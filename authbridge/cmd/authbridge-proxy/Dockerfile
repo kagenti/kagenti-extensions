@@ -17,7 +17,7 @@
 # `-ldflags="-s -w"` drops the symbol table and DWARF debug info to
 # shave ~30% off the binary. Go's runtime keeps `pclntab` separately,
 # so panic stack traces still show function names.
-FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git
 
@@ -27,7 +27,7 @@ COPY authlib/ authlib/
 COPY cmd/authbridge-proxy/ cmd/authbridge-proxy/
 
 ENV GOWORK=off
-RUN cd cmd/authbridge-proxy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /authbridge-proxy .
+RUN cd cmd/authbridge-proxy && go mod tidy && CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /authbridge-proxy .
 
 # Stage 2: Runtime — alpine (has bash, ~5 MB base)
 FROM alpine:3.20@sha256:beefdbd8a1da6d2915566fde36db9db0b524eb737fc57cd1367effd16dc0d06d
