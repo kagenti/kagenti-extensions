@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -134,6 +135,15 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	if !p.ready.Load() {
 		pctx.Skip("not_ready")
 		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// Skip infrastructure paths (health checks, agent-card discovery, etc.)
+	// that would flood the lineage graph with noise.
+	for _, prefix := range p.cfg.BypassPaths {
+		if strings.HasPrefix(pctx.Path, prefix) {
+			pctx.Skip("bypass_path")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
 	}
 
 	// Extract remote trace context from incoming W3C traceparent header.

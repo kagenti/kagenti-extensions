@@ -15,11 +15,18 @@ type Config struct {
 	// EmitBodyHash when true adds a SHA-256 hash of the request body as a
 	// span attribute. Off by default to avoid accidental PII exposure.
 	EmitBodyHash bool `json:"emit_body_hash"`
+
+	// BypassPaths lists URL path prefixes that should not generate lineage
+	// hops. Useful for suppressing infrastructure polling (agent-card
+	// discovery, health checks) that would otherwise flood the lineage graph.
+	// Default: ["/.well-known/", "/healthz", "/readyz", "/health"]
+	BypassPaths []string `json:"bypass_paths"`
 }
 
 func defaultConfig() Config {
 	return Config{
 		OTelEndpoint: "localhost:4317",
+		BypassPaths:  []string{"/.well-known/", "/healthz", "/readyz", "/health"},
 	}
 }
 
