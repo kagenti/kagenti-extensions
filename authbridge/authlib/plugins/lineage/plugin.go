@@ -212,6 +212,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		attribute.String("lineage.caller.id", callerID),
 		attribute.String("lineage.target.id", targetID),
 		attribute.String("openinference.span.kind", oiKind),
+		attribute.Bool("authbridge.proxy", true),
 	}
 	// enduser.id carries the human-readable username (preferred_username claim)
 	// for inbound hops initiated by a human user. The lineage service reads this
