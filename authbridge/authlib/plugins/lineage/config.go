@@ -16,6 +16,18 @@ type Config struct {
 	// span attribute. Off by default to avoid accidental PII exposure.
 	EmitBodyHash bool `json:"emit_body_hash"`
 
+	// CaptureIO when true attaches parsed request/response content as
+	// OpenInference input.value and output.value span attributes, enabling
+	// Phoenix to display message content inline.
+	//
+	// For A2A (inbound agent calls): input = user message parts, output = artifact.
+	// For MCP tools/call: input = tool params JSON, output = tool result JSON.
+	// For Inference (LLM): input = messages array JSON, output = completion text.
+	//
+	// Off by default — enable only if traces do not contain PII or the
+	// OTel backend enforces appropriate access controls.
+	CaptureIO bool `json:"capture_io"`
+
 	// BypassPaths lists URL path prefixes that should not generate lineage
 	// hops. Useful for suppressing infrastructure polling (agent-card
 	// discovery, health checks) that would otherwise flood the lineage graph.

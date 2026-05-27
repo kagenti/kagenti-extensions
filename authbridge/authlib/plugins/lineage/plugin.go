@@ -41,6 +41,12 @@ import (
 
 const pluginName = "lineage-telemetry"
 
+// inboundSpans is process-wide so the forward-proxy instance (outbound
+// pipeline) can look up spans written by the reverse-proxy instance
+// (inbound pipeline). Both instances run in the same authbridge process
+// but are created separately by the plugin factory.
+var inboundSpans sync.Map // map[traceID string]trace.SpanContext
+
 func init() {
 	plugins.RegisterPlugin(pluginName, func() pipeline.Plugin { return NewLineageTelemetry() })
 }
@@ -58,13 +64,7 @@ type LineageTelemetry struct {
 	tracer     trace.Tracer
 	ready      atomic.Bool
 	propagator propagation.TextMapPropagator
-	selfID     string // agent's own client ID for outbound caller attribution
-
-	// inboundSpans tracks the live inbound span context for each trace, keyed
-	// by trace ID (hex string). All outbound hops re-parent directly under
-	// the inbound authbridge span, bypassing intermediate Python httpx spans
-	// that are filtered by the OTel collector's filter/phoenix processor.
-	inboundSpans sync.Map // map[traceID string]trace.SpanContext
+	selfID string // agent's own client ID for outbound caller attribution
 }
 
 // NewLineageTelemetry constructs an unconfigured plugin. Configure + Init must
@@ -195,7 +195,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		remoteSpanCtx := trace.SpanContextFromContext(remoteCtx)
 		if remoteSpanCtx.IsValid() {
 			traceID := remoteSpanCtx.TraceID().String()
-			if val, ok := p.inboundSpans.Load(traceID); ok {
+			if val, ok := inboundSpans.Load(traceID); ok {
 				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
 			}
 		}
@@ -238,7 +238,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	// For inbound hops: register this span so outbound hops in the same trace
 	// can parent themselves directly under it, bypassing the filtered httpx spans.
 	if info.Kind == HopPrincipalToAgent {
-		p.inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
+		inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
 	}
 
 	// Propagate the new span context into the forwarded request so that:
@@ -273,7 +273,7 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 
 	// Remove the inbound span entry so the map doesn't grow unboundedly.
 	if state.info.Kind == HopPrincipalToAgent {
-		p.inboundSpans.Delete(state.span.SpanContext().TraceID().String())
+		inboundSpans.Delete(state.span.SpanContext().TraceID().String())
 	}
 
 	outcome := pctx.Outcome()
@@ -307,6 +307,15 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 		attrs = append(attrs,
 			attribute.String("inference.model", ext.Inference.Model),
 		)
+	}
+
+	if p.cfg.CaptureIO {
+		if v := ioInputValue(pctx); v != "" {
+			attrs = append(attrs, attribute.String("input.value", v))
+		}
+		if v := ioOutputValue(pctx); v != "" {
+			attrs = append(attrs, attribute.String("output.value", v))
+		}
 	}
 
 	if outcome.DenyingPlugin != "" || outcome.StatusCode >= 400 {
@@ -409,6 +418,64 @@ func hopSpanKinds(info hopInfo) (trace.SpanKind, string) {
 	default:
 		return trace.SpanKindClient, "CHAIN"
 	}
+}
+
+// ioInputValue returns the OpenInference input.value for a span: the parsed
+// request content for the hop's protocol, or "" if nothing meaningful is available.
+func ioInputValue(pctx *pipeline.Context) string {
+	ext := pctx.Extensions
+	switch {
+	case ext.A2A != nil && len(ext.A2A.Parts) > 0:
+		// Collect all text parts; fall back to JSON if non-text parts present.
+		var texts []string
+		for _, p := range ext.A2A.Parts {
+			if p.Content != "" {
+				texts = append(texts, p.Content)
+			}
+		}
+		if len(texts) > 0 {
+			return strings.Join(texts, "\n")
+		}
+		if b, err := json.Marshal(ext.A2A.Parts); err == nil {
+			return string(b)
+		}
+	case ext.Inference != nil && len(ext.Inference.Messages) > 0:
+		if b, err := json.Marshal(ext.Inference.Messages); err == nil {
+			return string(b)
+		}
+	case ext.MCP != nil && ext.MCP.Params != nil:
+		if b, err := json.Marshal(ext.MCP.Params); err == nil {
+			return string(b)
+		}
+	}
+	return ""
+}
+
+// ioOutputValue returns the OpenInference output.value for a span: the parsed
+// response content for the hop's protocol, or "" if nothing is available.
+func ioOutputValue(pctx *pipeline.Context) string {
+	ext := pctx.Extensions
+	switch {
+	case ext.A2A != nil && ext.A2A.Artifact != "":
+		return ext.A2A.Artifact
+	case ext.A2A != nil && ext.A2A.ErrorMessage != "":
+		return ext.A2A.ErrorMessage
+	case ext.Inference != nil && ext.Inference.Completion != "":
+		return ext.Inference.Completion
+	case ext.Inference != nil && len(ext.Inference.ToolCalls) > 0:
+		if b, err := json.Marshal(ext.Inference.ToolCalls); err == nil {
+			return string(b)
+		}
+	case ext.MCP != nil && ext.MCP.Result != nil:
+		if b, err := json.Marshal(ext.MCP.Result); err == nil {
+			return string(b)
+		}
+	case ext.MCP != nil && ext.MCP.Err != nil:
+		if b, err := json.Marshal(ext.MCP.Err); err == nil {
+			return string(b)
+		}
+	}
+	return ""
 }
 
 // Compile-time interface assertions.
