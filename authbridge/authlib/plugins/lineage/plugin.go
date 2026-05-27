@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,6 +58,13 @@ type LineageTelemetry struct {
 	ready      atomic.Bool
 	propagator propagation.TextMapPropagator
 	selfID     string // agent's own client ID for outbound caller attribution
+
+	// inboundSpans tracks the live inbound span context for each trace, keyed
+	// by trace ID (hex string). Outbound hops use it to parent themselves
+	// directly under the inbound authbridge span rather than under the
+	// intermediate httpx spans from the Python app, which are filtered out
+	// by the OTel collector's filter/phoenix processor before reaching Phoenix.
+	inboundSpans sync.Map // map[traceID string]trace.SpanContext
 }
 
 // NewLineageTelemetry constructs an unconfigured plugin. Configure + Init must
@@ -176,15 +184,34 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	remoteCtx := p.propagator.Extract(ctx, propagation.HeaderCarrier(pctx.Headers))
 
 	info := determineHop(pctx)
+
+	// For outbound hops: re-parent directly under the inbound authbridge span
+	// (same trace_id) rather than under the Python httpx span. The OTel
+	// collector's filter/phoenix drops httpx spans (http.method != nil &&
+	// openinference.span.kind == nil), leaving outbound authbridge spans
+	// visually orphaned in Phoenix. Using the stored inbound span context as
+	// the parent makes them appear as direct children of the inbound hop.
+	if pctx.Direction == pipeline.Outbound {
+		remoteSpanCtx := trace.SpanContextFromContext(remoteCtx)
+		if remoteSpanCtx.IsValid() {
+			traceID := remoteSpanCtx.TraceID().String()
+			if val, ok := p.inboundSpans.Load(traceID); ok {
+				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+			}
+		}
+	}
+
 	callerID := callerIdentity(pctx, p.selfID)
 	targetID := pctx.Host
 
+	spanKind, oiKind := hopSpanKinds(info)
 	spanAttrs := []attribute.KeyValue{
 		attribute.String("lineage.hop.kind", string(info.Kind)),
 		attribute.String("lineage.direction", pctx.Direction.String()),
 		attribute.String("lineage.protocol", info.Protocol),
 		attribute.String("lineage.caller.id", callerID),
 		attribute.String("lineage.target.id", targetID),
+		attribute.String("openinference.span.kind", oiKind),
 	}
 	// enduser.id carries the human-readable username (preferred_username claim)
 	// for inbound hops initiated by a human user. The lineage service reads this
@@ -198,9 +225,15 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 
 	spanName := hopSpanName(p.selfID, info)
 	spanCtx, span := p.tracer.Start(remoteCtx, spanName,
-		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithSpanKind(spanKind),
 		trace.WithAttributes(spanAttrs...),
 	)
+
+	// For inbound hops: register this span so outbound hops in the same trace
+	// can parent themselves directly under it, bypassing the filtered httpx spans.
+	if info.Kind == HopPrincipalToAgent {
+		p.inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
+	}
 
 	// Propagate the new span context into the forwarded request so that:
 	//   - inbound:  the backend app creates its spans as children of this span,
@@ -230,6 +263,11 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 	state := pipeline.GetState[hopState](pctx, pluginName)
 	if state == nil || state.span == nil {
 		return
+	}
+
+	// Remove the inbound span entry so the map doesn't grow unboundedly.
+	if state.info.Kind == HopPrincipalToAgent {
+		p.inboundSpans.Delete(state.span.SpanContext().TraceID().String())
 	}
 
 	outcome := pctx.Outcome()
@@ -324,6 +362,31 @@ func serviceLabel(selfID string) string {
 		}
 	}
 	return selfID
+}
+
+// hopSpanKinds returns the OTel SpanKind and the OpenInference span kind string
+// for a hop. OTel SpanKind drives standard backends; openinference.span.kind
+// drives Phoenix icons and kind-label filtering.
+//
+// OpenInference kind vocabulary:
+//
+//	AGENT   – LLM agent invocation (inbound or A2A outbound)
+//	LLM     – direct LLM inference call
+//	TOOL    – tool call (MCP)
+//	CHAIN   – generic processing step (unknown outbound service)
+func hopSpanKinds(info hopInfo) (trace.SpanKind, string) {
+	switch info.Kind {
+	case HopPrincipalToAgent:
+		return trace.SpanKindServer, "AGENT"
+	case HopAgentToTool:
+		return trace.SpanKindClient, "TOOL"
+	case HopAgentToLLM:
+		return trace.SpanKindClient, "LLM"
+	case HopAgentToAgent:
+		return trace.SpanKindClient, "AGENT"
+	default:
+		return trace.SpanKindClient, "CHAIN"
+	}
 }
 
 // Compile-time interface assertions.
