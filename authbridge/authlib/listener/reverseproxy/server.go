@@ -223,6 +223,16 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Content-Encoding")
 	}
 
+	// Propagate W3C trace context injected by the lineage plugin into the
+	// forwarded request. Plugins write to pctx.Headers (a clone of r.Header);
+	// r.Header is what the reverse proxy actually forwards, so we sync the
+	// two trace headers back here.
+	for _, hdr := range []string{"traceparent", "tracestate"} {
+		if v := pctx.Headers.Get(hdr); v != "" {
+			r.Header.Set(hdr, v)
+		}
+	}
+
 	// Inbound recording is gated on A2A by design: reverseproxy is the
 	// A2A-only listener (its session keying and rekey logic are A2A-specific
 	// — see modifyResponse). Forwardproxy widens the analogous gate to
