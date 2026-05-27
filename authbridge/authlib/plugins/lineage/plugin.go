@@ -198,10 +198,19 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		}
 	}
 
-	_, span := p.tracer.Start(remoteCtx, "lineage.hop",
+	spanName := hopSpanName(p.selfID, info)
+	spanCtx, span := p.tracer.Start(remoteCtx, spanName,
 		trace.WithSpanKind(trace.SpanKindServer),
 		trace.WithAttributes(spanAttrs...),
 	)
+
+	// For inbound hops: propagate the new span context to the forwarded request
+	// so the Python app creates its spans as children. Outbound HTTP calls from
+	// the app then carry this traceparent, and the forward proxy's outbound spans
+	// also become children — all hops for one user request share a single trace ID.
+	if pctx.Direction == pipeline.Inbound {
+		p.propagator.Inject(spanCtx, propagation.HeaderCarrier(pctx.Headers))
+	}
 
 	pipeline.SetState(pctx, pluginName, &hopState{span: span, info: info})
 	pctx.Observe("recorded_hop")
@@ -280,6 +289,43 @@ func callerIdentity(pctx *pipeline.Context, selfID string) string {
 		return pctx.Agent.ClientID
 	}
 	// Outbound requests carry no inbound identity; use the agent's own ID.
+	return selfID
+}
+
+// hopSpanName returns a human-readable OTel span name for the hop.
+// Format: "<service>.<protocol>" where service is the last path segment
+// of the SPIFFE ID (e.g. "weather-service" from
+// "spiffe://localtest.me/ns/team1/sa/weather-service") and protocol is
+// "inbound", "mcp", "llm", "a2a", or "outbound".
+func hopSpanName(selfID string, info hopInfo) string {
+	svc := serviceLabel(selfID)
+	switch info.Kind {
+	case HopPrincipalToAgent:
+		return svc + ".inbound"
+	case HopAgentToTool:
+		return svc + ".mcp"
+	case HopAgentToLLM:
+		return svc + ".llm"
+	case HopAgentToAgent:
+		return svc + ".a2a"
+	default:
+		return svc + ".outbound"
+	}
+}
+
+// serviceLabel extracts the last path segment from a SPIFFE ID, or returns
+// selfID as-is if it is not a SPIFFE URI. Falls back to "agent" if empty.
+func serviceLabel(selfID string) string {
+	if selfID == "" {
+		return "agent"
+	}
+	// "spiffe://trust-domain/ns/team1/sa/weather-service" → "weather-service"
+	parts := strings.Split(selfID, "/")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if parts[i] != "" {
+			return parts[i]
+		}
+	}
 	return selfID
 }
 
