@@ -61,17 +61,10 @@ type LineageTelemetry struct {
 	selfID     string // agent's own client ID for outbound caller attribution
 
 	// inboundSpans tracks the live inbound span context for each trace, keyed
-	// by trace ID (hex string). Outbound hops use it to parent themselves
-	// directly under the inbound authbridge span rather than under the
-	// intermediate httpx spans from the Python app, which are filtered out
-	// by the OTel collector's filter/phoenix processor before reaching Phoenix.
+	// by trace ID (hex string). All outbound hops re-parent directly under
+	// the inbound authbridge span, bypassing intermediate Python httpx spans
+	// that are filtered by the OTel collector's filter/phoenix processor.
 	inboundSpans sync.Map // map[traceID string]trace.SpanContext
-
-	// serviceSpans tracks CHAIN (agent_to_service) span contexts keyed by
-	// "traceID:host". TOOL/LLM/A2A outbound hops to the same host are
-	// re-parented under the CHAIN span so the SSE setup appears as the
-	// parent of subsequent MCP method calls in Phoenix.
-	serviceSpans sync.Map // map["traceID:host" string]trace.SpanContext
 }
 
 // NewLineageTelemetry constructs an unconfigured plugin. Configure + Init must
@@ -192,30 +185,18 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 
 	info := determineHop(pctx)
 
-	// For outbound hops: re-parent to preserve the logical call hierarchy.
-	// CHAIN hops (SSE setup / unknown service): parent under inbound span.
-	// TOOL/LLM/A2A hops: parent under a CHAIN span for the same host when
-	// one exists (MCP over streamable HTTP opens an SSE GET before POSTing
-	// methods), falling back to the inbound span. This makes MCP method
-	// calls appear as children of the SSE connection span in Phoenix rather
-	// than as siblings of it.
+	// For outbound hops: re-parent directly under the inbound authbridge span
+	// (same trace_id) rather than under the Python httpx span. The OTel
+	// collector's filter/phoenix drops httpx spans (http.method != nil &&
+	// openinference.span.kind == nil), leaving outbound authbridge spans
+	// visually orphaned in Phoenix. All outbound spans become direct children
+	// of the inbound span, giving a flat one-level tree in Phoenix.
 	if pctx.Direction == pipeline.Outbound {
 		remoteSpanCtx := trace.SpanContextFromContext(remoteCtx)
 		if remoteSpanCtx.IsValid() {
 			traceID := remoteSpanCtx.TraceID().String()
-			if info.Kind == HopAgentToService {
-				// CHAIN: re-parent directly under inbound span.
-				if val, ok := p.inboundSpans.Load(traceID); ok {
-					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
-				}
-			} else {
-				// TOOL/LLM/A2A: prefer a CHAIN span for the same host.
-				key := traceID + ":" + pctx.Host
-				if val, ok := p.serviceSpans.Load(key); ok {
-					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
-				} else if val, ok := p.inboundSpans.Load(traceID); ok {
-					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
-				}
+			if val, ok := p.inboundSpans.Load(traceID); ok {
+				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
 			}
 		}
 	}
@@ -259,12 +240,6 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	if info.Kind == HopPrincipalToAgent {
 		p.inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
 	}
-	// For CHAIN hops: register by "traceID:host" so subsequent TOOL/LLM/A2A
-	// hops to the same host are parented under this span.
-	if info.Kind == HopAgentToService {
-		key := span.SpanContext().TraceID().String() + ":" + pctx.Host
-		p.serviceSpans.Store(key, span.SpanContext())
-	}
 
 	// Propagate the new span context into the forwarded request so that:
 	//   - inbound:  the backend app creates its spans as children of this span,
@@ -297,16 +272,8 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 	}
 
 	// Remove the inbound span entry so the map doesn't grow unboundedly.
-	// Also purge all service (CHAIN) spans for the trace.
 	if state.info.Kind == HopPrincipalToAgent {
-		traceID := state.span.SpanContext().TraceID().String()
-		p.inboundSpans.Delete(traceID)
-		p.serviceSpans.Range(func(k, _ any) bool {
-			if strings.HasPrefix(k.(string), traceID+":") {
-				p.serviceSpans.Delete(k)
-			}
-			return true
-		})
+		p.inboundSpans.Delete(state.span.SpanContext().TraceID().String())
 	}
 
 	outcome := pctx.Outcome()
