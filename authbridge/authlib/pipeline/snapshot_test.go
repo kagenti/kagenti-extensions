@@ -101,6 +101,7 @@ type stubIdentity struct {
 func (s stubIdentity) Subject() string  { return s.subject }
 func (s stubIdentity) ClientID() string { return s.clientID }
 func (s stubIdentity) Scopes() []string { return s.scopes }
+func (s stubIdentity) Username() string { return "" }
 
 func TestSnapshotIdentity_NoIdentity(t *testing.T) {
 	pctx := &Context{}

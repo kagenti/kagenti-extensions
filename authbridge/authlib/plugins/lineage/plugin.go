@@ -181,15 +181,26 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	callerID := callerIdentity(pctx, p.selfID)
 	targetID := pctx.Host
 
+	spanAttrs := []attribute.KeyValue{
+		attribute.String("lineage.hop.kind", string(info.Kind)),
+		attribute.String("lineage.direction", pctx.Direction.String()),
+		attribute.String("lineage.protocol", info.Protocol),
+		attribute.String("lineage.caller.id", callerID),
+		attribute.String("lineage.target.id", targetID),
+	}
+	// enduser.id carries the human-readable username (preferred_username claim)
+	// for inbound hops initiated by a human user. The lineage service reads this
+	// to populate the `username` field on runs, distinguishing user-initiated
+	// runs from service-to-service calls.
+	if pctx.Identity != nil {
+		if u := pctx.Identity.Username(); u != "" {
+			spanAttrs = append(spanAttrs, attribute.String("enduser.id", u))
+		}
+	}
+
 	_, span := p.tracer.Start(remoteCtx, "lineage.hop",
 		trace.WithSpanKind(trace.SpanKindServer),
-		trace.WithAttributes(
-			attribute.String("lineage.hop.kind", string(info.Kind)),
-			attribute.String("lineage.direction", pctx.Direction.String()),
-			attribute.String("lineage.protocol", info.Protocol),
-			attribute.String("lineage.caller.id", callerID),
-			attribute.String("lineage.target.id", targetID),
-		),
+		trace.WithAttributes(spanAttrs...),
 	)
 
 	pipeline.SetState(pctx, pluginName, &hopState{span: span, info: info})

@@ -24,9 +24,10 @@ import (
 // that need plugin-specific fields type-assert to a richer interface
 // or to the plugin's known concrete type.
 type Identity interface {
-	Subject() string  // stable subject ID (sub claim / SPIFFE ID / email)
-	ClientID() string // registering-client ID, if applicable
-	Scopes() []string // granted scopes / roles
+	Subject() string   // stable subject ID (sub claim / SPIFFE ID / email)
+	ClientID() string  // registering-client ID, if applicable
+	Scopes() []string  // granted scopes / roles
+	Username() string  // human-readable name (preferred_username claim); empty for service accounts
 }
 
 // Direction indicates whether a request is inbound (caller → this agent) or

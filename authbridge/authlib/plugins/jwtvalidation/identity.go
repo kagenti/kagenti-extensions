@@ -32,3 +32,15 @@ func (i claimsIdentity) Scopes() []string {
 	}
 	return i.c.Scopes
 }
+
+func (i claimsIdentity) Username() string {
+	if i.c == nil {
+		return ""
+	}
+	if v, ok := i.c.Extra["preferred_username"]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
