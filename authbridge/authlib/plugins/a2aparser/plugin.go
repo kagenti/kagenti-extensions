@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"strings"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
@@ -45,6 +46,16 @@ func (p *A2AParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 	var rpc parsercommon.JSONRPCRequest
 	if err := json.Unmarshal(pctx.Body, &rpc); err != nil {
 		slog.Debug("a2a-parser: invalid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// Only claim A2A methods — message/* and tasks/* are the A2A-spec prefixes.
+	// MCP uses tools/, resources/, prompts/, initialize, ping, etc. Without this
+	// guard, a2a-parser claims all JSON-RPC traffic and mcp-parser never gets a
+	// chance to set pctx.Extensions.MCP, causing all MCP calls to be classified
+	// as agent_to_agent instead of agent_to_tool in the lineage telemetry.
+	if !isA2AMethod(rpc.Method) {
+		slog.Debug("a2a-parser: not an A2A method, skipping", "method", rpc.Method)
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -311,6 +322,13 @@ func sessionIDFromJSON(data []byte) string {
 		return resp.Result.ContextID
 	}
 	return resp.Result.SessionID
+}
+
+// isA2AMethod reports whether method is an A2A protocol method.
+// A2A uses the message/* and tasks/* namespaces per the A2A spec.
+func isA2AMethod(method string) bool {
+	return strings.HasPrefix(method, "message/") ||
+		strings.HasPrefix(method, "tasks/")
 }
 
 func parseA2AParts(rawParts []any) []pipeline.A2APart {
