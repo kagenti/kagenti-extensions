@@ -29,7 +29,14 @@ func determineHop(pctx *pipeline.Context) hopInfo {
 	case pctx.Extensions.A2A != nil:
 		return hopInfo{Kind: HopAgentToAgent, Protocol: "a2a"}
 	case pctx.Extensions.MCP != nil:
-		return hopInfo{Kind: HopAgentToTool, Protocol: "mcp"}
+		// Only tools/call is a true tool invocation; everything else
+		// (initialize, ping, tools/list, resources/*, etc.) is MCP
+		// protocol setup or discovery — classify as CHAIN so that
+		// actual tool call spans from the backend appear as children.
+		if pctx.Extensions.MCP.Method == "tools/call" {
+			return hopInfo{Kind: HopAgentToTool, Protocol: "mcp"}
+		}
+		return hopInfo{Kind: HopAgentToService, Protocol: "mcp"}
 	case pctx.Extensions.Inference != nil:
 		return hopInfo{Kind: HopAgentToLLM, Protocol: "inference"}
 	default:

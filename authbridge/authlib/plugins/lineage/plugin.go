@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -65,6 +66,12 @@ type LineageTelemetry struct {
 	// intermediate httpx spans from the Python app, which are filtered out
 	// by the OTel collector's filter/phoenix processor before reaching Phoenix.
 	inboundSpans sync.Map // map[traceID string]trace.SpanContext
+
+	// serviceSpans tracks CHAIN (agent_to_service) span contexts keyed by
+	// "traceID:host". TOOL/LLM/A2A outbound hops to the same host are
+	// re-parented under the CHAIN span so the SSE setup appears as the
+	// parent of subsequent MCP method calls in Phoenix.
+	serviceSpans sync.Map // map["traceID:host" string]trace.SpanContext
 }
 
 // NewLineageTelemetry constructs an unconfigured plugin. Configure + Init must
@@ -185,18 +192,30 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 
 	info := determineHop(pctx)
 
-	// For outbound hops: re-parent directly under the inbound authbridge span
-	// (same trace_id) rather than under the Python httpx span. The OTel
-	// collector's filter/phoenix drops httpx spans (http.method != nil &&
-	// openinference.span.kind == nil), leaving outbound authbridge spans
-	// visually orphaned in Phoenix. Using the stored inbound span context as
-	// the parent makes them appear as direct children of the inbound hop.
+	// For outbound hops: re-parent to preserve the logical call hierarchy.
+	// CHAIN hops (SSE setup / unknown service): parent under inbound span.
+	// TOOL/LLM/A2A hops: parent under a CHAIN span for the same host when
+	// one exists (MCP over streamable HTTP opens an SSE GET before POSTing
+	// methods), falling back to the inbound span. This makes MCP method
+	// calls appear as children of the SSE connection span in Phoenix rather
+	// than as siblings of it.
 	if pctx.Direction == pipeline.Outbound {
 		remoteSpanCtx := trace.SpanContextFromContext(remoteCtx)
 		if remoteSpanCtx.IsValid() {
 			traceID := remoteSpanCtx.TraceID().String()
-			if val, ok := p.inboundSpans.Load(traceID); ok {
-				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+			if info.Kind == HopAgentToService {
+				// CHAIN: re-parent directly under inbound span.
+				if val, ok := p.inboundSpans.Load(traceID); ok {
+					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+				}
+			} else {
+				// TOOL/LLM/A2A: prefer a CHAIN span for the same host.
+				key := traceID + ":" + pctx.Host
+				if val, ok := p.serviceSpans.Load(key); ok {
+					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+				} else if val, ok := p.inboundSpans.Load(traceID); ok {
+					remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+				}
 			}
 		}
 	}
@@ -223,7 +242,13 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		}
 	}
 
-	spanName := hopSpanName(p.selfID, info)
+	var method string
+	if pctx.Extensions.MCP != nil {
+		method = pctx.Extensions.MCP.Method
+	} else if pctx.Extensions.A2A != nil {
+		method = pctx.Extensions.A2A.Method
+	}
+	spanName := hopSpanName(p.selfID, info, method)
 	spanCtx, span := p.tracer.Start(remoteCtx, spanName,
 		trace.WithSpanKind(spanKind),
 		trace.WithAttributes(spanAttrs...),
@@ -233,6 +258,12 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	// can parent themselves directly under it, bypassing the filtered httpx spans.
 	if info.Kind == HopPrincipalToAgent {
 		p.inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
+	}
+	// For CHAIN hops: register by "traceID:host" so subsequent TOOL/LLM/A2A
+	// hops to the same host are parented under this span.
+	if info.Kind == HopAgentToService {
+		key := span.SpanContext().TraceID().String() + ":" + pctx.Host
+		p.serviceSpans.Store(key, span.SpanContext())
 	}
 
 	// Propagate the new span context into the forwarded request so that:
@@ -266,12 +297,21 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 	}
 
 	// Remove the inbound span entry so the map doesn't grow unboundedly.
+	// Also purge all service (CHAIN) spans for the trace.
 	if state.info.Kind == HopPrincipalToAgent {
-		p.inboundSpans.Delete(state.span.SpanContext().TraceID().String())
+		traceID := state.span.SpanContext().TraceID().String()
+		p.inboundSpans.Delete(traceID)
+		p.serviceSpans.Range(func(k, _ any) bool {
+			if strings.HasPrefix(k.(string), traceID+":") {
+				p.serviceSpans.Delete(k)
+			}
+			return true
+		})
 	}
 
 	outcome := pctx.Outcome()
 	if outcome == nil {
+		state.span.SetStatus(codes.Ok, "")
 		state.span.End()
 		return
 	}
@@ -302,6 +342,11 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 		)
 	}
 
+	if outcome.DenyingPlugin != "" || outcome.StatusCode >= 400 {
+		state.span.SetStatus(codes.Error, outcome.DenyingPlugin)
+	} else {
+		state.span.SetStatus(codes.Ok, "")
+	}
 	state.span.SetAttributes(attrs...)
 	state.span.End()
 }
@@ -328,24 +373,34 @@ func callerIdentity(pctx *pipeline.Context, selfID string) string {
 }
 
 // hopSpanName returns a human-readable OTel span name for the hop.
-// Format: "<service>.<protocol>" where service is the last path segment
-// of the SPIFFE ID (e.g. "weather-service" from
-// "spiffe://localtest.me/ns/team1/sa/weather-service") and protocol is
-// "inbound", "mcp", "llm", "a2a", or "outbound".
-func hopSpanName(selfID string, info hopInfo) string {
+// Format: "<service>.<protocol> [method]" where service is the last path
+// segment of the SPIFFE ID (e.g. "weather-service" from
+// "spiffe://localtest.me/ns/team1/sa/weather-service"), protocol is
+// "inbound", "mcp", "llm", "a2a", or "outbound", and method is the
+// optional protocol-level method name (e.g. "tools/call", "initialize").
+func hopSpanName(selfID string, info hopInfo, method string) string {
 	svc := serviceLabel(selfID)
+	var base string
 	switch info.Kind {
 	case HopPrincipalToAgent:
 		return svc + ".inbound"
 	case HopAgentToTool:
-		return svc + ".mcp"
+		base = svc + ".mcp"
 	case HopAgentToLLM:
-		return svc + ".llm"
+		base = svc + ".llm"
 	case HopAgentToAgent:
-		return svc + ".a2a"
+		base = svc + ".a2a"
+	case HopAgentToService:
+		// Use protocol hint ("mcp", "http") for CHAIN hops so initialize
+		// and other MCP setup calls are distinguishable from plain HTTP.
+		base = svc + "." + info.Protocol
 	default:
 		return svc + ".outbound"
 	}
+	if method != "" {
+		return base + " " + method
+	}
+	return base
 }
 
 // serviceLabel extracts the last path segment from a SPIFFE ID, or returns
