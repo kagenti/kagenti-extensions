@@ -21,12 +21,19 @@ type Config struct {
 	// discovery, health checks) that would otherwise flood the lineage graph.
 	// Default: ["/.well-known/", "/healthz", "/readyz", "/health"]
 	BypassPaths []string `json:"bypass_paths"`
+
+	// BypassHosts lists target host substrings (matched against pctx.Host)
+	// that should not generate lineage hops. Useful for suppressing
+	// infrastructure outbound calls such as OTel trace exports.
+	// Default: ["otel-collector", "jaeger", "zipkin", "prometheus"]
+	BypassHosts []string `json:"bypass_hosts"`
 }
 
 func defaultConfig() Config {
 	return Config{
 		OTelEndpoint: "localhost:4317",
 		BypassPaths:  []string{"/.well-known/", "/healthz", "/readyz", "/health"},
+		BypassHosts:  []string{"otel-collector", "jaeger", "zipkin", "prometheus"},
 	}
 }
 

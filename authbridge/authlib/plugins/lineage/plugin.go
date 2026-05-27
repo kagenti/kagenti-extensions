@@ -138,10 +138,17 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	}
 
 	// Skip infrastructure paths (health checks, agent-card discovery, etc.)
-	// that would flood the lineage graph with noise.
 	for _, prefix := range p.cfg.BypassPaths {
 		if strings.HasPrefix(pctx.Path, prefix) {
 			pctx.Skip("bypass_path")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+	}
+
+	// Skip infrastructure outbound targets (OTel exporters, metrics scrapers, etc.)
+	for _, substr := range p.cfg.BypassHosts {
+		if strings.Contains(pctx.Host, substr) {
+			pctx.Skip("bypass_host")
 			return pipeline.Action{Type: pipeline.Continue}
 		}
 	}
