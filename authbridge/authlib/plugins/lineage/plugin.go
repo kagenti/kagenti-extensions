@@ -204,13 +204,12 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		trace.WithAttributes(spanAttrs...),
 	)
 
-	// For inbound hops: propagate the new span context to the forwarded request
-	// so the Python app creates its spans as children. Outbound HTTP calls from
-	// the app then carry this traceparent, and the forward proxy's outbound spans
-	// also become children — all hops for one user request share a single trace ID.
-	if pctx.Direction == pipeline.Inbound {
-		p.propagator.Inject(spanCtx, propagation.HeaderCarrier(pctx.Headers))
-	}
+	// Propagate the new span context into the forwarded request so that:
+	//   - inbound:  the backend app creates its spans as children of this span,
+	//               and its outbound calls carry this traceparent forward.
+	//   - outbound: downstream agents/tools see this authbridge hop as their
+	//               parent, threading A2A and tool calls into the same trace.
+	p.propagator.Inject(spanCtx, propagation.HeaderCarrier(pctx.Headers))
 
 	pipeline.SetState(pctx, pluginName, &hopState{span: span, info: info})
 	pctx.Observe("recorded_hop")

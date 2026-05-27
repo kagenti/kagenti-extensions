@@ -264,6 +264,17 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Content-Encoding")
 	}
 
+	// Propagate W3C trace context injected by the lineage plugin into the
+	// forwarded request. Plugins write to pctx.Headers (a clone of r.Header);
+	// r.Header is what the HTTP client actually sends, so we sync the two
+	// trace headers back here. This ensures downstream agents/tools see the
+	// authbridge outbound span as their parent, threading A2A hops correctly.
+	for _, hdr := range []string{"traceparent", "tracestate"} {
+		if v := pctx.Headers.Get(hdr); v != "" {
+			r.Header.Set(hdr, v)
+		}
+	}
+
 	// Remove hop-by-hop headers
 	r.Header.Del("Connection")
 	r.Header.Del("Keep-Alive")
