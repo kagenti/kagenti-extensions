@@ -169,13 +169,11 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	}
 
 	// Extract remote trace context from incoming W3C traceparent header.
-	carrier := make(propagation.MapCarrier, len(pctx.Headers))
-	for k, vs := range pctx.Headers {
-		if len(vs) > 0 {
-			carrier[k] = vs[0]
-		}
-	}
-	remoteCtx := p.propagator.Extract(ctx, carrier)
+	// HeaderCarrier wraps http.Header and uses case-insensitive Get/Keys so
+	// canonical-form keys ("Traceparent") match the propagator's lowercase
+	// lookups. The previous MapCarrier build did an exact-match lookup and
+	// always missed, causing every hop to start a new root trace.
+	remoteCtx := p.propagator.Extract(ctx, propagation.HeaderCarrier(pctx.Headers))
 
 	info := determineHop(pctx)
 	callerID := callerIdentity(pctx, p.selfID)
