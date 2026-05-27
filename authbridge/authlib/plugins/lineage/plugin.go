@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 	"sync/atomic"
 
@@ -55,6 +56,7 @@ type LineageTelemetry struct {
 	tracer     trace.Tracer
 	ready      atomic.Bool
 	propagator propagation.TextMapPropagator
+	selfID     string // agent's own client ID for outbound caller attribution
 }
 
 // NewLineageTelemetry constructs an unconfigured plugin. Configure + Init must
@@ -117,8 +119,21 @@ func (p *LineageTelemetry) Init(ctx context.Context) error {
 		sdktrace.WithResource(res),
 	)
 	p.tracer = p.tp.Tracer("authbridge/" + pluginName)
+
+	// Resolve self identity for outbound caller attribution.
+	if p.cfg.SelfID != "" {
+		p.selfID = p.cfg.SelfID
+	} else if p.cfg.SelfIDFile != "" {
+		if raw, err := os.ReadFile(p.cfg.SelfIDFile); err == nil {
+			p.selfID = strings.TrimSpace(string(raw))
+		} else {
+			slog.Warn("lineage-telemetry: could not read self_id_file; outbound caller will be empty",
+				"path", p.cfg.SelfIDFile, "error", err)
+		}
+	}
+
 	p.ready.Store(true)
-	slog.Info("lineage-telemetry: initialized", "endpoint", endpoint)
+	slog.Info("lineage-telemetry: initialized", "endpoint", endpoint, "self_id", p.selfID)
 	return nil
 }
 
@@ -163,7 +178,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	remoteCtx := p.propagator.Extract(ctx, carrier)
 
 	info := determineHop(pctx)
-	callerID := callerIdentity(pctx)
+	callerID := callerIdentity(pctx, p.selfID)
 	targetID := pctx.Host
 
 	_, span := p.tracer.Start(remoteCtx, "lineage.hop",
@@ -237,16 +252,24 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 }
 
 // callerIdentity extracts a stable caller identifier from the request context.
-func callerIdentity(pctx *pipeline.Context) string {
+// Prefers Subject (end-user ID) over ClientID (service account / client name).
+// Falls back to selfID (the agent's own ID) for outbound requests where no
+// inbound identity has been established.
+func callerIdentity(pctx *pipeline.Context, selfID string) string {
 	if pctx.Identity != nil {
 		if s := pctx.Identity.Subject(); s != "" {
 			return s
+		}
+		// Subject is absent (service-account grant) — fall back to client ID.
+		if c := pctx.Identity.ClientID(); c != "" {
+			return c
 		}
 	}
 	if pctx.Agent != nil && pctx.Agent.ClientID != "" {
 		return pctx.Agent.ClientID
 	}
-	return ""
+	// Outbound requests carry no inbound identity; use the agent's own ID.
+	return selfID
 }
 
 // Compile-time interface assertions.

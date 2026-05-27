@@ -27,6 +27,17 @@ type Config struct {
 	// infrastructure outbound calls such as OTel trace exports.
 	// Default: ["otel-collector", "jaeger", "zipkin", "prometheus"]
 	BypassHosts []string `json:"bypass_hosts"`
+
+	// SelfID is the agent's own stable identifier, used as the caller ID on
+	// outbound spans where no identity is available from the JWT or SPIFFE
+	// context. Typically the Keycloak client ID of this workload.
+	// If empty, SelfIDFile is consulted instead.
+	SelfID string `json:"self_id"`
+
+	// SelfIDFile is the path to a file containing the agent's own client ID.
+	// Defaults to /shared/client-id.txt (the operator-mounted credential).
+	// Ignored when SelfID is set.
+	SelfIDFile string `json:"self_id_file"`
 }
 
 func defaultConfig() Config {
@@ -34,6 +45,7 @@ func defaultConfig() Config {
 		OTelEndpoint: "localhost:4317",
 		BypassPaths:  []string{"/.well-known/", "/healthz", "/readyz", "/health"},
 		BypassHosts:  []string{"otel-collector", "jaeger", "zipkin", "prometheus"},
+		SelfIDFile:   "/shared/client-id.txt",
 	}
 }
 
