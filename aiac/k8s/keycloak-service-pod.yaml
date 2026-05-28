@@ -1,0 +1,52 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiac-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-keycloak-config
+  namespace: aiac-system
+data:
+  KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+
+---
+# Prerequisites: create this Secret before applying this manifest:
+#
+#   kubectl create secret generic keycloak-admin-secret \
+#     -n aiac-system \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin-secret
+  namespace: aiac-system
+type: Opaque
+stringData:
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_PASSWORD: "admin"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: aiac-keycloak-service
+  namespace: aiac-system
+  labels:
+    app: aiac-keycloak-service
+spec:
+  containers:
+    - name: aiac-keycloak-service
+      image: localhost/aiac-keycloak-service:local
+      imagePullPolicy: Never
+      ports:
+        - containerPort: 7070
+      envFrom:
+        - configMapRef:
+            name: aiac-keycloak-config
+        - secretRef:
+            name: keycloak-admin-secret
