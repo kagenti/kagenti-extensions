@@ -1,0 +1,64 @@
+- Title: AI-based Access Control (AIAC) for Keycloak
+- Deployment:
+  - Topology:
+      - Keycloak Configuration Service Pod: aiac-service container (FastAPI :7070). Exposed as Kubernetes
+          ClusterIP Service to allow inter-Pod access from the Agent Pod.
+      - RAG Pod: chromadb container (:7080) + aiac-rag-ingest container (FastAPI :7072). Exposed as
+          Kubernetes ClusterIP Service for Agent (RAG query) and for ingest access via
+          kubectl port-forward. ChromaDB hosts two collections: aiac-policies (policy rules)
+          and aiac-domain-knowledge (org/business context). The legal collection set is governed
+          by AIAC_RAG_COLLECTIONS on the Ingest Service container.
+      - Agent Pod: aiac-agent container (FastAPI :7071). Calls Keycloak Configuration Service Pod and RAG Pod
+          over the cluster network.
+  - Manifests:
+      - aiac/k8s/keycloak-service-deployment.yaml: Keycloak Configuration Service Pod + ClusterIP Service
+      - aiac/k8s/rag-deployment.yaml: RAG Pod (ChromaDB + RAG Ingest Service) + ClusterIP Service
+      - aiac/k8s/agent-deployment.yaml: Agent Pod + ClusterIP Service
+  - ConfigMap: aiac-keycloak-config carrying KEYCLOAK_URL and KEYCLOAK_REALM.
+      Reuses keycloak-admin-secret for admin credentials.
+      RAG-specific configuration (AIAC_RAG_COLLECTIONS, EMBEDDING_*) lives in the RAG Pod's
+      own ConfigMap/env block, not in aiac-keycloak-config.
+  - Note: Keycloak Configuration Service Pod previously bound to 127.0.0.1 only. Now binds to 0.0.0.0
+      and is exposed as a ClusterIP Service to allow the Agent Pod to reach it.
+- Testing:
+  - Unit tests: Mock the web service in library tests; mock Keycloak in configuration service tests. Located in tests/.
+  - Integration tests: Hit a live Keycloak instance. Located in tests/. Require KEYCLOAK_URL,
+    KEYCLOAK_REALM, KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD to be set.
+- Components:
+  - Keycloak Configuration Service:
+    - Description: FastAPI service (:7070) proxying the Keycloak Admin REST API (8 endpoints).
+    - spec: components/keycloak-service.yaml
+  - Library:
+    - Description: Python package — dependency-free Pydantic models (models.py) + HTTP client returning typed instances (api.py).
+    - spec: components/library.yaml
+  - Agent:
+    - Description: LangGraph StateGraph (:7071) — six /apply/* endpoints, parallel RAG + Keycloak fetch, LLM propose/validate, immediate apply.
+    - spec: components/aiac-agent.yaml
+  - RAG Knowledge Base:
+    - Description: ChromaDB vector store (:7080) holding the aiac-policies collection in the RAG Pod.
+    - spec: components/rag-knowledge-base.yaml
+  - RAG Ingest Service:
+    - Description: FastAPI service (:7072) accepting policy documents and writing vectors into co-located ChromaDB.
+    - spec: components/rag-ingest-service.yaml
+- Package structure:
+    - aiac/src/aiac/__init__.py: absent (namespace package)
+    - aiac/src/aiac/__init__.py: empty
+    - aiac/src/aiac/keycloak/__init__.py: empty
+    - aiac/src/aiac/keycloak/library/__init__.py: empty (callers must use explicit submodule paths)
+    - aiac/src/aiac/keycloak/library/models.py: Pydantic model definitions
+    - aiac/src/aiac/keycloak/library/api.py: HTTP client functions
+    - aiac/src/aiac/keycloak/service/__init__.py: empty
+    - aiac/src/aiac/keycloak/service/main.py: FastAPI app + uvicorn entrypoint
+    - aiac/src/aiac/keycloak/service/Dockerfile: Docker image (build context aiac/src/)
+    - aiac/src/aiac/keycloak/service/requirements.txt: Python dependencies
+    - aiac/src/aiac/agent/__init__.py: empty
+    - aiac/src/aiac/agent/service/__init__.py: empty
+    - aiac/src/aiac/agent/service/main.py: FastAPI app factory + uvicorn entrypoint
+    - aiac/src/aiac/agent/service/routes.py: all six /apply/* route handlers
+    - aiac/src/aiac/agent/service/Dockerfile: Docker image (build context aiac/src/)
+    - aiac/src/aiac/agent/service/requirements.txt: Python dependencies
+    - aiac/src/aiac/agent/agent/__init__.py: empty
+    - aiac/src/aiac/agent/agent/state.py: AgentState, TriggerContext, KeycloakSnapshot, ProposedDiff, RoleAssignment, ValidationVerdict
+    - aiac/src/aiac/agent/agent/prompts.py: planner and auditor system prompt templates
+    - aiac/src/aiac/agent/agent/nodes.py: all node functions
+    - aiac/src/aiac/agent/agent/graph.py: StateGraph definition, edge wiring, compiled graph instance

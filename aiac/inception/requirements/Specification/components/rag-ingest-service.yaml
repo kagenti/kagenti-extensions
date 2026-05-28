@@ -1,0 +1,83 @@
+- Title: AIAC RAG Ingest Service
+- Description: >
+    FastAPI REST service co-located with ChromaDB in the RAG Pod. Exposes ingest endpoints
+    that accept knowledge documents for any configured collection, chunk and embed them, and
+    write the resulting vectors into the ChromaDB instance running in the same Pod. Supports
+    both access control policies (aiac-policies collection) and org/business domain context
+    (aiac-domain-knowledge collection) through a single collection-parameterized API surface.
+    Accessible from outside Kubernetes via kubectl port-forward for developer-driven ingestion.
+- Endpoints:
+    Replace (wipe + reload named collection):
+    - POST /ingest/{collection}/text:
+        Replace the entire named collection from a JSON body.
+        Body: {"docs": [{"id": "<doc_id>", "text": "<document text>"}, ...]}
+        Empty docs list is allowed — wipes the collection.
+    - POST /ingest/{collection}/file:
+        Replace the entire named collection from one or more uploaded files.
+        Multipart upload; each file becomes one document.
+        doc_id = filename without extension. Multiple files → multiple docs.
+        Filename collisions within one call → 400.
+    - POST /ingest/{collection}/url:
+        Replace the entire named collection from a JSON body of URLs.
+        Body: {"docs": [{"id": "<doc_id>", "url": "<url>"}, ...]}
+        Service fetches each URL; response body becomes the document text.
+        Caller assigns doc_id independent of the URL.
+
+    Update (document-level upsert — additive, never deletes):
+    - POST /ingest/{collection}/update/text:
+        Upsert documents into the named collection from a JSON body.
+        Body: {"docs": [{"id": "<doc_id>", "text": "<document text>"}, ...]}
+        New doc_id → add; matching doc_id → replace that doc's chunks.
+        doc_ids in the collection but absent from the body are KEPT (additive semantics).
+        Empty docs list → no-op.
+    - POST /ingest/{collection}/update/file:
+        Upsert documents into the named collection from one or more uploaded files.
+        Same multipart conventions as POST /ingest/{collection}/file.
+        Existing docs with matching doc_id are replaced; others are left untouched.
+    - POST /ingest/{collection}/update/url:
+        Upsert documents into the named collection from a JSON body of URLs.
+        Body: {"docs": [{"id": "<doc_id>", "url": "<url>"}, ...]}
+        Additive: only named doc_ids are affected.
+
+    Delete (explicit removal — the only path that removes content from the collection):
+    - DELETE /ingest/{collection}/{doc_id}:
+        Remove all chunks belonging to doc_id from the named collection.
+        doc_id not found → 404.
+
+    Collection validation (all endpoints):
+    - {collection} must be a member of AIAC_RAG_COLLECTIONS (default: policy,domain-knowledge).
+    - Unknown collection slug → 404.
+    - Collection slug to ChromaDB collection name mapping:
+        policy            → aiac-policies
+        domain-knowledge  → aiac-domain-knowledge
+
+- Ingest semantics:
+    - Replace: drops the ChromaDB collection and recreates it, then ingests all provided docs.
+        Atomic at the collection level — partial failures roll back to empty collection.
+    - Update: document-level upsert keyed on doc_id stored in chunk metadata. For each
+        incoming doc_id: delete existing chunks with that doc_id, then insert new chunks.
+        All other doc_ids in the collection are untouched.
+    - Delete: removes all chunks whose metadata.doc_id equals the given doc_id.
+    - Chunking and embedding applied uniformly across all operations and both collections.
+      doc_id is stored in ChromaDB chunk metadata on every write to enable update and delete.
+
+- Framework: FastAPI with uvicorn
+- Configuration:
+    - CHROMA_URL: Base URL of the ChromaDB instance co-located in the same Pod.
+      Default: http://localhost:7080
+      Source: Environment variable injected via Kubernetes Deployment manifest.
+    - AIAC_RAG_COLLECTIONS: Comma-separated list of legal collection slugs.
+      Default: policy,domain-knowledge
+      Source: Environment variable injected via Kubernetes Deployment manifest.
+      Adding a third slug here (and a corresponding ChromaDB collection name in the
+      slug→name map) is a config-only change requiring no code modification.
+    - EMBEDDING_BASE_URL: Base URL of the embedding model API endpoint.
+      Source: Environment variable injected via Kubernetes Deployment manifest.
+    - EMBEDDING_MODEL: Embedding model name (shared across all collections).
+      Source: Environment variable injected via Kubernetes Deployment manifest.
+    - EMBEDDING_API_KEY: Embedding API access token (shared across all collections).
+      Source: Kubernetes Secret mounted as environment variable.
+- Port: 7072
+- Dependencies: TBD (chromadb client, embedding model client, fastapi, uvicorn, httpx for URL fetching)
+- Location: TBD
+- Deployment: Docker container co-located with ChromaDB in the RAG Pod

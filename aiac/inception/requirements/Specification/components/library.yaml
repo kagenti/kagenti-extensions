@@ -1,0 +1,86 @@
+- Models:
+  - Title: Keycloak configuration accessor Models
+  - Description: >
+      Data structures and schema library containing Pydantic BaseModel subclasses
+      representing Keycloak entities. Importable standalone — no HTTP client dependency.
+      Used by the API library, AI agents, and LangGraph agents to parse and validate
+      raw Keycloak JSON.
+  - Module: aiac.keycloak.library.models
+  - Schemas:
+    - User: Pydantic BaseModel representing a Keycloak user.
+    - RealmRole: Pydantic BaseModel representing a Keycloak realm role.
+    - RoleMappings: >
+        Pydantic BaseModel representing the Keycloak Admin REST API response from
+        GET /users/{id}/role-mappings. Fields: realmMappings (list[RealmRole], default []),
+        clientMappings (dict[str, Any], default {}). Defined after RealmRole.
+    - Client: Pydantic BaseModel representing a Keycloak client.
+    - ClientScope: Pydantic BaseModel representing a Keycloak client scope.
+    - ClientRole: >
+        Pydantic BaseModel representing a Keycloak client role.
+        Fields: id (str), name (str), description (str | None), composite (bool), clientRole (bool).
+        Used as the payload element for assign/revoke client role operations.
+  - Model config: extra='ignore' on all models to stay stable across Keycloak version changes.
+  - Dependencies: pydantic
+  - Implementation: Python
+  - Location: aiac/src/aiac/keycloak/library/
+  - Deployment: Python module distributed as part of the repository.
+
+- API:
+  - Title: Keycloak configuration accessor API
+  - Description: >
+      Python API library wrapping the Keycloak Configuration Service.
+      Exposes its REST endpoints as typed Python functions returning Pydantic model
+      instances from aiac.library.models. Intended for Python scripts and LangGraph agents.
+  - Module: aiac.keycloak.library.api
+  - Common parameter:
+      - realm (str, mandatory): passed to the Service as ?realm=<name> so the request
+          targets the named Keycloak realm. All eight functions require this parameter.
+  - Functions:
+    - Get users:
+      - Description: Retrieves current users from Keycloak server.
+      - Function: get_users
+      - Parameters: realm (str)
+      - Returns: list[User]
+    - Get realm roles:
+      - Description: Retrieves current realm roles from Keycloak server.
+      - Function: get_realm_roles
+      - Parameters: realm (str)
+      - Returns: list[RealmRole]
+    - Get user role mappings:
+      - Description: Retrieves realm and client role mappings for a specific user from Keycloak server.
+      - Function: get_user_role_mappings
+      - Parameters: user_id (str) — Keycloak user UUID; realm (str)
+      - Returns: RoleMappings
+    - Get clients:
+      - Description: Retrieves current clients from Keycloak server.
+      - Function: get_clients
+      - Parameters: realm (str)
+      - Returns: list[Client]
+    - Get client scopes:
+      - Description: Retrieves current client scopes from Keycloak server.
+      - Function: get_client_scopes
+      - Parameters: realm (str)
+      - Returns: list[ClientScope]
+    - Get client roles:
+      - Description: Retrieves roles defined for a specific client.
+      - Function: get_client_roles
+      - Parameters: client_id (str) — Keycloak client UUID; realm (str)
+      - Returns: list[ClientRole]
+    - Assign client roles to user:
+      - Description: Assigns one or more client roles to a user.
+      - Function: assign_client_roles
+      - Parameters: user_id (str), client_id (str), roles (list[ClientRole]), realm (str)
+      - Returns: None
+    - Revoke client roles from user:
+      - Description: Revokes one or more client roles from a user.
+      - Function: revoke_client_roles
+      - Parameters: user_id (str), client_id (str), roles (list[ClientRole]), realm (str)
+      - Returns: None
+  - Configuration:
+      - AC_SERVICE_URL: Base URL of the Keycloak Configuration Service.
+        Default: http://127.0.0.1:7070
+        Source: .env file consumed via python-dotenv, with fallback to default.
+  - Dependencies: requests, pydantic, python-dotenv, aiac.library.models
+  - Implementation: Python
+  - Location: aiac/src/aiac/keycloak/library/
+  - Deployment: Python module distributed as part of the repository.

@@ -67,3 +67,6 @@ __pycache__/
 .mypy_cache/
 test-jwt-rotation.sh
 kagenti-webhook/bin/
+
+# AIAC working artefacts (regenerated; not source of truth)
+aiac/inception/issues/
