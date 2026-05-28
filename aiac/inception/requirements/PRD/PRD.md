@@ -26,7 +26,7 @@ Six components across three Kubernetes Pods plus a Python library layer, all imp
 └──────────────┼───────────────────────────────────────────┘
                │
 ┌──────────────┼───────────────────────────────────────────┐
-│  Agent Pod   |                                           │
+│  Agent Pod   │                                           │
 │              │                                           │
 │  ┌────────────────────────┐                              │
 │  │  AIAC Agent (FastAPI)  │  :7071  ClusterIP            │
@@ -48,10 +48,10 @@ Six components across three Kubernetes Pods plus a Python library layer, all imp
 └──────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
-│  Python library  (aiac/src/)                    │
+│  Python library  (aiac/src/)                             │
 │                                                          │
-│  aiac.keycloak.library.models  — Pydantic only  │
-│  aiac.keycloak.library.api     — HTTP client →  │
+│  aiac.keycloak.library.models  — Pydantic only           │
+│  aiac.keycloak.library.api     — HTTP client →           │
 │                          Keycloak Configuration Service  │
 └──────────────────────────────────────────────────────────┘
 ```
