@@ -1,7 +1,7 @@
 # Component PRD: Keycloak Configuration Service
 
 ## Location
-`aiac/service/`
+`aiac/src/aiac/keycloak/service/`
 
 ## Description
 A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns raw Keycloak JSON unchanged for read operations; forwards write operations directly. Stateless — no caching.
