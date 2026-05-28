@@ -99,7 +99,10 @@ type Context struct {
 	Scheme  string
 	Host    string
 	Path    string
-	Headers http.Header
+	// RemoteAddr is the "IP:port" of the direct TCP caller, populated by the
+	// proxy listeners from r.RemoteAddr. Empty for ext_proc and test contexts.
+	RemoteAddr string
+	Headers    http.Header
 	Body    []byte // nil unless at least one plugin declares BodyAccess: true
 
 	// StartedAt is the wall-clock time this context was constructed by the

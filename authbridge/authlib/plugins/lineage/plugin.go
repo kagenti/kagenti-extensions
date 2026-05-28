@@ -201,18 +201,32 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		}
 	}
 
-	callerID := callerIdentity(pctx, p.selfID)
-	targetID := pctx.Host
+	// Normalize IDs to short service names; keep raw addresses separately.
+	sourceID := serviceLabel(sourceIdentity(pctx, p.selfID))
+	rawTarget := pctx.Host
+	targetID := shortHostname(rawTarget)
 
 	spanKind, oiKind := hopSpanKinds(info)
 	spanAttrs := []attribute.KeyValue{
 		attribute.String("lineage.hop.kind", string(info.Kind)),
 		attribute.String("lineage.direction", pctx.Direction.String()),
 		attribute.String("lineage.protocol", info.Protocol),
-		attribute.String("lineage.caller.id", callerID),
+		attribute.String("lineage.source.id", sourceID),
 		attribute.String("lineage.target.id", targetID),
 		attribute.String("openinference.span.kind", oiKind),
 		attribute.Bool("authbridge.proxy", true),
+		// trust.* attrs are the canonical keys consumed by the lineage service
+		// transformer. Set them directly so the lineage pipeline works without
+		// an OTel transform fallback for authbridge-originated spans.
+		attribute.String("trust.source_id", sourceID),
+		attribute.String("trust.target_id", targetID),
+		attribute.String("trust.hop_kind", string(info.Kind)),
+	}
+	if pctx.RemoteAddr != "" {
+		spanAttrs = append(spanAttrs, attribute.String("lineage.source.addr", pctx.RemoteAddr))
+	}
+	if rawTarget != "" {
+		spanAttrs = append(spanAttrs, attribute.String("lineage.target.addr", rawTarget))
 	}
 	// enduser.id carries the human-readable username (preferred_username claim)
 	// for inbound hops initiated by a human user. The lineage service reads this
@@ -221,6 +235,11 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	if pctx.Identity != nil {
 		if u := pctx.Identity.Username(); u != "" {
 			spanAttrs = append(spanAttrs, attribute.String("enduser.id", u))
+		}
+		// trust.principal_id: the human or service identity that initiated this
+		// request chain. Set from the authenticated subject on inbound hops.
+		if s := pctx.Identity.Subject(); s != "" {
+			spanAttrs = append(spanAttrs, attribute.String("trust.principal_id", s))
 		}
 	}
 
@@ -328,11 +347,11 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 	state.span.End()
 }
 
-// callerIdentity extracts a stable caller identifier from the request context.
+// sourceIdentity extracts a stable source identifier from the request context.
 // Prefers Subject (end-user ID) over ClientID (service account / client name).
 // Falls back to selfID (the agent's own ID) for outbound requests where no
 // inbound identity has been established.
-func callerIdentity(pctx *pipeline.Context, selfID string) string {
+func sourceIdentity(pctx *pipeline.Context, selfID string) string {
 	if pctx.Identity != nil {
 		if s := pctx.Identity.Subject(); s != "" {
 			return s
@@ -394,6 +413,27 @@ func serviceLabel(selfID string) string {
 		}
 	}
 	return selfID
+}
+
+// shortHostname reduces a Kubernetes FQDN (with optional port) to just the
+// first DNS label, which is the short service name.
+// "weather-service.team1.svc.cluster.local:8080" → "weather-service"
+// "weather-tool-mcp.team1.svc.cluster.local:8000" → "weather-tool-mcp"
+// "plain-host" → "plain-host"
+func shortHostname(host string) string {
+	if host == "" {
+		return host
+	}
+	// Strip port.
+	h := host
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		h = h[:i]
+	}
+	// Take the first DNS label.
+	if i := strings.Index(h, "."); i >= 0 {
+		return h[:i]
+	}
+	return h
 }
 
 // hopSpanKinds returns the OTel SpanKind and the OpenInference span kind string

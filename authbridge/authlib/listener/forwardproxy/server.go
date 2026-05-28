@@ -173,12 +173,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pctx := &pipeline.Context{
-		Direction: pipeline.Outbound,
-		Scheme:    r.URL.Scheme,
-		Host:      r.Host,
-		Path:      r.URL.Path,
-		Headers:   r.Header.Clone(),
-		StartedAt: time.Now(),
+		Direction:  pipeline.Outbound,
+		Scheme:     r.URL.Scheme,
+		Host:       r.Host,
+		Path:       r.URL.Path,
+		RemoteAddr: r.RemoteAddr,
+		Headers:    r.Header.Clone(),
+		StartedAt:  time.Now(),
 	}
 
 	// Finisher dispatch runs after every exit path. RunFinish is a

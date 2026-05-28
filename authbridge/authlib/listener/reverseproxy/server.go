@@ -163,12 +163,13 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx := &pipeline.Context{
-		Direction: pipeline.Inbound,
-		Scheme:    requestScheme(r),
-		Host:      r.Host,
-		Path:      r.URL.Path,
-		Headers:   r.Header.Clone(),
-		StartedAt: time.Now(),
+		Direction:  pipeline.Inbound,
+		Scheme:     requestScheme(r),
+		Host:       r.Host,
+		Path:       r.URL.Path,
+		RemoteAddr: r.RemoteAddr,
+		Headers:    r.Header.Clone(),
+		StartedAt:  time.Now(),
 	}
 
 	// Surface connection-level identity to plugins that opt in. r.TLS is
