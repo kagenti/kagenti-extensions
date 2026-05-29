@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""
+State Definitions for Single Role Mapper
+
+This module defines the TypedDict state structure used by the LangGraph
+workflow for mapping a single client role to real roles that should have access.
+"""
+
+from typing import TypedDict, Annotated, List, Dict
+from operator import add
+
+
+class SingleRoleState(TypedDict):
+    """
+    State dictionary for the single role mapping LangGraph workflow.
+
+    Attributes:
+        policy_description: Natural language policy description (context for the mapping)
+        client_name: Name of the client that owns the role
+        client_role: Dict with 'name' and 'description' of the client role to analyze
+        realm_roles: List of available realm roles with descriptions
+        explanation: LLM's explanation of which real roles should have access
+        real_roles_with_access: List of realm role names that should have access
+        messages: Accumulated list of LLM messages (for conversation history)
+        errors: List of validation errors (replaced on each validation attempt)
+        retry_count: Number of validation retry attempts made
+        validation_passed: Boolean flag indicating if validation succeeded
+    """
+    policy_description: str
+    client_name: str
+    client_role: Dict[str, str]
+    realm_roles: List[Dict[str, str]]
+    explanation: str
+    real_roles_with_access: List[str]
+    messages: Annotated[List, add]  # Annotated with 'add' for accumulation
+    errors: List[str]  # NOT accumulated - replaced on each validation attempt
+    retry_count: int
+    validation_passed: bool  # Boolean flag for retry decision, not accumulated
+
+# Made with Bob

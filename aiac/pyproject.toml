@@ -1,3 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["test"]
-pythonpath = ["src"]
+pythonpath = ["src", "src/agent"]
+markers = [
+    "integration: tests that call real LLM endpoints",
+]

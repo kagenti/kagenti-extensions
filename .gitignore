@@ -57,6 +57,7 @@ secrets.json
 secrets.env
 kubeconfig
 *.kubeconfig
+llm_conf.yaml
 
 # Python
 __pycache__/

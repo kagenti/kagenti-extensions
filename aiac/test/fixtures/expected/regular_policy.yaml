@@ -1,0 +1,18 @@
+# Expected policy for regular_policy.txt
+# Policy Description:
+#   * Members of the R&D can access both private and public github repositories
+#   * Other technical personnel can access public github repositories only
+
+policy:
+  developer:
+  - client: spiffe://localtest.me/ns/team1/sa/git-issue-agent
+    role: github-agent
+  - client: github-tool
+    role: github-tool-aud
+  - client: github-tool
+    role: github-full-access
+  tech-support:
+  - client: spiffe://localtest.me/ns/team1/sa/git-issue-agent
+    role: github-agent
+  - client: github-tool
+    role: github-tool-aud
