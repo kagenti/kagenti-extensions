@@ -1,6 +1,6 @@
 [tool.pytest.ini_options]
 testpaths = ["test"]
-pythonpath = ["src", "src/agent"]
+pythonpath = ["src", "src/aiac/agent/onboarding/policy"]
 markers = [
     "integration: tests that call real LLM endpoints",
 ]

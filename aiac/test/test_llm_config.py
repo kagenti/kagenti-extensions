@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from aiac_agent.config.llm_config import (
+from config.llm_config import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_MAX_TOKENS,
     DEFAULT_TEMPERATURE,
