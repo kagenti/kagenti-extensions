@@ -1,26 +1,49 @@
-# PRD: AI-based Access Control (AIAC) for Keycloak
+# PRD: AI-based Access Control (AIAC)
 
 ## 1. Purpose
 
-Automate Keycloak RBAC management using a natural-language access control policy enforced by an AI agent. The system has three concerns:
+Automate RBAC management using a natural-language access control policy enforced by an AI agent. The system is designed around a generic **Policy Decision Point (PDP)** abstraction, with Keycloak as the Phase 1 backend. The system has three concerns:
 
-1. **Configuration accessor** — a REST service and Python library that expose Keycloak user, role, client, and role-mapping data for both read and write operations.
-2. **Policy knowledge base** — a ChromaDB RAG store holding the access control policy in persistent, queryable form, populated via a co-located ingest service.
-3. **AIAC Agent** — a LangGraph-based AI agent triggered by Keycloak state-change events. It retrieves the current policy from the RAG store, interprets it against the live Keycloak state, and applies the required role assignments and revocations immediately.
+1. **PDP Configuration Service** — a REST service that exposes PDP entity data (subjects, roles, services, scopes, permissions, composite mappings) for read operations. Backed by Keycloak in both phases; the read interface is stable across phases.
+2. **PDP Policy Service** — a REST service that applies policy changes to the PDP backend. Phase 1 implementation writes Keycloak composite role mappings (realm role → service permissions). Phase 2 implementation writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a deployment swap only.
+3. **Policy knowledge base** — a ChromaDB RAG store holding the access control policy in persistent, queryable form, populated via a co-located ingest service.
+4. **AIAC Agent** — a LangGraph-based AI agent triggered by Keycloak state-change events (via Keycloak SPI listener) and by the RAG Ingest Service. It retrieves the current policy from the RAG store, interprets it against the live PDP state, and applies the required composite mappings immediately.
+5. **Python library** — `aiac.pdp.library` provides typed access to both PDP services via `read_api` and `write_api` modules backed by generic Pydantic models.
+
+### Implementation phases
+
+| Phase | PDP Policy write target | Write operation |
+|---|---|---|
+| Phase 1 | Keycloak | Composite role mappings (realm role → service permissions) |
+| Phase 2 | OPA | LLM-generated Rego rules |
+
+Phase transition: before Phase 2 is activated, the agent clears all composite mappings from Keycloak, then the PDP Policy pod is replaced with the OPA implementation.
+
+---
 
 ## 2. Architecture Overview
 
-Six components across three Kubernetes Pods plus a Python library layer, all implemented in Python 3.14. External dependencies: Keycloak Admin API, an LLM API, and an embedding API.
+Six components across five Kubernetes Pods plus a Python library layer, all implemented in Python 3.12. External dependencies: Keycloak Admin API, an LLM API, and an embedding API. The Keycloak SPI listener is defined in a separate PRD.
 
 ### Deployment topology
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  Keycloak Configuration Service Pod                      │
+│  PDP Configuration Pod                                   │
 │                                                          │
 │  ┌────────────────────────┐                              │
-│  │  Keycloak Configuration│  :7070  ClusterIP            │
-│  │  Service (FastAPI)     │  aiac-keycloak-service       │
+│  │  PDP Configuration     │  :7070  ClusterIP            │
+│  │  Service (FastAPI)     │  aiac-pdp-config-service     │
+│  └────────────────────────┘                              │
+│              ▲                                           │
+└──────────────┼───────────────────────────────────────────┘
+               │
+┌──────────────┼───────────────────────────────────────────┐
+│  PDP Policy Pod (Phase 1: Keycloak | Phase 2: OPA)       │
+│              │                                           │
+│  ┌────────────────────────┐                              │
+│  │  PDP Policy Service    │  :7073  ClusterIP            │
+│  │  (FastAPI)             │  aiac-pdp-policy-service     │
 │  └────────────────────────┘                              │
 │              ▲                                           │
 └──────────────┼───────────────────────────────────────────┘
@@ -50,9 +73,11 @@ Six components across three Kubernetes Pods plus a Python library layer, all imp
 ┌──────────────────────────────────────────────────────────┐
 │  Python library  (aiac/src/)                             │
 │                                                          │
-│  aiac.keycloak.library.models  — Pydantic only           │
-│  aiac.keycloak.library.api     — HTTP client →           │
-│                          Keycloak Configuration Service  │
+│  aiac.pdp.library.models   — Pydantic only               │
+│  aiac.pdp.library.read_api — HTTP client →               │
+│                          PDP Configuration Service       │
+│  aiac.pdp.library.write_api — HTTP client →              │
+│                          PDP Policy Service              │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -63,100 +88,119 @@ Policy / domain knowledge ingestion (operator-driven):
 
   Developer ──(kubectl port-forward)──► RAG Ingest Service ──► ChromaDB aiac-policies          [policy rules]
                                                            ├──► ChromaDB aiac-domain-knowledge  [org/business context]
-                                                           └──► Embedding API (external)
+                                                           ├──► Embedding API (external)
+                                                           └──► AIAC Agent /apply/build          [trigger policy recompute]
 
 Role enforcement (event-driven):
 
   Policy update triggers (build, rebuild) → Policy Update Orchestrator:
 
-  Trigger ──► AIAC Agent ──┬── (rebuild only) library.api ──► Keycloak Configuration Service  [revoke all role assignments]
+  Trigger ──► AIAC Agent ──┬── (rebuild only) write_api ──► PDP Policy Service  [clear all composite mappings]
                            ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
+                           ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read state + composites]
                            ├──► LLM API (external)              [propose diff from policy + domain context + state]
                            ├──► LLM API (external)              [validate diff]
-                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply diff]
+                           └──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite diff]
 
-  Users & realm roles triggers (user/{id}, realm-role/{id}) → Users & Realm Roles Orchestrator:
+  Realm role trigger (realm-role/{id}) → Realm Roles Orchestrator:
 
   Trigger ──► AIAC Agent ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read scoped state]
-                           ├──► LLM API (external)              [propose mappings scoped to affected entity]
+                           ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read scoped state]
+                           ├──► LLM API (external)              [propose composite mappings scoped to affected role]
                            ├──► LLM API (external)              [validate mappings]
-                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply mappings]
+                           └──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
 
   Client onboarding trigger (client/{id}) → Client Onboarding Orchestrator:
 
   Trigger ──► AIAC Agent ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ClientInfo]
                            ├──► LLM API (external)              [analyze agent/tool → ClientProvision]
-                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [provision roles + scopes]
+                           ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [provision permissions + scopes]
                            ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
-                           ├──► LLM API (external)              [propose mappings for new client]
+                           ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read state]
+                           ├──► LLM API (external)              [propose composite mappings for new service]
                            ├──► LLM API (external)              [validate mappings]
-                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply mappings]
+                           └──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
 ```
 
 ### Component dependencies
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| Keycloak Configuration Service | `aiac.keycloak.library.api` | Keycloak Admin REST API | Raw Keycloak JSON |
-| `aiac.keycloak.library.models` | `aiac.keycloak.library.api`, AIAC Agent, other agents | — | Pydantic model definitions |
-| `aiac.keycloak.library.api` | AIAC Agent, Python scripts, LangGraph agents | Keycloak Configuration Service (HTTP) | Pydantic model instances |
+| PDP Configuration Service | `aiac.pdp.library.read_api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
+| PDP Policy Service (Keycloak) | `aiac.pdp.library.write_api` | Keycloak Admin REST API | 204/201 on success |
+| `aiac.pdp.library.models` | `aiac.pdp.library.read_api`, `aiac.pdp.library.write_api`, AIAC Agent | — | Pydantic model definitions |
+| `aiac.pdp.library.read_api` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances |
+| `aiac.pdp.library.write_api` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
-| RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API | — |
-| AIAC Agent | Keycloak event handlers | Controller → Orchestrators → `aiac.keycloak.library.api`, ChromaDB, LLM API, Kubernetes API (in-cluster) | Applied/revoked role diff; provisioned client roles/scopes (onboarding) |
+| RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, AIAC Agent | — |
+| AIAC Agent | Keycloak SPI listener (entity events), RAG Ingest Service (build), operator (rebuild) | Policy Update / Realm Roles / Client Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
 
 ### Key architectural decisions
 
-- **Keycloak Configuration Service binds to `0.0.0.0`.** Exposed as a Kubernetes ClusterIP Service (`aiac-keycloak-service`) so that the Agent Pod can reach it over the cluster network. Also accessible via `kubectl port-forward`.
-- **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as a Kubernetes ClusterIP Service (`aiac-rag-service`) on ports 7080 (ChromaDB) and 7072 (RAG Ingest Service). Developer ingestion is done via `kubectl port-forward`.
+- **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
+- **PDP Policy Service ClusterIP name is stable across phases.** `aiac-pdp-policy-service` on `:7073` is used in both Phase 1 (Keycloak) and Phase 2 (OPA). Phase transition = deployment swap only.
+- **Phase 1 RBAC via composite roles.** AIAC manages realm role → service permission mappings at the role level, not per-user. Users inherit permissions automatically when assigned a realm role.
+- **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as `aiac-rag-service` on ports 7080 (ChromaDB) and 7072 (RAG Ingest Service).
 - **AIAC Agent is stateless.** Changes are applied immediately on trigger — no pending session or human confirmation step.
-- **`aiac.keycloak.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
-- **`aiac.__init__`, `aiac.keycloak.__init__`, `aiac.keycloak.library.__init__`, and `aiac.keycloak.service.__init__` are empty.** Callers use explicit submodule paths: `from aiac.keycloak.library.models import User`, `from aiac.keycloak.library.api import get_users`.
-- **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** The legal collection set is governed by `AIAC_RAG_COLLECTIONS` on the RAG Ingest Service (default: `policy,domain-knowledge`). Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
+- **`aiac.pdp.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
+- **`aiac.__init__`, `aiac.pdp.__init__`, `aiac.pdp.library.__init__`, `aiac.pdp.configuration.__init__`, `aiac.pdp.policy.__init__`, and `aiac.pdp.policy.keycloak.__init__` are empty.** Callers use explicit submodule paths: `from aiac.pdp.library.models import Subject`, `from aiac.pdp.library.read_api import get_subjects`.
+- **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
+- **`rebuild` is operator-only.** Never triggered automatically. Clears all composite mappings then recomputes from scratch. RAG Ingest Service triggers `build` (incremental) only.
+- **`user/{id}` trigger removed.** Composite role mappings are realm-role-scoped; individual user creation/update does not require agent intervention — composites apply automatically.
 
 ---
 
-## 3. Component: Keycloak Configuration Service
+## 3. Component: PDP Configuration Service
 
-FastAPI service (`0.0.0.0:7070`) that proxies the Keycloak Admin REST API. Exposes 11 endpoints (6 reads + assign + revoke + create client role + create client scope + revoke all role assignments). Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter.
+FastAPI service (`0.0.0.0:7070`) that proxies Keycloak Admin REST API read endpoints using generic PDP entity names. Exposes 7 read endpoints. Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter. Backed by Keycloak in both Phase 1 and Phase 2.
 
-**Full spec:** [components/keycloak-service.md](components/keycloak-service.md)
+**Full spec:** [components/pdp-configuration-service.md](components/pdp-configuration-service.md)
 
 ---
 
-## 4. Component: Library
+## 4. Component: PDP Policy Service
 
-Python package at `aiac/src/`. Two submodules:
+FastAPI service (`0.0.0.0:7073`) that applies policy changes to the active PDP backend. Two implementations share the same Kubernetes ClusterIP name (`aiac-pdp-policy-service`):
 
-- **`aiac.keycloak.library.models`** — dependency-free Pydantic models for all Keycloak entities (`User`, `RealmRole`, `Client`, `ClientRole`, `ClientScope`, `RoleMappings`).
-- **`aiac.keycloak.library.api`** — HTTP client wrapping the Keycloak Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
+- **Phase 1 — Keycloak:** manages composite role mappings (realm role → service permissions) via Keycloak Admin API. 5 write endpoints.
+- **Phase 2 — OPA:** writes LLM-generated Rego rules to OPA. Interface TBD (separate PRD).
+
+**Phase 1 full spec:** [components/pdp-policy-keycloak-service.md](components/pdp-policy-keycloak-service.md)
+
+---
+
+## 5. Component: Library
+
+Python package at `aiac/src/`. Three submodules:
+
+- **`aiac.pdp.library.models`** — dependency-free Pydantic models for all PDP entities (`Subject`, `Role`, `Service`, `Permission`, `Scope`, `Assignments`).
+- **`aiac.pdp.library.read_api`** — HTTP client wrapping the PDP Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
+- **`aiac.pdp.library.write_api`** — HTTP client wrapping the PDP Policy Service; abstracts Phase 1 (Keycloak composite mappings) and Phase 2 (OPA Rego) behind a stable function interface.
 
 **Full spec:** [components/library.md](components/library.md)
 
 ---
 
-## 5. Component: AIAC Agent
+## 6. Component: AIAC Agent
 
-FastAPI + LangGraph service (`0.0.0.0:7071`). Structured as a thin **Controller** (`controller/routes.py`) that dispatches five `/apply/*` endpoints to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
+FastAPI + LangGraph service (`0.0.0.0:7071`). Structured as a thin **Controller** (`controller/routes.py`) that dispatches four `/apply/*` endpoints to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
 | Client Onboarding | `client/{id}` | Client Provision → Client Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Users & Realm Roles | `user/{id}`, `realm-role/{id}` | User sub-agent or Realm Role sub-agent (alternative) |
+| Realm Roles | `realm-role/{id}` | Realm Role sub-agent |
 
-All six sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live Keycloak state. The **Rebuild** variant additionally clears all role assignments before computing the diff. The **Users & Realm Roles** sub-agents apply scoped mappings for a single affected user or realm role. The **Client Onboarding** orchestrator first provisions client roles/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new client's roles/scopes. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+All four sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Realm Roles** sub-agent applies scoped composite mappings for a single affected realm role. The **Client Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 
 ---
 
-## 6. Component: RAG Knowledge Base
+## 7. Component: RAG Knowledge Base
 
 ChromaDB vector store (`aiac-rag-service:7080`) hosting two collections: `aiac-policies` (access control policy rules) and `aiac-domain-knowledge` (org/business context such as team rosters, application ownership, and department mappings). Both collections are managed by the RAG Ingest Service and read by the AIAC Agent. Co-located with the RAG Ingest Service in the RAG Pod.
 
@@ -164,35 +208,54 @@ ChromaDB vector store (`aiac-rag-service:7080`) hosting two collections: `aiac-p
 
 ---
 
-## 7. Component: RAG Ingest Service
+## 8. Component: RAG Ingest Service
 
-FastAPI service (`0.0.0.0:7072`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). Developer access via `kubectl port-forward`.
+FastAPI service (`0.0.0.0:7072`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service calls `POST /apply/build` on the AIAC Agent (`AIAC_AGENT_URL`). Developer access via `kubectl port-forward`.
 
 **Full spec:** [components/rag-ingest-service.md](components/rag-ingest-service.md)
 
 ---
 
-## 8. Deployment
+## 9. Component: Keycloak SPI Listener
+
+A custom Keycloak Event Listener SPI (Java) that listens to Keycloak's internal event bus and translates entity-scoped events into HTTP calls to the AIAC Agent's `/apply/*` endpoints.
+
+| Keycloak Event | AIAC Agent endpoint |
+|---|---|
+| `REGISTER`, `UPDATE_PROFILE` (user events) | — (dropped; composite roles handle user permission inheritance automatically) |
+| `CLIENT_CREATED` | `POST /apply/client/{id}` |
+| Realm role created/updated | `POST /apply/realm-role/{id}` |
+
+**Full spec:** TBD (separate PRD).
+
+---
+
+## 10. Deployment
 
 ### Kubernetes manifests
 
-Three separate manifest files:
+Five separate manifest files:
 
 | File | Contents |
 |------|----------|
-| `aiac/k8s/keycloak-service-deployment.yaml` | `aiac-keycloak-config` ConfigMap + Keycloak Configuration Service Pod Deployment + ClusterIP Service |
+| `aiac/k8s/pdp-config-deployment.yaml` | `aiac-pdp-config` ConfigMap + PDP Configuration Service Pod Deployment + ClusterIP Service |
+| `aiac/k8s/pdp-policy-keycloak-deployment.yaml` | PDP Policy Service Pod Deployment (Keycloak implementation) + ClusterIP Service |
 | `aiac/k8s/rag-deployment.yaml` | RAG Pod Deployment (ChromaDB + RAG Ingest Service containers) + ClusterIP Service |
 | `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment + ClusterIP Service |
+| `aiac/k8s/pdp-policy-opa-deployment.yaml` | PDP Policy Service Pod Deployment (OPA implementation) — Phase 2, TBD |
 
-The Keycloak Configuration Service Pod mounts `aiac-keycloak-config` (KEYCLOAK_URL, KEYCLOAK_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars.
+The PDP Configuration and PDP Policy (Keycloak) Pods mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars.
 
 ### Docker images
 
 Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
-# Build Keycloak Configuration Service
-docker build -f aiac/src/aiac/keycloak/service/Dockerfile -t ac-configuration-service:latest aiac/src/
+# Build PDP Configuration Service
+docker build -f aiac/src/aiac/pdp/configuration/Dockerfile -t aiac-pdp-config:latest aiac/src/
+
+# Build PDP Policy Service (Keycloak)
+docker build -f aiac/src/aiac/pdp/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
 
 # Build Agent
 docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest aiac/src/
@@ -201,23 +264,26 @@ docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest a
 docker build -t aiac-rag-ingest:latest aiac/rag-ingest/
 ```
 
-### `aiac-keycloak-config` ConfigMap template
+### `aiac-pdp-config` ConfigMap template
 
 ```yaml
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aiac-keycloak-config
+  name: aiac-pdp-config
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
   KEYCLOAK_REALM: "kagenti"
+  AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7070"
+  AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7073"
+  AIAC_AGENT_URL: "http://aiac-agent-service:7071"
 ```
 
 Update `KEYCLOAK_URL` and `KEYCLOAK_REALM` for the target environment before applying.
 
 ---
 
-## 9. Testing
+## 11. Testing
 
 Tests live in `aiac/test/`.
 
@@ -225,9 +291,11 @@ Tests live in `aiac/test/`.
 
 | Target | What to mock | What to assert |
 |--------|-------------|----------------|
-| Keycloak Configuration Service endpoints | `KeycloakAdmin` methods (return fixture dicts) | Correct JSON response, 204 on write success, 502 on Keycloak error |
-| `aiac.keycloak.library.models` | No mock needed | `extra='ignore'` drops unknown fields, required fields validated, `model_validate` round-trips correctly |
-| `aiac.keycloak.library.api` functions | Keycloak Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
+| PDP Configuration Service endpoints | `KeycloakAdmin` methods (return fixture dicts) | Correct JSON response, 502 on Keycloak error |
+| PDP Policy Service (Keycloak) endpoints | `KeycloakAdmin` methods | 204 on write success, 201 on create, 502 on Keycloak error |
+| `aiac.pdp.library.models` | No mock needed | `extra='ignore'` drops unknown fields, required fields validated, `model_validate` round-trips correctly |
+| `aiac.pdp.library.read_api` functions | PDP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
+| `aiac.pdp.library.write_api` functions | PDP Policy Service HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
 | AIAC Agent | TBD | TBD |
 
 ### Integration tests
@@ -241,7 +309,7 @@ Require a live Keycloak instance. Controlled by env vars:
 | `KEYCLOAK_ADMIN_USERNAME` | Admin username |
 | `KEYCLOAK_ADMIN_PASSWORD` | Admin password |
 
-Integration tests call the live Keycloak Configuration Service (running locally or via port-forward) and assert that results are non-empty lists of the correct type.
+Integration tests call the live PDP Configuration Service (running locally or via port-forward) and assert that results are non-empty lists of the correct type.
 
 Use a pytest marker (e.g. `@pytest.mark.integration`) so unit tests and integration tests can be run independently:
 
@@ -252,12 +320,12 @@ pytest aiac/ -m integration          # integration only
 
 ---
 
-## 10. Conventions and constraints
+## 12. Conventions and constraints
 
-- Python version: 3.14
-- Base Docker image: `python:3.14-slim`
+- Python version: 3.12
+- Base Docker image: `python:3.12-slim`
 - Linting: ruff (line length 120, target py312 per root `pyproject.toml`)
 - Commits: DCO sign-off required (`git commit -s`); use `Assisted-By` not `Co-Authored-By`
-- No auth on Keycloak Configuration Service or RAG Ingest Service — network isolation (ClusterIP + `kubectl port-forward`) is the access control mechanism
-- Keycloak Configuration Service, Agent, and RAG Ingest Service are not registered with the repo's `build.yaml` CI matrix; they have independent build processes
+- No auth on PDP Configuration Service, PDP Policy Service, or RAG Ingest Service — network isolation (ClusterIP + `kubectl port-forward`) is the access control mechanism
+- PDP Configuration Service, PDP Policy Service, Agent, and RAG Ingest Service are not registered with the repo's `build.yaml` CI matrix; they have independent build processes
 - `aiac/__init__.py` exists and is empty — `aiac` is a regular package, not a namespace package

@@ -2,7 +2,7 @@
 
 ## Description
 
-A LangGraph-based AI agent service that enforces a natural-language access control policy against the live Keycloak state. Triggered via HTTP by Keycloak state change events or full build/rebuild requests.
+A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via HTTP by Keycloak state-change events (via Keycloak SPI listener) or full build/rebuild requests (via RAG Ingest Service or admin call).
 
 The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
@@ -10,7 +10,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 |---|---|---|
 | Client Onboarding | `client/{id}` | Client Provision → Client Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Users & Realm Roles | `user/{id}`, `realm-role/{id}` | User sub-agent or Realm Role sub-agent (alternative) |
+| Realm Roles | `realm-role/{id}` | Realm Role sub-agent |
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -35,16 +35,14 @@ flowchart TD
         ORC2 --> SA4
     end
 
-    subgraph URR["Users and Realm Roles"]
+    subgraph RR["Realm Roles"]
         ORC3["Orchestrator"]
-        SA5["Users"]
-        SA6["Realm Roles"]
+        SA5["Realm Role"]
         ORC3 --> SA5
-        ORC3 --> SA6
     end
 
     TRIGGERS --> CTRL
-    CTRL -->|"user/:id or realm-role/:id"| ORC3
+    CTRL -->|"realm-role/:id"| ORC3
     CTRL -->|"build / rebuild"| ORC2
     CTRL -->|"client/:id"| ORC1
 ```
@@ -86,15 +84,15 @@ START → classify_client → [analyze_agent | analyze_tool] → provision_clien
      - Unrecognised format → treat as `ClientType.tool`.
   2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) by namespace + name via the in-cluster Kubernetes API.
      - **Found** → `client_type = agent`: read the `AgentCard` CR; populate `ClientInfo(client_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
-     - **Not found** → `client_type = tool`: call `get_clients(realm)` from `aiac.keycloak.library.api`; locate the `Client` by `client_id`; populate `ClientInfo(client_type=tool, description=client.description or client.name, skills=[])`.
-  3. Returns `502` on Kubernetes API failure or if the Keycloak Client record is not found for a tool.
+     - **Not found** → `client_type = tool`: call `get_services(realm)` from `aiac.pdp.library.read_api`; locate the `Service` by `client_id`; populate `ClientInfo(client_type=tool, description=service.description or service.name, skills=[])`.
+  3. Returns `502` on Kubernetes API failure or if the Service record is not found for a tool.
 
   > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev` and `agentcards.agent.kagenti.dev`.
 
   > **kagenti-operator note:** The operator does not expose an HTTP API. `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) are stored alongside workloads. Absence of an `AgentRuntime` CR is the authoritative signal for `ClientType.tool`.
 
 - `analyze_agent` / `analyze_tool`: LLM node producing a `ClientProvision` from `ClientInfo`. Routing is a conditional edge on `ClientInfo.client_type`.
-- `provision_client`: non-LLM node; calls `create_client_role` and `create_client_scope` for each entry in `ClientProvision`.
+- `provision_client`: non-LLM node; calls `create_service_permission` and `create_service_scope` for each entry in `ClientProvision`.
 - `format_response`: assembles the provision result for the orchestrator.
 
 ```mermaid
@@ -104,7 +102,7 @@ flowchart TD
     CLASSIFY -->|"client_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ClientProvision"]
     CLASSIFY -->|"client_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ClientProvision"]
 
-    ANALYZE_AGENT --> PROVISION["provision_client\n\ncreate_client_role\ncreate_client_scope\nper ClientProvision entry"]
+    ANALYZE_AGENT --> PROVISION["provision_client\n\ncreate_service_permission\ncreate_service_scope\nper ClientProvision entry"]
     ANALYZE_TOOL --> PROVISION
 
     PROVISION --> FORMAT["format_response"]
@@ -125,17 +123,17 @@ flowchart TD
 
 ### Client Policy Sub-agent
 
-Runs after Client Provision completes. Freshly provisioned roles/scopes are live in Keycloak before this sub-agent starts.
+Runs after Client Provision completes. Freshly provisioned permissions/scopes are live in Keycloak before this sub-agent starts.
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_keycloak_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
 ```
 
-- Examines all realm roles and determines which realm role → client role/scope mappings to create for the newly added client, based on the access control policy and domain knowledge.
-- `fetch_keycloak_state`: fetches all users, all realm roles, the new client's roles and scopes, and all user role mappings.
-- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the new client only.
-- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new client).
-- `apply_mappings`: calls `assign_client_roles` / `revoke_client_roles` for each entry in the validated diff.
+- Examines all realm roles and determines which realm role → service permission/scope composite mappings to create for the newly added service, based on the access control policy and domain knowledge.
+- `fetch_pdp_state`: fetches all realm roles and their current composites, the new service's permissions and scopes.
+- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the new service only.
+- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service).
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` for each entry in the validated diff.
 - `format_response`: assembles the policy result for the orchestrator.
 
 ```mermaid
@@ -144,13 +142,13 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB: aiac-policies"]
     START --> FDK["fetch_domain_knowledge\nChromaDB: aiac-domain-knowledge"]
-    START --> FKC["fetch_keycloak_state\nusers, realm roles,\nclient roles/scopes,\nuser role mappings"]
+    START --> FKC["fetch_pdp_state\nroles + composites,\nnew service permissions/scopes"]
 
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to new client only"]
+    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to new service only"]
 
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails <= MAX_CHANGES\n3. Auditor LLM re-confirmation\n4. Scope check new client only"]
+    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails <= MAX_CHANGES\n3. Auditor LLM re-confirmation\n4. Scope check new service only"]
 
-    VALIDATE --> APPLY["apply_mappings\nassign_client_roles\nrevoke_client_roles"]
+    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
@@ -164,7 +162,7 @@ flowchart TD
 
 **State:** `BaseAgentState` (no extensions required).
 
-**Prompts** (`onboarding/policy/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM` — scoped to single-client mapping context.
+**Prompts** (`onboarding/policy/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM` — scoped to single-service composite mapping context.
 
 ---
 
@@ -172,18 +170,18 @@ flowchart TD
 
 Handles `POST /apply/build` and `POST /apply/rebuild`. Dispatches to one sub-agent based on trigger type.
 
-The Policy Update agent compares the **current Keycloak state** (authoritative record of previously applied rules) against the **current policy in ChromaDB** and applies the delta: adding missing assignments and removing stale ones.
+The Policy Update agent compares the **current composite role mappings** (authoritative record of previously applied rules) against the **current policy in ChromaDB** and applies the delta: adding missing composite mappings and removing stale ones.
 
 ### Build Sub-agent
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_keycloak_state] → propose_diff → validate_diff → apply_diff → format_response → END
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
 ```
 
-- `fetch_keycloak_state`: fetches all users, all clients + their roles, all realm roles, all role mappings for all users.
-- `propose_diff`: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live Keycloak state.
+- `fetch_pdp_state`: fetches all realm roles and their current composites, all services and their permissions, all scopes.
+- `propose_diff`: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
 - `validate_diff`: existence check + safety guard rails + auditor LLM re-confirmation + scope check.
-- `apply_diff`: calls `assign_client_roles` / `revoke_client_roles`.
+- `apply_diff`: calls `add_role_composites` / `remove_role_composites`.
 - `format_response`: assembles the build result.
 
 ```mermaid
@@ -192,13 +190,13 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB"]
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_keycloak_state\nall users, clients,\nrealm roles, all\nrole mappings"]
+    START --> FKC["fetch_pdp_state\nall roles + composites,\nall services + permissions"]
 
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nminimal delta vs live state"]
+    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nminimal delta vs live composites"]
 
     PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
 
-    VALIDATE --> APPLY["apply_diff\nassign_client_roles\nrevoke_client_roles"]
+    VALIDATE --> APPLY["apply_diff\nadd_role_composites\nremove_role_composites"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
@@ -217,25 +215,25 @@ flowchart TD
 ### Rebuild Sub-agent
 
 ```
-START → clear_assignments → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_keycloak_state] → propose_diff → validate_diff → apply_diff → format_response → END
+START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
 ```
 
-- `clear_assignments`: calls `revoke_all_role_assignments(realm)` before the fetch fan-out. `propose_diff` receives an empty `keycloak_snapshot` and produces an assign-only diff.
+- `clear_composites`: calls `clear_all_composites(realm)` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
 - All other nodes: identical in contract to Build sub-agent.
 
 ```mermaid
 flowchart TD
-    START(("START")) --> CLEAR["clear_assignments\nrevoke_all_role_assignments\nrealm-wide wipe"]
+    START(("START")) --> CLEAR["clear_composites\nclear_all_composites\nrealm-wide wipe"]
 
     CLEAR --> FP["fetch_policy\nChromaDB"]
     CLEAR --> FDK["fetch_domain_knowledge\nChromaDB"]
-    CLEAR --> FKC["fetch_keycloak_state\nempty snapshot\nafter wipe"]
+    CLEAR --> FKC["fetch_pdp_state\nempty role_composites\nafter wipe"]
 
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nassign-only state is empty"]
+    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nadd-only: composites are empty"]
 
     PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
 
-    VALIDATE --> APPLY["apply_diff\nassign_client_roles only"]
+    VALIDATE --> APPLY["apply_diff\nadd_role_composites only"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
@@ -254,11 +252,21 @@ flowchart TD
 
 ---
 
-## Users & Realm Roles Orchestrator
+## Realm Roles Orchestrator
 
-Handles `POST /apply/user/{user_id}` and `POST /apply/realm-role/{role_id}`. Dispatches to one sub-agent based on trigger type.
+Handles `POST /apply/realm-role/{role_id}`. Dispatches to the Realm Role sub-agent.
 
-Both sub-agents share the same graph shape; only `fetch_keycloak_state` scope differs.
+### Realm Role Sub-agent
+
+```
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
+```
+
+- `fetch_pdp_state`: fetches all services and their permissions, all realm roles, and the current composites for the affected realm role.
+- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected realm role.
+- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected realm role).
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites`.
+- `format_response`: assembles the result.
 
 ```mermaid
 flowchart TD
@@ -266,13 +274,13 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB"]
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_keycloak_state\n\nUser: that users\ncurrent mappings\nand all clients/roles\n\nRealm Role: all users\nand all realm roles"]
+    START --> FKC["fetch_pdp_state\naffected role composites,\nall services + permissions"]
 
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected\nuser OR realm role"]
+    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected realm role"]
 
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected entity only"]
+    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected role only"]
 
-    VALIDATE --> APPLY["apply_mappings\nassign_client_roles\nrevoke_client_roles"]
+    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
@@ -284,37 +292,9 @@ flowchart TD
     style APPLY fill:#dcfce7
 ```
 
-### User Sub-agent
-
-```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_keycloak_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
-```
-
-- `fetch_keycloak_state`: fetches that user's current role mappings and all clients + their roles.
-- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected user.
-- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected user).
-- `apply_mappings`: calls `assign_client_roles` / `revoke_client_roles`.
-- `format_response`: assembles the result.
-
 **State:** `BaseAgentState` (no extensions required).
 
-**Prompts** (`users_realm_roles/user/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
-
-### Realm Role Sub-agent
-
-```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_keycloak_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
-```
-
-- `fetch_keycloak_state`: fetches all users and all realm roles.
-- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected realm role.
-- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected realm role).
-- `apply_mappings`: calls `assign_client_roles` / `revoke_client_roles`.
-- `format_response`: assembles the result.
-
-**State:** `BaseAgentState` (no extensions required).
-
-**Prompts** (`users_realm_roles/realm_role/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
+**Prompts** (`realm_roles/realm_role/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
 
 ---
 
@@ -334,18 +314,17 @@ flowchart TD
         S2["realm: str"]
         S3["policy_chunks: list of str"]
         S4["domain_knowledge_chunks: list of str"]
-        S5["keycloak_snapshot: KeycloakSnapshot"]
+        S5["pdp_snapshot: PDPSnapshot"]
         S6["proposed_diff: ProposedDiff or None"]
         S7["validation_errors: list of str"]
-        S8["applied / revoked: list of RoleAssignment"]
+        S8["added / removed: list of CompositeMapping"]
         S9["summary: str"]
     end
 
     subgraph QUERY_KEYS["ChromaDB query strings by trigger"]
         Q1["build / rebuild -> all access control rules"]
-        Q2["user/:id -> user role assignment rules"]
-        Q3["realm-role/:id -> realm role assignment rules"]
-        Q4["client/:id -> client access control rules"]
+        Q2["realm-role/:id -> realm role assignment rules"]
+        Q3["client/:id -> client access control rules"]
     end
 
     FP & FDK --> STATE
@@ -366,7 +345,6 @@ Both nodes use the same trigger-type-keyed query strings:
 |---|---|
 | `build` | `"all access control rules"` |
 | `rebuild` | `"all access control rules"` |
-| `user/{id}` | `"user role assignment rules"` |
 | `realm-role/{id}` | `"realm role assignment rules"` |
 | `client/{id}` | `"client access control rules"` |
 
@@ -381,40 +359,41 @@ All type definitions shared across agents:
 | Field | Type | Description |
 |---|---|---|
 | `trigger` | `TriggerContext` | Endpoint type + entity ID |
-| `realm` | `str` | Keycloak realm (from `KEYCLOAK_REALM`) |
+| `realm` | `str` | Realm name (from `KEYCLOAK_REALM`) |
 | `policy_chunks` | `list[str]` | Policy text chunks from `aiac-policies` |
 | `domain_knowledge_chunks` | `list[str]` | Domain context chunks from `aiac-domain-knowledge` |
-| `keycloak_snapshot` | `KeycloakSnapshot` | Scoped Keycloak data for this trigger |
+| `pdp_snapshot` | `PDPSnapshot` | Scoped PDP data for this trigger |
 | `proposed_diff` | `ProposedDiff \| None` | LLM output |
 | `validation_errors` | `list[str]` | Errors from validate node |
-| `applied` | `list[RoleAssignment]` | Executed assignments |
-| `revoked` | `list[RoleAssignment]` | Executed revocations |
+| `added` | `list[CompositeMapping]` | Executed composite additions |
+| `removed` | `list[CompositeMapping]` | Executed composite removals |
 | `summary` | `str` | Human-readable explanation |
 
-#### `KeycloakSnapshot`
+#### `PDPSnapshot`
 
 ```python
-class KeycloakSnapshot(BaseModel):
-    users: list[User] = []
-    realm_roles: list[RealmRole] = []
-    clients: list[Client] = []
-    client_roles: dict[str, list[ClientRole]] = {}   # client_id → roles
-    client_scopes: list[ClientScope] = []
-    user_role_mappings: dict[str, RoleMappings] = {} # user_id → mappings
+class PDPSnapshot(BaseModel):
+    subjects: list[Subject] = []
+    roles: list[Role] = []
+    services: list[Service] = []
+    service_permissions: dict[str, list[Permission]] = {}  # service_id → permissions
+    service_scopes: list[Scope] = []
+    subject_assignments: dict[str, Assignments] = {}       # subject_id → assignments
+    role_composites: dict[str, list[Permission]] = {}      # role_name → current composite permissions
 ```
 
-#### `ProposedDiff` and `RoleAssignment`
+#### `ProposedDiff` and `CompositeMapping`
 
 ```python
-class RoleAssignment(BaseModel):
-    user_id: str
-    client_id: str
-    role_id: str
+class CompositeMapping(BaseModel):
     role_name: str
+    service_id: str
+    permission_id: str
+    permission_name: str
 
 class ProposedDiff(BaseModel):
-    assign: list[RoleAssignment]
-    revoke: list[RoleAssignment]
+    add: list[CompositeMapping]
+    remove: list[CompositeMapping]
     reasoning: str
 ```
 
@@ -469,7 +448,7 @@ All `propose_*` and `validate_*` nodes use `langchain-openai` (`ChatOpenAI`) via
 
 Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants in its `prompts.py`:
 
-- **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped Keycloak snapshot summary.
+- **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped PDP snapshot summary.
 - **Auditor prompt**: system message — auditor role for the specific agent's scope; user message — proposed diff + policy chunks + domain knowledge chunks.
 
 Client Provision sub-agent additionally defines `ANALYZE_AGENT_SYSTEM` and `ANALYZE_TOOL_SYSTEM` in `onboarding/provision/prompts.py`.
@@ -482,13 +461,13 @@ All `validate_*` / `validate_mappings` nodes perform the same four checks. Binar
 
 ```mermaid
 flowchart TD
-    IN["proposed_diff\n+ keycloak_snapshot"] --> C1
+    IN["proposed_diff\n+ pdp_snapshot"] --> C1
 
-    C1{"1. Existence check\nEvery user_id, client_id,\nrole_id in diff exists\nin keycloak_snapshot"}
-    C1 -->|"fail"| ABORT["ABORT\nvalidation_errors populated\napplied and revoked empty"]
+    C1{"1. Existence check\nEvery role_name, service_id,\npermission_id in diff exists\nin pdp_snapshot"}
+    C1 -->|"fail"| ABORT["ABORT\nvalidation_errors populated\nadded and removed empty"]
     C1 -->|"pass"| C2
 
-    C2{"2. Safety guard rails\ntotal changes\nassign + revoke\n<= MAX_CHANGES_PER_RUN"}
+    C2{"2. Safety guard rails\ntotal changes\nadd + remove\n<= MAX_CHANGES_PER_RUN"}
     C2 -->|"fail"| ABORT
     C2 -->|"pass"| C3
 
@@ -505,8 +484,8 @@ flowchart TD
     style C3 fill:#fef9c3
 ```
 
-1. **Existence check** — every `user_id`, `client_id`, `role_id` in the diff exists in `keycloak_snapshot`.
-2. **Safety guard rails** — total changes (`assign` + `revoke`) ≤ `MAX_CHANGES_PER_RUN`.
+1. **Existence check** — every `role_name`, `service_id`, `permission_id` in the diff exists in `pdp_snapshot`.
+2. **Safety guard rails** — total changes (`add` + `remove`) ≤ `MAX_CHANGES_PER_RUN`.
 3. **LLM re-confirmation** — second LLM call with auditor system prompt; returns `ValidationVerdict(approved, reason)`.
 4. **Scope check** — diff is bounded to entities referenced by the trigger; no over-reach on partial updates.
 
@@ -518,23 +497,22 @@ flowchart TD
 |---|---|---|---|
 | POST | `/apply/build` | Policy Update | Build |
 | POST | `/apply/rebuild` | Policy Update | Rebuild |
-| POST | `/apply/user/{user_id}` | Users & Realm Roles | User |
-| POST | `/apply/realm-role/{role_id}` | Users & Realm Roles | Realm Role |
+| POST | `/apply/realm-role/{role_id}` | Realm Roles | Realm Role |
 | POST | `/apply/client/{client_id}` | Client Onboarding | Provision → Policy |
 
 **Success response (Client Onboarding):**
 ```json
-{ "applied": [...], "revoked": [...], "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
+{ "added": [...], "removed": [...], "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
 ```
 
 **Success response (all other agents):**
 ```json
-{ "applied": [...], "revoked": [...], "summary": "...", "provisioned": null }
+{ "added": [...], "removed": [...], "summary": "...", "provisioned": null }
 ```
 
 **Abort response (validation failure, all agents):**
 ```json
-{ "applied": [], "revoked": [], "summary": "...", "validation_errors": [...], "provisioned": null }
+{ "added": [], "removed": [], "summary": "...", "validation_errors": [...], "provisioned": null }
 ```
 
 ---
@@ -543,9 +521,10 @@ flowchart TD
 
 | Variable | Default | Source |
 |---|---|---|
-| `AC_SERVICE_URL` | `http://aiac-keycloak-service:7070` | ConfigMap |
+| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7070` | ConfigMap (`aiac-pdp-config`) |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7073` | ConfigMap (`aiac-pdp-config`) |
 | `CHROMA_URL` | `http://aiac-rag-service:7080` | ConfigMap |
-| `KEYCLOAK_REALM` | — | ConfigMap (`aiac-keycloak-config`) |
+| `KEYCLOAK_REALM` | — | ConfigMap (`aiac-pdp-config`) |
 | `LLM_BASE_URL` | — | ConfigMap |
 | `LLM_MODEL` | — | ConfigMap |
 | `LLM_API_KEY` | — | Kubernetes Secret |
@@ -565,7 +544,8 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 | Upstream | HTTP status on final failure |
 |---|---|
 | ChromaDB | `503 Service Unavailable` |
-| Keycloak Configuration Service | `502 Bad Gateway` |
+| PDP Configuration Service | `502 Bad Gateway` |
+| PDP Policy Service | `502 Bad Gateway` |
 | Kubernetes API | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
 
@@ -576,7 +556,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 - Framework: FastAPI with uvicorn
 - Bind: `0.0.0.0:7071`
 - State: stateless — changes applied immediately, no pending session required
-- Base image: `python:3.14-slim`
+- Base image: `python:3.12-slim`
 
 ---
 
@@ -586,7 +566,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 aiac/src/aiac/agent/
 ├── controller/
 │   ├── __init__.py
-│   └── routes.py                        ← FastAPI app + five /apply/* route handlers
+│   └── routes.py                        ← FastAPI app + four /apply/* route handlers
 │
 ├── onboarding/
 │   ├── __init__.py
@@ -600,7 +580,7 @@ aiac/src/aiac/agent/
 │   └── policy/
 │       ├── __init__.py
 │       ├── graph.py                     ← Client Policy StateGraph
-│       ├── nodes.py                     ← fetch_keycloak_state, propose_mappings, validate_mappings, apply_mappings, format_response
+│       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 ├── policy_update/
@@ -609,32 +589,27 @@ aiac/src/aiac/agent/
 │   ├── build/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Build StateGraph
-│   │   ├── nodes.py                     ← fetch_keycloak_state, propose_diff, validate_diff, apply_diff, format_response
+│   │   ├── nodes.py                     ← fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
 │   │   └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │   └── rebuild/
 │       ├── __init__.py
 │       ├── graph.py                     ← Rebuild StateGraph
-│       ├── nodes.py                     ← clear_assignments, fetch_keycloak_state, propose_diff, validate_diff, apply_diff, format_response
+│       ├── nodes.py                     ← clear_composites, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
-├── users_realm_roles/
+├── realm_roles/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← dispatches to user or realm_role sub-agent
-│   ├── user/
-│   │   ├── __init__.py
-│   │   ├── graph.py                     ← User StateGraph
-│   │   ├── nodes.py                     ← fetch_keycloak_state, propose_mappings, validate_mappings, apply_mappings, format_response
-│   │   └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
+│   ├── orchestrator.py                  ← dispatches to realm_role sub-agent
 │   └── realm_role/
 │       ├── __init__.py
 │       ├── graph.py                     ← Realm Role StateGraph
-│       ├── nodes.py                     ← fetch_keycloak_state, propose_mappings, validate_mappings, apply_mappings, format_response
+│       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 └── shared/
     ├── __init__.py
     ├── nodes.py                         ← fetch_policy, fetch_domain_knowledge
-    └── state.py                         ← BaseAgentState, TriggerContext, KeycloakSnapshot, ProposedDiff, RoleAssignment, ValidationVerdict
+    └── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, ProposedDiff, CompositeMapping, ValidationVerdict
 ```
 
 Docker build command (run from repo root):
