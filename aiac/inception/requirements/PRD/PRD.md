@@ -26,7 +26,7 @@ Six components across three Kubernetes Pods plus a Python library layer, all imp
 └──────────────┼───────────────────────────────────────────┘
                │
 ┌──────────────┼───────────────────────────────────────────┐
-│  Agent Pod   |                                           │
+│  Agent Pod   │                                           │
 │              │                                           │
 │  ┌────────────────────────┐                              │
 │  │  AIAC Agent (FastAPI)  │  :7071  ClusterIP            │
@@ -48,10 +48,10 @@ Six components across three Kubernetes Pods plus a Python library layer, all imp
 └──────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
-│  Python library  (aiac/src/)                    │
+│  Python library  (aiac/src/)                             │
 │                                                          │
-│  aiac.library.models  — Pydantic only           │
-│  aiac.library.api     — HTTP client →           │
+│  aiac.keycloak.library.models  — Pydantic only           │
+│  aiac.keycloak.library.api     — HTTP client →           │
 │                          Keycloak Configuration Service  │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -80,20 +80,20 @@ Role enforcement (event-driven):
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| Keycloak Configuration Service | `aiac.library.api` | Keycloak Admin REST API | Raw Keycloak JSON |
-| `aiac.library.models` | `aiac.library.api`, AIAC Agent, other agents | — | Pydantic model definitions |
-| `aiac.library.api` | AIAC Agent, Python scripts, LangGraph agents | Keycloak Configuration Service (HTTP) | Pydantic model instances |
+| Keycloak Configuration Service | `aiac.keycloak.library.api` | Keycloak Admin REST API | Raw Keycloak JSON |
+| `aiac.keycloak.library.models` | `aiac.keycloak.library.api`, AIAC Agent, other agents | — | Pydantic model definitions |
+| `aiac.keycloak.library.api` | AIAC Agent, Python scripts, LangGraph agents | Keycloak Configuration Service (HTTP) | Pydantic model instances |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API | — |
-| AIAC Agent | Keycloak event handlers, orchestrators | `aiac.library.api`, ChromaDB, LLM API | Applied/revoked role diff |
+| AIAC Agent | Keycloak event handlers, orchestrators | `aiac.keycloak.library.api`, ChromaDB, LLM API | Applied/revoked role diff |
 
 ### Key architectural decisions
 
 - **Keycloak Configuration Service binds to `0.0.0.0`.** Exposed as a Kubernetes ClusterIP Service (`aiac-keycloak-service`) so that the Agent Pod can reach it over the cluster network. Also accessible via `kubectl port-forward`.
 - **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as a Kubernetes ClusterIP Service (`aiac-rag-service`) on ports 7080 (ChromaDB) and 7072 (RAG Ingest Service). Developer ingestion is done via `kubectl port-forward`.
 - **AIAC Agent is stateless.** Changes are applied immediately on trigger — no pending session or human confirmation step.
-- **`aiac.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
-- **`aiac.__init__`, `aiac.library.__init__`, and `aiac.service.__init__` are empty.** Callers use explicit submodule paths: `from aiac.library.models import User`, `from aiac.library.api import get_users`.
+- **`aiac.keycloak.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
+- **`aiac.__init__`, `aiac.keycloak.__init__`, `aiac.keycloak.library.__init__`, and `aiac.keycloak.service.__init__` are empty.** Callers use explicit submodule paths: `from aiac.keycloak.library.models import User`, `from aiac.keycloak.library.api import get_users`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** The legal collection set is governed by `AIAC_RAG_COLLECTIONS` on the RAG Ingest Service (default: `policy,domain-knowledge`). Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
 
 ---
@@ -110,8 +110,8 @@ FastAPI service (`0.0.0.0:7070`) that proxies the Keycloak Admin REST API. Expos
 
 Python package at `aiac/src/`. Two submodules:
 
-- **`aiac.library.models`** — dependency-free Pydantic models for all Keycloak entities (`User`, `RealmRole`, `Client`, `ClientRole`, `ClientScope`, `RoleMappings`).
-- **`aiac.library.api`** — HTTP client wrapping the Keycloak Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
+- **`aiac.keycloak.library.models`** — dependency-free Pydantic models for all Keycloak entities (`User`, `RealmRole`, `Client`, `ClientRole`, `ClientScope`, `RoleMappings`).
+- **`aiac.keycloak.library.api`** — HTTP client wrapping the Keycloak Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
 
 **Full spec:** [components/library.md](components/library.md)
 
@@ -161,10 +161,10 @@ Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
 # Build Keycloak Configuration Service
-docker build -t ac-configuration-service:latest aiac/service/
+docker build -f aiac/src/aiac/keycloak/service/Dockerfile -t ac-configuration-service:latest aiac/src/
 
 # Build Agent
-docker build -t aiac-agent:latest aiac/agent/
+docker build -f aiac/src/aiac/agent/service/Dockerfile -t aiac-agent:latest aiac/src/
 
 # Build RAG Ingest Service
 docker build -t aiac-rag-ingest:latest aiac/rag-ingest/
@@ -188,15 +188,15 @@ Update `KEYCLOAK_URL` and `KEYCLOAK_REALM` for the target environment before app
 
 ## 9. Testing
 
-Tests live in `tests/` alongside the existing client-registration and keycloak_sync tests.
+Tests live in `aiac/test/`.
 
 ### Unit tests
 
 | Target | What to mock | What to assert |
 |--------|-------------|----------------|
 | Keycloak Configuration Service endpoints | `KeycloakAdmin` methods (return fixture dicts) | Correct JSON response, 204 on write success, 502 on Keycloak error |
-| `aiac.library.models` | No mock needed | `extra='ignore'` drops unknown fields, required fields validated, `model_validate` round-trips correctly |
-| `aiac.library.api` functions | Keycloak Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
+| `aiac.keycloak.library.models` | No mock needed | `extra='ignore'` drops unknown fields, required fields validated, `model_validate` round-trips correctly |
+| `aiac.keycloak.library.api` functions | Keycloak Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
 | AIAC Agent | TBD | TBD |
 
 ### Integration tests
@@ -215,8 +215,8 @@ Integration tests call the live Keycloak Configuration Service (running locally 
 Use a pytest marker (e.g. `@pytest.mark.integration`) so unit tests and integration tests can be run independently:
 
 ```bash
-pytest tests/ -m "not integration"   # unit only
-pytest tests/ -m integration          # integration only
+pytest aiac/ -m "not integration"   # unit only
+pytest aiac/ -m integration          # integration only
 ```
 
 ---
@@ -229,4 +229,4 @@ pytest tests/ -m integration          # integration only
 - Commits: DCO sign-off required (`git commit -s`); use `Assisted-By` not `Co-Authored-By`
 - No auth on Keycloak Configuration Service or RAG Ingest Service — network isolation (ClusterIP + `kubectl port-forward`) is the access control mechanism
 - Keycloak Configuration Service, Agent, and RAG Ingest Service are not registered with the repo's `build.yaml` CI matrix; they have independent build processes
-- The `aiac` directory is a namespace package — do not create `aiac/__init__.py`
+- `aiac/__init__.py` exists and is empty — `aiac` is a regular package, not a namespace package

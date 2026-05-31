@@ -18,7 +18,7 @@ Binds to `0.0.0.0:7070`.
 Copy or edit `.env` in the service directory:
 
 ```
-src/aiac/service/.env
+src/aiac/keycloak/service/.env
 ```
 
 ```dotenv
@@ -33,20 +33,20 @@ OS environment variables override `.env` values when both are present.
 ### Install dependencies
 
 ```bash
-pip install -r src/aiac/service/requirements.txt
+pip install -r src/aiac/keycloak/service/requirements.txt
 ```
 
 ### Run
 
 ```bash
-uvicorn aiac.service.main:app --host 0.0.0.0 --port 7070
+uvicorn aiac.keycloak.service.main:app --host 0.0.0.0 --port 7070
 ```
 
 Run from the `aiac/` directory (the `src/` directory must be on `PYTHONPATH`):
 
 ```bash
 cd aiac
-PYTHONPATH=src uvicorn aiac.service.main:app --host 0.0.0.0 --port 7070
+PYTHONPATH=src uvicorn aiac.keycloak.service.main:app --host 0.0.0.0 --port 7070
 ```
 
 ### Smoke test
@@ -62,8 +62,8 @@ curl http://localhost:7070/users
 ### Build
 
 ```bash
-docker build -t aiac-keycloak-service:local \
-  src/aiac/service/
+docker build -f src/aiac/keycloak/service/Dockerfile \
+  -t aiac-keycloak-service:local src/
 ```
 
 ### Run
@@ -84,8 +84,8 @@ docker run --rm -p 7070:7070 \
 ### Build and load into Kind
 
 ```bash
-docker build -t aiac-keycloak-service:local \
-  src/aiac/service/
+docker build -f src/aiac/keycloak/service/Dockerfile \
+  -t aiac-keycloak-service:local src/
 
 kind load docker-image aiac-keycloak-service:local --name kagenti
 ```
