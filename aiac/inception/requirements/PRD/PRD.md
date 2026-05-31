@@ -67,11 +67,25 @@ Policy / domain knowledge ingestion (operator-driven):
 
 Role enforcement (event-driven):
 
+  Policy update triggers (build, rebuild, user, realm-role):
+
   Trigger ──► AIAC Agent ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
                            ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
-                           │
+                           │    (rebuild only: revoke all role assignments first)
                            ├──► LLM API (external)              [propose diff from policy + domain context + state]
+                           ├──► LLM API (external)              [validate diff]
+                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply diff]
+
+  Client onboarding trigger (client/{id}):
+
+  Trigger ──► AIAC Agent ──┬──► kagenti-operator                [retrieve ClientInfo (type, description, skills)]
+                           ├──► LLM API (external)              [analyze agent/tool → ClientProvision]
+                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [provision roles + scopes]
+                           ├──► ChromaDB aiac-policies         [retrieve policy chunks]
+                           ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
+                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
+                           ├──► LLM API (external)              [propose diff]
                            ├──► LLM API (external)              [validate diff]
                            └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply diff]
 ```
@@ -85,7 +99,7 @@ Role enforcement (event-driven):
 | `aiac.keycloak.library.api` | AIAC Agent, Python scripts, LangGraph agents | Keycloak Configuration Service (HTTP) | Pydantic model instances |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API | — |
-| AIAC Agent | Keycloak event handlers, orchestrators | `aiac.keycloak.library.api`, ChromaDB, LLM API | Applied/revoked role diff |
+| AIAC Agent | Keycloak event handlers, orchestrators | `aiac.keycloak.library.api`, ChromaDB, LLM API, kagenti-operator | Applied/revoked role diff; provisioned client roles/scopes (onboarding) |
 
 ### Key architectural decisions
 
@@ -100,7 +114,7 @@ Role enforcement (event-driven):
 
 ## 3. Component: Keycloak Configuration Service
 
-FastAPI service (`0.0.0.0:7070`) that proxies the Keycloak Admin REST API. Exposes 8 endpoints (6 reads + assign + revoke). Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter.
+FastAPI service (`0.0.0.0:7070`) that proxies the Keycloak Admin REST API. Exposes 11 endpoints (6 reads + assign + revoke + create client role + create client scope + revoke all role assignments). Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter.
 
 **Full spec:** [components/keycloak-service.md](components/keycloak-service.md)
 
@@ -119,7 +133,7 @@ Python package at `aiac/src/`. Two submodules:
 
 ## 5. Component: AIAC Agent
 
-LangGraph `StateGraph` (`0.0.0.0:7071`). Six `/apply/*` endpoints trigger a conditional workflow: three-way parallel fan-out (policy fetch from `aiac-policies` + domain knowledge fetch from `aiac-domain-knowledge` + Keycloak state fetch) → LLM propose diff → LLM validate diff → apply or abort. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+LangGraph `StateGraph` (`0.0.0.0:7071`). Five `/apply/*` endpoints dispatch to one of two compiled graphs. The **Policy Update Graph** handles `build`, `rebuild`, `user/{id}`, and `realm-role/{id}` triggers: three-way parallel fan-out (policy fetch + domain knowledge fetch + Keycloak state fetch) → LLM propose diff → LLM validate diff → apply or abort. The **Client Onboarding Graph** handles `client/{id}` triggers: classify client type via Keycloak + kagenti-operator → LLM analyze (agent or tool) → provision roles/scopes in Keycloak → same fan-out → diff → validate → apply or abort. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 

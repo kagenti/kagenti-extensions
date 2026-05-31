@@ -132,7 +132,7 @@ python-dotenv
 
 ### Functions
 
-All eight functions require a mandatory `realm: str` parameter, forwarded to the Service as `?realm=<name>`.
+All eleven functions require a mandatory `realm: str` parameter, forwarded to the Service as `?realm=<name>`.
 
 ```python
 def get_users(realm: str) -> list[User]: ...
@@ -143,6 +143,9 @@ def get_client_scopes(realm: str) -> list[ClientScope]: ...
 def get_client_roles(client_id: str, realm: str) -> list[ClientRole]: ...
 def assign_client_roles(user_id: str, client_id: str, roles: list[ClientRole], realm: str) -> None: ...
 def revoke_client_roles(user_id: str, client_id: str, roles: list[ClientRole], realm: str) -> None: ...
+def create_client_role(client_id: str, role_name: str, description: str, realm: str) -> ClientRole: ...
+def create_client_scope(client_id: str, scope_name: str, description: str, realm: str) -> ClientScope: ...
+def revoke_all_role_assignments(realm: str) -> None: ...
 ```
 
 Each read function:
@@ -154,6 +157,23 @@ Each read function:
 1. Issue `POST` / `DELETE {AC_SERVICE_URL}/users/{user_id}/role-mappings/clients/{client_id}` with the serialised role list as JSON body, always appending `?realm=<name>`.
 2. Raise `RuntimeError` on non-2xx HTTP status.
 3. Return `None` on success.
+
+`create_client_role`:
+1. Issues `POST {AC_SERVICE_URL}/clients/{client_id}/roles` with body `{"name": role_name, "description": description}`, appending `?realm=<name>`.
+2. Raises `RuntimeError` on non-2xx HTTP status.
+3. Returns the created `ClientRole` instance parsed from the response.
+
+`create_client_scope`:
+1. Issues `POST {AC_SERVICE_URL}/clients/{client_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<name>`.
+2. The service creates the scope at realm level and assigns it to the client as a default scope in a single atomic operation.
+3. Raises `RuntimeError` on non-2xx HTTP status.
+4. Returns the created `ClientScope` instance parsed from the response.
+
+`revoke_all_role_assignments`:
+1. Issues `DELETE {AC_SERVICE_URL}/role-mappings`, appending `?realm=<name>`.
+2. The service iterates all users in the realm, fetches each user's role mappings, and revokes all client role assignments.
+3. Raises `RuntimeError` on non-2xx HTTP status.
+4. Returns `None` on success.
 
 ### Configuration
 
