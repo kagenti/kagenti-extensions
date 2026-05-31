@@ -67,27 +67,36 @@ Policy / domain knowledge ingestion (operator-driven):
 
 Role enforcement (event-driven):
 
-  Policy update triggers (build, rebuild, user, realm-role):
+  Policy update triggers (build, rebuild) → Policy Update Orchestrator:
 
-  Trigger ──► AIAC Agent ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
+  Trigger ──► AIAC Agent ──┬── (rebuild only) library.api ──► Keycloak Configuration Service  [revoke all role assignments]
+                           ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
                            ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
-                           │    (rebuild only: revoke all role assignments first)
                            ├──► LLM API (external)              [propose diff from policy + domain context + state]
                            ├──► LLM API (external)              [validate diff]
                            └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply diff]
 
-  Client onboarding trigger (client/{id}):
+  Users & realm roles triggers (user/{id}, realm-role/{id}) → Users & Realm Roles Orchestrator:
 
-  Trigger ──► AIAC Agent ──┬──► kagenti-operator                [retrieve ClientInfo (type, description, skills)]
+  Trigger ──► AIAC Agent ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
+                           ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
+                           ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read scoped state]
+                           ├──► LLM API (external)              [propose mappings scoped to affected entity]
+                           ├──► LLM API (external)              [validate mappings]
+                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply mappings]
+
+  Client onboarding trigger (client/{id}) → Client Onboarding Orchestrator:
+
+  Trigger ──► AIAC Agent ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ClientInfo]
                            ├──► LLM API (external)              [analyze agent/tool → ClientProvision]
                            ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [provision roles + scopes]
                            ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
                            ├──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [read state]
-                           ├──► LLM API (external)              [propose diff]
-                           ├──► LLM API (external)              [validate diff]
-                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply diff]
+                           ├──► LLM API (external)              [propose mappings for new client]
+                           ├──► LLM API (external)              [validate mappings]
+                           └──► library.api ──► Keycloak Configuration Service ──► Keycloak Admin API  [apply mappings]
 ```
 
 ### Component dependencies
@@ -99,7 +108,7 @@ Role enforcement (event-driven):
 | `aiac.keycloak.library.api` | AIAC Agent, Python scripts, LangGraph agents | Keycloak Configuration Service (HTTP) | Pydantic model instances |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API | — |
-| AIAC Agent | Keycloak event handlers, orchestrators | `aiac.keycloak.library.api`, ChromaDB, LLM API, kagenti-operator | Applied/revoked role diff; provisioned client roles/scopes (onboarding) |
+| AIAC Agent | Keycloak event handlers | Controller → Orchestrators → `aiac.keycloak.library.api`, ChromaDB, LLM API, Kubernetes API (in-cluster) | Applied/revoked role diff; provisioned client roles/scopes (onboarding) |
 
 ### Key architectural decisions
 
@@ -133,7 +142,15 @@ Python package at `aiac/src/`. Two submodules:
 
 ## 5. Component: AIAC Agent
 
-LangGraph `StateGraph` (`0.0.0.0:7071`). Five `/apply/*` endpoints dispatch to one of two compiled graphs. The **Policy Update Graph** handles `build`, `rebuild`, `user/{id}`, and `realm-role/{id}` triggers: three-way parallel fan-out (policy fetch + domain knowledge fetch + Keycloak state fetch) → LLM propose diff → LLM validate diff → apply or abort. The **Client Onboarding Graph** handles `client/{id}` triggers: classify client type via Keycloak + kagenti-operator → LLM analyze (agent or tool) → provision roles/scopes in Keycloak → same fan-out → diff → validate → apply or abort. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+FastAPI + LangGraph service (`0.0.0.0:7071`). Structured as a thin **Controller** (`controller/routes.py`) that dispatches five `/apply/*` endpoints to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
+
+| Orchestrator | Trigger(s) | Sub-agents |
+|---|---|---|
+| Client Onboarding | `client/{id}` | Client Provision → Client Policy (sequential) |
+| Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
+| Users & Realm Roles | `user/{id}`, `realm-role/{id}` | User sub-agent or Realm Role sub-agent (alternative) |
+
+All six sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live Keycloak state. The **Rebuild** variant additionally clears all role assignments before computing the diff. The **Users & Realm Roles** sub-agents apply scoped mappings for a single affected user or realm role. The **Client Onboarding** orchestrator first provisions client roles/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new client's roles/scopes. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 
@@ -178,7 +195,7 @@ Built independently. No entry in the repo's `build.yaml` CI matrix.
 docker build -f aiac/src/aiac/keycloak/service/Dockerfile -t ac-configuration-service:latest aiac/src/
 
 # Build Agent
-docker build -f aiac/src/aiac/agent/service/Dockerfile -t aiac-agent:latest aiac/src/
+docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest aiac/src/
 
 # Build RAG Ingest Service
 docker build -t aiac-rag-ingest:latest aiac/rag-ingest/
