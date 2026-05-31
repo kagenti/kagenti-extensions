@@ -2,13 +2,17 @@
 
 ## Description
 
-A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via HTTP by Keycloak state-change events (via Keycloak SPI listener) or full build/rebuild requests (via RAG Ingest Service or admin call).
+A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via HTTP by:
+
+- **Keycloak SPI listener** (state-change events) → `service/{id}` and `realm-role/{id}` triggers
+- **RAG Ingest Service** (post-ingest completion) → `build` trigger only
+- **Operator/admin call** → `rebuild` trigger only
 
 The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
-| Client Onboarding | `client/{id}` | Client Provision → Client Policy (sequential) |
+| Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
 | Realm Roles | `realm-role/{id}` | Realm Role sub-agent |
 
@@ -19,10 +23,10 @@ flowchart TD
     TRIGGERS["HTTP Triggers\nPOST /apply/*"]
     CTRL["Controller\nroutes.py"]
 
-    subgraph CO["Client Onboarding"]
+    subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
-        SA1["Client Provision"]
-        SA2["Client Policy"]
+        SA1["Service Provision"]
+        SA2["Service Policy"]
         ORC1 --> SA1
         ORC1 --> SA2
     end
@@ -44,7 +48,7 @@ flowchart TD
     TRIGGERS --> CTRL
     CTRL -->|"realm-role/:id"| ORC3
     CTRL -->|"build / rebuild"| ORC2
-    CTRL -->|"client/:id"| ORC1
+    CTRL -->|"service/:id"| ORC1
 ```
 
 ---
@@ -61,48 +65,48 @@ No business logic, retry handling, or state assembly lives in the Controller.
 
 ---
 
-## Client Onboarding Orchestrator
+## Service Onboarding Orchestrator
 
-Handles `POST /apply/client/{client_id}`.
+Handles `POST /apply/service/{service_id}`.
 
 The orchestrator sequences two sub-agents and assembles the final response:
 
 ```
-ClientProvisionGraph.invoke() → ClientPolicyGraph.invoke() → assemble response
+ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → assemble response
 ```
 
-### Client Provision Sub-agent
+### Service Provision Sub-agent
 
 ```
-START → classify_client → [analyze_agent | analyze_tool] → provision_client → format_response → END
+START → classify_service → [analyze_agent | analyze_tool] → provision_service → format_response → END
 ```
 
-- `classify_client`: determines client type and populates `ClientInfo`.
-  1. **Parse `trigger.client_id`**:
+- `classify_service`: determines service type and populates `ServiceInfo`.
+  1. **Parse `trigger.service_id`**:
      - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract namespace.
      - Short format `{namespace}/{workloadName}` → split on first `/`.
-     - Unrecognised format → treat as `ClientType.tool`.
+     - Unrecognised format → treat as `ServiceType.tool`.
   2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) by namespace + name via the in-cluster Kubernetes API.
-     - **Found** → `client_type = agent`: read the `AgentCard` CR; populate `ClientInfo(client_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
-     - **Not found** → `client_type = tool`: call `get_services(realm)` from `aiac.pdp.library.read_api`; locate the `Service` by `client_id`; populate `ClientInfo(client_type=tool, description=service.description or service.name, skills=[])`.
+     - **Found** → `service_type = agent`: read the `AgentCard` CR; populate `ServiceInfo(service_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
+     - **Not found** → `service_type = tool`: call `get_services(realm)` from `aiac.pdp.library.read_api`; locate the `Service` by `service_id`; populate `ServiceInfo(service_type=tool, description=service.description or service.name, skills=[])`.
   3. Returns `502` on Kubernetes API failure or if the Service record is not found for a tool.
 
   > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev` and `agentcards.agent.kagenti.dev`.
 
-  > **kagenti-operator note:** The operator does not expose an HTTP API. `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) are stored alongside workloads. Absence of an `AgentRuntime` CR is the authoritative signal for `ClientType.tool`.
+  > **kagenti-operator note:** The operator does not expose an HTTP API. `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) are stored alongside workloads. Absence of an `AgentRuntime` CR is the authoritative signal for `ServiceType.tool`.
 
-- `analyze_agent` / `analyze_tool`: LLM node producing a `ClientProvision` from `ClientInfo`. Routing is a conditional edge on `ClientInfo.client_type`.
-- `provision_client`: non-LLM node; calls `create_service_permission` and `create_service_scope` for each entry in `ClientProvision`.
+- `analyze_agent` / `analyze_tool`: LLM node producing a `ServiceProvision` from `ServiceInfo`. Routing is a conditional edge on `ServiceInfo.service_type`.
+- `provision_service`: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.write_api` for each entry in `ServiceProvision`.
 - `format_response`: assembles the provision result for the orchestrator.
 
 ```mermaid
 flowchart TD
-    START(("START")) --> CLASSIFY["classify_client\n\n1. Parse client_id format\n2. Lookup AgentRuntime CR K8s\n3. Populate ClientInfo"]
+    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. Lookup AgentRuntime CR K8s\n3. Populate ServiceInfo"]
 
-    CLASSIFY -->|"client_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ClientProvision"]
-    CLASSIFY -->|"client_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ClientProvision"]
+    CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ServiceProvision"]
+    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ServiceProvision"]
 
-    ANALYZE_AGENT --> PROVISION["provision_client\n\ncreate_service_permission\ncreate_service_scope\nper ClientProvision entry"]
+    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
     ANALYZE_TOOL --> PROVISION
 
     PROVISION --> FORMAT["format_response"]
@@ -118,12 +122,12 @@ flowchart TD
 
 | Field | Type | Description |
 |---|---|---|
-| `client_info` | `ClientInfo \| None` | Populated by `classify_client` |
-| `client_provision` | `ClientProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
+| `service_info` | `ServiceInfo \| None` | Populated by `classify_service` |
+| `service_provision` | `ServiceProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
 
-### Client Policy Sub-agent
+### Service Policy Sub-agent
 
-Runs after Client Provision completes. Freshly provisioned permissions/scopes are live in Keycloak before this sub-agent starts.
+Runs after Service Provision completes. Freshly provisioned permissions/scopes are live in Keycloak before this sub-agent starts.
 
 ```
 START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
@@ -133,7 +137,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all realm roles and their current composites, the new service's permissions and scopes.
 - `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the new service only.
 - `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` for each entry in the validated diff.
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api` for each entry in the validated diff.
 - `format_response`: assembles the policy result for the orchestrator.
 
 ```mermaid
@@ -181,7 +185,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all realm roles and their current composites, all services and their permissions, all scopes.
 - `propose_diff`: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
 - `validate_diff`: existence check + safety guard rails + auditor LLM re-confirmation + scope check.
-- `apply_diff`: calls `add_role_composites` / `remove_role_composites`.
+- `apply_diff`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api`.
 - `format_response`: assembles the build result.
 
 ```mermaid
@@ -218,7 +222,7 @@ flowchart TD
 START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
 ```
 
-- `clear_composites`: calls `clear_all_composites(realm)` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
+- `clear_composites`: calls `clear_all_composites(realm)` from `aiac.pdp.library.write_api` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
 - All other nodes: identical in contract to Build sub-agent.
 
 ```mermaid
@@ -265,7 +269,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all services and their permissions, all realm roles, and the current composites for the affected realm role.
 - `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected realm role.
 - `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected realm role).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites`.
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api`.
 - `format_response`: assembles the result.
 
 ```mermaid
@@ -324,7 +328,7 @@ flowchart TD
     subgraph QUERY_KEYS["ChromaDB query strings by trigger"]
         Q1["build / rebuild -> all access control rules"]
         Q2["realm-role/:id -> realm role assignment rules"]
-        Q3["client/:id -> client access control rules"]
+        Q3["service/:id -> service access control rules"]
     end
 
     FP & FDK --> STATE
@@ -346,7 +350,7 @@ Both nodes use the same trigger-type-keyed query strings:
 | `build` | `"all access control rules"` |
 | `rebuild` | `"all access control rules"` |
 | `realm-role/{id}` | `"realm role assignment rules"` |
-| `client/{id}` | `"client access control rules"` |
+| `service/{id}` | `"service access control rules"` |
 
 Number of results capped by `CHROMA_N_RESULTS` (default `10`).
 
@@ -405,10 +409,10 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-#### Client Onboarding types (in `onboarding/provision/state.py`)
+#### Service Onboarding types (in `onboarding/provision/state.py`)
 
 ```python
-class ClientType(str, Enum):
+class ServiceType(str, Enum):
     agent = "agent"
     tool = "tool"
 
@@ -417,8 +421,8 @@ class Skill(BaseModel):
     name: str
     description: str
 
-class ClientInfo(BaseModel):
-    client_type: ClientType
+class ServiceInfo(BaseModel):
+    service_type: ServiceType
     description: str
     skills: list[Skill] = []
 
@@ -430,14 +434,14 @@ class ScopeDefinition(BaseModel):
     name: str
     description: str
 
-class ClientProvision(BaseModel):
+class ServiceProvision(BaseModel):
     roles: list[RoleDefinition]
     scopes: list[ScopeDefinition]
     reasoning: str
 
 class OnboardingProvisionState(BaseAgentState):
-    client_info: ClientInfo | None = None
-    client_provision: ClientProvision | None = None
+    service_info: ServiceInfo | None = None
+    service_provision: ServiceProvision | None = None
 ```
 
 ---
@@ -451,7 +455,7 @@ Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants i
 - **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped PDP snapshot summary.
 - **Auditor prompt**: system message — auditor role for the specific agent's scope; user message — proposed diff + policy chunks + domain knowledge chunks.
 
-Client Provision sub-agent additionally defines `ANALYZE_AGENT_SYSTEM` and `ANALYZE_TOOL_SYSTEM` in `onboarding/provision/prompts.py`.
+Service Provision sub-agent additionally defines `ANALYZE_AGENT_SYSTEM` and `ANALYZE_TOOL_SYSTEM` in `onboarding/provision/prompts.py`.
 
 ---
 
@@ -498,9 +502,9 @@ flowchart TD
 | POST | `/apply/build` | Policy Update | Build |
 | POST | `/apply/rebuild` | Policy Update | Rebuild |
 | POST | `/apply/realm-role/{role_id}` | Realm Roles | Realm Role |
-| POST | `/apply/client/{client_id}` | Client Onboarding | Provision → Policy |
+| POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
 
-**Success response (Client Onboarding):**
+**Success response (Service Onboarding):**
 ```json
 { "added": [...], "removed": [...], "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
 ```
@@ -573,13 +577,13 @@ aiac/src/aiac/agent/
 │   ├── orchestrator.py                  ← sequences provision → policy, assembles combined response
 │   ├── provision/
 │   │   ├── __init__.py
-│   │   ├── graph.py                     ← Client Provision StateGraph
-│   │   ├── nodes.py                     ← classify_client, analyze_agent, analyze_tool, provision_client, format_response
+│   │   ├── graph.py                     ← Service Provision StateGraph
+│   │   ├── nodes.py                     ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
 │   │   ├── prompts.py                   ← ANALYZE_AGENT_SYSTEM, ANALYZE_TOOL_SYSTEM
-│   │   └── state.py                     ← ClientType, Skill, ClientInfo, RoleDefinition, ScopeDefinition, ClientProvision, OnboardingProvisionState
+│   │   └── state.py                     ← ServiceType, Skill, ServiceInfo, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
 │   └── policy/
 │       ├── __init__.py
-│       ├── graph.py                     ← Client Policy StateGraph
+│       ├── graph.py                     ← Service Policy StateGraph
 │       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
