@@ -38,11 +38,22 @@ START → classify_client → [analyze_agent | analyze_tool] → provision_clien
 
 Handles trigger: `client/{id}`.
 
-- `classify_client`: queries Keycloak and the kagenti-operator to determine client type and retrieve `ClientInfo`. See **kagenti-operator dependency note** below.
+- `classify_client`: determines client type and populates `ClientInfo` using the Kubernetes API (in-cluster `ServiceAccount`) and the Keycloak library.
+  1. **Parse `trigger.client_id`** to extract namespace + workload name:
+     - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract namespace.
+     - Short format `{namespace}/{workloadName}` → split on first `/`.
+     - Unrecognised format → treat as `ClientType.tool`.
+  2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) by namespace + name via the in-cluster Kubernetes API.
+     - **Found** → `client_type = agent`: read the `AgentCard` CR (same namespace and name); populate `ClientInfo(client_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
+     - **Not found** → `client_type = tool`: call `get_clients(realm)` from `aiac.keycloak.library.api`; locate the `Client` by `client_id`; populate `ClientInfo(client_type=tool, description=client.description or client.name, skills=[])`.
+  3. Returns `502` on Kubernetes API failure or if the Keycloak Client record is not found for a tool.
+
+  > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev` and `agentcards.agent.kagenti.dev`. RBAC manifests are specified in the K8s deployment issue.
+
+  > **kagenti-operator note:** The operator does not expose an HTTP API — it is a controller-runtime manager only. Agent cards are stored as `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) alongside their workloads. Tools are not operator-managed; absence of an `AgentRuntime` CR is the authoritative signal for `ClientType.tool`.
+
 - `analyze_agent` / `analyze_tool`: LLM node that produces a `ClientProvision` from `ClientInfo`. `analyze_agent` uses agent description + skill list; `analyze_tool` uses description only. Routing is a conditional edge on `ClientInfo.client_type`.
 - `provision_client`: non-LLM node; calls `create_client_role` and `create_client_scope` for each entry in `ClientProvision`. Runs before `fetch_keycloak_state` so provisioned roles/scopes are visible in the snapshot.
-
-> **kagenti-operator dependency:** `classify_client` queries the kagenti-operator API to retrieve the Agent Card (for `ClientType.agent`) or tool description (for `ClientType.tool`). The kagenti-operator API contract for this query is defined in a separate investigation.
 
 ### State schema
 
@@ -89,6 +100,8 @@ class KeycloakSnapshot(BaseModel):
     client_scopes: list[ClientScope] = []
     user_role_mappings: dict[str, RoleMappings] = {} # user_id → mappings
 ```
+
+> **Model dependency:** `classify_client` reads `Client.description` from the Keycloak library model for the tool path. The `Client` model in `aiac.keycloak.library.models` must include `description: str | None = None` (added in issue 1.5).
 
 Client onboarding types:
 
@@ -289,7 +302,7 @@ All upstream calls (`fetch_policy`, `fetch_keycloak_state`, `propose_diff`, `val
 |----------|------------------------------|
 | ChromaDB | `503 Service Unavailable` |
 | Keycloak Configuration Service | `502 Bad Gateway` |
-| kagenti-operator | `502 Bad Gateway` |
+| Kubernetes API (AgentRuntime / AgentCard lookup) | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
 
 ## Dependencies (`requirements.txt`)
@@ -303,4 +316,5 @@ fastapi
 uvicorn[standard]
 requests
 python-dotenv
+kubernetes
 ```
