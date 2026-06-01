@@ -16,12 +16,12 @@ def extract_explanation_and_json(content: str) -> Tuple[str, List]:
     Extract explanation and JSON from formatted LLM output.
     
     This function parses the LLM's response to extract two components:
-    1. The explanation text (from ```explanation``` block or pre-JSON text)
-    2. The JSON data (from ```json``` block or plain JSON)
+    1. The explanation text (from code block with ```explanation tag or pre-JSON text)
+    2. The JSON data (from code block with ```json tag or plain JSON)
     
     It handles multiple formats:
-    - Markdown code blocks with ```explanation``` and ```json``` tags
-    - Plain text explanation followed by ```json``` block
+    - Markdown code blocks with ```explanation and ```json tags
+    - Plain text explanation followed by ```json block
     - Plain text with "explanation" header followed by JSON array
     - Plain JSON without code blocks (fallback)
     

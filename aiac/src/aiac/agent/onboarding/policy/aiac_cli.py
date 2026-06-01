@@ -1,11 +1,32 @@
 #!/usr/bin/env python3
-"""AIAC CLI — orchestrate end-to-end policy update against Keycloak.
+"""
+AIAC CLI - Access Control Policy Generator
+
+Command-line interface for generating Keycloak access control policies from
+natural language descriptions using AI-powered semantic analysis.
 
 Usage:
     python aiac_cli.py <policy_text_file> <config.yaml> <output.yaml>
 
-The first form runs the full Keycloak pipeline. The `generate` subcommand only
-runs the agent's text->YAML step (no Keycloak interaction).
+Arguments:
+    policy_text_file    Path to file containing natural language policy description
+    config.yaml         Path to Keycloak realm configuration YAML
+    output.yaml         Path where generated YAML policy will be saved
+
+Example:
+    python aiac_cli.py my_policy.txt keycloak_config.yaml generated_policy.yaml
+
+The CLI generates a complete access control policy by:
+    1. Reading the natural language policy description
+    2. Loading Keycloak realm configuration (roles, clients)
+    3. Using LLM to map roles based on semantic analysis
+    4. Validating the generated policy structure
+    5. Saving the result as a YAML file with explanatory comments
+
+For programmatic usage, import PolicyBuilder directly:
+    from full_policy_agent import PolicyBuilder
+    builder = PolicyBuilder(config_path=Path("config.yaml"))
+    result = builder.generate_policy("policy description")
 """
 
 import argparse
@@ -53,7 +74,14 @@ def print_info(message: str) -> None:
 def generate_policy_only(
     policy_file: Path, config_path: Path, output_file: str
 ) -> None:
-    """Run only the agent's natural-language → YAML step (no Keycloak)."""
+    """
+    Run only the agent's natural-language to YAML step (no Keycloak interaction).
+    
+    Args:
+        policy_file: Path to file containing natural language policy description
+        config_path: Path to Keycloak realm configuration YAML
+        output_file: Path where generated YAML policy will be saved
+    """
     if not policy_file.exists():
         raise FileNotFoundError(f"Policy file not found: {policy_file}")
 

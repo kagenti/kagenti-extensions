@@ -56,10 +56,17 @@ def extract_explanation_and_json_single_role(content: str) -> tuple[str, Optiona
     """
     Extract explanation and JSON from LLM response for single role mapping.
 
-    Tries, in order:
-    1. Fenced ```explanation / ```json blocks (preferred format)
-    2. Any ```json or ``` block containing a dict
-    3. A bare { ... } object anywhere in the response
+    Tries multiple parsing strategies in order:
+    1. Fenced code blocks with ```explanation and ```json tags (preferred format)
+    2. Any ```json or generic ``` block containing a dict
+    3. A bare { ... } JSON object anywhere in the response
+
+    Args:
+        content: Raw LLM response content string
+
+    Returns:
+        Tuple of (explanation_text, parsed_json_dict)
+        Returns empty string and None if parsing fails
     """
     explanation = ""
     json_data = None
@@ -119,7 +126,14 @@ def extract_explanation_and_json_single_role(content: str) -> tuple[str, Optiona
 
 
 def print_explanation_single_role(explanation: str, is_retry: bool = False, verbose: bool = True):
-    """Print the LLM's explanation if verbose mode is enabled."""
+    """
+    Print the LLM's explanation if verbose mode is enabled.
+    
+    Args:
+        explanation: The explanation text to print
+        is_retry: Whether this is from a retry attempt (adds retry indicator)
+        verbose: Whether to print the explanation
+    """
     if verbose and explanation:
         prefix = "🔄 Retry Explanation:" if is_retry else "💡 LLM Explanation:"
         print(f"\n{prefix}")
@@ -395,6 +409,10 @@ def _should_route_after_structural_validation(state: SingleRoleState, max_retrie
     """
     Route after structural validation: retry, proceed to semantic check, or end.
 
+    Args:
+        state: Current SingleRoleState with validation results
+        max_retries: Maximum retry attempts allowed
+
     Returns:
         "analyze_role_mapping" if structural errors remain and retries are available,
         "verify_semantic_mapping" if structural validation passed,
@@ -415,6 +433,10 @@ def _should_route_after_structural_validation(state: SingleRoleState, max_retrie
 def _should_retry_after_semantic(state: SingleRoleState, max_retries: int) -> str:
     """
     Determine if semantic verification failure should retry analyze_role_mapping.
+
+    Args:
+        state: Current SingleRoleState with semantic verification results
+        max_retries: Maximum retry attempts allowed
 
     Returns:
         "analyze_role_mapping" if semantic check failed and retries remain,

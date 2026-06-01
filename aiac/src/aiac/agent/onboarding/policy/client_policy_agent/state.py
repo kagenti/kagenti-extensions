@@ -18,11 +18,11 @@ class ClientPolicyState(TypedDict):
         description: Natural language policy description
         client_id: Keycloak client ID to scope the policy to
         explanation: LLM explanation of the role mappings
-        parsed_scopes: List of {role, client_roles} mappings (realm-role → client-roles)
+        parsed_scopes: List of {role, client_roles} mappings (realm-role to client-roles)
         policy_structure: Structured policy dict ready for YAML conversion
         yaml_output: Final YAML-formatted policy string
         messages: Accumulated LLM messages
-        errors: Validation errors — replaced on each validation attempt
+        errors: Validation errors - replaced on each validation attempt
         retry_count: Number of validation retry attempts
         validation_passed: Whether the last validation pass succeeded
     """

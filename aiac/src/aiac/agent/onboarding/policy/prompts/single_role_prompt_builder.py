@@ -16,7 +16,11 @@ def build_single_role_system_prompt(
     client_name: str = "",
 ) -> str:
     """
-    Build a system prompt for mapping a single client role to real roles.
+    Build a system prompt for mapping a single client role to realm roles.
+
+    This function constructs a comprehensive prompt that guides the LLM through
+    the process of determining which realm roles should have access to a specific
+    client role based on semantic analysis of role descriptions and policy context.
 
     Args:
         realm_roles: List of dicts with 'name' and 'description' for realm roles
@@ -67,12 +71,12 @@ about which real roles should have access to the client role.
     return f"""You are an expert at analyzing access control requirements and mapping client role capabilities to appropriate user roles.
 {policy_context}TASK OVERVIEW:
 You are given:
-1. A list of all available real roles (realm roles) with their descriptions
+1. A list of all available realm roles with their descriptions
 2. A single client role with its description
 
-Your task is to determine which real roles should have access to this client role.
+Your task is to determine which realm roles should have access to this client role.
 
-AVAILABLE REAL ROLES (Realm Roles):
+AVAILABLE REALM ROLES:
 {available_roles}
 
 CLIENT ROLE TO ANALYZE:
@@ -85,42 +89,42 @@ ANALYSIS GUIDELINES:
    - Use role descriptions to find the best match for each category
    - Broad terms (e.g., "all other staff") may map to multiple realm roles
 
-2. ENABLING / GATEWAY SERVICES ⚠️  CRITICAL — READ CAREFULLY:
+2. ENABLING / GATEWAY SERVICES - CRITICAL - READ CAREFULLY:
    An enabling service is one whose description says it provides access TO another service
    or technology (e.g., "Access to the data warehouse connector", "Access to the payment
    gateway", "Access to the data pipeline").
 
-   ⚠️  DOMAIN REQUIREMENT — AN ENABLING SERVICE MUST BE IN THE SAME DOMAIN AS THE POLICY:
-   - "Access to the data warehouse connector" IS an enabling service for a data warehouse policy ✓ (same domain)
-   - "Access to the monitoring dashboard UI" is NOT an enabling service for a data warehouse policy ✗ (different domain)
-   - "Access to the payment gateway" is NOT an enabling service for a document storage policy ✗
+   DOMAIN REQUIREMENT - AN ENABLING SERVICE MUST BE IN THE SAME DOMAIN AS THE POLICY:
+   - "Access to the data warehouse connector" IS an enabling service for a data warehouse policy (same domain)
+   - "Access to the monitoring dashboard UI" is NOT an enabling service for a data warehouse policy (different domain)
+   - "Access to the payment gateway" is NOT an enabling service for a document storage policy (different domains)
    - Even if a role description matches the "access to [service]" pattern, it is only enabling
      if the service is directly required to reach the resource the policy is about.
 
-   ⚠️  RULE: ALL user categories that need the downstream resource at ANY access level
+   RULE: ALL user categories that need the downstream resource at ANY access level
    MUST be granted this enabling role.
 
-   ⚠️  ACCESS LEVEL DOES NOT MATTER FOR ENABLING SERVICES:
+   ACCESS LEVEL DOES NOT MATTER FOR ENABLING SERVICES:
    - "read-only access to data files" still requires the data warehouse connector
    - "limited access to data" still requires the data pipeline service
-   - The enabling service is a prerequisite — without it, the user cannot reach the
+   - The enabling service is a prerequisite - without it, the user cannot reach the
      downstream resource at all, regardless of how limited their access is.
 
-   ⚠️  DO NOT confuse enabling services with final resource roles:
-   - ENABLING: "Access to the data warehouse connector" → needed by everyone with data access
-   - FINAL: "Access to public data files" → needed only by those with public access
-   - FINAL: "Access to confidential data records" → needed only by those with full access
+   DO NOT confuse enabling services with final resource roles:
+   - ENABLING: "Access to the data warehouse connector" - needed by everyone with data access
+   - FINAL: "Access to public data files" - needed only by those with public access
+   - FINAL: "Access to confidential data records" - needed only by those with full access
 
-   ⚠️  DO NOT exclude user categories based on their realm role name:
+   DO NOT exclude user categories based on their realm role name:
    - A "sales" realm role that needs data access still needs the data warehouse connector
    - A "support" realm role that needs read-only access still needs the enabling service
-   - The realm role name is irrelevant — only whether the policy grants them ANY access matters
+   - The realm role name is irrelevant - only whether the policy grants them ANY access matters
 
    EXAMPLE: Policy says "Group A gets full data warehouse access; Group B (including
    non-technical roles) gets read-only data warehouse access".
-   - Role "Access to the data warehouse connector": BOTH Group A AND Group B need it → ["role-a", "role-b"]
-   - Role "Full data access": only Group A → ["role-a"]
-   - Role "Read-only data access": only Group B → ["role-b"]
+   - Role "Access to the data warehouse connector": BOTH Group A AND Group B need it - ["role-a", "role-b"]
+   - Role "Full data access": only Group A - ["role-a"]
+   - Role "Read-only data access": only Group B - ["role-b"]
 
 3. ACCESS LEVEL DIFFERENTIATION (only for FINAL resource roles):
    - Pay close attention to access-level qualifiers: "private" vs "public",

@@ -61,13 +61,13 @@ def _filter_and_extract_scopes(
 ) -> ClientPolicyState:
     """
     Run SingleRoleMapper for every role of the target client and invert the
-    results into the {role → client_roles} structure used by _build_policy.
+    results into the {role to client_roles} structure used by _build_policy.
 
     Args:
         state: Current ClientPolicyState (needs 'description' and 'client_id')
         llm: LLM instance
-        realm_roles: All available realm roles [{name, description}]
-        client_roles: Roles belonging to the target client [{name, description}]
+        realm_roles: All available realm roles [{'name': str, 'description': str}]
+        client_roles: Roles belonging to the target client [{'name': str, 'description': str}]
         verbose: Whether to print detailed output
 
     Returns:

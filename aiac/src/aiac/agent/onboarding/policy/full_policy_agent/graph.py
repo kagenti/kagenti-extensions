@@ -83,13 +83,13 @@ def _parse_and_extract_scopes(
     results into the parsed_scopes format expected by _build_policy.
 
     For every client role across all clients, SingleRoleMapper determines which
-    realm roles should have access.  The per-role results are inverted so that
+    realm roles should have access. The per-role results are inverted so that
     parsed_scopes is a list of {role: realm_role, client_roles: [...]}.
 
     Args:
         state: Current PolicyState with 'description' field
         llm: LLM instance for processing
-        realm_roles: List of available realm roles
+        realm_roles: List of available realm roles [{'name': str, 'description': str}]
         client_roles_map: Dict mapping client names to roles
         verbose: Whether to print detailed output
 
