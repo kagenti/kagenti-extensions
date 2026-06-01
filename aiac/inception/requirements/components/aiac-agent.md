@@ -2,11 +2,16 @@
 
 ## Description
 
-A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via HTTP by:
+A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via the **Event Broker** (NATS JetStream) for all automated triggers, and directly via HTTP for the operator-only `rebuild` command:
 
-- **Keycloak SPI listener** (state-change events) → `service/{id}` and `realm-role/{id}` triggers
-- **RAG Ingest Service** (post-ingest completion) → `build` trigger only
-- **Operator/admin call** → `rebuild` trigger only
+- **Event Broker** → `aiac.apply.service.{id}` subject (originated by Keycloak SPI `CLIENT_CREATED`)
+- **Event Broker** → `aiac.apply.realm-role.{id}` subject (originated by Keycloak SPI realm role created/updated)
+- **Event Broker** → `aiac.apply.build` subject (originated by RAG Ingest Service post-ingest)
+- **Operator/admin call** → `POST /apply/rebuild` directly via `kubectl port-forward` (HTTP only — not routed through Event Broker)
+
+The Agent subscribes to the Event Broker as a durable competing consumer (`aiac-agent-consumer` queue group). It acknowledges each message only after successful processing — ensuring at-least-once delivery and automatic replay on pod restart.
+
+The `/apply/*` HTTP endpoints are retained as a debugging escape hatch. The **NATS consumer is a thin adapter layer** that receives events from the Event Broker and calls the same internal `/apply/*` handler functions — there is no duplicated business logic.
 
 The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
@@ -20,8 +25,14 @@ All components are **logically separated modules within a single pod and process
 
 ```mermaid
 flowchart TD
-    TRIGGERS["HTTP Triggers\nPOST /apply/*"]
+    NATS["Event Broker\nNATS JetStream\naiac.apply.>"]
+    NATS_CONSUMER["NATS Consumer\nasyncio background task\nthin adapter"]
+    TRIGGERS["HTTP Triggers\nPOST /apply/*\n(debugging + rebuild)"]
     CTRL["Controller\nroutes.py"]
+
+    NATS -->|"durable queue group\naiac-agent-consumer"| NATS_CONSUMER
+    NATS_CONSUMER -->|"calls internal handler"| CTRL
+    TRIGGERS --> CTRL
 
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
@@ -50,6 +61,36 @@ flowchart TD
     CTRL -->|"build / rebuild"| ORC2
     CTRL -->|"service/:id"| ORC1
 ```
+
+---
+
+## NATS Consumer
+
+A thin adapter started as an **asyncio background task** in the FastAPI `lifespan` handler. It subscribes to the `aiac.apply.>` wildcard on the `aiac-events` NATS JetStream stream using the `aiac-agent-consumer` durable queue group.
+
+### Dispatch table
+
+| Subject pattern | Internal handler |
+|---|---|
+| `aiac.apply.service.{id}` | Service Onboarding Orchestrator |
+| `aiac.apply.realm-role.{id}` | Realm Roles Orchestrator |
+| `aiac.apply.build` | Policy Update Orchestrator (Build) |
+
+### Ack contract
+
+The consumer **awaits** the internal handler before issuing the NATS acknowledgement. On handler success → ack. On handler exception → do not ack; NATS redelivers after `AckWait`. After 5 unacknowledged redeliveries, NATS routes the message to `aiac.apply.dlq`.
+
+Fire-and-forget (`asyncio.create_task`) is explicitly prohibited — acking before handler completion would break at-least-once guarantees.
+
+### Failure isolation
+
+The consumer and the FastAPI HTTP server share the same process. If the Agent pod crashes mid-processing, the in-flight message was never acked and NATS redelivers it to the next pod instance. This prevents the consumer from exhausting retry counts against an unavailable handler (which would occur if they were separate containers).
+
+### Configuration
+
+| Variable | Default | Source |
+|---|---|---|
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
 
 ---
 
@@ -525,6 +566,7 @@ flowchart TD
 
 | Variable | Default | Source |
 |---|---|---|
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7070` | ConfigMap (`aiac-pdp-config`) |
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7073` | ConfigMap (`aiac-pdp-config`) |
 | `CHROMA_URL` | `http://aiac-rag-service:7080` | ConfigMap |
@@ -638,4 +680,5 @@ uvicorn[standard]
 requests
 python-dotenv
 kubernetes
+nats-py
 ```

@@ -3,7 +3,7 @@
 ## Description
 A FastAPI REST service co-located with ChromaDB in the RAG Pod. Accepts knowledge documents for any configured collection, chunks and embeds them, and writes the resulting vectors into the ChromaDB instance in the same Pod. Supports both access control policies (`aiac-policies`) and org/business domain context (`aiac-domain-knowledge`) through a single collection-parameterized API surface. Developer-driven ingestion is performed via `kubectl port-forward`.
 
-After every successful ingest operation the service notifies the AIAC Agent by calling `POST /apply/build` on `AIAC_AGENT_URL`. This triggers the agent to recompute and apply the updated policy against the live PDP state. All three ingest semantics (replace, update, delete) fire `build`; `rebuild` is an explicit operator-only call and is never triggered by the ingest service.
+After every successful ingest operation the service publishes a trigger event to the **Event Broker** (NATS JetStream) on the `aiac.apply.build` subject. This causes the AIAC Agent to recompute and apply the updated policy against the live PDP state. All three ingest semantics (replace, update, delete) publish `build`; `rebuild` is an explicit operator-only command issued directly to the Agent and is never triggered by the ingest service.
 
 ## Endpoints
 
@@ -37,9 +37,11 @@ The `{collection}` path segment must be a slug from `AIAC_RAG_COLLECTIONS` (defa
 
 **Delete** is the only path that removes content from a collection. `/update/*` endpoints never delete as a side effect.
 
-## Post-ingest agent notification
+## Post-ingest Event Broker notification
 
-After every successful ingest operation (replace, update, or delete), the service fires a best-effort `POST {AIAC_AGENT_URL}/apply/build`. The notification is non-blocking: ingest success is reported to the caller before the agent call completes. Agent call failures are logged but do not cause the ingest endpoint to return an error. This preserves ingest availability even when the AIAC Agent pod is temporarily unavailable.
+After every successful ingest operation (replace, update, or delete), the service publishes `{"id": ""}` to `aiac.apply.build` on the Event Broker (`NATS_URL`). The publish is non-blocking: ingest success is reported to the caller before the NATS publish completes. Publish failures are logged but do not cause the ingest endpoint to return an error. This preserves ingest availability even when the Event Broker is temporarily unavailable.
+
+The AIAC Agent's durable consumer receives the event and acknowledges it after successful processing. Delivery guarantees (at-least-once, replay on Agent restart) are managed by the Event Broker — the RAG Ingest Service is fire-and-forget from its perspective.
 
 ## Collection slug → ChromaDB name mapping
 
@@ -61,7 +63,7 @@ After every successful ingest operation (replace, update, or delete), the servic
 |----------|---------|--------|
 | `CHROMA_URL` | `http://localhost:7080` | ConfigMap |
 | `AIAC_RAG_COLLECTIONS` | `policy,domain-knowledge` | ConfigMap |
-| `AIAC_AGENT_URL` | `http://aiac-agent-service:7071` | ConfigMap |
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
 | `EMBEDDING_BASE_URL` | — | ConfigMap |
 | `EMBEDDING_MODEL` | — | ConfigMap |
 | `EMBEDDING_API_KEY` | — | Kubernetes Secret |
@@ -81,6 +83,7 @@ fastapi
 uvicorn[standard]
 chromadb
 httpx
+nats-py
 ```
 
 (Embedding model client TBD — depends on chosen embedding provider)
