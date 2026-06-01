@@ -139,7 +139,7 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
 # ============================================================================
 
 def test_generate_yaml_unit():
-    """_generate_yaml renders YAML with correct header comments and structure."""
+    """_generate_yaml renders YAML with correct header comments and structure (bypasses LLM)."""
     state: ClientPolicyState = {
         "description": "Developers get full GitHub access.",
         "client_id": "github-tool",
@@ -175,7 +175,7 @@ def test_generate_yaml_unit():
 
 
 def test_build_policy_unit():
-    """_build_policy assembles policy_structure correctly from parsed_scopes."""
+    """_build_policy assembles policy_structure correctly from parsed_scopes (bypasses LLM)."""
     state: ClientPolicyState = {
         "description": "test",
         "client_id": "github-tool",
@@ -216,7 +216,7 @@ def test_build_policy_unit():
 
 
 def test_build_policy_empty_scopes():
-    """_build_policy produces an empty policy when no scopes matched."""
+    """_build_policy produces an empty policy when no scopes matched (bypasses LLM)."""
     state: ClientPolicyState = {
         "description": "test",
         "client_id": "kagenti",
@@ -233,10 +233,8 @@ def test_build_policy_empty_scopes():
     result = _build_policy(state)
     assert result["policy_structure"] == {"policy": {}}
 
-
-def test_client_policy_builder_initialization(config_file):
+def test_client_policy_builder_initialization(config_file, mock_llm):
     """ClientPolicyBuilder loads only roles for the specified client."""
-    mock_llm = Mock()
 
     builder = ClientPolicyBuilder(
         client_id="github-tool",
@@ -259,10 +257,8 @@ def test_client_policy_builder_initialization(config_file):
     assert "demo-ui" not in role_names
     assert "github-agent" not in role_names
 
-
-def test_client_policy_builder_initialization_unknown_client(config_file):
+def test_client_policy_builder_initialization_unknown_client(config_file, mock_llm):
     """ClientPolicyBuilder with an unknown client_id yields an empty role list."""
-    mock_llm = Mock()
 
     builder = ClientPolicyBuilder(
         client_id="does-not-exist",
@@ -274,9 +270,8 @@ def test_client_policy_builder_initialization_unknown_client(config_file):
     assert builder.client_roles == []
 
 
-def test_get_graph_returns_compiled_graph(config_file):
+def test_get_graph_returns_compiled_graph(config_file, mock_llm):
     """get_graph() returns the compiled LangGraph workflow."""
-    mock_llm = Mock()
     builder = ClientPolicyBuilder(
         client_id="github-tool",
         config_path=config_file,
@@ -285,6 +280,8 @@ def test_get_graph_returns_compiled_graph(config_file):
     )
     graph = builder.get_graph()
     assert graph is not None
+
+
 
 
 # ============================================================================
@@ -306,9 +303,8 @@ Policy grants {realm_role} access to {role_name} on {client_id}.
 """
 
 
-def test_generate_policy_returns_expected_keys(config_file):
+def test_generate_policy_returns_expected_keys(config_file, mock_llm):
     """generate_policy result contains all documented keys."""
-    mock_llm = Mock()
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -331,9 +327,8 @@ def test_generate_policy_returns_expected_keys(config_file):
     assert "retry_count" in result
 
 
-def test_generate_policy_yaml_is_valid_yaml(config_file):
+def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
     """yaml_output in the result must be parseable YAML."""
-    mock_llm = Mock()
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -353,9 +348,8 @@ def test_generate_policy_yaml_is_valid_yaml(config_file):
     assert "policy" in parsed
 
 
-def test_generate_policy_scoped_to_client_only(config_file):
+def test_generate_policy_scoped_to_client_only(config_file, mock_llm):
     """All mappings in the generated policy belong to the specified client."""
-    mock_llm = Mock()
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -378,9 +372,8 @@ def test_generate_policy_scoped_to_client_only(config_file):
             )
 
 
-def test_invalid_role_triggers_validation_error(config_file):
+def test_invalid_role_triggers_validation_error(config_file, mock_llm):
     """A mapping with an unknown realm role is caught by validation."""
-    mock_llm = Mock()
     mock_response = Mock()
     mock_response.content = """
 ```json
@@ -406,14 +399,13 @@ def test_invalid_role_triggers_validation_error(config_file):
     )
 
 
-def test_output_scoped_even_when_llm_mentions_foreign_client_role(config_file):
+def test_output_scoped_even_when_llm_mentions_foreign_client_role(config_file, mock_llm):
     """
     The client/role in every output mapping always comes from the predefined
     client_roles list, not from the LLM JSON. Even if the LLM's client_role
     field names a role from a different client (demo-ui belongs to kagenti),
     the output must only contain github-tool roles and succeed.
     """
-    mock_llm = Mock()
     mock_response = Mock()
     # LLM mentions demo-ui (a kagenti role) in its JSON client_role field.
     # That field is ignored; only real_roles_with_access matters.
