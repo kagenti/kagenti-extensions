@@ -128,10 +128,10 @@ Role enforcement (event-driven):
                            ├──► LLM API (external)              [validate mappings]
                            └──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
 
-  Client onboarding trigger (client/{id}) → Client Onboarding Orchestrator:
+  Service onboarding trigger (service/{id}) → Service Onboarding Orchestrator:
 
-  Trigger ──► AIAC Agent ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ClientInfo]
-                           ├──► LLM API (external)              [analyze agent/tool → ClientProvision]
+  Trigger ──► AIAC Agent ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ServiceInfo]
+                           ├──► LLM API (external)              [analyze agent/tool → ServiceProvision]
                            ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [provision permissions + scopes]
                            ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                            ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
@@ -206,7 +206,7 @@ FastAPI + LangGraph service (`0.0.0.0:7071`). Structured as a thin **Controller*
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
-| Client Onboarding | `client/{id}` | Client Provision → Client Policy (sequential) |
+| Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
 | Realm Roles | `realm-role/{id}` | Realm Role sub-agent |
 
@@ -239,7 +239,7 @@ A custom Keycloak Event Listener SPI (Java) that listens to Keycloak's internal 
 | Keycloak Event | AIAC Agent endpoint |
 |---|---|
 | `REGISTER`, `UPDATE_PROFILE` (user events) | — (dropped; composite roles handle user permission inheritance automatically) |
-| `CLIENT_CREATED` | `POST /apply/client/{id}` |
+| `CLIENT_CREATED` | `POST /apply/service/{id}` |
 | Realm role created/updated | `POST /apply/realm-role/{id}` |
 
 **Full spec:** TBD (separate PRD).
