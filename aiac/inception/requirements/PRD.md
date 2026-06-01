@@ -2,22 +2,38 @@
 
 ## 1. Purpose
 
-Automate RBAC management using a natural-language access control policy enforced by an AI agent. The system is designed around a generic **Policy Decision Point (PDP)** abstraction, with Keycloak as the Phase 1 backend. The system has three concerns:
+Kagenti AI agents call services across a shared platform. Each call must carry a token narrowed to exactly the permissions the caller's role entitles on the target service. The challenge is where access policy lives: without a dedicated policy management layer, the natural design is a hybrid where AuthBridge (the per-pod enforcement sidecar) declares `token_scopes` in its route configuration — spreading policy intent across per-deployment ConfigMaps rather than maintaining it in a single authoritative place.
+
+AIAC solves this by automating RBAC/ABAC management using a natural-language policy enforced by an AI agent, built around a generic **Policy Decision Point (PDP)** abstraction with Keycloak as the Phase 1 backend. The system comprises five components:
 
 1. **PDP Configuration Service** — a REST service that exposes PDP entity data (subjects, roles, services, scopes, permissions, composite mappings) for read operations. Backed by Keycloak in both phases; the read interface is stable across phases.
-2. **PDP Policy Service** — a REST service that applies policy changes to the PDP backend. Phase 1 implementation writes Keycloak composite role mappings (realm role → service permissions). Phase 2 implementation writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a deployment swap only.
-3. **Policy knowledge base** — a ChromaDB RAG store holding the access control policy in persistent, queryable form, populated via a co-located ingest service.
-4. **AIAC Agent** — a LangGraph-based AI agent triggered by Keycloak state-change events (via Keycloak SPI listener) and by the RAG Ingest Service. It retrieves the current policy from the RAG store, interprets it against the live PDP state, and applies the required composite mappings immediately.
+2. **PDP Policy Service** — a REST service that applies policy changes to the active PDP backend. Phase 1 implementation writes Keycloak composite role mappings (realm role → service permissions). Phase 2 implementation writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a deployment swap only.
+3. **RAG Knowledge Base** — a ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service.
+4. **AIAC Agent** — a LangGraph-based AI agent triggered by Keycloak state-change events (via Keycloak SPI listener), by the RAG Ingest Service (incremental build), and by the operator (full rebuild). It retrieves the current policy from the RAG store, interprets it against the live PDP state, and applies the required policy changes immediately.
 5. **Python library** — `aiac.pdp.library` provides typed access to both PDP services via `read_api` and `write_api` modules backed by generic Pydantic models.
+
+### Design principle: PDP/PEP separation
+
+AIAC enforces a strict three-layer model across both phases:
+
+| Layer | Component | Role |
+|---|---|---|
+| **Policy Management** | AIAC Agent | Translates natural-language policy into PDP configuration on every trigger |
+| **Policy Decision (PDP)** | Keycloak (Phase 1) / OPA (Phase 2) | Decides what a caller may access; issues scoped tokens |
+| **Policy Enforcement (PEP)** | AuthBridge | Intercepts traffic; exchanges tokens; carries no policy knowledge |
+
+The PEP (AuthBridge) is a pure enforcement layer. It performs RFC 8693 token exchanges sending only the target `audience` — no `scope` parameter. The PDP evaluates the caller's realm role and issues a token containing exactly the entitlements that role grants on the target service.
+
+This means `token_scopes` is absent from `authproxy-routes`. Route configuration carries routing intent only (`host` → `target_audience`). Policy intent lives entirely in the PDP, kept current by AIAC.
 
 ### Implementation phases
 
-| Phase | PDP Policy write target | Write operation |
-|---|---|---|
-| Phase 1 | Keycloak | Composite role mappings (realm role → service permissions) |
-| Phase 2 | OPA | LLM-generated Rego rules |
+| Phase | PDP Policy write target | Write operation | PEP behaviour |
+|---|---|---|---|
+| Phase 1 | Keycloak | Composite role mappings (realm role → service permissions) | `audience` only — Keycloak resolves entitlements from composites |
+| Phase 2 | OPA | LLM-generated Rego rules | `audience` only — OPA evaluates Rego; PEP is unchanged |
 
-Phase transition: before Phase 2 is activated, the agent clears all composite mappings from Keycloak, then the PDP Policy pod is replaced with the OPA implementation.
+Phase transition: before Phase 2 is activated, the agent clears all composite mappings from Keycloak, then the PDP Policy pod is replaced with the OPA implementation. AuthBridge requires no changes — the PEP is identical in both phases.
 
 ---
 
