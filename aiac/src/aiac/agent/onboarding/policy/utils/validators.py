@@ -13,19 +13,19 @@ def validate_policy_structure(
     policy: Dict[str, Any],
     realm_roles: List[Dict[str, str]],
     service_names: List[str],
-    service_roles_map: Dict[str, List[Dict[str, str]]]
+    privileges_map: Dict[str, List[Dict[str, str]]]
 ) -> List[str]:
     """
     Perform structural validation on the policy.
     
-    Checks that all realm roles, services, and service roles exist in the
+    Checks that all realm roles, services, and privileges exist in the
     configuration and that the policy structure is valid.
     
     Args:
         policy: The policy dictionary to validate
         realm_roles: List of dicts with 'name' and 'description' for realm roles
         service_names: List of valid service names
-        service_roles_map: Dict mapping service names to list of role dicts with 'name' and 'description'
+        privileges_map: Dict mapping service names to list of privilege dicts with 'name' and 'description'
         
     Returns:
         List of error messages (empty if validation passed)
@@ -40,7 +40,7 @@ def validate_policy_structure(
     realm_role_names = [role['name'] for role in realm_roles]
     
     # Validate that only preset names are used
-    for realm_role, service_role_mappings in policy.items():
+    for realm_role, privilege_mappings in policy.items():
         # Validate realm role name
         if not realm_role:
             structural_errors.append("Found empty realm role name")
@@ -51,22 +51,22 @@ def validate_policy_structure(
             )
         
         # Check if realm role has any mappings
-        if not service_role_mappings:
+        if not privilege_mappings:
             structural_errors.append(
-                f"Realm role '{realm_role}' has no service role mappings assigned"
+                f"Realm role '{realm_role}' has no privilege mappings assigned"
             )
         
-        # Validate each service role mapping
-        for mapping in service_role_mappings:
+        # Validate each privilege mapping
+        for mapping in privilege_mappings:
             if not isinstance(mapping, dict):
                 structural_errors.append(
                     f"Invalid mapping format in realm role '{realm_role}': "
-                    f"must be a dict with 'service' and 'role' keys"
+                    f"must be a dict with 'service' and 'privilege' keys"
                 )
                 continue
             
             service = mapping.get('service', '')
-            role = mapping.get('role', '')
+            privilege = mapping.get('privilege', '')
             
             # Validate service name
             if not service:
@@ -79,23 +79,23 @@ def validate_policy_structure(
                     f"the preset service names. Available services: {', '.join(service_names)}"
                 )
             
-            # Validate role name for the service
-            if not role:
+            # Validate privilege name for the service
+            if not privilege:
                 structural_errors.append(
-                    f"Found empty role name for service '{service}' in realm role '{realm_role}'"
+                    f"Found empty privilege name for service '{service}' in realm role '{realm_role}'"
                 )
-            elif service in service_roles_map:
-                # Extract role names from the service roles map
-                service_role_names = [r['name'] for r in service_roles_map[service]]
-                if role not in service_role_names:
-                    available_roles = (
-                        ', '.join(service_role_names)
-                        if service_role_names
+            elif service in privileges_map:
+                # Extract privilege names from the privileges map
+                privilege_names = [p['name'] for p in privileges_map[service]]
+                if privilege not in privilege_names:
+                    available_privileges = (
+                        ', '.join(privilege_names)
+                        if privilege_names
                         else '(none)'
                     )
                     structural_errors.append(
-                        f"Role '{role}' for service '{service}' in realm role '{realm_role}' "
-                        f"is not valid. Available roles for {service}: {available_roles}"
+                        f"Privilege '{privilege}' for service '{service}' in realm role '{realm_role}' "
+                        f"is not valid. Available privileges for {service}: {available_privileges}"
                     )
     
     return structural_errors

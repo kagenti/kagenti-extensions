@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Single Role Mapper - Main Module
+Single Privilege Mapper - Main Module
 
-This module provides the SingleRoleMapper class that uses LangGraph workflows
+This module provides the SinglePrivilegeMapper class that uses LangGraph workflows
 to determine which real roles (realm roles) should have access to a specific
-service role based on semantic analysis of role descriptions and policy context.
+privilege based on semantic analysis of role descriptions and policy context.
 
 Key Features:
-    - Semantic matching of service role to real roles
+    - Semantic matching of privilege to real roles
     - Policy description context for better decision making
     - Automatic validation and retry mechanism
     - LLM-powered analysis of role descriptions
@@ -24,7 +24,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
 from config import create_llm
-from .state import SingleRoleState
+from .state import SinglePrivilegeState
 from config.constants import MAX_VALIDATION_RETRIES
 from prompts.single_role_prompt_builder import (
     build_single_role_system_prompt,
@@ -34,9 +34,9 @@ from prompts.single_role_prompt_builder import (
 
 
 @dataclass
-class SingleRoleMapperConfig:
+class SinglePrivilegeMapperConfig:
     """
-    Configuration for SingleRoleMapper agent.
+    Configuration for SinglePrivilegeMapper agent.
     
     Attributes:
         llm: LangChain LLM instance
@@ -146,36 +146,36 @@ def print_explanation_single_role(explanation: str, is_retry: bool = False, verb
 # ============================================================================
 
 def _analyze_role_mapping(
-    state: SingleRoleState,
+    state: SinglePrivilegeState,
     llm: BaseChatModel,
     verbose: bool
-) -> SingleRoleState:
+) -> SinglePrivilegeState:
     """
-    Analyze which real roles should have access to the service role.
+    Analyze which real roles should have access to the privilege.
 
-    This is the first node in the workflow. It sends the service role,
+    This is the first node in the workflow. It sends the privilege,
     available real roles, policy context, and call chain structure to the LLM
     for semantic analysis.
 
     Args:
-        state: Current SingleRoleState
+        state: Current SinglePrivilegeState
         llm: LLM instance for processing
         verbose: Whether to print detailed output
 
     Returns:
-        Updated SingleRoleState with real_roles_with_access and explanation
+        Updated SinglePrivilegeState with real_roles_with_access and explanation
     """
     # Build prompts
     system_prompt = build_single_role_system_prompt(
         state['realm_roles'],
-        state['service_role'],
+        state['privilege'],
         state.get('policy_description', ''),
         state.get('service_name', ''),
     )
     
     user_prompt = (
-        f"Analyze which real roles should have access to the service role "
-        f"'{state['service_role']['name']}' from service '{state['service_name']}'."
+        f"Analyze which real roles should have access to the privilege "
+        f"'{state['privilege']['name']}' from service '{state['service_name']}'."
     )
     
     # Add policy context to user prompt if available
@@ -199,7 +199,7 @@ def _analyze_role_mapping(
     if not parsed_data:
         retry_prompt = build_single_role_retry_prompt(
             state['realm_roles'],
-            state['service_role']
+            state['privilege']
         )
         
         retry_messages = [
@@ -249,10 +249,10 @@ def _analyze_role_mapping(
 
 
 def _validate_role_mapping(
-    state: SingleRoleState,
+    state: SinglePrivilegeState,
     verbose: bool,
     max_retries: int
-) -> SingleRoleState:
+) -> SinglePrivilegeState:
     """
     Validate the role mapping results.
     
@@ -261,12 +261,12 @@ def _validate_role_mapping(
     - The mapping makes semantic sense
     
     Args:
-        state: SingleRoleState with real_roles_with_access
+        state: SinglePrivilegeState with real_roles_with_access
         verbose: Whether to print detailed output
         max_retries: Maximum retry attempts
-        
+
     Returns:
-        Updated SingleRoleState with errors and validation_passed fields
+        Updated SinglePrivilegeState with errors and validation_passed fields
     """
     retry_count = state.get("retry_count", 0)
     real_roles_with_access = state.get("real_roles_with_access", [])
@@ -328,27 +328,27 @@ def _validate_role_mapping(
 
 
 def _verify_semantic_mapping(
-    state: SingleRoleState,
+    state: SinglePrivilegeState,
     llm: BaseChatModel,
     verbose: bool,
     max_retries: int,
-) -> SingleRoleState:
+) -> SinglePrivilegeState:
     """
     Semantically verify the role mapping using LLM.
 
     Asks the LLM whether the assigned realm roles correctly reflect the access
-    requirements for this service role given the policy description. On failure
+    requirements for this privilege given the policy description. On failure
     the retry counter is incremented so the graph can loop back to
     analyze_role_mapping.
 
     Args:
-        state: SingleRoleState with real_roles_with_access populated
+        state: SinglePrivilegeState with real_roles_with_access populated
         llm: LLM instance for verification
         verbose: Whether to print verification details
         max_retries: Maximum retry attempts allowed
 
     Returns:
-        Updated SingleRoleState with validation_passed and errors
+        Updated SinglePrivilegeState with validation_passed and errors
     """
     retry_count = state.get("retry_count", 0)
     real_roles_with_access = state.get("real_roles_with_access", [])
@@ -356,7 +356,7 @@ def _verify_semantic_mapping(
     verification_prompt = build_semantic_verification_prompt(
         policy_description=state.get("policy_description", ""),
         service_name=state.get("service_name", ""),
-        service_role=state["service_role"],
+        privilege=state["privilege"],
         realm_roles=state["realm_roles"],
         real_roles_with_access=real_roles_with_access,
     )
@@ -374,7 +374,7 @@ def _verify_semantic_mapping(
         if verbose:
             status = 'YES' if mapping_correct else 'NO'
             print(
-                f"\nSemantic verification [{state['service_name']}/{state['service_role']['name']}]:"
+                f"\nSemantic verification [{state['service_name']}/{state['privilege']['name']}]:"
                 f" MAPPING_CORRECT={status}"
             )
             if not mapping_correct:
@@ -382,7 +382,7 @@ def _verify_semantic_mapping(
 
         if not mapping_correct:
             error_msg = (
-                f"Semantic mismatch for {state['service_name']}/{state['service_role']['name']}:"
+                f"Semantic mismatch for {state['service_name']}/{state['privilege']['name']}:"
                 f" {explanation}"
             )
             if retry_count < max_retries:
@@ -405,12 +405,12 @@ def _verify_semantic_mapping(
         return {**state, "errors": [], "validation_passed": True}
 
 
-def _should_route_after_structural_validation(state: SingleRoleState, max_retries: int) -> str:
+def _should_route_after_structural_validation(state: SinglePrivilegeState, max_retries: int) -> str:
     """
     Route after structural validation: retry, proceed to semantic check, or end.
 
     Args:
-        state: Current SingleRoleState with validation results
+        state: Current SinglePrivilegeState with validation results
         max_retries: Maximum retry attempts allowed
 
     Returns:
@@ -430,12 +430,12 @@ def _should_route_after_structural_validation(state: SingleRoleState, max_retrie
     return END
 
 
-def _should_retry_after_semantic(state: SingleRoleState, max_retries: int) -> str:
+def _should_retry_after_semantic(state: SinglePrivilegeState, max_retries: int) -> str:
     """
     Determine if semantic verification failure should retry analyze_role_mapping.
 
     Args:
-        state: Current SingleRoleState with semantic verification results
+        state: Current SinglePrivilegeState with semantic verification results
         max_retries: Maximum retry attempts allowed
 
     Returns:
@@ -455,40 +455,40 @@ def _should_retry_after_semantic(state: SingleRoleState, max_retries: int) -> st
 # GRAPH CONSTRUCTION
 # ============================================================================
 
-def create_single_role_mapper_graph(config: SingleRoleMapperConfig):
+def create_single_privilege_mapper_graph(config: SinglePrivilegeMapperConfig):
     """
-    Create and compile the single role mapper graph.
+    Create and compile the single privilege mapper graph.
     
     Args:
-        config: SingleRoleMapperConfig instance
+        config: SinglePrivilegeMapperConfig instance
         
     Returns:
         Compiled LangGraph workflow
     """
     
     # Define node functions as closures with access to config
-    def analyze_role_mapping_node(state: SingleRoleState) -> SingleRoleState:
+    def analyze_role_mapping_node(state: SinglePrivilegeState) -> SinglePrivilegeState:
         """Analyze which real roles should have access."""
         return _analyze_role_mapping(state, config.llm, config.verbose)
 
-    def validate_role_mapping_node(state: SingleRoleState) -> SingleRoleState:
+    def validate_role_mapping_node(state: SinglePrivilegeState) -> SinglePrivilegeState:
         """Validate structural correctness of the role mapping."""
         return _validate_role_mapping(state, config.verbose, config.max_retries)
 
-    def verify_semantic_mapping_node(state: SingleRoleState) -> SingleRoleState:
+    def verify_semantic_mapping_node(state: SinglePrivilegeState) -> SinglePrivilegeState:
         """Semantically verify the role mapping against the policy description."""
         return _verify_semantic_mapping(state, config.llm, config.verbose, config.max_retries)
 
-    def should_route_after_structure_node(state: SingleRoleState) -> str:
+    def should_route_after_structure_node(state: SinglePrivilegeState) -> str:
         """Route after structural validation."""
         return _should_route_after_structural_validation(state, config.max_retries)
 
-    def should_retry_after_semantic_node(state: SingleRoleState) -> str:
+    def should_retry_after_semantic_node(state: SinglePrivilegeState) -> str:
         """Determine if semantic failure should retry."""
         return _should_retry_after_semantic(state, config.max_retries)
 
     # Build the graph
-    workflow = StateGraph(SingleRoleState)
+    workflow = StateGraph(SinglePrivilegeState)
 
     # Add nodes
     workflow.add_node("analyze_role_mapping", analyze_role_mapping_node)
@@ -527,18 +527,18 @@ def create_single_role_mapper_graph(config: SingleRoleMapperConfig):
 # MAIN CLASS
 # ============================================================================
 
-class SingleRoleMapper:
+class SinglePrivilegeMapper:
     """
-    AI-powered mapper for determining which real roles should have access to a service role.
+    AI-powered mapper for determining which real roles should have access to a privilege.
 
     This class uses LangGraph to orchestrate a workflow that:
-    1. Analyzes a service role, available real roles, and policy context
+    1. Analyzes a privilege, available real roles, and policy context
     2. Uses LLM to semantically match roles based on descriptions
     3. Validates the results
     4. Retries if validation fails
     
     Attributes:
-        config: SingleRoleMapperConfig instance
+        config: SinglePrivilegeMapperConfig instance
         graph: Compiled LangGraph state machine
     """
     
@@ -565,14 +565,14 @@ class SingleRoleMapper:
             llm_instance = llm
         
         # Create configuration object
-        self.config = SingleRoleMapperConfig(
+        self.config = SinglePrivilegeMapperConfig(
             llm=llm_instance,
             verbose=verbose,
             max_retries=max_retries
         )
         
         # Build and compile the LangGraph state machine
-        self.graph = create_single_role_mapper_graph(self.config)
+        self.graph = create_single_privilege_mapper_graph(self.config)
     
     def get_graph(self):
         """
@@ -587,23 +587,23 @@ class SingleRoleMapper:
         self,
         policy_description: str,
         service_name: str,
-        service_role: Dict[str, str],
+        privilege: Dict[str, str],
         realm_roles: List[Dict[str, str]],
     ) -> Dict[str, Any]:
         """
-        Determine which real roles should have access to a service role.
+        Determine which real roles should have access to a privilege.
 
         Args:
             policy_description: Natural language policy description for context
-            service_name: Name of the service that owns the role
-            service_role: Dict with 'name' and 'description' of the service role
+            service_name: Name of the service that owns the privilege
+            privilege: Dict with 'name' and 'description' of the privilege
             realm_roles: List of dicts with 'name' and 'description' for realm roles
 
         Returns:
             Dictionary containing:
                 - policy_description (str): The policy context used
                 - service_name (str): Name of the service
-                - service_role (str): Name of the service role analyzed
+                - privilege (str): Name of the privilege analyzed
                 - real_roles_with_access (list): List of realm role names that should have access
                 - explanation (str): LLM's explanation of the mapping
                 - errors (list): Validation errors (empty if successful)
@@ -611,10 +611,10 @@ class SingleRoleMapper:
                 - retry_count (int): Number of validation retries that occurred
         """
         # Initialize the workflow state
-        initial_state: SingleRoleState = {
+        initial_state: SinglePrivilegeState = {
             "policy_description": policy_description,
             "service_name": service_name,
-            "service_role": service_role,
+            "privilege": privilege,
             "realm_roles": realm_roles,
             "explanation": "",
             "real_roles_with_access": [],
@@ -631,7 +631,7 @@ class SingleRoleMapper:
         return {
             "policy_description": policy_description,
             "service_name": service_name,
-            "service_role": service_role['name'],
+            "privilege": privilege['name'],
             "real_roles_with_access": final_state["real_roles_with_access"],
             "explanation": final_state["explanation"],
             "errors": final_state["errors"],

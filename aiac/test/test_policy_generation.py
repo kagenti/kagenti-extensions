@@ -106,8 +106,8 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
         differences.append(f"Unexpected extra realm role: '{role}'")
 
     for role in expected_roles & generated_roles:
-        gen_set = {(m["service"], m["role"]) for m in generated[role]}
-        exp_set = {(m["service"], m["role"]) for m in expected[role]}
+        gen_set = {(m["service"], m["privilege"]) for m in generated[role]}
+        exp_set = {(m["service"], m["privilege"]) for m in expected[role]}
 
         for mapping in exp_set - gen_set:
             differences.append(f"Role '{role}' missing mapping: {mapping}")
@@ -252,8 +252,8 @@ def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
     [
         {
             "role": "unknown-role",
-            "service_roles": [
-                {"service": "kagenti", "role": "demo-ui"}
+            "privileges": [
+                {"service": "kagenti", "privilege": "demo-ui"}
             ]
         }
     ]
@@ -283,14 +283,14 @@ def test_policy_builder_initialization(config_file, mock_llm):
     assert realm_role_names == ["developer", "tech-support", "sales"]
 
     # Verify services were loaded
-    assert "kagenti" in builder.service_roles_map
-    assert "github-tool" in builder.service_roles_map
-    assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.service_roles_map
+    assert "kagenti" in builder.privileges_map
+    assert "github-tool" in builder.privileges_map
+    assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.privileges_map
 
-    # Verify service roles are dicts with 'name' and 'description'
-    kagenti_roles = builder.service_roles_map["kagenti"]
-    assert len(kagenti_roles) > 0
-    assert all(isinstance(role, dict) and 'name' in role for role in kagenti_roles)
+    # Verify privileges are dicts with 'name' and 'description'
+    kagenti_privileges = builder.privileges_map["kagenti"]
+    assert len(kagenti_privileges) > 0
+    assert all(isinstance(priv, dict) and 'name' in priv for priv in kagenti_privileges)
 
 
 # ============================================================================

@@ -48,7 +48,7 @@ from aiac.pdp.library.read_api_from_config import (
     get_services,
     get_service_permissions,
 )
-from single_role_agent import SingleRoleMapper
+from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 
 
@@ -79,55 +79,55 @@ def _parse_and_extract_scopes(
     state: PolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    service_roles_map: dict,
+    privileges_map: dict,
     verbose: bool
 ) -> PolicyState:
     """
-    Map each service role to realm roles using SingleRoleMapper, then aggregate
+    Map each privilege to realm roles using SingleRoleMapper, then aggregate
     results into the parsed_scopes format expected by _build_policy.
 
-    For every service role across all services, SingleRoleMapper determines which
+    For every privilege across all services, SingleRoleMapper determines which
     realm roles should have access. The per-role results are inverted so that
-    parsed_scopes is a list of {role: realm_role, service_roles: [...]}.
+    parsed_scopes is a list of {role: realm_role, privileges: [...]}.
 
     Args:
         state: Current PolicyState with 'description' field
         llm: LLM instance for processing
         realm_roles: List of available realm roles [{'name': str, 'description': str}]
-        service_roles_map: Dict mapping service names to roles
+        privileges_map: Dict mapping service names to privileges
         verbose: Whether to print detailed output
 
     Returns:
         Updated PolicyState with parsed_scopes and explanation
     """
-    mapper = SingleRoleMapper(llm=llm, verbose=verbose)
+    mapper = SinglePrivilegeMapper(llm=llm, verbose=verbose)
 
     explanations = []
-    # realm_role_name -> list of {"service": X, "role": Y} dicts
-    realm_role_to_service_roles: dict = {}
+    # realm_role_name -> list of {"service": X, "privilege": Y} dicts
+    realm_role_to_privileges: dict = {}
 
-    for service_name, service_roles in service_roles_map.items():
-        for service_role in service_roles:
+    for service_name, privileges in privileges_map.items():
+        for privilege in privileges:
             result = mapper.map_role(
                 policy_description=state['description'],
                 service_name=service_name,
-                service_role=service_role,
+                privilege=privilege,
                 realm_roles=realm_roles,
             )
 
             if result.get('explanation'):
                 explanations.append(
-                    f"{service_name}/{service_role['name']}: {result['explanation']}"
+                    f"{service_name}/{privilege['name']}: {result['explanation']}"
                 )
 
             for realm_role_name in result.get('real_roles_with_access', []):
-                realm_role_to_service_roles.setdefault(realm_role_name, []).append(
-                    {'service': service_name, 'role': service_role['name']}
+                realm_role_to_privileges.setdefault(realm_role_name, []).append(
+                    {'service': service_name, 'privilege': privilege['name']}
                 )
 
     parsed_scopes = [
-        {'role': realm_role, 'service_roles': service_roles}
-        for realm_role, service_roles in realm_role_to_service_roles.items()
+        {'role': realm_role, 'privileges': priv_list}
+        for realm_role, priv_list in realm_role_to_privileges.items()
     ]
 
     return {
@@ -158,8 +158,8 @@ def _build_policy(state: PolicyState) -> PolicyState:
     # Transform parsed scopes into policy structure
     for role_info in state["parsed_scopes"]:
         role_name = role_info.get("role", "")
-        service_roles = role_info.get("service_roles", [])
-        policy[role_name] = service_roles
+        privileges = role_info.get("privileges", [])
+        policy[role_name] = privileges
     
     # Wrap in policy structure
     policy_structure = {"policy": policy}
@@ -184,9 +184,9 @@ def _generate_yaml(state: PolicyState) -> PolicyState:
     """
     # Create header comments
     header = """# Access Control Policy
-# Maps user roles (realm roles) to specific service roles
-# Format: user_role_name -> list of service role mappings
-# Each entry specifies: service (service name) and role (role name from that service)
+# Maps user roles (realm roles) to specific privileges
+# Format: user_role_name -> list of privilege mappings
+# Each entry specifies: service (service name) and privilege (privilege name from that service)
 
 """
     
@@ -231,7 +231,7 @@ def _validate_policy(
     llm: BaseChatModel,
     realm_roles: list,
     service_names: list,
-    service_roles_map: dict,
+    privileges_map: dict,
     verbose: bool,
     max_retries: int
 ) -> PolicyState:
@@ -246,7 +246,7 @@ def _validate_policy(
         llm: LLM instance for semantic verification
         realm_roles: List of available realm roles
         service_names: List of service names
-        service_roles_map: Dict mapping service names to roles
+        privileges_map: Dict mapping service names to privileges
         verbose: Whether to print detailed output
         max_retries: Maximum retry attempts
 
@@ -261,7 +261,7 @@ def _validate_policy(
         policy,
         realm_roles,
         service_names,
-        service_roles_map
+        privileges_map
     )
     
     # If there are structural errors and we can retry, trigger retry
@@ -273,7 +273,7 @@ def _validate_policy(
             "retry_count": retry_count + 1
         }
     
-    # Return final result; semantic validation is handled per-role in SingleRoleMapper
+    # Return final result; semantic validation is handled per-privilege in SingleRoleMapper
     return {
         **state,
         "errors": structural_errors,
@@ -317,7 +317,7 @@ def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
 def create_policy_builder_graph(
     config: PolicyBuilderConfig,
     realm_roles: list,
-    service_roles_map: dict,
+    privileges_map: dict,
     service_names: list
 ):
     """
@@ -329,7 +329,7 @@ def create_policy_builder_graph(
     Args:
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm roles
-        service_roles_map: Dict mapping service names to roles
+        privileges_map: Dict mapping service names to privileges
         service_names: List of service names
 
     Returns:
@@ -338,9 +338,9 @@ def create_policy_builder_graph(
 
     # Define node functions as closures with access to config
     def parse_and_extract_node(state: PolicyState) -> PolicyState:
-        """Parse natural language and extract role mappings."""
+        """Parse natural language and extract privilege mappings."""
         return _parse_and_extract_scopes(
-            state, config.llm, realm_roles, service_roles_map, config.verbose
+            state, config.llm, realm_roles, privileges_map, config.verbose
         )
     
     def build_policy_node(state: PolicyState) -> PolicyState:
@@ -355,7 +355,7 @@ def create_policy_builder_graph(
         """Validate structure and semantics."""
         return _validate_policy(
             state, config.llm, realm_roles, service_names,
-            service_roles_map, config.verbose, config.max_retries
+            privileges_map, config.verbose, config.max_retries
         )
     
     def should_retry_node(state: PolicyState) -> str:
@@ -412,7 +412,7 @@ class PolicyBuilder:
     Attributes:
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm role names
-        service_roles_map: Dict mapping service names to their available roles
+        privileges_map: Dict mapping service names to their available privileges
         service_names: List of service names
         graph: Compiled LangGraph state machine
     """
@@ -463,11 +463,11 @@ class PolicyBuilder:
             for r in roles_models
         ]
         services = get_services(realm=realm)
-        self.service_roles_map = {}
+        self.privileges_map = {}
         self.service_names = []
         for service in services:
             permissions = get_service_permissions(service.id, realm=realm)
-            self.service_roles_map[service.clientId] = [
+            self.privileges_map[service.clientId] = [
                 {"name": permission.name, "description": permission.description or ""}
                 for permission in permissions
             ]
@@ -477,7 +477,7 @@ class PolicyBuilder:
         self.graph = create_policy_builder_graph(
             self.config,
             self.realm_roles,
-            self.service_roles_map,
+            self.privileges_map,
             self.service_names
         )
     
@@ -514,7 +514,7 @@ class PolicyBuilder:
             Dictionary containing:
                 - yaml_output (str): Complete YAML policy file content
                 - policy_structure (dict): Structured policy data
-                - parsed_scopes (list): Raw role-to-service-role mappings from LLM
+                - parsed_scopes (list): Raw role-to-privilege mappings from LLM
                 - errors (list): Validation errors (empty if successful)
                 - success (bool): True if generation succeeded without errors
                 - retry_count (int): Number of validation retries that occurred

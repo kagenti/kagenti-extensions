@@ -3,7 +3,7 @@
 Single Role Prompt Builder for Access Mapping
 
 This module contains functions for building LLM prompts used to determine
-which real roles should have access to a specific service role.
+which real roles should have access to a specific privilege.
 """
 
 from typing import List, Dict, Optional
@@ -11,22 +11,22 @@ from typing import List, Dict, Optional
 
 def build_single_role_system_prompt(
     realm_roles: List[Dict[str, str]],
-    service_role: Dict[str, str],
+    privilege: Dict[str, str],
     policy_description: str = "",
     service_name: str = "",
 ) -> str:
     """
-    Build a system prompt for mapping a single service role to realm roles.
+    Build a system prompt for mapping a single privilege to realm roles.
 
     This function constructs a comprehensive prompt that guides the LLM through
     the process of determining which realm roles should have access to a specific
-    service role based on semantic analysis of role descriptions and policy context.
+    privilege based on semantic analysis of role descriptions and policy context.
 
     Args:
         realm_roles: List of dicts with 'name' and 'description' for realm roles
-        service_role: Dict with 'name' and 'description' for the service role to analyze
+        privilege: Dict with 'name' and 'description' for the privilege to analyze
         policy_description: Optional natural language policy description for context
-        service_name: Name of the service that owns the role
+        service_name: Name of the service that owns the privilege
 
     Returns:
         Formatted system prompt string ready for LLM consumption
@@ -47,12 +47,12 @@ def build_single_role_system_prompt(
         else "  (none defined)"
     )
 
-    # Format the service role information
-    service_role_name = service_role['name']
-    service_role_desc = service_role.get('description', '')
-    service_role_info = service_role_name
-    if service_role_desc:
-        service_role_info += f": {service_role_desc}"
+    # Format the privilege information
+    privilege_name = privilege['name']
+    privilege_desc = privilege.get('description', '')
+    privilege_info = privilege_name
+    if privilege_desc:
+        privilege_info += f": {privilege_desc}"
 
     # Add policy context if provided
     policy_context = ""
@@ -68,19 +68,19 @@ about which real roles should have access to the service role.
 
 """
 
-    return f"""You are an expert at analyzing access control requirements and mapping service role capabilities to appropriate user roles.
+    return f"""You are an expert at analyzing access control requirements and mapping privilege capabilities to appropriate user roles.
 {policy_context}TASK OVERVIEW:
 You are given:
 1. A list of all available realm roles with their descriptions
-2. A single service role with its description
+2. A single privilege with its description
 
-Your task is to determine which realm roles should have access to this service role.
+Your task is to determine which realm roles should have access to this privilege.
 
 AVAILABLE REALM ROLES:
 {available_roles}
 
-SERVICE ROLE TO ANALYZE:
-{service_role_info}
+PRIVILEGE TO ANALYZE:
+{privilege_info}
 
 ANALYSIS GUIDELINES:
 1. IDENTIFY AND MAP ALL USER CATEGORIES (CRITICAL):
@@ -148,17 +148,17 @@ ANALYSIS GUIDELINES:
    - Do not modify, abbreviate, or create new role names
 
 TASK STEPS:
-1. RELEVANCE CHECK: What is the DOMAIN of this service role (e.g., "data warehouse", "UI dashboards", "payments")?
+1. RELEVANCE CHECK: What is the DOMAIN of this privilege (e.g., "data warehouse", "UI dashboards", "payments")?
    What is the DOMAIN of the policy subject? If they are DIFFERENT domains, return [] immediately.
    Do NOT continue to the next steps.
-   IMPORTANT: The policy must explicitly mention the service role's domain. Do NOT reason from
+   IMPORTANT: The policy must explicitly mention the privilege's domain. Do NOT reason from
    the user role name (e.g., "developers use demo UIs too") — that is forbidden here.
    - "Access to the monitoring dashboard UI" — domain: dashboards. Policy about data warehouse — DIFFERENT → []
    - "Access to the data warehouse connector" — domain: data warehouse. Policy about data warehouse — SAME → continue
    - "Access to confidential data records" — domain: data warehouse. Policy about data warehouse — SAME → continue
    - "Access to the demo UI interface" — domain: web UI. Policy about GitHub repos — DIFFERENT → []
      (Even though "developers" may use demo UIs in general, the policy says nothing about UI access → [])
-2. CLASSIFY this service role: is it a FINAL resource role or an ENABLING/GATEWAY service?
+2. CLASSIFY this privilege: is it a FINAL resource privilege or an ENABLING/GATEWAY service?
    - ENABLING/GATEWAY: description says "access to [some service/agent/pipeline/gateway]"
      AND the service is in the same domain as the policy
    - FINAL RESOURCE: description says "access to [data/repos/files/records]"
@@ -179,7 +179,7 @@ need access, how they map to realm roles]
 
 ```json
 {{
-  "service_role": "{service_role_name}",
+  "privilege": "{privilege_name}",
   "real_roles_with_access": [
     "exact-realm-role-name-1",
     "exact-realm-role-name-2"
@@ -191,31 +191,31 @@ EXAMPLE OUTPUTS:
 
 Example A — domain mismatch, not relevant to policy subject:
 ```explanation
-Step 1 RELEVANCE CHECK: service role domain is "monitoring dashboard UI". Policy domain is
+Step 1 RELEVANCE CHECK: privilege domain is "monitoring dashboard UI". Policy domain is
 "data warehouse access". These are DIFFERENT domains — dashboard UI is unrelated to data
 warehouse access. Returning [] immediately without further analysis.
 Note: Even if "developers" or "analysts" typically use dashboard UIs, the policy is silent
 about UI access. POLICY SILENCE = NO ACCESS.
 ```
 ```json
-{{"service_role": "monitoring-dashboard", "real_roles_with_access": []}}
+{{"privilege": "monitoring-dashboard", "real_roles_with_access": []}}
 ```
 
-Example A2 — domain mismatch: UI role, GitHub policy:
+Example A2 — domain mismatch: UI privilege, GitHub policy:
 ```explanation
-Step 1 RELEVANCE CHECK: service role domain is "demo UI interface". Policy domain is
+Step 1 RELEVANCE CHECK: privilege domain is "demo UI interface". Policy domain is
 "GitHub repository access". These are DIFFERENT domains. The policy mentions only GitHub
 repositories; it says nothing about any UI or web interface. POLICY SILENCE = NO ACCESS.
 Returning [] immediately. (The fact that "developers" may use demo UIs is irrelevant —
 access is determined by the policy text, not by job function assumptions.)
 ```
 ```json
-{{"service_role": "demo-ui", "real_roles_with_access": []}}
+{{"privilege": "demo-ui", "real_roles_with_access": []}}
 ```
 
 Example B — enabling/gateway service (ALL users who need the downstream resource):
 ```explanation
-Step 1 RELEVANCE CHECK: service role domain is "data warehouse connector". Policy domain is
+Step 1 RELEVANCE CHECK: privilege domain is "data warehouse connector". Policy domain is
 "data warehouse access". SAME domain — continue.
 Step 2 CLASSIFY: ENABLING SERVICE — "Access to the data warehouse connector" is a prerequisite
 service, not a final resource. Policy identifies two user categories: Group A (full access)
@@ -224,12 +224,12 @@ enabling service. Access level does NOT matter for enabling services.
 Realm role mapping: role-a → Group A, role-b → Group B.
 ```
 ```json
-{{"service_role": "warehouse-connector", "real_roles_with_access": ["role-a", "role-b"]}}
+{{"privilege": "warehouse-connector", "real_roles_with_access": ["role-a", "role-b"]}}
 ```
 
-Example C — restricted role, limited access:
+Example C — restricted privilege, limited access:
 ```explanation
-Step 1 RELEVANCE CHECK: service role domain is "confidential data records". Policy domain is
+Step 1 RELEVANCE CHECK: privilege domain is "confidential data records". Policy domain is
 "data warehouse access". SAME domain — continue.
 Step 2 CLASSIFY: FINAL RESOURCE — provides access to restricted data records.
 Policy states Group A can access both restricted and public data; Group B can access
@@ -237,7 +237,7 @@ public data only. Only Group A has explicit access to restricted data.
 Realm role mapping: role-a → Group A.
 ```
 ```json
-{{"service_role": "restricted-data-access", "real_roles_with_access": ["role-a"]}}
+{{"privilege": "restricted-data-access", "real_roles_with_access": ["role-a"]}}
 ```
 """
 
@@ -245,26 +245,26 @@ Realm role mapping: role-a → Group A.
 def build_semantic_verification_prompt(
     policy_description: str,
     service_name: str,
-    service_role: Dict[str, str],
+    privilege: Dict[str, str],
     realm_roles: List[Dict[str, str]],
     real_roles_with_access: List[str],
 ) -> str:
     """
-    Build a prompt to semantically verify a single role mapping.
+    Build a prompt to semantically verify a single privilege mapping.
 
     Args:
         policy_description: Natural language policy description
-        service_name: Name of the service that owns the role
-        service_role: Dict with 'name' and 'description' of the service role
+        service_name: Name of the service that owns the privilege
+        privilege: Dict with 'name' and 'description' of the privilege
         realm_roles: List of dicts with 'name' and 'description' for all realm roles
         real_roles_with_access: List of realm role names currently assigned
 
     Returns:
         Formatted verification prompt string ready for LLM consumption
     """
-    service_role_name = service_role['name']
-    service_role_desc = service_role.get('description', '')
-    service_role_info = service_role_name + (f" ({service_role_desc})" if service_role_desc else "")
+    privilege_name = privilege['name']
+    privilege_desc = privilege.get('description', '')
+    privilege_info = privilege_name + (f" ({privilege_desc})" if privilege_desc else "")
 
     realm_roles_context = "\n".join(
         f"  - {r['name']}" + (f": {r.get('description', '')}" if r.get('description') else "")
@@ -273,23 +273,23 @@ def build_semantic_verification_prompt(
 
     assigned_roles = ", ".join(real_roles_with_access) if real_roles_with_access else "(none)"
 
-    return f"""You are a policy validator. Verify that the following role mapping is correct.
+    return f"""You are a policy validator. Verify that the following privilege mapping is correct.
 
 POLICY DESCRIPTION:
 {policy_description}
 
-SERVICE ROLE BEING ANALYZED:
+PRIVILEGE BEING ANALYZED:
   Service: {service_name}
-  Role: {service_role_info}
+  Privilege: {privilege_info}
 
-CURRENT MAPPING (realm roles that have access to this service role):
+CURRENT MAPPING (realm roles that have access to this privilege):
   {assigned_roles}
 
 AVAILABLE REALM ROLES:
 {realm_roles_context}
 
 VALIDATION TASK:
-Based on the policy description, verify if granting access to service role '{service_role_name}' \
+Based on the policy description, verify if granting access to privilege '{privilege_name}' \
 from service '{service_name}' to realm roles [{assigned_roles}] is correct.
 
 Consider:
@@ -308,28 +308,28 @@ EXPLANATION: Specific description of what is wrong with the mapping."""
 
 def build_single_role_retry_prompt(
     realm_roles: List[Dict[str, str]],
-    service_role: Dict[str, str]
+    privilege: Dict[str, str]
 ) -> str:
     """
-    Build a retry prompt when initial JSON parsing fails for single role analysis.
+    Build a retry prompt when initial JSON parsing fails for single privilege analysis.
 
     Args:
         realm_roles: List of dicts with 'name' and 'description' for realm roles
-        service_role: Dict with 'name' and 'description' for the service role
+        privilege: Dict with 'name' and 'description' for the privilege
 
     Returns:
         Formatted retry prompt string with role reminders and format example
     """
     realm_role_names = [role['name'] for role in realm_roles]
-    service_role_name = service_role['name']
+    privilege_name = privilege['name']
 
     return f"""The previous response could not be parsed as valid JSON.
 
 Please provide the mapping again using ONLY these preset names:
 - Available real roles: {", ".join(realm_role_names) if realm_role_names else "(none)"}
-- Service role to analyze: {service_role_name}
+- Privilege to analyze: {privilege_name}
 
-Remember: Return a list of real role names that should have access to the service role.
+Remember: Return a list of real role names that should have access to the privilege.
 
 Return in this format:
 ```explanation
@@ -338,7 +338,7 @@ Return in this format:
 
 ```json
 {{
-  "service_role": "{service_role_name}",
+  "privilege": "{privilege_name}",
   "real_roles_with_access": [
     "exact-realm-role-name-1",
     "exact-realm-role-name-2"

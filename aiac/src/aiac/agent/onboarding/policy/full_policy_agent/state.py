@@ -20,7 +20,7 @@ class PolicyState(TypedDict):
     Attributes:
         description: Original natural language policy description
         explanation: LLM's explanation of how it mapped the policy
-        parsed_scopes: List of role-to-service-role mappings built by aggregating SingleRoleMapper results
+        parsed_scopes: List of role-to-privilege mappings built by aggregating SingleRoleMapper results
         policy_structure: Structured policy dictionary ready for YAML conversion
         yaml_output: Final YAML-formatted policy string
         messages: Accumulated list of LLM messages (for conversation history)

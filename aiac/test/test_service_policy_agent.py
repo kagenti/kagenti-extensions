@@ -122,8 +122,8 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
         differences.append(f"Unexpected extra realm role: '{role}'")
 
     for role in expected_roles & generated_roles:
-        gen_set = {(m["service"], m["role"]) for m in generated[role]}
-        exp_set = {(m["service"], m["role"]) for m in expected[role]}
+        gen_set = {(m["service"], m["privilege"]) for m in generated[role]}
+        exp_set = {(m["service"], m["privilege"]) for m in expected[role]}
 
         for mapping in exp_set - gen_set:
             differences.append(f"Role '{role}' missing mapping: {mapping}")
@@ -183,15 +183,15 @@ def test_build_policy_unit():
         "parsed_scopes": [
             {
                 "role": "developer",
-                "service_roles": [
-                    {"service": "github-tool", "role": "github-full-access"},
-                    {"service": "github-tool", "role": "github-tool-aud"},
+                "privileges": [
+                    {"service": "github-tool", "privilege": "github-full-access"},
+                    {"service": "github-tool", "privilege": "github-tool-aud"},
                 ],
             },
             {
                 "role": "tech-support",
-                "service_roles": [
-                    {"service": "github-tool", "role": "github-tool-aud"},
+                "privileges": [
+                    {"service": "github-tool", "privilege": "github-tool-aud"},
                 ],
             },
         ],
@@ -208,8 +208,8 @@ def test_build_policy_unit():
     policy = result["policy_structure"]["policy"]
     assert "developer" in policy
     assert "tech-support" in policy
-    assert {"service": "github-tool", "role": "github-full-access"} in policy["developer"]
-    assert {"service": "github-tool", "role": "github-tool-aud"} in policy["tech-support"]
+    assert {"service": "github-tool", "privilege": "github-full-access"} in policy["developer"]
+    assert {"service": "github-tool", "privilege": "github-tool-aud"} in policy["tech-support"]
     # No other services should appear
     all_services = {m["service"] for mappings in policy.values() for m in mappings}
     assert all_services == {"github-tool"}
@@ -249,16 +249,16 @@ def test_service_policy_builder_initialization(config_file, mock_llm):
     assert "developer" in realm_role_names
     assert "tech-support" in realm_role_names
 
-    # Only github-tool roles should be loaded
-    role_names = [r["name"] for r in builder.service_roles]
-    assert "github-tool-aud" in role_names
-    assert "github-full-access" in role_names
-    # Roles from other services must not appear
-    assert "demo-ui" not in role_names
-    assert "github-agent" not in role_names
+    # Only github-tool privileges should be loaded
+    privilege_names = [p["name"] for p in builder.privileges]
+    assert "github-tool-aud" in privilege_names
+    assert "github-full-access" in privilege_names
+    # Privileges from other services must not appear
+    assert "demo-ui" not in privilege_names
+    assert "github-agent" not in privilege_names
 
 def test_service_policy_builder_initialization_unknown_service(config_file, mock_llm):
-    """ServicePolicyBuilder with an unknown service_id yields an empty role list."""
+    """ServicePolicyBuilder with an unknown service_id yields an empty privilege list."""
 
     builder = ServicePolicyBuilder(
         service_id="does-not-exist",
@@ -267,7 +267,7 @@ def test_service_policy_builder_initialization_unknown_service(config_file, mock
         verbose=False,
     )
 
-    assert builder.service_roles == []
+    assert builder.privileges == []
 
 
 def test_get_graph_returns_compiled_graph(config_file, mock_llm):

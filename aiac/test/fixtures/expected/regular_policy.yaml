@@ -6,13 +6,13 @@
 policy:
   developer:
   - service: spiffe://localtest.me/ns/team1/sa/git-issue-agent
-    role: github-agent
+    privilege: github-agent
   - service: github-tool
-    role: github-tool-aud
+    privilege: github-tool-aud
   - service: github-tool
-    role: github-full-access
+    privilege: github-full-access
   tech-support:
   - service: spiffe://localtest.me/ns/team1/sa/git-issue-agent
-    role: github-agent
+    privilege: github-agent
   - service: github-tool
-    role: github-tool-aud
+    privilege: github-tool-aud

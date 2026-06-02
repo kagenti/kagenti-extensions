@@ -17,8 +17,8 @@ class ServicePolicyState(TypedDict):
     Attributes:
         description: Natural language policy description
         service_id: Keycloak service ID to scope the policy to
-        explanation: LLM explanation of the role mappings
-        parsed_scopes: List of {role, service_roles} mappings (realm-role to service-roles)
+        explanation: LLM explanation of the privilege mappings
+        parsed_scopes: List of {role, privileges} mappings (realm-role to privileges)
         policy_structure: Structured policy dict ready for YAML conversion
         yaml_output: Final YAML-formatted policy string
         messages: Accumulated LLM messages

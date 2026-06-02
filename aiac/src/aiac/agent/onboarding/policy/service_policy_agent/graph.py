@@ -33,7 +33,7 @@ from aiac.pdp.library.read_api_from_config import (
     get_services,
     get_service_permissions,
 )
-from single_role_agent import SingleRoleMapper
+from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 
 
@@ -60,48 +60,48 @@ def _filter_and_extract_scopes(
     state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    service_roles: list,
+    privileges: list,
     verbose: bool,
 ) -> ServicePolicyState:
     """
-    Run SingleRoleMapper for every role of the target service and invert the
-    results into the {role to service_roles} structure used by _build_policy.
+    Run SingleRoleMapper for every privilege of the target service and invert the
+    results into the {role to privileges} structure used by _build_policy.
 
     Args:
         state: Current ServicePolicyState (needs 'description' and 'service_id')
         llm: LLM instance
         realm_roles: All available realm roles [{'name': str, 'description': str}]
-        service_roles: Roles belonging to the target service [{'name': str, 'description': str}]
+        privileges: Privileges belonging to the target service [{'name': str, 'description': str}]
         verbose: Whether to print detailed output
 
     Returns:
         Updated ServicePolicyState with parsed_scopes and explanation
     """
     service_id = state["service_id"]
-    mapper = SingleRoleMapper(llm=llm, verbose=verbose)
+    mapper = SinglePrivilegeMapper(llm=llm, verbose=verbose)
 
     explanations: list[str] = []
-    realm_role_to_service_roles: dict = {}
+    realm_role_to_privileges: dict = {}
 
-    for service_role in service_roles:
+    for privilege in privileges:
         result = mapper.map_role(
             policy_description=state["description"],
             service_name=service_id,
-            service_role=service_role,
+            privilege=privilege,
             realm_roles=realm_roles,
         )
 
         if result.get("explanation"):
-            explanations.append(f"{service_id}/{service_role['name']}: {result['explanation']}")
+            explanations.append(f"{service_id}/{privilege['name']}: {result['explanation']}")
 
         for realm_role_name in result.get("real_roles_with_access", []):
-            realm_role_to_service_roles.setdefault(realm_role_name, []).append(
-                {"service": service_id, "role": service_role["name"]}
+            realm_role_to_privileges.setdefault(realm_role_name, []).append(
+                {"service": service_id, "privilege": privilege["name"]}
             )
 
     parsed_scopes = [
-        {"role": realm_role, "service_roles": cr_list}
-        for realm_role, cr_list in realm_role_to_service_roles.items()
+        {"role": realm_role, "privileges": priv_list}
+        for realm_role, priv_list in realm_role_to_privileges.items()
     ]
 
     return {
@@ -124,7 +124,7 @@ def _build_policy(state: ServicePolicyState) -> ServicePolicyState:
     """
     policy: dict = {}
     for entry in state["parsed_scopes"]:
-        policy[entry["role"]] = entry["service_roles"]
+        policy[entry["role"]] = entry["privileges"]
 
     return {**state, "policy_structure": {"policy": policy}}
 
@@ -140,7 +140,7 @@ def _generate_yaml(state: ServicePolicyState) -> ServicePolicyState:
     header = (
         "# Partial Access Control Policy\n"
         f"# Scoped to service: {service_id}\n"
-        "# Maps realm roles to the service roles they may access.\n\n"
+        "# Maps realm roles to the privileges they may access.\n\n"
     )
 
     if state.get("description"):
@@ -171,7 +171,7 @@ def _validate_policy(
     llm: BaseChatModel,
     realm_roles: list,
     service_id: str,
-    service_roles: list,
+    privileges: list,
     verbose: bool,
     max_retries: int,
 ) -> ServicePolicyState:
@@ -184,13 +184,13 @@ def _validate_policy(
     retry_count = state.get("retry_count", 0)
     policy = state["policy_structure"].get("policy", {})
     service_names = [service_id]
-    service_roles_map = {service_id: service_roles}
+    privileges_map = {service_id: privileges}
 
     structural_errors = validate_policy_structure(
-        policy, realm_roles, service_names, service_roles_map
+        policy, realm_roles, service_names, privileges_map
     )
     # An empty policy is valid for a service-scoped agent: the policy description
-    # may simply not grant any permissions to this service's roles.
+    # may simply not grant any permissions to this service's privileges.
     structural_errors = [e for e in structural_errors if e != "Policy is empty"]
 
     if structural_errors and retry_count < max_retries:
@@ -228,7 +228,7 @@ def create_service_policy_builder_graph(
     config: ServicePolicyBuilderConfig,
     realm_roles: list,
     service_id: str,
-    service_roles: list,
+    privileges: list,
 ):
     """
     Build and compile the service-scoped policy builder graph.
@@ -237,7 +237,7 @@ def create_service_policy_builder_graph(
         config: ServicePolicyBuilderConfig
         realm_roles: All realm roles [{name, description}]
         service_id: Target Keycloak service ID
-        service_roles: Roles of the target service [{name, description}]
+        privileges: Privileges of the target service [{name, description}]
 
     Returns:
         Compiled LangGraph workflow
@@ -245,7 +245,7 @@ def create_service_policy_builder_graph(
 
     def filter_and_extract_node(state: ServicePolicyState) -> ServicePolicyState:
         return _filter_and_extract_scopes(
-            state, config.llm, realm_roles, service_roles, config.verbose
+            state, config.llm, realm_roles, privileges, config.verbose
         )
 
     def build_policy_node(state: ServicePolicyState) -> ServicePolicyState:
@@ -256,7 +256,7 @@ def create_service_policy_builder_graph(
 
     def validate_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, service_id, service_roles,
+            state, config.llm, realm_roles, service_id, privileges,
             config.verbose, config.max_retries
         )
 
@@ -292,10 +292,10 @@ class ServicePolicyBuilder:
 
     Given a natural language policy description and a service ID, produces
     a YAML access control policy that contains only the realm-role →
-    service-role mappings relevant to that service.
+    privilege mappings relevant to that service.
 
     Workflow:
-        1. filter_and_extract  — map each role of the service to realm roles
+        1. filter_and_extract  — map each privilege of the service to realm roles
         2. build_policy        — assemble the structured policy dict
         3. generate_yaml       — render YAML with comments
         4. validate_policy     — structural validation with retry
@@ -342,12 +342,12 @@ class ServicePolicyBuilder:
         ]
 
         services = get_services(realm=realm)
-        self.service_roles = []
+        self.privileges = []
         for service in services:
             if service.clientId != service_id:
                 continue
             permissions = get_service_permissions(service.id, realm=realm)
-            self.service_roles = [
+            self.privileges = [
                 {"name": permission.name, "description": permission.description or ""}
                 for permission in permissions
             ]
@@ -357,7 +357,7 @@ class ServicePolicyBuilder:
             self.config,
             self.realm_roles,
             self.service_id,
-            self.service_roles,
+            self.privileges,
         )
 
     def get_graph(self):
@@ -375,7 +375,7 @@ class ServicePolicyBuilder:
             dict with keys:
                 yaml_output (str)       — YAML policy file content
                 policy_structure (dict) — structured policy data
-                parsed_scopes (list)    — raw realm-role → service-role mappings
+                parsed_scopes (list)    — raw realm-role → privilege mappings
                 errors (list)           — validation errors (empty on success)
                 success (bool)          — True when no validation errors
                 retry_count (int)       — number of validation retries

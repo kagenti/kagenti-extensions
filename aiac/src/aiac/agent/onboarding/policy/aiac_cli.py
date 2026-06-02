@@ -122,14 +122,14 @@ def generate_policy_only(
             print(f"  - {error}")
 
     print("\n" + "=" * 80)
-    print("Parsed Role-to-Service-Role Mappings:")
+    print("Parsed Role-to-Privilege Mappings:")
     print("=" * 80)
     for role_mapping in result["parsed_scopes"]:
         realm_role = role_mapping["role"]
-        service_roles = role_mapping.get("service_roles", [])
+        privileges = role_mapping.get("privileges", [])
         print(f"  {realm_role}:")
-        for sr in service_roles:
-            print(f"    - {sr['service']}: {sr['role']}")
+        for priv in privileges:
+            print(f"    - {priv['service']}: {priv['privilege']}")
 
 def main() -> None:
     gen_parser = argparse.ArgumentParser(

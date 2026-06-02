@@ -7,7 +7,7 @@ Converts natural language policy descriptions into structured YAML policies for 
 Main Components:
     - PolicyBuilder: Full policy generation for all services in a realm
     - ServicePolicyBuilder: Service-scoped policy generation
-    - SingleRoleMapper: Individual role mapping with semantic analysis
+    - SinglePrivilegeMapper: Individual privilege mapping with semantic analysis
 
 Quick Start:
     >>> from pathlib import Path
@@ -24,7 +24,7 @@ For detailed documentation, see README.md in this directory.
 
 from full_policy_agent.graph import PolicyBuilder
 from service_policy_agent.graph import ServicePolicyBuilder
-from single_role_agent.graph import SingleRoleMapper
+from single_privilege_agent.graph import SinglePrivilegeMapper
 
 __version__ = "1.0.0"
 __author__ = "AIAC Development Team"
@@ -33,6 +33,6 @@ __license__ = "MIT"
 __all__ = [
     "PolicyBuilder",
     "ServicePolicyBuilder",
-    "SingleRoleMapper",
+    "SinglePrivilegeMapper",
 ]
 
