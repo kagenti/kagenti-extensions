@@ -1,4 +1,4 @@
-"""Unit tests for aiac/pdp/configuration/main.py FastAPI application."""
+"""Unit tests for aiac/pdp/service/configuration/keycloak/main.py FastAPI application."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 
-from aiac.pdp.configuration.main import app, get_admin
+from aiac.pdp.service.configuration.keycloak.main import app, get_admin
 
 REALM = "kagenti"
 
@@ -145,7 +145,7 @@ class TestRealmQueryParam:
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
-             patch("aiac.pdp.configuration.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
+             patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
             with TestClient(app) as client:
                 resp = client.get(f"/subjects?realm={REALM}")
         assert resp.status_code == 200
@@ -165,7 +165,7 @@ class TestRealmQueryParam:
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
-             patch("aiac.pdp.configuration.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
+             patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
             with TestClient(app) as client:
                 pass  # lifespan runs
         startup_calls = [c for c in mock_cls.call_args_list if c.kwargs.get("realm_name") == "master"]

@@ -1,4 +1,4 @@
-"""Unit tests for aiac/pdp/policy/keycloak/main.py FastAPI application."""
+"""Unit tests for aiac/pdp/service/policy/keycloak/main.py FastAPI application."""
 
 import os
 from unittest.mock import MagicMock, patch
@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 
-from aiac.pdp.policy.keycloak.main import app, get_admin
+from aiac.pdp.service.policy.keycloak.main import app, get_admin
 
 REALM = "kagenti"
 

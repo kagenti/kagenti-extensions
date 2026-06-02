@@ -1,10 +1,10 @@
-"""Unit tests for aiac.pdp.library.write_api."""
+"""Unit tests for aiac.pdp.library.policy."""
 
 import pytest
 from unittest.mock import MagicMock, patch
 
 from aiac.pdp.library.models import Permission, Scope
-from aiac.pdp.library import write_api
+from aiac.pdp.library import policy
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7073"
@@ -43,8 +43,8 @@ class TestAddRoleComposites:
     def test_posts_and_returns_none(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
         perms = [Permission(id="r1", name="viewer", composite=False, clientRole=False)]
-        with patch("aiac.pdp.library.write_api.requests.post", return_value=_ok()) as m:
-            result = write_api.add_role_composites("admin", perms, REALM)
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok()) as m:
+            result = policy.add_role_composites("admin", perms, REALM)
         assert result is None
         m.assert_called_once()
         url, kwargs = m.call_args[0][0], m.call_args[1]
@@ -61,8 +61,8 @@ class TestRemoveRoleComposites:
     def test_deletes_and_returns_none(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
         perms = [Permission(id="r1", name="viewer", composite=False, clientRole=False)]
-        with patch("aiac.pdp.library.write_api.requests.delete", return_value=_ok()) as m:
-            result = write_api.remove_role_composites("admin", perms, REALM)
+        with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
+            result = policy.remove_role_composites("admin", perms, REALM)
         assert result is None
         m.assert_called_once()
         url = m.call_args[0][0]
@@ -77,8 +77,8 @@ class TestRemoveRoleComposites:
 class TestClearAllComposites:
     def test_deletes_and_returns_none(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        with patch("aiac.pdp.library.write_api.requests.delete", return_value=_ok()) as m:
-            result = write_api.clear_all_composites(REALM)
+        with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
+            result = policy.clear_all_composites(REALM)
         assert result is None
         url = m.call_args[0][0]
         assert url.endswith("/composites")
@@ -93,8 +93,8 @@ class TestCreateServicePermission:
     def test_returns_permission_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
         created = {"id": "cr1", "name": "view-data", "composite": False, "clientRole": True}
-        with patch("aiac.pdp.library.write_api.requests.post", return_value=_ok(created, 201)):
-            result = write_api.create_service_permission("svc-uuid", "view-data", "desc", REALM)
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created, 201)):
+            result = policy.create_service_permission("svc-uuid", "view-data", "desc", REALM)
         assert isinstance(result, Permission)
         assert result.name == "view-data"
 
@@ -108,8 +108,8 @@ class TestCreateServiceScope:
     def test_returns_scope_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
         created = {"id": "sc1", "name": "read:data"}
-        with patch("aiac.pdp.library.write_api.requests.post", return_value=_ok(created, 201)):
-            result = write_api.create_service_scope("svc-uuid", "read:data", "desc", REALM)
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created, 201)):
+            result = policy.create_service_scope("svc-uuid", "read:data", "desc", REALM)
         assert isinstance(result, Scope)
         assert result.name == "read:data"
 
@@ -122,9 +122,9 @@ class TestCreateServiceScope:
 @pytest.mark.parametrize("fn_name,args,method", _WRITE_FUNCTIONS)
 def test_non_2xx_raises_runtime_error(fn_name, args, method, monkeypatch):
     monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-    with patch(f"aiac.pdp.library.write_api.requests.{method}", return_value=_err()):
+    with patch(f"aiac.pdp.library.policy.requests.{method}", return_value=_err()):
         with pytest.raises(RuntimeError):
-            getattr(write_api, fn_name)(*args)
+            getattr(policy, fn_name)(*args)
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +134,6 @@ def test_non_2xx_raises_runtime_error(fn_name, args, method, monkeypatch):
 
 def test_default_base_url_used_when_env_unset(monkeypatch):
     monkeypatch.delenv("AIAC_PDP_POLICY_URL", raising=False)
-    with patch("aiac.pdp.library.write_api.requests.delete", return_value=_ok()) as m:
-        write_api.clear_all_composites(REALM)
+    with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
+        policy.clear_all_composites(REALM)
     assert m.call_args[0][0].startswith("http://127.0.0.1:7073")
