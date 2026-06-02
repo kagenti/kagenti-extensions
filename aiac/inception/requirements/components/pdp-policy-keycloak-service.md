@@ -1,7 +1,7 @@
 # Component PRD: PDP Policy Service — Keycloak Implementation
 
 ## Location
-`aiac/src/aiac/pdp/policy/keycloak/`
+`aiac/src/aiac/pdp/service/policy/keycloak/`
 
 ## Description
 A FastAPI web service that applies RBAC policy changes to Keycloak by managing composite role mappings. Realm roles are made composites of service (client) permissions (roles), so that any subject (user) assigned a realm role automatically inherits the associated service permissions. Stateless — no caching.
@@ -56,10 +56,15 @@ python-keycloak
 ## File structure
 
 ```
-aiac/src/aiac/pdp/policy/keycloak/
-├── Dockerfile
-├── requirements.txt
-└── main.py
+aiac/src/aiac/pdp/service/
+├── __init__.py
+└── policy/
+    ├── __init__.py
+    └── keycloak/
+        ├── __init__.py
+        ├── Dockerfile
+        ├── requirements.txt
+        └── main.py
 ```
 
 ## `main.py` behaviour notes

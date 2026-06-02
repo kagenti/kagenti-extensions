@@ -129,7 +129,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
      - Unrecognised format → treat as `ServiceType.tool`.
   2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) by namespace + name via the in-cluster Kubernetes API.
      - **Found** → `service_type = agent`: read the `AgentCard` CR; populate `ServiceInfo(service_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
-     - **Not found** → `service_type = tool`: call `get_services(realm)` from `aiac.pdp.library.read_api`; locate the `Service` by `service_id`; populate `ServiceInfo(service_type=tool, description=service.description or service.name, skills=[])`.
+     - **Not found** → `service_type = tool`: call `get_services(realm)` from `aiac.pdp.library.configuration`; locate the `Service` by `service_id`; populate `ServiceInfo(service_type=tool, description=service.description or service.name, skills=[])`.
   3. Returns `502` on Kubernetes API failure or if the Service record is not found for a tool.
 
   > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev` and `agentcards.agent.kagenti.dev`.
@@ -137,7 +137,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   > **kagenti-operator note:** The operator does not expose an HTTP API. `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) are stored alongside workloads. Absence of an `AgentRuntime` CR is the authoritative signal for `ServiceType.tool`.
 
 - `analyze_agent` / `analyze_tool`: LLM node producing a `ServiceProvision` from `ServiceInfo`. Routing is a conditional edge on `ServiceInfo.service_type`.
-- `provision_service`: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.write_api` for each entry in `ServiceProvision`.
+- `provision_service`: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`.
 - `format_response`: assembles the provision result for the orchestrator.
 
 ```mermaid
@@ -178,7 +178,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all realm roles and their current composites, the new service's permissions and scopes.
 - `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the new service only.
 - `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api` for each entry in the validated diff.
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy` for each entry in the validated diff.
 - `format_response`: assembles the policy result for the orchestrator.
 
 ```mermaid
@@ -226,7 +226,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all realm roles and their current composites, all services and their permissions, all scopes.
 - `propose_diff`: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
 - `validate_diff`: existence check + safety guard rails + auditor LLM re-confirmation + scope check.
-- `apply_diff`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api`.
+- `apply_diff`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
 - `format_response`: assembles the build result.
 
 ```mermaid
@@ -263,7 +263,7 @@ flowchart TD
 START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
 ```
 
-- `clear_composites`: calls `clear_all_composites(realm)` from `aiac.pdp.library.write_api` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
+- `clear_composites`: calls `clear_all_composites(realm)` from `aiac.pdp.library.policy` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
 - All other nodes: identical in contract to Build sub-agent.
 
 ```mermaid
@@ -310,7 +310,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 - `fetch_pdp_state`: fetches all services and their permissions, all realm roles, and the current composites for the affected realm role.
 - `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected realm role.
 - `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected realm role).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.write_api`.
+- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
 - `format_response`: assembles the result.
 
 ```mermaid

@@ -11,7 +11,7 @@ AIAC solves this by automating RBAC/ABAC management using a natural-language pol
 3. **RAG Knowledge Base** — a ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service.
 4. **Event Broker** — a NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once.
 5. **AIAC Agent** — a LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). It retrieves the current policy from the RAG store, interprets it against the live PDP state, and applies the required policy changes immediately.
-6. **Python library** — `aiac.pdp.library` provides typed access to both PDP services via `read_api` and `write_api` modules backed by generic Pydantic models.
+6. **Python library** — `aiac.pdp.library` provides typed access to both PDP services via `configuration` and `policy` modules backed by generic Pydantic models.
 
 ### Design principle: PDP/PEP separation
 
@@ -113,9 +113,9 @@ Six components across six Kubernetes Pods plus a Python library layer, all imple
 │  Python library  (aiac/src/)                             │
 │                                                          │
 │  aiac.pdp.library.models   — Pydantic only               │
-│  aiac.pdp.library.read_api — HTTP client →               │
+│  aiac.pdp.library.configuration — HTTP client →               │
 │                          PDP Configuration Service       │
-│  aiac.pdp.library.write_api — HTTP client →              │
+│  aiac.pdp.library.policy — HTTP client →              │
 │                          PDP Policy Service              │
 └──────────────────────────────────────────────────────────┘
 ```
@@ -136,43 +136,43 @@ Role enforcement (event-driven):
 
   Event Broker ──► AIAC Agent (NATS consumer) ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
                                                 ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read state + composites]
+                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read state + composites]
                                                 ├──► LLM API (external)              [propose diff from policy + domain context + state]
                                                 ├──► LLM API (external)              [validate diff]
-                                                ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite diff]
+                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite diff]
                                                 └──► NATS ack                        [message removed from stream]
 
   Rebuild trigger (operator-only, HTTP direct):
 
-  Operator ──(kubectl port-forward)──► AIAC Agent /apply/rebuild ──┬── write_api ──► PDP Policy Service  [clear all composite mappings]
+  Operator ──(kubectl port-forward)──► AIAC Agent /apply/rebuild ──┬── policy ──► PDP Policy Service  [clear all composite mappings]
                                                                    ├──► ChromaDB aiac-policies
                                                                    ├──► ChromaDB aiac-domain-knowledge
-                                                                   ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API
+                                                                   ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API
                                                                    ├──► LLM API (external)
                                                                    ├──► LLM API (external)
-                                                                   └──► write_api ──► PDP Policy Service ──► Keycloak Admin API
+                                                                   └──► policy ──► PDP Policy Service ──► Keycloak Admin API
 
   Realm role trigger (aiac.apply.realm-role.{id}) → Realm Roles Orchestrator:
 
   Event Broker ──► AIAC Agent (NATS consumer) ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
                                                 ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read scoped state]
+                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read scoped state]
                                                 ├──► LLM API (external)              [propose composite mappings scoped to affected role]
                                                 ├──► LLM API (external)              [validate mappings]
-                                                ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
+                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
                                                 └──► NATS ack
 
   Service onboarding trigger (aiac.apply.service.{id}) → Service Onboarding Orchestrator:
 
   Event Broker ──► AIAC Agent (NATS consumer) ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ServiceInfo]
                                                 ├──► LLM API (external)              [analyze agent/tool → ServiceProvision]
-                                                ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [provision permissions + scopes]
+                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [provision permissions + scopes]
                                                 ├──► ChromaDB aiac-policies         [retrieve policy chunks]
                                                 ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► read_api ──► PDP Configuration Service ──► Keycloak Admin API  [read state]
+                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read state]
                                                 ├──► LLM API (external)              [propose composite mappings for new service]
                                                 ├──► LLM API (external)              [validate mappings]
-                                                ├──► write_api ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
+                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
                                                 └──► NATS ack
 ```
 
@@ -180,11 +180,11 @@ Role enforcement (event-driven):
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| PDP Configuration Service | `aiac.pdp.library.read_api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
-| PDP Policy Service (Keycloak) | `aiac.pdp.library.write_api` | Keycloak Admin REST API | 204/201 on success |
-| `aiac.pdp.library.models` | `aiac.pdp.library.read_api`, `aiac.pdp.library.write_api`, AIAC Agent | — | Pydantic model definitions |
-| `aiac.pdp.library.read_api` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances |
-| `aiac.pdp.library.write_api` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None |
+| PDP Configuration Service | `aiac.pdp.library.configuration` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
+| PDP Policy Service (Keycloak) | `aiac.pdp.library.policy` | Keycloak Admin REST API | 204/201 on success |
+| `aiac.pdp.library.models` | `aiac.pdp.library.configuration`, `aiac.pdp.library.policy`, AIAC Agent | — | Pydantic model definitions |
+| `aiac.pdp.library.configuration` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances |
+| `aiac.pdp.library.policy` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, Event Broker | — |
 | Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
@@ -204,7 +204,7 @@ Role enforcement (event-driven):
 - **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
 - **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, PDP Configuration Service, PDP Policy Service, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently.
 - **`aiac.pdp.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
-- **`aiac.__init__`, `aiac.pdp.__init__`, `aiac.pdp.library.__init__`, `aiac.pdp.configuration.__init__`, `aiac.pdp.policy.__init__`, and `aiac.pdp.policy.keycloak.__init__` are empty.** Callers use explicit submodule paths: `from aiac.pdp.library.models import Subject`, `from aiac.pdp.library.read_api import get_subjects`.
+- **`aiac.__init__`, `aiac.pdp.__init__`, `aiac.pdp.library.__init__`, `aiac.pdp.service.__init__`, `aiac.pdp.service.configuration.__init__`, `aiac.pdp.service.configuration.keycloak.__init__`, `aiac.pdp.service.policy.__init__`, and `aiac.pdp.service.policy.keycloak.__init__` are empty.** Callers use explicit submodule paths: `from aiac.pdp.library.models import Subject`, `from aiac.pdp.library.configuration import get_subjects`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
 - **`user/{id}` trigger removed.** Composite role mappings are realm-role-scoped; individual user creation/update does not require agent intervention — composites apply automatically.
 
@@ -234,8 +234,8 @@ FastAPI service (`0.0.0.0:7073`) that applies policy changes to the active PDP b
 Python package at `aiac/src/`. Three submodules:
 
 - **`aiac.pdp.library.models`** — dependency-free Pydantic models for all PDP entities (`Subject`, `Role`, `Service`, `Permission`, `Scope`, `Assignments`).
-- **`aiac.pdp.library.read_api`** — HTTP client wrapping the PDP Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
-- **`aiac.pdp.library.write_api`** — HTTP client wrapping the PDP Policy Service; abstracts Phase 1 (Keycloak composite mappings) and Phase 2 (OPA Rego) behind a stable function interface.
+- **`aiac.pdp.library.configuration`** — HTTP client wrapping the PDP Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
+- **`aiac.pdp.library.policy`** — HTTP client wrapping the PDP Policy Service; abstracts Phase 1 (Keycloak composite mappings) and Phase 2 (OPA Rego) behind a stable function interface.
 
 **Full spec:** [components/library.md](components/library.md)
 
@@ -318,10 +318,10 @@ Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
 # Build PDP Configuration Service
-docker build -f aiac/src/aiac/pdp/configuration/Dockerfile -t aiac-pdp-config:latest aiac/src/
+docker build -f aiac/src/aiac/pdp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
 # Build PDP Policy Service (Keycloak)
-docker build -f aiac/src/aiac/pdp/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
+docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
 
 # Build Agent (includes aiac-init container)
 docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest aiac/src/
@@ -363,8 +363,8 @@ Tests live in `aiac/test/`.
 | PDP Configuration Service endpoints | `KeycloakAdmin` methods (return fixture dicts) | Correct JSON response, 502 on Keycloak error |
 | PDP Policy Service (Keycloak) endpoints | `KeycloakAdmin` methods | 204 on write success, 201 on create, 502 on Keycloak error |
 | `aiac.pdp.library.models` | No mock needed | `extra='ignore'` drops unknown fields, required fields validated, `model_validate` round-trips correctly |
-| `aiac.pdp.library.read_api` functions | PDP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
-| `aiac.pdp.library.write_api` functions | PDP Policy Service HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
+| `aiac.pdp.library.configuration` functions | PDP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback |
+| `aiac.pdp.library.policy` functions | PDP Policy Service HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
 | Event Broker NATS consumer | NATS message delivery (mock `nats-py` subscription) | Correct handler dispatched per subject; ack issued on success; no ack on handler exception |
 | Event Broker DLQ | NATS max redelivery exceeded | Message routed to `aiac.apply.dlq` after 5 failures |
 | Init container health-check | HTTP 4xx then 200 sequence; NATS TCP refused then connected | Exits 0 only after all four dependencies healthy; `add_stream` called with correct config |

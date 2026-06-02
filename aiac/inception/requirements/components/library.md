@@ -14,26 +14,30 @@ aiac/src/
         ├── library/
         │   ├── __init__.py     # empty
         │   ├── models.py       # Pydantic model definitions only
-        │   ├── read_api.py     # HTTP client → PDP Configuration Service
-        │   └── write_api.py    # HTTP client → PDP Policy Service
-        ├── configuration/
-        │   ├── __init__.py     # empty
-        │   ├── main.py         # FastAPI app (read service)
-        │   ├── Dockerfile
-        │   └── requirements.txt
-        └── policy/
+        │   ├── configuration.py  # HTTP client → PDP Configuration Service
+        │   └── policy.py         # HTTP client → PDP Policy Service
+        └── service/
             ├── __init__.py     # empty
-            └── keycloak/
+            ├── configuration/
+            │   ├── __init__.py     # empty
+            │   └── keycloak/
+            │       ├── __init__.py     # empty
+            │       ├── main.py         # FastAPI app (Keycloak read service)
+            │       ├── Dockerfile
+            │       └── requirements.txt
+            └── policy/
                 ├── __init__.py     # empty
-                ├── main.py         # FastAPI app (Keycloak write service)
-                ├── Dockerfile
-                └── requirements.txt
+                └── keycloak/
+                    ├── __init__.py     # empty
+                    ├── main.py         # FastAPI app (Keycloak write service)
+                    ├── Dockerfile
+                    └── requirements.txt
 aiac/test/
 └── test_models.py              # unit tests for aiac.pdp.library.models
 aiac/pyproject.toml   # pytest config: testpaths=["test"], pythonpath=["src"]
 ```
 
-`aiac` is a regular package with an empty `__init__.py`. `aiac.pdp`, `aiac.pdp.library`, `aiac.pdp.configuration`, `aiac.pdp.policy`, and `aiac.pdp.policy.keycloak` are regular packages with empty `__init__.py` files. Callers must use explicit submodule paths.
+`aiac` is a regular package with an empty `__init__.py`. `aiac.pdp`, `aiac.pdp.library`, `aiac.pdp.service`, `aiac.pdp.service.configuration`, `aiac.pdp.service.configuration.keycloak`, `aiac.pdp.service.policy`, and `aiac.pdp.service.policy.keycloak` are regular packages with empty `__init__.py` files. Callers must use explicit submodule paths.
 
 ---
 
@@ -134,7 +138,7 @@ subjects = [Subject.model_validate(s) for s in raw]
 
 ---
 
-## Submodule: `aiac.pdp.library.read_api`
+## Submodule: `aiac.pdp.library.configuration`
 
 ### Description
 HTTP client library that wraps the PDP Configuration Service REST API and returns typed Pydantic model instances from `aiac.pdp.library.models`.
@@ -167,7 +171,7 @@ Each function:
 
 ### Configuration
 
-Read from a `.env` file co-located with `read_api.py` (`aiac/src/aiac/pdp/library/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
+Read from a `.env` file co-located with `configuration.py` (`aiac/src/aiac/pdp/library/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
 
 | Variable | Default |
 |----------|---------|
@@ -176,7 +180,7 @@ Read from a `.env` file co-located with `read_api.py` (`aiac/src/aiac/pdp/librar
 ### Usage
 
 ```python
-from aiac.pdp.library.read_api import get_subjects, get_roles
+from aiac.pdp.library.configuration import get_subjects, get_roles
 
 subjects = get_subjects(realm="kagenti")
 for s in subjects:
@@ -185,7 +189,7 @@ for s in subjects:
 
 ---
 
-## Submodule: `aiac.pdp.library.write_api`
+## Submodule: `aiac.pdp.library.policy`
 
 ### Description
 HTTP client library that wraps the PDP Policy Service REST API. Abstracts the Phase 1 (Keycloak) and Phase 2 (OPA) policy write backends behind a stable function interface — callers never interact with the backend directly. The active backend is determined by `AIAC_PDP_POLICY_URL`, which points to whichever policy service pod is deployed.
@@ -240,7 +244,7 @@ def create_service_scope(service_id: str, scope_name: str, description: str, rea
 ### Usage
 
 ```python
-from aiac.pdp.library.write_api import add_role_composites
+from aiac.pdp.library.policy import add_role_composites
 from aiac.pdp.library.models import Permission
 
 permissions = [Permission(id="abc", name="editor", description=None, composite=False, clientRole=True)]

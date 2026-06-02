@@ -1,7 +1,7 @@
 # Component PRD: PDP Configuration Service
 
 ## Location
-`aiac/src/aiac/pdp/configuration/`
+`aiac/src/aiac/pdp/service/configuration/keycloak/`
 
 ## Description
 A FastAPI web service that proxies Keycloak Admin REST API read endpoints. Returns PDP entity state in generic form for consumption by the AIAC Agent and library clients. Stateless — no caching. Backed exclusively by Keycloak in both Phase 1 and Phase 2; the read interface is stable across phases.
@@ -52,10 +52,15 @@ python-keycloak
 ## File structure
 
 ```
-aiac/src/aiac/pdp/configuration/
-├── Dockerfile
-├── requirements.txt
-└── main.py
+aiac/src/aiac/pdp/service/
+├── __init__.py
+└── configuration/
+    ├── __init__.py
+    └── keycloak/
+        ├── __init__.py
+        ├── Dockerfile
+        ├── requirements.txt
+        └── main.py
 ```
 
 ## `main.py` behaviour notes
