@@ -12,6 +12,7 @@ metadata:
   namespace: aiac-system
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+  KEYCLOAK_REALM: "master"
 
 ---
 # Prerequisites: create this Secret before applying this manifest:
