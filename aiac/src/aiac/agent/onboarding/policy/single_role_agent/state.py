@@ -3,7 +3,7 @@
 State Definitions for Single Role Mapper
 
 This module defines the TypedDict state structure used by the LangGraph
-workflow for mapping a single client role to real roles that should have access.
+workflow for mapping a single service role to real roles that should have access.
 """
 
 from typing import TypedDict, Annotated, List, Dict
@@ -16,8 +16,8 @@ class SingleRoleState(TypedDict):
 
     Attributes:
         policy_description: Natural language policy description (context for the mapping)
-        client_name: Name of the client that owns the role
-        client_role: Dict with 'name' and 'description' of the client role to analyze
+        service_name: Name of the service that owns the role
+        service_role: Dict with 'name' and 'description' of the service role to analyze
         realm_roles: List of available realm roles with descriptions
         explanation: LLM's explanation of which real roles should have access
         real_roles_with_access: List of realm role names that should have access
@@ -27,8 +27,8 @@ class SingleRoleState(TypedDict):
         validation_passed: Boolean flag indicating if validation succeeded
     """
     policy_description: str
-    client_name: str
-    client_role: Dict[str, str]
+    service_name: str
+    service_role: Dict[str, str]
     realm_roles: List[Dict[str, str]]
     explanation: str
     real_roles_with_access: List[str]

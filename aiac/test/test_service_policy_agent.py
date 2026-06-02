@@ -1,22 +1,22 @@
 """
-Tests for the client_policy_agent.
+Tests for the service_policy_agent.
 
-The agent takes a natural language policy description plus a client ID and
-produces a partial policy containing only the rules relevant to that client.
+The agent takes a natural language policy description plus a service ID and
+produces a partial policy containing only the rules relevant to that service.
 
 To run all tests:
-    pytest test/test_client_policy_agent.py
+    pytest test/test_service_policy_agent.py
 
 To skip integration tests (require LLM access):
-    pytest test/test_client_policy_agent.py -m "not integration"
+    pytest test/test_service_policy_agent.py -m "not integration"
 
 To run ONLY integration tests:
-    pytest test/test_client_policy_agent.py -m integration
+    pytest test/test_service_policy_agent.py -m integration
 
 To run the LLM-backed fixture test:
     1. Ensure LLM is configured in config/llm.env
-    2. Remove the @pytest.mark.skip decorator on test_generate_client_policy_from_fixtures
-    3. Run: pytest test/test_client_policy_agent.py::test_generate_client_policy_from_fixtures -v
+    2. Remove the @pytest.mark.skip decorator on test_generate_service_policy_from_fixtures
+    3. Run: pytest test/test_service_policy_agent.py::test_generate_service_policy_from_fixtures -v
 """
 
 import pytest
@@ -24,9 +24,9 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
-from client_policy_agent import ClientPolicyBuilder
-from client_policy_agent.graph import _generate_yaml, _build_policy, _filter_and_extract_scopes
-from client_policy_agent.state import ClientPolicyState
+from service_policy_agent import ServicePolicyBuilder
+from service_policy_agent.graph import _generate_yaml, _build_policy, _filter_and_extract_scopes
+from service_policy_agent.state import ServicePolicyState
 from config import create_llm
 
 
@@ -89,17 +89,17 @@ def normalize_policy_yaml(yaml_content: str) -> dict:
     return data.get("policy", {})
 
 
-def filter_policy_to_client(policy: dict, client_id: str) -> dict:
+def filter_policy_to_service(policy: dict, service_id: str) -> dict:
     """
     Keep only the realm-role entries that contain at least one mapping for
-    *client_id*.  Within each kept entry, retain only the mappings for that
-    client.  Used to derive the expected partial policy from a full fixture.
+    *service_id*.  Within each kept entry, retain only the mappings for that
+    service.  Used to derive the expected partial policy from a full fixture.
     """
     result = {}
     for realm_role, mappings in policy.items():
-        client_mappings = [m for m in mappings if m.get("client") == client_id]
-        if client_mappings:
-            result[realm_role] = client_mappings
+        service_mappings = [m for m in mappings if m.get("service") == service_id]
+        if service_mappings:
+            result[realm_role] = service_mappings
     return result
 
 
@@ -122,8 +122,8 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
         differences.append(f"Unexpected extra realm role: '{role}'")
 
     for role in expected_roles & generated_roles:
-        gen_set = {(m["client"], m["role"]) for m in generated[role]}
-        exp_set = {(m["client"], m["role"]) for m in expected[role]}
+        gen_set = {(m["service"], m["role"]) for m in generated[role]}
+        exp_set = {(m["service"], m["role"]) for m in expected[role]}
 
         for mapping in exp_set - gen_set:
             differences.append(f"Role '{role}' missing mapping: {mapping}")
@@ -140,15 +140,15 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
 
 def test_generate_yaml_unit():
     """_generate_yaml renders YAML with correct header comments and structure (bypasses LLM)."""
-    state: ClientPolicyState = {
+    state: ServicePolicyState = {
         "description": "Developers get full GitHub access.",
-        "client_id": "github-tool",
+        "service_id": "github-tool",
         "explanation": "Developer realm role maps to all github-tool roles.",
         "policy_structure": {
             "policy": {
                 "developer": [
-                    {"client": "github-tool", "role": "github-tool-aud"},
-                    {"client": "github-tool", "role": "github-full-access"},
+                    {"service": "github-tool", "role": "github-tool-aud"},
+                    {"service": "github-tool", "role": "github-full-access"},
                 ]
             }
         },
@@ -167,7 +167,7 @@ def test_generate_yaml_unit():
     assert "developer:" in output
     assert "github-tool" in output
     assert "github-full-access" in output
-    # Header must mention the scoped client
+    # Header must mention the scoped service
     assert "github-tool" in output
     assert "# Partial Access Control Policy" in output
     assert "# Original Policy Description:" in output
@@ -176,22 +176,22 @@ def test_generate_yaml_unit():
 
 def test_build_policy_unit():
     """_build_policy assembles policy_structure correctly from parsed_scopes (bypasses LLM)."""
-    state: ClientPolicyState = {
+    state: ServicePolicyState = {
         "description": "test",
-        "client_id": "github-tool",
+        "service_id": "github-tool",
         "explanation": "",
         "parsed_scopes": [
             {
                 "role": "developer",
-                "client_roles": [
-                    {"client": "github-tool", "role": "github-full-access"},
-                    {"client": "github-tool", "role": "github-tool-aud"},
+                "service_roles": [
+                    {"service": "github-tool", "role": "github-full-access"},
+                    {"service": "github-tool", "role": "github-tool-aud"},
                 ],
             },
             {
                 "role": "tech-support",
-                "client_roles": [
-                    {"client": "github-tool", "role": "github-tool-aud"},
+                "service_roles": [
+                    {"service": "github-tool", "role": "github-tool-aud"},
                 ],
             },
         ],
@@ -208,18 +208,18 @@ def test_build_policy_unit():
     policy = result["policy_structure"]["policy"]
     assert "developer" in policy
     assert "tech-support" in policy
-    assert {"client": "github-tool", "role": "github-full-access"} in policy["developer"]
-    assert {"client": "github-tool", "role": "github-tool-aud"} in policy["tech-support"]
-    # No other clients should appear
-    all_clients = {m["client"] for mappings in policy.values() for m in mappings}
-    assert all_clients == {"github-tool"}
+    assert {"service": "github-tool", "role": "github-full-access"} in policy["developer"]
+    assert {"service": "github-tool", "role": "github-tool-aud"} in policy["tech-support"]
+    # No other services should appear
+    all_services = {m["service"] for mappings in policy.values() for m in mappings}
+    assert all_services == {"github-tool"}
 
 
 def test_build_policy_empty_scopes():
     """_build_policy produces an empty policy when no scopes matched (bypasses LLM)."""
-    state: ClientPolicyState = {
+    state: ServicePolicyState = {
         "description": "test",
-        "client_id": "kagenti",
+        "service_id": "kagenti",
         "explanation": "",
         "parsed_scopes": [],
         "policy_structure": {},
@@ -233,47 +233,47 @@ def test_build_policy_empty_scopes():
     result = _build_policy(state)
     assert result["policy_structure"] == {"policy": {}}
 
-def test_client_policy_builder_initialization(config_file, mock_llm):
-    """ClientPolicyBuilder loads only roles for the specified client."""
+def test_service_policy_builder_initialization(config_file, mock_llm):
+    """ServicePolicyBuilder loads only roles for the specified service."""
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
     )
 
-    assert builder.client_id == "github-tool"
+    assert builder.service_id == "github-tool"
     # Realm roles come from config regardless of scoping
     realm_role_names = [r["name"] for r in builder.realm_roles]
     assert "developer" in realm_role_names
     assert "tech-support" in realm_role_names
 
     # Only github-tool roles should be loaded
-    role_names = [r["name"] for r in builder.client_roles]
+    role_names = [r["name"] for r in builder.service_roles]
     assert "github-tool-aud" in role_names
     assert "github-full-access" in role_names
-    # Roles from other clients must not appear
+    # Roles from other services must not appear
     assert "demo-ui" not in role_names
     assert "github-agent" not in role_names
 
-def test_client_policy_builder_initialization_unknown_client(config_file, mock_llm):
-    """ClientPolicyBuilder with an unknown client_id yields an empty role list."""
+def test_service_policy_builder_initialization_unknown_service(config_file, mock_llm):
+    """ServicePolicyBuilder with an unknown service_id yields an empty role list."""
 
-    builder = ClientPolicyBuilder(
-        client_id="does-not-exist",
+    builder = ServicePolicyBuilder(
+        service_id="does-not-exist",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
     )
 
-    assert builder.client_roles == []
+    assert builder.service_roles == []
 
 
 def test_get_graph_returns_compiled_graph(config_file, mock_llm):
     """get_graph() returns the compiled LangGraph workflow."""
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -288,15 +288,15 @@ def test_get_graph_returns_compiled_graph(config_file, mock_llm):
 # MOCK-LLM TESTS (structural / format validation, no real LLM)
 # ============================================================================
 
-def _make_mock_llm_response(realm_role: str, client_id: str, role_name: str) -> str:
+def _make_mock_llm_response(realm_role: str, service_id: str, role_name: str) -> str:
     """Return a well-formed LLM JSON response for a single role mapping."""
     return f"""
 ```explanation
-Policy grants {realm_role} access to {role_name} on {client_id}.
+Policy grants {realm_role} access to {role_name} on {service_id}.
 ```
 ```json
 {{
-  "client_role": "{role_name}",
+  "service_role": "{role_name}",
   "real_roles_with_access": ["{realm_role}"]
 }}
 ```
@@ -311,8 +311,8 @@ def test_generate_policy_returns_expected_keys(config_file, mock_llm):
     )
     mock_llm.invoke.return_value = mock_response
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -335,8 +335,8 @@ def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
     )
     mock_llm.invoke.return_value = mock_response
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -348,16 +348,16 @@ def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
     assert "policy" in parsed
 
 
-def test_generate_policy_scoped_to_client_only(config_file, mock_llm):
-    """All mappings in the generated policy belong to the specified client."""
+def test_generate_policy_scoped_to_service_only(config_file, mock_llm):
+    """All mappings in the generated policy belong to the specified service."""
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
     )
     mock_llm.invoke.return_value = mock_response
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -367,8 +367,8 @@ def test_generate_policy_scoped_to_client_only(config_file, mock_llm):
     policy = result["policy_structure"].get("policy", {})
     for mappings in policy.values():
         for mapping in mappings:
-            assert mapping["client"] == "github-tool", (
-                f"Mapping for a different client leaked in: {mapping}"
+            assert mapping["service"] == "github-tool", (
+                f"Mapping for a different service leaked in: {mapping}"
             )
 
 
@@ -378,15 +378,15 @@ def test_invalid_role_triggers_validation_error(config_file, mock_llm):
     mock_response.content = """
 ```json
 {
-  "client_role": "github-tool-aud",
+  "service_role": "github-tool-aud",
   "real_roles_with_access": ["nonexistent-realm-role"]
 }
 ```
 """
     mock_llm.invoke.return_value = mock_response
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -399,31 +399,31 @@ def test_invalid_role_triggers_validation_error(config_file, mock_llm):
     )
 
 
-def test_output_scoped_even_when_llm_mentions_foreign_client_role(config_file, mock_llm):
+def test_output_scoped_even_when_llm_mentions_foreign_service_role(config_file, mock_llm):
     """
-    The client/role in every output mapping always comes from the predefined
-    client_roles list, not from the LLM JSON. Even if the LLM's client_role
-    field names a role from a different client (demo-ui belongs to kagenti),
+    The service/role in every output mapping always comes from the predefined
+    service_roles list, not from the LLM JSON. Even if the LLM's service_role
+    field names a role from a different service (demo-ui belongs to kagenti),
     the output must only contain github-tool roles and succeed.
     """
     mock_response = Mock()
-    # LLM mentions demo-ui (a kagenti role) in its JSON client_role field.
+    # LLM mentions demo-ui (a kagenti role) in its JSON service_role field.
     # That field is ignored; only real_roles_with_access matters.
     mock_response.content = """
 ```explanation
-Mapping developer to demo-ui (wrong client - but client_role field is ignored).
+Mapping developer to demo-ui (wrong service - but service_role field is ignored).
 ```
 ```json
 {
-  "client_role": "demo-ui",
+  "service_role": "demo-ui",
   "real_roles_with_access": ["developer"]
 }
 ```
 """
     mock_llm.invoke.return_value = mock_response
 
-    builder = ClientPolicyBuilder(
-        client_id="github-tool",
+    builder = ServicePolicyBuilder(
+        service_id="github-tool",
         config_path=config_file,
         llm=mock_llm,
         verbose=False,
@@ -433,9 +433,9 @@ Mapping developer to demo-ui (wrong client - but client_role field is ignored).
     # The mapping is structurally valid: developer → github-tool roles
     assert result["success"], f"Unexpected errors: {result['errors']}"
     policy = result["policy_structure"].get("policy", {})
-    all_clients = {m["client"] for mappings in policy.values() for m in mappings}
-    assert all_clients == {"github-tool"}, (
-        f"Foreign client leaked into output: {all_clients}"
+    all_services = {m["service"] for mappings in policy.values() for m in mappings}
+    assert all_services == {"github-tool"}, (
+        f"Foreign service leaked into output: {all_services}"
     )
 
 
@@ -444,7 +444,7 @@ Mapping developer to demo-ui (wrong client - but client_role field is ignored).
 # ============================================================================
 
 # @pytest.mark.skip(reason="Requires LLM access - run manually with a configured LLM")
-def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_files, llm_instance, llm_model_name):
+def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy_files, llm_instance, llm_model_name):
     """
     Integration test: generate a partial policy for each fixture using a real LLM.
 
@@ -452,8 +452,8 @@ def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_
     1. Reads the policy description from fixtures/policies/*.txt
     2. Loads the expected FULL policy from fixtures/expected/*.yaml
     3. Derives the expected PARTIAL policy by keeping only mappings for
-       each target client defined in the fixture config
-    4. Generates a partial policy with ClientPolicyBuilder
+       each target service defined in the fixture config
+    4. Generates a partial policy with ServicePolicyBuilder
     5. Compares the result with the derived expected partial policy
 
     The test is parametrised over the four LLM models defined in llm_model_name.
@@ -461,9 +461,9 @@ def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_
     if not policy_files:
         pytest.skip("No policy fixture files found")
 
-    # Collect all client IDs from config
+    # Collect all service IDs from config
     config_data = yaml.safe_load((config_file).read_text())
-    all_client_ids = [c["client_id"] for c in config_data.get("clients", [])]
+    all_service_ids = [c["service_id"] for c in config_data.get("services", [])]
 
     failures = []
 
@@ -479,12 +479,12 @@ def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_
 
         full_expected = normalize_policy_yaml(expected_file.read_text())
 
-        for client_id in all_client_ids:
-            expected_partial = filter_policy_to_client(full_expected, client_id)
+        for service_id in all_service_ids:
+            expected_partial = filter_policy_to_service(full_expected, service_id)
 
             try:
-                builder = ClientPolicyBuilder(
-                    client_id=client_id,
+                builder = ServicePolicyBuilder(
+                    service_id=service_id,
                     config_path=config_file,
                     llm=llm_instance,
                     verbose=False,
@@ -493,7 +493,7 @@ def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_
 
                 if not result["success"]:
                     failures.append(
-                        f"[{llm_model_name}] {policy_file.name} / {client_id}: "
+                        f"[{llm_model_name}] {policy_file.name} / {service_id}: "
                         f"generation failed: {result['errors']}"
                     )
                     continue
@@ -503,20 +503,20 @@ def test_generate_client_policy_from_fixtures(fixtures_dir, config_file, policy_
 
                 if not match:
                     failures.append(
-                        f"[{llm_model_name}] {policy_file.name} / {client_id}: "
+                        f"[{llm_model_name}] {policy_file.name} / {service_id}: "
                         "policy mismatch:\n"
                         + "\n".join(f"  - {d}" for d in diffs)
                     )
 
             except Exception as exc:
                 failures.append(
-                    f"[{llm_model_name}] {policy_file.name} / {client_id}: "
+                    f"[{llm_model_name}] {policy_file.name} / {service_id}: "
                     f"exception: {exc}"
                 )
 
     if failures:
         pytest.fail(
-            f"Client policy generation tests failed for model {llm_model_name}:\n\n"
+            f"Service policy generation tests failed for model {llm_model_name}:\n\n"
             + "\n\n".join(failures)
         )
 

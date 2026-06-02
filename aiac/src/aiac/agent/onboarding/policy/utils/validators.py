@@ -12,20 +12,20 @@ from typing import Dict, List, Any
 def validate_policy_structure(
     policy: Dict[str, Any],
     realm_roles: List[Dict[str, str]],
-    client_names: List[str],
-    client_roles_map: Dict[str, List[Dict[str, str]]]
+    service_names: List[str],
+    service_roles_map: Dict[str, List[Dict[str, str]]]
 ) -> List[str]:
     """
     Perform structural validation on the policy.
     
-    Checks that all realm roles, clients, and client roles exist in the
+    Checks that all realm roles, services, and service roles exist in the
     configuration and that the policy structure is valid.
     
     Args:
         policy: The policy dictionary to validate
         realm_roles: List of dicts with 'name' and 'description' for realm roles
-        client_names: List of valid client names
-        client_roles_map: Dict mapping client names to list of role dicts with 'name' and 'description'
+        service_names: List of valid service names
+        service_roles_map: Dict mapping service names to list of role dicts with 'name' and 'description'
         
     Returns:
         List of error messages (empty if validation passed)
@@ -40,7 +40,7 @@ def validate_policy_structure(
     realm_role_names = [role['name'] for role in realm_roles]
     
     # Validate that only preset names are used
-    for realm_role, client_role_mappings in policy.items():
+    for realm_role, service_role_mappings in policy.items():
         # Validate realm role name
         if not realm_role:
             structural_errors.append("Found empty realm role name")
@@ -51,51 +51,51 @@ def validate_policy_structure(
             )
         
         # Check if realm role has any mappings
-        if not client_role_mappings:
+        if not service_role_mappings:
             structural_errors.append(
-                f"Realm role '{realm_role}' has no client role mappings assigned"
+                f"Realm role '{realm_role}' has no service role mappings assigned"
             )
         
-        # Validate each client role mapping
-        for mapping in client_role_mappings:
+        # Validate each service role mapping
+        for mapping in service_role_mappings:
             if not isinstance(mapping, dict):
                 structural_errors.append(
                     f"Invalid mapping format in realm role '{realm_role}': "
-                    f"must be a dict with 'client' and 'role' keys"
+                    f"must be a dict with 'service' and 'role' keys"
                 )
                 continue
             
-            client = mapping.get('client', '')
+            service = mapping.get('service', '')
             role = mapping.get('role', '')
             
-            # Validate client name
-            if not client:
+            # Validate service name
+            if not service:
                 structural_errors.append(
-                    f"Found empty client name in realm role '{realm_role}'"
+                    f"Found empty service name in realm role '{realm_role}'"
                 )
-            elif client not in client_names:
+            elif service not in service_names:
                 structural_errors.append(
-                    f"Client '{client}' in realm role '{realm_role}' is not in "
-                    f"the preset client names. Available clients: {', '.join(client_names)}"
+                    f"Service '{service}' in realm role '{realm_role}' is not in "
+                    f"the preset service names. Available services: {', '.join(service_names)}"
                 )
             
-            # Validate role name for the client
+            # Validate role name for the service
             if not role:
                 structural_errors.append(
-                    f"Found empty role name for client '{client}' in realm role '{realm_role}'"
+                    f"Found empty role name for service '{service}' in realm role '{realm_role}'"
                 )
-            elif client in client_roles_map:
-                # Extract role names from the client roles map
-                client_role_names = [r['name'] for r in client_roles_map[client]]
-                if role not in client_role_names:
+            elif service in service_roles_map:
+                # Extract role names from the service roles map
+                service_role_names = [r['name'] for r in service_roles_map[service]]
+                if role not in service_role_names:
                     available_roles = (
-                        ', '.join(client_role_names)
-                        if client_role_names
+                        ', '.join(service_role_names)
+                        if service_role_names
                         else '(none)'
                     )
                     structural_errors.append(
-                        f"Role '{role}' for client '{client}' in realm role '{realm_role}' "
-                        f"is not valid. Available roles for {client}: {available_roles}"
+                        f"Role '{role}' for service '{service}' in realm role '{realm_role}' "
+                        f"is not valid. Available roles for {service}: {available_roles}"
                     )
     
     return structural_errors

@@ -43,7 +43,11 @@ from langchain_core.language_models import BaseChatModel
 from config import create_llm
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.keycloak.library import api_from_config
+from aiac.pdp.library.read_api_from_config import (
+    get_roles,
+    get_services,
+    get_service_permissions,
+)
 from single_role_agent import SingleRoleMapper
 from utils.validators import validate_policy_structure
 
@@ -75,22 +79,22 @@ def _parse_and_extract_scopes(
     state: PolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    client_roles_map: dict,
+    service_roles_map: dict,
     verbose: bool
 ) -> PolicyState:
     """
-    Map each client role to realm roles using SingleRoleMapper, then aggregate
+    Map each service role to realm roles using SingleRoleMapper, then aggregate
     results into the parsed_scopes format expected by _build_policy.
 
-    For every client role across all clients, SingleRoleMapper determines which
+    For every service role across all services, SingleRoleMapper determines which
     realm roles should have access. The per-role results are inverted so that
-    parsed_scopes is a list of {role: realm_role, client_roles: [...]}.
+    parsed_scopes is a list of {role: realm_role, service_roles: [...]}.
 
     Args:
         state: Current PolicyState with 'description' field
         llm: LLM instance for processing
         realm_roles: List of available realm roles [{'name': str, 'description': str}]
-        client_roles_map: Dict mapping client names to roles
+        service_roles_map: Dict mapping service names to roles
         verbose: Whether to print detailed output
 
     Returns:
@@ -99,31 +103,31 @@ def _parse_and_extract_scopes(
     mapper = SingleRoleMapper(llm=llm, verbose=verbose)
 
     explanations = []
-    # realm_role_name -> list of {"client": X, "role": Y} dicts
-    realm_role_to_client_roles: dict = {}
+    # realm_role_name -> list of {"service": X, "role": Y} dicts
+    realm_role_to_service_roles: dict = {}
 
-    for client_name, client_roles in client_roles_map.items():
-        for client_role in client_roles:
+    for service_name, service_roles in service_roles_map.items():
+        for service_role in service_roles:
             result = mapper.map_role(
                 policy_description=state['description'],
-                client_name=client_name,
-                client_role=client_role,
+                service_name=service_name,
+                service_role=service_role,
                 realm_roles=realm_roles,
             )
 
             if result.get('explanation'):
                 explanations.append(
-                    f"{client_name}/{client_role['name']}: {result['explanation']}"
+                    f"{service_name}/{service_role['name']}: {result['explanation']}"
                 )
 
             for realm_role_name in result.get('real_roles_with_access', []):
-                realm_role_to_client_roles.setdefault(realm_role_name, []).append(
-                    {'client': client_name, 'role': client_role['name']}
+                realm_role_to_service_roles.setdefault(realm_role_name, []).append(
+                    {'service': service_name, 'role': service_role['name']}
                 )
 
     parsed_scopes = [
-        {'role': realm_role, 'client_roles': client_roles}
-        for realm_role, client_roles in realm_role_to_client_roles.items()
+        {'role': realm_role, 'service_roles': service_roles}
+        for realm_role, service_roles in realm_role_to_service_roles.items()
     ]
 
     return {
@@ -154,8 +158,8 @@ def _build_policy(state: PolicyState) -> PolicyState:
     # Transform parsed scopes into policy structure
     for role_info in state["parsed_scopes"]:
         role_name = role_info.get("role", "")
-        client_roles = role_info.get("client_roles", [])
-        policy[role_name] = client_roles
+        service_roles = role_info.get("service_roles", [])
+        policy[role_name] = service_roles
     
     # Wrap in policy structure
     policy_structure = {"policy": policy}
@@ -180,9 +184,9 @@ def _generate_yaml(state: PolicyState) -> PolicyState:
     """
     # Create header comments
     header = """# Access Control Policy
-# Maps user roles (realm roles) to specific client roles
-# Format: user_role_name -> list of client role mappings
-# Each entry specifies: client (client name) and role (role name from that client)
+# Maps user roles (realm roles) to specific service roles
+# Format: user_role_name -> list of service role mappings
+# Each entry specifies: service (service name) and role (role name from that service)
 
 """
     
@@ -226,8 +230,8 @@ def _validate_policy(
     state: PolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    client_names: list,
-    client_roles_map: dict,
+    service_names: list,
+    service_roles_map: dict,
     verbose: bool,
     max_retries: int
 ) -> PolicyState:
@@ -241,8 +245,8 @@ def _validate_policy(
         state: PolicyState with 'policy_structure' and 'description'
         llm: LLM instance for semantic verification
         realm_roles: List of available realm roles
-        client_names: List of client names
-        client_roles_map: Dict mapping client names to roles
+        service_names: List of service names
+        service_roles_map: Dict mapping service names to roles
         verbose: Whether to print detailed output
         max_retries: Maximum retry attempts
 
@@ -256,8 +260,8 @@ def _validate_policy(
     structural_errors = validate_policy_structure(
         policy,
         realm_roles,
-        client_names,
-        client_roles_map
+        service_names,
+        service_roles_map
     )
     
     # If there are structural errors and we can retry, trigger retry
@@ -313,8 +317,8 @@ def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
 def create_policy_builder_graph(
     config: PolicyBuilderConfig,
     realm_roles: list,
-    client_roles_map: dict,
-    client_names: list
+    service_roles_map: dict,
+    service_names: list
 ):
     """
     Create and compile the policy builder graph.
@@ -325,8 +329,8 @@ def create_policy_builder_graph(
     Args:
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm roles
-        client_roles_map: Dict mapping client names to roles
-        client_names: List of client names
+        service_roles_map: Dict mapping service names to roles
+        service_names: List of service names
 
     Returns:
         Compiled LangGraph workflow
@@ -336,7 +340,7 @@ def create_policy_builder_graph(
     def parse_and_extract_node(state: PolicyState) -> PolicyState:
         """Parse natural language and extract role mappings."""
         return _parse_and_extract_scopes(
-            state, config.llm, realm_roles, client_roles_map, config.verbose
+            state, config.llm, realm_roles, service_roles_map, config.verbose
         )
     
     def build_policy_node(state: PolicyState) -> PolicyState:
@@ -350,8 +354,8 @@ def create_policy_builder_graph(
     def validate_policy_node(state: PolicyState) -> PolicyState:
         """Validate structure and semantics."""
         return _validate_policy(
-            state, config.llm, realm_roles, client_names,
-            client_roles_map, config.verbose, config.max_retries
+            state, config.llm, realm_roles, service_names,
+            service_roles_map, config.verbose, config.max_retries
         )
     
     def should_retry_node(state: PolicyState) -> str:
@@ -408,8 +412,8 @@ class PolicyBuilder:
     Attributes:
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm role names
-        client_roles_map: Dict mapping client names to their available roles
-        client_names: List of client names
+        service_roles_map: Dict mapping service names to their available roles
+        service_names: List of service names
         graph: Compiled LangGraph state machine
     """
     
@@ -444,7 +448,7 @@ class PolicyBuilder:
             llm_instance = llm
         
         if config_path is not None:
-            os.environ["AC_CONFIG_PATH"] = str(config_path)
+            os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
 
         # Create configuration object
         self.config = PolicyBuilderConfig(
@@ -453,20 +457,28 @@ class PolicyBuilder:
             max_retries=max_retries
         )
 
-        realm_roles_models = api_from_config.get_realm_roles(realm=realm)
+        roles_models = get_roles(realm=realm)
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
-            for r in realm_roles_models
+            for r in roles_models
         ]
-        self.client_roles_map = api_from_config.get_client_roles_map(realm=realm)
-        self.client_names = api_from_config.get_client_names(realm=realm)
+        services = get_services(realm=realm)
+        self.service_roles_map = {}
+        self.service_names = []
+        for service in services:
+            permissions = get_service_permissions(service.id, realm=realm)
+            self.service_roles_map[service.clientId] = [
+                {"name": permission.name, "description": permission.description or ""}
+                for permission in permissions
+            ]
+            self.service_names.append(service.clientId)
 
         # Build and compile the LangGraph state machine
         self.graph = create_policy_builder_graph(
             self.config,
             self.realm_roles,
-            self.client_roles_map,
-            self.client_names
+            self.service_roles_map,
+            self.service_names
         )
     
     # ========================================================================
@@ -502,7 +514,7 @@ class PolicyBuilder:
             Dictionary containing:
                 - yaml_output (str): Complete YAML policy file content
                 - policy_structure (dict): Structured policy data
-                - parsed_scopes (list): Raw role-to-client-role mappings from LLM
+                - parsed_scopes (list): Raw role-to-service-role mappings from LLM
                 - errors (list): Validation errors (empty if successful)
                 - success (bool): True if generation succeeded without errors
                 - retry_count (int): Number of validation retries that occurred
@@ -564,3 +576,4 @@ if __name__ == "__main__":
     sys.exit(1)
 
 # Made with Bob
+

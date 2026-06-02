@@ -106,8 +106,8 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
         differences.append(f"Unexpected extra realm role: '{role}'")
 
     for role in expected_roles & generated_roles:
-        gen_set = {(m["client"], m["role"]) for m in generated[role]}
-        exp_set = {(m["client"], m["role"]) for m in expected[role]}
+        gen_set = {(m["service"], m["role"]) for m in generated[role]}
+        exp_set = {(m["service"], m["role"]) for m in expected[role]}
 
         for mapping in exp_set - gen_set:
             differences.append(f"Role '{role}' missing mapping: {mapping}")
@@ -213,8 +213,8 @@ def test_policy_builder_can_generate_yaml_from_structure(config_file):
         "policy_structure": {
             "policy": {
                 "developer": [
-                    {"client": "kagenti", "role": "demo-ui"},
-                    {"client": "github-tool", "role": "github-full-access"}
+                    {"service": "kagenti", "role": "demo-ui"},
+                    {"service": "github-tool", "role": "github-full-access"}
                 ]
             }
         },
@@ -252,8 +252,8 @@ def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
     [
         {
             "role": "unknown-role",
-            "client_roles": [
-                {"client": "kagenti", "role": "demo-ui"}
+            "service_roles": [
+                {"service": "kagenti", "role": "demo-ui"}
             ]
         }
     ]
@@ -282,13 +282,13 @@ def test_policy_builder_initialization(config_file, mock_llm):
     realm_role_names = [role['name'] for role in builder.realm_roles]
     assert realm_role_names == ["developer", "tech-support", "sales"]
 
-    # Verify clients were loaded
-    assert "kagenti" in builder.client_roles_map
-    assert "github-tool" in builder.client_roles_map
-    assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.client_roles_map
+    # Verify services were loaded
+    assert "kagenti" in builder.service_roles_map
+    assert "github-tool" in builder.service_roles_map
+    assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.service_roles_map
 
-    # Verify client roles are dicts with 'name' and 'description'
-    kagenti_roles = builder.client_roles_map["kagenti"]
+    # Verify service roles are dicts with 'name' and 'description'
+    kagenti_roles = builder.service_roles_map["kagenti"]
     assert len(kagenti_roles) > 0
     assert all(isinstance(role, dict) and 'name' in role for role in kagenti_roles)
 

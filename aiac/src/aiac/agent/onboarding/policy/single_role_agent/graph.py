@@ -4,10 +4,10 @@ Single Role Mapper - Main Module
 
 This module provides the SingleRoleMapper class that uses LangGraph workflows
 to determine which real roles (realm roles) should have access to a specific
-client role based on semantic analysis of role descriptions and policy context.
+service role based on semantic analysis of role descriptions and policy context.
 
 Key Features:
-    - Semantic matching of client role to real roles
+    - Semantic matching of service role to real roles
     - Policy description context for better decision making
     - Automatic validation and retry mechanism
     - LLM-powered analysis of role descriptions
@@ -151,9 +151,9 @@ def _analyze_role_mapping(
     verbose: bool
 ) -> SingleRoleState:
     """
-    Analyze which real roles should have access to the client role.
+    Analyze which real roles should have access to the service role.
 
-    This is the first node in the workflow. It sends the client role,
+    This is the first node in the workflow. It sends the service role,
     available real roles, policy context, and call chain structure to the LLM
     for semantic analysis.
 
@@ -168,14 +168,14 @@ def _analyze_role_mapping(
     # Build prompts
     system_prompt = build_single_role_system_prompt(
         state['realm_roles'],
-        state['client_role'],
+        state['service_role'],
         state.get('policy_description', ''),
-        state.get('client_name', ''),
+        state.get('service_name', ''),
     )
     
     user_prompt = (
-        f"Analyze which real roles should have access to the client role "
-        f"'{state['client_role']['name']}' from client '{state['client_name']}'."
+        f"Analyze which real roles should have access to the service role "
+        f"'{state['service_role']['name']}' from service '{state['service_name']}'."
     )
     
     # Add policy context to user prompt if available
@@ -199,7 +199,7 @@ def _analyze_role_mapping(
     if not parsed_data:
         retry_prompt = build_single_role_retry_prompt(
             state['realm_roles'],
-            state['client_role']
+            state['service_role']
         )
         
         retry_messages = [
@@ -337,7 +337,7 @@ def _verify_semantic_mapping(
     Semantically verify the role mapping using LLM.
 
     Asks the LLM whether the assigned realm roles correctly reflect the access
-    requirements for this client role given the policy description. On failure
+    requirements for this service role given the policy description. On failure
     the retry counter is incremented so the graph can loop back to
     analyze_role_mapping.
 
@@ -355,8 +355,8 @@ def _verify_semantic_mapping(
 
     verification_prompt = build_semantic_verification_prompt(
         policy_description=state.get("policy_description", ""),
-        client_name=state.get("client_name", ""),
-        client_role=state["client_role"],
+        service_name=state.get("service_name", ""),
+        service_role=state["service_role"],
         realm_roles=state["realm_roles"],
         real_roles_with_access=real_roles_with_access,
     )
@@ -374,7 +374,7 @@ def _verify_semantic_mapping(
         if verbose:
             status = 'YES' if mapping_correct else 'NO'
             print(
-                f"\nSemantic verification [{state['client_name']}/{state['client_role']['name']}]:"
+                f"\nSemantic verification [{state['service_name']}/{state['service_role']['name']}]:"
                 f" MAPPING_CORRECT={status}"
             )
             if not mapping_correct:
@@ -382,7 +382,7 @@ def _verify_semantic_mapping(
 
         if not mapping_correct:
             error_msg = (
-                f"Semantic mismatch for {state['client_name']}/{state['client_role']['name']}:"
+                f"Semantic mismatch for {state['service_name']}/{state['service_role']['name']}:"
                 f" {explanation}"
             )
             if retry_count < max_retries:
@@ -529,10 +529,10 @@ def create_single_role_mapper_graph(config: SingleRoleMapperConfig):
 
 class SingleRoleMapper:
     """
-    AI-powered mapper for determining which real roles should have access to a client role.
-    
+    AI-powered mapper for determining which real roles should have access to a service role.
+
     This class uses LangGraph to orchestrate a workflow that:
-    1. Analyzes a client role, available real roles, and policy context
+    1. Analyzes a service role, available real roles, and policy context
     2. Uses LLM to semantically match roles based on descriptions
     3. Validates the results
     4. Retries if validation fails
@@ -586,24 +586,24 @@ class SingleRoleMapper:
     def map_role(
         self,
         policy_description: str,
-        client_name: str,
-        client_role: Dict[str, str],
+        service_name: str,
+        service_role: Dict[str, str],
         realm_roles: List[Dict[str, str]],
     ) -> Dict[str, Any]:
         """
-        Determine which real roles should have access to a client role.
+        Determine which real roles should have access to a service role.
 
         Args:
             policy_description: Natural language policy description for context
-            client_name: Name of the client that owns the role
-            client_role: Dict with 'name' and 'description' of the client role
+            service_name: Name of the service that owns the role
+            service_role: Dict with 'name' and 'description' of the service role
             realm_roles: List of dicts with 'name' and 'description' for realm roles
 
         Returns:
             Dictionary containing:
                 - policy_description (str): The policy context used
-                - client_name (str): Name of the client
-                - client_role (str): Name of the client role analyzed
+                - service_name (str): Name of the service
+                - service_role (str): Name of the service role analyzed
                 - real_roles_with_access (list): List of realm role names that should have access
                 - explanation (str): LLM's explanation of the mapping
                 - errors (list): Validation errors (empty if successful)
@@ -613,8 +613,8 @@ class SingleRoleMapper:
         # Initialize the workflow state
         initial_state: SingleRoleState = {
             "policy_description": policy_description,
-            "client_name": client_name,
-            "client_role": client_role,
+            "service_name": service_name,
+            "service_role": service_role,
             "realm_roles": realm_roles,
             "explanation": "",
             "real_roles_with_access": [],
@@ -630,8 +630,8 @@ class SingleRoleMapper:
         # Extract and return results
         return {
             "policy_description": policy_description,
-            "client_name": client_name,
-            "client_role": client_role['name'],
+            "service_name": service_name,
+            "service_role": service_role['name'],
             "real_roles_with_access": final_state["real_roles_with_access"],
             "explanation": final_state["explanation"],
             "errors": final_state["errors"],

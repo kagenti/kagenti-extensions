@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
 """
-State Definitions for Client Policy Agent
+State Definitions for Service Policy Agent
 
 TypedDict state structure for the LangGraph workflow that generates a
-partial access control policy scoped to a single Keycloak client.
+partial access control policy scoped to a single Keycloak service.
 """
 
 from typing import TypedDict, Annotated, List, Dict, Any
 from operator import add
 
 
-class ClientPolicyState(TypedDict):
+class ServicePolicyState(TypedDict):
     """
-    State for the client-scoped policy building workflow.
+    State for the service-scoped policy building workflow.
 
     Attributes:
         description: Natural language policy description
-        client_id: Keycloak client ID to scope the policy to
+        service_id: Keycloak service ID to scope the policy to
         explanation: LLM explanation of the role mappings
-        parsed_scopes: List of {role, client_roles} mappings (realm-role to client-roles)
+        parsed_scopes: List of {role, service_roles} mappings (realm-role to service-roles)
         policy_structure: Structured policy dict ready for YAML conversion
         yaml_output: Final YAML-formatted policy string
         messages: Accumulated LLM messages
@@ -27,7 +27,7 @@ class ClientPolicyState(TypedDict):
         validation_passed: Whether the last validation pass succeeded
     """
     description: str
-    client_id: str
+    service_id: str
     explanation: str
     parsed_scopes: List[Dict[str, Any]]
     policy_structure: Dict[str, Any]

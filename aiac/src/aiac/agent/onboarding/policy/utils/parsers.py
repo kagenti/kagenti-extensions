@@ -37,7 +37,7 @@ def extract_explanation_and_json(content: str) -> Tuple[str, List]:
         ... Mapping admins to all roles
         ... ```
         ... ```json
-        ... [{"role": "admin", "client_roles": [...]}]
+        ... [{"role": "admin", "service_roles": [...]}]
         ... ```'''
         >>> explanation, data = extract_explanation_and_json(content)
     """

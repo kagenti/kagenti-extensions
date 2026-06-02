@@ -5,8 +5,8 @@ AI-powered access control policy builder using LangGraph workflows and LLMs.
 Converts natural language policy descriptions into structured YAML policies for Keycloak.
 
 Main Components:
-    - PolicyBuilder: Full policy generation for all clients in a realm
-    - ClientPolicyBuilder: Client-scoped policy generation
+    - PolicyBuilder: Full policy generation for all services in a realm
+    - ServicePolicyBuilder: Service-scoped policy generation
     - SingleRoleMapper: Individual role mapping with semantic analysis
 
 Quick Start:
@@ -23,7 +23,7 @@ For detailed documentation, see README.md in this directory.
 """
 
 from full_policy_agent.graph import PolicyBuilder
-from client_policy_agent.graph import ClientPolicyBuilder
+from service_policy_agent.graph import ServicePolicyBuilder
 from single_role_agent.graph import SingleRoleMapper
 
 __version__ = "1.0.0"
@@ -32,7 +32,7 @@ __license__ = "MIT"
 
 __all__ = [
     "PolicyBuilder",
-    "ClientPolicyBuilder",
+    "ServicePolicyBuilder",
     "SingleRoleMapper",
 ]
 

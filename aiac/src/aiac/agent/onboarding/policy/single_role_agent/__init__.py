@@ -2,7 +2,7 @@
 """
 Single Role Agent Package
 
-This package provides functionality for mapping individual client roles
+This package provides functionality for mapping individual service roles
 to real roles (realm roles) that should have access to them.
 """
 

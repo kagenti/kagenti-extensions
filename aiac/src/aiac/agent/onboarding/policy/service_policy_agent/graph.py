@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Client Policy Agent
+Service Policy Agent
 
 Generates a partial access control policy that contains only the rules
-relevant for a single specified Keycloak client.  Inputs are a natural
-language policy description and a client ID; output is a YAML policy
-with realm-role → client-role mappings scoped to that client.
+relevant for a single specified Keycloak service.  Inputs are a natural
+language policy description and a service ID; output is a YAML policy
+with realm-role → service-role mappings scoped to that service.
 
 Workflow:
     1. filter_and_extract  — run SingleRoleMapper for every role of the
-                             given client and aggregate the results.
+                             given service and aggregate the results.
     2. build_policy        — assemble the {policy: {realm_role: [...]}} dict.
     3. generate_yaml       — render YAML with header comments.
     4. validate_policy     — structural validation with retry.
@@ -26,17 +26,21 @@ from langgraph.graph import StateGraph, END
 from langchain_core.language_models import BaseChatModel
 
 from config import create_llm
-from client_policy_agent.state import ClientPolicyState
+from service_policy_agent.state import ServicePolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.keycloak.library import api_from_config
+from aiac.pdp.library.read_api_from_config import (
+    get_roles,
+    get_services,
+    get_service_permissions,
+)
 from single_role_agent import SingleRoleMapper
 from utils.validators import validate_policy_structure
 
 
 @dataclass
-class ClientPolicyBuilderConfig:
+class ServicePolicyBuilderConfig:
     """
-    Configuration for the ClientPolicyBuilder agent.
+    Configuration for the ServicePolicyBuilder agent.
 
     Attributes:
         llm: LangChain LLM instance
@@ -53,51 +57,51 @@ class ClientPolicyBuilderConfig:
 # ============================================================================
 
 def _filter_and_extract_scopes(
-    state: ClientPolicyState,
+    state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    client_roles: list,
+    service_roles: list,
     verbose: bool,
-) -> ClientPolicyState:
+) -> ServicePolicyState:
     """
-    Run SingleRoleMapper for every role of the target client and invert the
-    results into the {role to client_roles} structure used by _build_policy.
+    Run SingleRoleMapper for every role of the target service and invert the
+    results into the {role to service_roles} structure used by _build_policy.
 
     Args:
-        state: Current ClientPolicyState (needs 'description' and 'client_id')
+        state: Current ServicePolicyState (needs 'description' and 'service_id')
         llm: LLM instance
         realm_roles: All available realm roles [{'name': str, 'description': str}]
-        client_roles: Roles belonging to the target client [{'name': str, 'description': str}]
+        service_roles: Roles belonging to the target service [{'name': str, 'description': str}]
         verbose: Whether to print detailed output
 
     Returns:
-        Updated ClientPolicyState with parsed_scopes and explanation
+        Updated ServicePolicyState with parsed_scopes and explanation
     """
-    client_id = state["client_id"]
+    service_id = state["service_id"]
     mapper = SingleRoleMapper(llm=llm, verbose=verbose)
 
     explanations: list[str] = []
-    realm_role_to_client_roles: dict = {}
+    realm_role_to_service_roles: dict = {}
 
-    for client_role in client_roles:
+    for service_role in service_roles:
         result = mapper.map_role(
             policy_description=state["description"],
-            client_name=client_id,
-            client_role=client_role,
+            service_name=service_id,
+            service_role=service_role,
             realm_roles=realm_roles,
         )
 
         if result.get("explanation"):
-            explanations.append(f"{client_id}/{client_role['name']}: {result['explanation']}")
+            explanations.append(f"{service_id}/{service_role['name']}: {result['explanation']}")
 
         for realm_role_name in result.get("real_roles_with_access", []):
-            realm_role_to_client_roles.setdefault(realm_role_name, []).append(
-                {"client": client_id, "role": client_role["name"]}
+            realm_role_to_service_roles.setdefault(realm_role_name, []).append(
+                {"service": service_id, "role": service_role["name"]}
             )
 
     parsed_scopes = [
-        {"role": realm_role, "client_roles": cr_list}
-        for realm_role, cr_list in realm_role_to_client_roles.items()
+        {"role": realm_role, "service_roles": cr_list}
+        for realm_role, cr_list in realm_role_to_service_roles.items()
     ]
 
     return {
@@ -111,32 +115,32 @@ def _filter_and_extract_scopes(
     }
 
 
-def _build_policy(state: ClientPolicyState) -> ClientPolicyState:
+def _build_policy(state: ServicePolicyState) -> ServicePolicyState:
     """
     Assemble the structured policy dict from parsed_scopes.
 
     Returns:
-        Updated ClientPolicyState with policy_structure
+        Updated ServicePolicyState with policy_structure
     """
     policy: dict = {}
     for entry in state["parsed_scopes"]:
-        policy[entry["role"]] = entry["client_roles"]
+        policy[entry["role"]] = entry["service_roles"]
 
     return {**state, "policy_structure": {"policy": policy}}
 
 
-def _generate_yaml(state: ClientPolicyState) -> ClientPolicyState:
+def _generate_yaml(state: ServicePolicyState) -> ServicePolicyState:
     """
     Render the policy structure as a YAML string with explanatory comments.
 
     Returns:
-        Updated ClientPolicyState with yaml_output
+        Updated ServicePolicyState with yaml_output
     """
-    client_id = state.get("client_id", "")
+    service_id = state.get("service_id", "")
     header = (
         "# Partial Access Control Policy\n"
-        f"# Scoped to client: {client_id}\n"
-        "# Maps realm roles to the client roles they may access.\n\n"
+        f"# Scoped to service: {service_id}\n"
+        "# Maps realm roles to the service roles they may access.\n\n"
     )
 
     if state.get("description"):
@@ -157,36 +161,36 @@ def _generate_yaml(state: ClientPolicyState) -> ClientPolicyState:
         sort_keys=False,
         allow_unicode=True,
     )
-    footer = "\n# Generated by ClientPolicyBuilder using LangGraph\n"
+    footer = "\n# Generated by ServicePolicyBuilder using LangGraph\n"
 
     return {**state, "yaml_output": header + yaml_content + footer}
 
 
 def _validate_policy(
-    state: ClientPolicyState,
+    state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    client_id: str,
-    client_roles: list,
+    service_id: str,
+    service_roles: list,
     verbose: bool,
     max_retries: int,
-) -> ClientPolicyState:
+) -> ServicePolicyState:
     """
     Structural validation of the generated policy.
 
     Returns:
-        Updated ClientPolicyState with errors and validation_passed
+        Updated ServicePolicyState with errors and validation_passed
     """
     retry_count = state.get("retry_count", 0)
     policy = state["policy_structure"].get("policy", {})
-    client_names = [client_id]
-    client_roles_map = {client_id: client_roles}
+    service_names = [service_id]
+    service_roles_map = {service_id: service_roles}
 
     structural_errors = validate_policy_structure(
-        policy, realm_roles, client_names, client_roles_map
+        policy, realm_roles, service_names, service_roles_map
     )
-    # An empty policy is valid for a client-scoped agent: the policy description
-    # may simply not grant any permissions to this client's services.
+    # An empty policy is valid for a service-scoped agent: the policy description
+    # may simply not grant any permissions to this service's roles.
     structural_errors = [e for e in structural_errors if e != "Policy is empty"]
 
     if structural_errors and retry_count < max_retries:
@@ -205,7 +209,7 @@ def _validate_policy(
     }
 
 
-def _should_retry(state: ClientPolicyState, max_retries: int) -> str:
+def _should_retry(state: ServicePolicyState, max_retries: int) -> str:
     """Conditional edge: retry parse or finish."""
     if not state.get("validation_passed", False) and state.get("retry_count", 0) < max_retries:
         errors = state.get("errors", [])
@@ -220,46 +224,46 @@ def _should_retry(state: ClientPolicyState, max_retries: int) -> str:
 # GRAPH CONSTRUCTION
 # ============================================================================
 
-def create_client_policy_builder_graph(
-    config: ClientPolicyBuilderConfig,
+def create_service_policy_builder_graph(
+    config: ServicePolicyBuilderConfig,
     realm_roles: list,
-    client_id: str,
-    client_roles: list,
+    service_id: str,
+    service_roles: list,
 ):
     """
-    Build and compile the client-scoped policy builder graph.
+    Build and compile the service-scoped policy builder graph.
 
     Args:
-        config: ClientPolicyBuilderConfig
+        config: ServicePolicyBuilderConfig
         realm_roles: All realm roles [{name, description}]
-        client_id: Target Keycloak client ID
-        client_roles: Roles of the target client [{name, description}]
+        service_id: Target Keycloak service ID
+        service_roles: Roles of the target service [{name, description}]
 
     Returns:
         Compiled LangGraph workflow
     """
 
-    def filter_and_extract_node(state: ClientPolicyState) -> ClientPolicyState:
+    def filter_and_extract_node(state: ServicePolicyState) -> ServicePolicyState:
         return _filter_and_extract_scopes(
-            state, config.llm, realm_roles, client_roles, config.verbose
+            state, config.llm, realm_roles, service_roles, config.verbose
         )
 
-    def build_policy_node(state: ClientPolicyState) -> ClientPolicyState:
+    def build_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _build_policy(state)
 
-    def generate_yaml_node(state: ClientPolicyState) -> ClientPolicyState:
+    def generate_yaml_node(state: ServicePolicyState) -> ServicePolicyState:
         return _generate_yaml(state)
 
-    def validate_policy_node(state: ClientPolicyState) -> ClientPolicyState:
+    def validate_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, client_id, client_roles,
+            state, config.llm, realm_roles, service_id, service_roles,
             config.verbose, config.max_retries
         )
 
-    def should_retry_node(state: ClientPolicyState) -> str:
+    def should_retry_node(state: ServicePolicyState) -> str:
         return _should_retry(state, config.max_retries)
 
-    workflow = StateGraph(ClientPolicyState)
+    workflow = StateGraph(ServicePolicyState)
     workflow.add_node("filter_and_extract", filter_and_extract_node)
     workflow.add_node("build_policy", build_policy_node)
     workflow.add_node("generate_yaml", generate_yaml_node)
@@ -282,16 +286,16 @@ def create_client_policy_builder_graph(
 # PUBLIC CLASS
 # ============================================================================
 
-class ClientPolicyBuilder:
+class ServicePolicyBuilder:
     """
-    AI-powered policy builder scoped to a single Keycloak client.
+    AI-powered policy builder scoped to a single Keycloak service.
 
-    Given a natural language policy description and a client ID, produces
+    Given a natural language policy description and a service ID, produces
     a YAML access control policy that contains only the realm-role →
-    client-role mappings relevant to that client.
+    service-role mappings relevant to that service.
 
     Workflow:
-        1. filter_and_extract  — map each role of the client to realm roles
+        1. filter_and_extract  — map each role of the service to realm roles
         2. build_policy        — assemble the structured policy dict
         3. generate_yaml       — render YAML with comments
         4. validate_policy     — structural validation with retry
@@ -299,7 +303,7 @@ class ClientPolicyBuilder:
 
     def __init__(
         self,
-        client_id: str,
+        service_id: str,
         realm: str = "",
         config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
@@ -308,7 +312,7 @@ class ClientPolicyBuilder:
     ):
         """
         Args:
-            client_id: Keycloak client ID to scope the policy to
+            service_id: Keycloak service ID to scope the policy to
             realm: Keycloak realm name (empty string uses the default realm)
             config_path: Path to the AC config YAML; falls back to AC_CONFIG_PATH env var
             llm: LangChain LLM instance; created automatically if not provided
@@ -322,29 +326,38 @@ class ClientPolicyBuilder:
             llm_instance = llm
 
         if config_path is not None:
-            os.environ["AC_CONFIG_PATH"] = str(config_path)
+            os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
 
-        self.client_id = client_id
-        self.config = ClientPolicyBuilderConfig(
+        self.service_id = service_id
+        self.config = ServicePolicyBuilderConfig(
             llm=llm_instance,
             verbose=verbose,
             max_retries=max_retries,
         )
 
-        realm_roles_models = api_from_config.get_realm_roles(realm=realm)
+        roles_models = get_roles(realm=realm)
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
-            for r in realm_roles_models
+            for r in roles_models
         ]
 
-        client_roles_map = api_from_config.get_client_roles_map(realm=realm)
-        self.client_roles = client_roles_map.get(client_id, [])
+        services = get_services(realm=realm)
+        self.service_roles = []
+        for service in services:
+            if service.clientId != service_id:
+                continue
+            permissions = get_service_permissions(service.id, realm=realm)
+            self.service_roles = [
+                {"name": permission.name, "description": permission.description or ""}
+                for permission in permissions
+            ]
+            break
 
-        self.graph = create_client_policy_builder_graph(
+        self.graph = create_service_policy_builder_graph(
             self.config,
             self.realm_roles,
-            self.client_id,
-            self.client_roles,
+            self.service_id,
+            self.service_roles,
         )
 
     def get_graph(self):
@@ -353,7 +366,7 @@ class ClientPolicyBuilder:
 
     def generate_policy(self, description: str) -> Dict[str, Any]:
         """
-        Generate a client-scoped access control policy from a natural language description.
+        Generate a service-scoped access control policy from a natural language description.
 
         Args:
             description: Natural language policy description
@@ -362,14 +375,14 @@ class ClientPolicyBuilder:
             dict with keys:
                 yaml_output (str)       — YAML policy file content
                 policy_structure (dict) — structured policy data
-                parsed_scopes (list)    — raw realm-role → client-role mappings
+                parsed_scopes (list)    — raw realm-role → service-role mappings
                 errors (list)           — validation errors (empty on success)
                 success (bool)          — True when no validation errors
                 retry_count (int)       — number of validation retries
         """
-        initial_state: ClientPolicyState = {
+        initial_state: ServicePolicyState = {
             "description": description,
-            "client_id": self.client_id,
+            "service_id": self.service_id,
             "explanation": "",
             "parsed_scopes": [],
             "policy_structure": {},
@@ -391,7 +404,7 @@ class ClientPolicyBuilder:
             "retry_count": final_state.get("retry_count", 0),
         }
 
-    def save_policy(self, yaml_output: str, filepath: str = "client_policy.yaml"):
+    def save_policy(self, yaml_output: str, filepath: str = "service_policy.yaml"):
         """
         Save the generated policy YAML to a file.
 
@@ -401,9 +414,9 @@ class ClientPolicyBuilder:
         """
         with open(filepath, "w") as f:
             f.write(yaml_output)
-        print(f"Client policy saved to {filepath}")
+        print(f"Service policy saved to {filepath}")
 
 
 if __name__ == "__main__":
-    print("Use ClientPolicyBuilder programmatically or via the CLI.")
+    print("Use ServicePolicyBuilder programmatically or via the CLI.")
     sys.exit(1)

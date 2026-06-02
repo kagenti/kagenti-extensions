@@ -5,14 +5,14 @@
 
 policy:
   developer:
-  - client: spiffe://localtest.me/ns/team1/sa/git-issue-agent
+  - service: spiffe://localtest.me/ns/team1/sa/git-issue-agent
     role: github-agent
-  - client: github-tool
+  - service: github-tool
     role: github-tool-aud
-  - client: github-tool
+  - service: github-tool
     role: github-full-access
   tech-support:
-  - client: spiffe://localtest.me/ns/team1/sa/git-issue-agent
+  - service: spiffe://localtest.me/ns/team1/sa/git-issue-agent
     role: github-agent
-  - client: github-tool
+  - service: github-tool
     role: github-tool-aud

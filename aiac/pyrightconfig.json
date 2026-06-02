@@ -1,8 +1,27 @@
 {
+  "include": [
+    "src"
+  ],
   "extraPaths": [
     "src",
     "src/aiac/agent/onboarding/policy"
   ],
   "pythonVersion": "3.12",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": "src",
+      "pythonVersion": "3.12",
+      "extraPaths": [
+        "src"
+      ]
+    },
+    {
+      "root": "src/aiac/agent/onboarding/policy",
+      "pythonVersion": "3.12",
+      "extraPaths": [
+        "src"
+      ]
+    }
+  ]
 }
