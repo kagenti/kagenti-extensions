@@ -8,7 +8,7 @@ metadata:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aiac-keycloak-config
+  name: aiac-pdp-configuration-keycloak-config
   namespace: aiac-system
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
@@ -35,19 +35,19 @@ stringData:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: aiac-keycloak-service
+  name: pdp-configuration-keycloak-pod
   namespace: aiac-system
   labels:
-    app: aiac-keycloak-service
+    app: pdp-configuration-keycloak-pod
 spec:
   containers:
-    - name: aiac-keycloak-service
-      image: localhost/aiac-keycloak-service:local
+    - name: aiac-pdp-configuration-keycloak-service
+      image: localhost/aiac-pdp-configuration-keycloak-service:local
       imagePullPolicy: Never
       ports:
         - containerPort: 7070
       envFrom:
         - configMapRef:
-            name: aiac-keycloak-config
+            name: aiac-pdp-configuration-keycloak-config
         - secretRef:
             name: keycloak-admin-secret

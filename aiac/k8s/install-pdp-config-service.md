@@ -6,7 +6,7 @@ consumed by the AIAC agent and library clients.
 
 **Port:** 7070  
 **Source:** `src/aiac/pdp/service/configuration/keycloak/`  
-**Manifest:** `k8s/keycloak-service-pod.yaml`
+**Manifest:** `k8s/pdp-configuration-keycloak-pod.yaml`
 
 ## Prerequisites
 
@@ -19,7 +19,7 @@ consumed by the AIAC agent and library clients.
 
 ```bash
 cd aiac/src/aiac/pdp/service/configuration/keycloak
-docker build -t localhost/aiac-keycloak-service:local .
+docker build -t localhost/aiac-pdp-configuration-keycloak-service:local .
 ```
 
 ## 2 — Load the image into the cluster
@@ -27,17 +27,17 @@ docker build -t localhost/aiac-keycloak-service:local .
 **Kind (local development)**
 
 ```bash
-kind load docker-image localhost/aiac-keycloak-service:local --name <cluster-name>
+kind load docker-image localhost/aiac-pdp-configuration-keycloak-service:local --name <cluster-name>
 ```
 
 **Remote registry**
 
 ```bash
-docker tag localhost/aiac-keycloak-service:local <registry>/aiac-keycloak-service:<tag>
-docker push <registry>/aiac-keycloak-service:<tag>
+docker tag localhost/aiac-pdp-configuration-keycloak-service:local <registry>/aiac-pdp-configuration-keycloak-service:<tag>
+docker push <registry>/aiac-pdp-configuration-keycloak-service:<tag>
 ```
 
-Update the `image:` field in `k8s/keycloak-service-pod.yaml` to match.
+Update the `image:` field in `k8s/pdp-configuration-keycloak-pod.yaml` to match.
 
 ## 3 — Create the admin secret
 
@@ -57,7 +57,7 @@ kubectl create secret generic keycloak-admin-secret \
 
 ## 4 — Configure the environment
 
-Edit the `aiac-keycloak-config` ConfigMap in `k8s/keycloak-service-pod.yaml` to match your
+Edit the `aiac-pdp-configuration-keycloak-config` ConfigMap in `k8s/pdp-configuration-keycloak-pod.yaml` to match your
 environment:
 
 | Key | Default | Description |
@@ -68,22 +68,22 @@ environment:
 ## 5 — Deploy
 
 ```bash
-kubectl apply -f aiac/k8s/keycloak-service-pod.yaml
+kubectl apply -f aiac/k8s/pdp-configuration-keycloak-pod.yaml
 ```
 
 Expected output:
 
 ```
 namespace/aiac-system created (or unchanged)
-configmap/aiac-keycloak-config created (or configured)
+configmap/aiac-pdp-configuration-keycloak-config created (or configured)
 secret/keycloak-admin-secret configured
-pod/aiac-keycloak-service created
+pod/pdp-configuration-keycloak-pod created
 ```
 
 Wait for the pod to be ready:
 
 ```bash
-kubectl wait pod/aiac-keycloak-service -n aiac-system \
+kubectl wait pod/pdp-configuration-keycloak-pod -n aiac-system \
   --for=condition=Ready --timeout=60s
 ```
 
@@ -92,7 +92,7 @@ kubectl wait pod/aiac-keycloak-service -n aiac-system \
 Port-forward and hit the health endpoint:
 
 ```bash
-kubectl port-forward pod/aiac-keycloak-service 7070:7070 -n aiac-system &
+kubectl port-forward pod/pdp-configuration-keycloak-pod 7070:7070 -n aiac-system &
 curl http://localhost:7070/health
 # {"status":"ok"}
 ```
@@ -109,14 +109,14 @@ python test/pdp/library/show_keycloak_data.py
 ```bash
 # 1. Rebuild
 cd aiac/src/aiac/pdp/service/configuration/keycloak
-docker build -t localhost/aiac-keycloak-service:local .
+docker build -t localhost/aiac-pdp-configuration-keycloak-service:local .
 
 # 2. Reload into Kind
-kind load docker-image localhost/aiac-keycloak-service:local --name <cluster-name>
+kind load docker-image localhost/aiac-pdp-configuration-keycloak-service:local --name <cluster-name>
 
 # 3. Bounce the pod
-kubectl delete pod aiac-keycloak-service -n aiac-system
-kubectl apply -f aiac/k8s/keycloak-service-pod.yaml
+kubectl delete pod pdp-configuration-keycloak-pod -n aiac-system
+kubectl apply -f aiac/k8s/pdp-configuration-keycloak-pod.yaml
 ```
 
 ## API reference
