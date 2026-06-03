@@ -196,11 +196,21 @@ func extractSendResponse(body []byte, ext *pipeline.A2AExtension) bool {
 		ext.TaskID = resp.Result.TaskID
 	}
 
-	// Extract artifact text
+	// Extract artifact text (prefer explicit artifacts; fall back to status message).
 	for _, artifact := range resp.Result.Artifacts {
 		for _, part := range artifact.Parts {
 			if part.Kind == "text" && part.Text != "" {
 				ext.Artifact = part.Text
+			}
+		}
+	}
+	// For input_required (normal completion) the agent reply lives in the
+	// status message, not in a separate artifact field.
+	if ext.Artifact == "" {
+		for _, part := range resp.Result.Status.Message.Parts {
+			if part.Kind == "text" && part.Text != "" {
+				ext.Artifact = part.Text
+				break
 			}
 		}
 	}

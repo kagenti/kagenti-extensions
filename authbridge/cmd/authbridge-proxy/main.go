@@ -240,6 +240,7 @@ func main() {
 	}
 	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
 	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
 
 	statsProvider := func() *auth.Stats {

@@ -23,6 +23,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -46,6 +47,13 @@ const pluginName = "lineage-telemetry"
 // (inbound pipeline). Both instances run in the same authbridge process
 // but are created separately by the plugin factory.
 var inboundSpans sync.Map // map[traceID string]trace.SpanContext
+
+// agentCurrentInbound maps selfID → SpanContext for the currently-active
+// inbound request on that agent. Used as a fallback when an outbound call
+// (e.g. from Google ADK) carries a stale trace ID that does not match any
+// entry in inboundSpans — the span is re-parented under the agent's current
+// inbound request regardless of the trace ID in the outbound headers.
+var agentCurrentInbound sync.Map // map[selfID string]trace.SpanContext
 
 func init() {
 	plugins.RegisterPlugin(pluginName, func() pipeline.Plugin { return NewLineageTelemetry() })
@@ -192,10 +200,23 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	// visually orphaned in Phoenix. All outbound spans become direct children
 	// of the inbound span, giving a flat one-level tree in Phoenix.
 	if pctx.Direction == pipeline.Outbound {
+		linked := false
 		remoteSpanCtx := trace.SpanContextFromContext(remoteCtx)
 		if remoteSpanCtx.IsValid() {
 			traceID := remoteSpanCtx.TraceID().String()
 			if val, ok := inboundSpans.Load(traceID); ok {
+				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
+				linked = true
+			}
+		}
+		// Fallback: re-parent under the agent's current inbound span.
+		// Handles two cases:
+		//  1. Python injects no traceparent (no HTTPXClientInstrumentor) so
+		//     remoteSpanCtx is invalid and the block above is skipped entirely.
+		//  2. The outbound call carries a stale/different trace ID (e.g. Google
+		//     ADK MCPToolset sessions that persist across requests).
+		if !linked && p.selfID != "" {
+			if val, ok := agentCurrentInbound.Load(p.selfID); ok {
 				remoteCtx = trace.ContextWithRemoteSpanContext(ctx, val.(trace.SpanContext))
 			}
 		}
@@ -257,8 +278,14 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 
 	// For inbound hops: register this span so outbound hops in the same trace
 	// can parent themselves directly under it, bypassing the filtered httpx spans.
+	// Also store by agent identity so outbound calls with mismatched trace IDs
+	// (e.g. from Google ADK MCPToolset sessions that carry a stale context) can
+	// still be re-parented under the current inbound request.
 	if info.Kind == HopPrincipalToAgent {
 		inboundSpans.Store(span.SpanContext().TraceID().String(), span.SpanContext())
+		if p.selfID != "" {
+			agentCurrentInbound.Store(p.selfID, span.SpanContext())
+		}
 	}
 
 	// Propagate the new span context into the forwarded request so that:
@@ -291,9 +318,20 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 		return
 	}
 
-	// Remove the inbound span entry so the map doesn't grow unboundedly.
+	// Defer inbound span removal: the SSE connection from the client may be
+	// cut by a proxy/ztunnel idle-timeout before the agent finishes processing.
+	// Deleting immediately would break parent links for outbound spans emitted
+	// after the client connection drops but while run_turn is still running.
+	// A 5-minute TTL is well beyond any realistic agent turn duration.
 	if state.info.Kind == HopPrincipalToAgent {
-		inboundSpans.Delete(state.span.SpanContext().TraceID().String())
+		traceID := state.span.SpanContext().TraceID().String()
+		selfID := p.selfID
+		time.AfterFunc(5*time.Minute, func() {
+			inboundSpans.Delete(traceID)
+			if selfID != "" {
+				agentCurrentInbound.Delete(selfID)
+			}
+		})
 	}
 
 	outcome := pctx.Outcome()
@@ -385,7 +423,8 @@ func hopSpanName(selfID string, info hopInfo, method string) string {
 	case HopAgentToLLM:
 		base = svc + ".llm"
 	case HopAgentToAgent:
-		base = svc + ".a2a"
+		// A2A method is always "message/stream" — omit the suffix.
+		return svc + ".a2a"
 	case HopAgentToService:
 		// Use protocol hint ("mcp", "http") for CHAIN hops so initialize
 		// and other MCP setup calls are distinguishable from plain HTTP.

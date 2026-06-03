@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
@@ -290,7 +291,38 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Clear RequestURI — set by the server but must be empty for client requests
 	r.RequestURI = ""
 
-	resp, err := s.Client.Do(r)
+	// Transparent proxy mode: when iptables redirects outbound traffic to this
+	// proxy, the request URL has no Host component (the client didn't know it was
+	// talking to a proxy). Reconstruct the full URL from the Host header so the
+	// proxy can forward the request to the correct upstream server.
+	// Also ensure Content-Length is explicit (not -1) so the upstream server
+	// receives a well-formed HTTP/1.1 request even when the original client used
+	// Transfer-Encoding: chunked or omitted Content-Length.
+	if r.URL.Host == "" && r.Host != "" {
+		r.URL.Host = r.Host
+		if r.URL.Scheme == "" {
+			r.URL.Scheme = "http"
+		}
+		if r.ContentLength < 0 && r.Body != nil {
+			// Body was already read into pctx.Body above; fix ContentLength.
+			r.ContentLength = int64(len(pctx.Body))
+		}
+	}
+
+	// SSE (text/event-stream) streams must not go through the timed http.Client
+	// because Client.Timeout applies to the entire request including body streaming,
+	// killing long-lived SSE connections after 30 s. Use Transport.RoundTrip directly
+	// so there is no deadline on the body stream.
+	isSSERequest := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+	var (
+		resp *http.Response
+		err  error
+	)
+	if isSSERequest {
+		resp, err = s.Client.Transport.RoundTrip(r)
+	} else {
+		resp, err = s.Client.Do(r)
+	}
 	if err != nil {
 		http.Error(w, `{"error":"bad gateway"}`, http.StatusBadGateway)
 		return
@@ -301,7 +333,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx.StatusCode = resp.StatusCode
 	pctx.ResponseHeaders = resp.Header.Clone()
 
-	if s.OutboundPipeline.NeedsBody() && resp.Body != nil {
+	// SSE responses must not be buffered: reading the full body blocks until the
+	// stream closes, preventing any events from reaching the client. Plugins
+	// receive an empty body instead (same convention as the reverseproxy fix).
+	isSSEResponse := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	if s.OutboundPipeline.NeedsBody() && resp.Body != nil && !isSSEResponse {
 		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 		if err != nil {
 			slog.Warn("forward-proxy: response body read error", "host", r.Host, "error", err)
@@ -317,48 +353,52 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	}
 
-	respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
-	if respAction.Type == pipeline.Reject {
-		httpx.WriteRejection(w, respAction)
-		return
+	// For non-SSE responses, run the response pipeline now (body already buffered).
+	// For SSE responses, defer until after streaming so the last event is captured
+	// into pctx.ResponseBody first, letting a2a-parser extract the output text.
+	runResponsePipeline := func() {
+		respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
+		if respAction.Type == pipeline.Reject {
+			// Too late to reject an already-started response; just log.
+			slog.Debug("forward-proxy: response pipeline rejected after headers sent", "host", r.Host)
+		}
+		if pctx.ResponseBodyMutated() {
+			// For non-SSE bodies the mutation can still rewrite Content-Length.
+			resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
+		}
+		if s.Sessions != nil {
+			sid := s.Sessions.ActiveSession()
+			if sid == "" {
+				sid = session.DefaultSessionID
+			}
+			plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+			ev := pipeline.SessionEvent{
+				At:          time.Now(),
+				Direction:   pipeline.Outbound,
+				Phase:       pipeline.SessionResponse,
+				MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
+				Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
+				Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
+				Plugins:     plugins,
+				Identity:    pipeline.SnapshotIdentity(pctx),
+				Host:        pctx.Host,
+				StatusCode:  resp.StatusCode,
+				Error:       pipeline.DeriveError(pctx),
+				Duration:    pipeline.DurationSince(pctx.StartedAt),
+			}
+			if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
+				s.Sessions.Append(sid, ev)
+			}
+		}
 	}
 
-	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
-	// Use the replaced bytes and rewrite Content-Length so the downstream
-	// client gets a consistent response. Content-Encoding is cleared
-	// because the framework can't know if the plugin also decompressed;
-	// safer to ship plain bytes than a broken archive.
-	if pctx.ResponseBodyMutated() {
-		resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
-		resp.ContentLength = int64(len(pctx.ResponseBody))
-		resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
-		resp.Header.Del("Content-Encoding")
-	}
-
-	if s.Sessions != nil {
-		sid := s.Sessions.ActiveSession()
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
-		plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
-		ev := pipeline.SessionEvent{
-			At:          time.Now(),
-			Direction:   pipeline.Outbound,
-			Phase:       pipeline.SessionResponse,
-			MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
-			Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
-			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-			Plugins:     plugins,
-			Identity:    pipeline.SnapshotIdentity(pctx),
-			Host:        pctx.Host,
-			StatusCode:  resp.StatusCode,
-			Error:       pipeline.DeriveError(pctx),
-			Duration:    pipeline.DurationSince(pctx.StartedAt),
-		}
-		// Same widened gate as the request side — see the request-phase
-		// comment for why each clause matters.
-		if ev.MCP != nil || ev.Inference != nil || ev.Invocations != nil || plugins != nil {
-			s.Sessions.Append(sid, ev)
+	if !isSSEResponse {
+		runResponsePipeline()
+		if pctx.ResponseBodyMutated() {
+			resp.Body = io.NopCloser(bytes.NewReader(pctx.ResponseBody))
+			resp.ContentLength = int64(len(pctx.ResponseBody))
+			resp.Header.Set("Content-Length", fmt.Sprintf("%d", len(pctx.ResponseBody)))
+			resp.Header.Del("Content-Encoding")
 		}
 	}
 
@@ -368,9 +408,52 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	if _, err := io.Copy(w, resp.Body); err != nil {
+	if isSSEResponse {
+		// Stream SSE to client, capture last event, then run response pipeline
+		// so a2a-parser sees the final artifact and output.value is populated.
+		lastEvent := captureLastSSEEvent(w, resp.Body)
+		if lastEvent != nil {
+			pctx.ResponseBody = lastEvent
+		}
+		runResponsePipeline()
+	} else if _, err := io.Copy(w, resp.Body); err != nil {
 		slog.Debug("response copy error", "host", r.Host, "error", err)
 	}
+}
+
+// captureLastSSEEvent streams resp.Body to dst while keeping a rolling
+// buffer of the most recent "data:" line. Returns the last data payload
+// (without the "data:" prefix) so callers can populate pctx.ResponseBody.
+func captureLastSSEEvent(dst io.Writer, src io.ReadCloser) []byte {
+	var last []byte
+	buf := make([]byte, 4096)
+	var pending []byte
+	for {
+		n, err := src.Read(buf)
+		if n > 0 {
+			dst.Write(buf[:n]) //nolint:errcheck
+			if f, ok := dst.(interface{ Flush() }); ok {
+				f.Flush()
+			}
+			pending = append(pending, buf[:n]...)
+			// Scan pending for complete "data: ..." lines.
+			for {
+				idx := bytes.IndexByte(pending, '\n')
+				if idx < 0 {
+					break
+				}
+				line := pending[:idx]
+				pending = pending[idx+1:]
+				if bytes.HasPrefix(line, []byte("data: ")) {
+					last = bytes.TrimPrefix(line, []byte("data: "))
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return last
 }
 
 // recordOutboundReject emits a SessionDenied event for outbound

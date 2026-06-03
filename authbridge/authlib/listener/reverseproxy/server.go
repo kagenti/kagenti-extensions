@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
@@ -27,6 +28,22 @@ import (
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
 
 type pctxKey struct{}
+
+// cancelImmuneTransport wraps an http.RoundTripper and replaces each request's
+// context with context.Background() before forwarding. This prevents client
+// disconnections from cancelling the outgoing backend connection — critical for
+// SSE streaming where the backend keeps sending events after the client drops.
+type cancelImmuneTransport struct {
+	wrapped http.RoundTripper
+}
+
+func (t *cancelImmuneTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Detach from the inbound request context so client disconnections don't
+	// cancel the backend connection. Preserve pctxKey so modifyResponse can
+	// still access the pipeline context for SSE capture and response plugins.
+	bgCtx := context.WithValue(context.Background(), pctxKey{}, req.Context().Value(pctxKey{}))
+	return t.wrapped.RoundTrip(req.WithContext(bgCtx))
+}
 
 // responseRejectedError carries a pipeline Reject from the roundTripper
 // back to the error handler, where it's rendered into the
@@ -90,6 +107,13 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 		return nil, err
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// Use a transport that strips the inbound request context before forwarding.
+	// Without this, when the client disconnects (e.g. ztunnel 30s lifetime cut),
+	// Go's HTTP transport cancels the outgoing backend connection, making the
+	// backend response body unreadable in drainAsync. With context.Background(),
+	// the backend connection stays alive and drainAsync can capture the final
+	// SSE event even after the client has gone.
+	proxy.Transport = &cancelImmuneTransport{wrapped: http.DefaultTransport}
 	s := &Server{
 		InboundPipeline: inbound,
 		Sessions:        sessions,
@@ -186,11 +210,31 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Finisher dispatch runs after every exit path from this handler —
-	// allowed requests, plugin denials, upstream errors. RunFinish is
-	// a no-op when pctx.dispatched is empty (e.g. body-too-large
-	// rejected before Run), so this defer is safe on the pre-pipeline
-	// error paths too.
+	// allowed requests, plugin denials, upstream errors, and even panics
+	// (e.g. http.ErrAbortHandler when the client disconnects mid-stream).
+	// SSE capture is applied here so it runs even when proxy.ServeHTTP
+	// panics (broken pipe) and the code after ServeHTTP is never reached.
 	defer func() {
+		if pctx != nil && pctx.Extensions.Custom != nil {
+			if cap, ok := pctx.Extensions.Custom["sse.capture"].(*sseFinalCapture); ok && cap != nil {
+				// If the final event wasn't captured during normal proxy flow
+				// (e.g. ztunnel cut the client connection before it arrived),
+				// drain the still-open backend body to find it.
+				if !cap.done {
+					drainDone := cap.drainAsync()
+					select {
+					case <-drainDone:
+					case <-time.After(15 * time.Second):
+					}
+				}
+				// Close the intercepted backend body now that we're done.
+				cap.src.RealClose() //nolint:errcheck
+				cap.applyToContext()
+				if len(pctx.ResponseBody) > 0 {
+					s.InboundPipeline.RunResponse(context.Background(), pctx) //nolint:errcheck
+				}
+			}
+		}
 		s.InboundPipeline.RunFinish(r.Context(), pctx, pipeline.OutcomeFromContext(pctx))
 	}()
 
@@ -269,6 +313,121 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.proxy.ServeHTTP(w, r)
 }
 
+// closeInterceptor wraps the backend response body so that proxy's
+// resp.Body.Close() call becomes a no-op. The actual close is deferred
+// until after drainAsync finishes reading the remaining backend data.
+type closeInterceptor struct {
+	rc        io.ReadCloser
+	proxDone  bool // set to true when the proxy calls Close()
+}
+
+func (ci *closeInterceptor) Read(p []byte) (int, error) { return ci.rc.Read(p) }
+func (ci *closeInterceptor) Close() error               { ci.proxDone = true; return nil }
+
+// RealClose closes the underlying reader.
+func (ci *closeInterceptor) RealClose() error { return ci.rc.Close() }
+
+// sseFinalCapture wraps the backend response body (agent → proxy).
+// As data flows from the agent, it scans for "data: " lines and captures
+// the last one. When it sees an event with "final":true or "input-required"
+// it stores the event and returns io.EOF on the next Read so that io.Copy
+// exits promptly — preventing the proxy from blocking forever on an open
+// SSE stream.
+type sseFinalCapture struct {
+	src       *closeInterceptor
+	pctx      *pipeline.Context
+	pending   []byte
+	lastEvent []byte
+	done      bool
+}
+
+func (c *sseFinalCapture) Read(p []byte) (int, error) {
+	if c.done {
+		return 0, io.EOF
+	}
+	n, err := c.src.Read(p)
+	if n > 0 {
+		c.pending = append(c.pending, p[:n]...)
+		for {
+			idx := bytes.IndexByte(c.pending, '\n')
+			if idx < 0 {
+				break
+			}
+			line := bytes.TrimSpace(c.pending[:idx])
+			c.pending = c.pending[idx+1:]
+			if bytes.HasPrefix(line, []byte("data: ")) {
+				data := bytes.TrimPrefix(line, []byte("data: "))
+				if len(data) > 0 {
+					c.lastEvent = data
+					// Signal EOF when we see a terminal event so io.Copy
+					// exits and proxy.ServeHTTP returns promptly.
+					if bytes.Contains(data, []byte(`"final":true`)) ||
+						bytes.Contains(data, []byte(`"input-required"`)) {
+						c.done = true
+					}
+				}
+			}
+		}
+	}
+	if c.done && err == nil {
+		// Deliver the data we just read, then return EOF on next call.
+		return n, nil
+	}
+	return n, err
+}
+
+func (c *sseFinalCapture) Close() error { return c.src.Close() }
+
+// drainAsync starts a goroutine that reads from the intercepted backend body
+// (which was not closed when the proxy exited) until it finds a terminal
+// "data:" line ("final":true or "input-required") or the backend closes.
+// Returns a channel that is closed when the goroutine exits.
+func (c *sseFinalCapture) drainAsync() <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := c.src.rc.Read(buf)
+			if n > 0 {
+				c.pending = append(c.pending, buf[:n]...)
+				for {
+					idx := bytes.IndexByte(c.pending, '\n')
+					if idx < 0 {
+						break
+					}
+					line := bytes.TrimSpace(c.pending[:idx])
+					c.pending = c.pending[idx+1:]
+					if bytes.HasPrefix(line, []byte("data: ")) {
+						data := bytes.TrimPrefix(line, []byte("data: "))
+						if len(data) > 0 {
+							c.lastEvent = data
+							if bytes.Contains(data, []byte(`"final":true`)) ||
+								bytes.Contains(data, []byte(`"input-required"`)) {
+								c.done = true
+								return
+							}
+						}
+					}
+				}
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	return done
+}
+
+func (c *sseFinalCapture) applyToContext() {
+	if c.pctx == nil || len(c.pctx.ResponseBody) > 0 {
+		return
+	}
+	if len(c.lastEvent) > 0 {
+		c.pctx.ResponseBody = c.lastEvent
+	}
+}
+
 func (s *Server) modifyResponse(resp *http.Response) error {
 	pctx, _ := resp.Request.Context().Value(pctxKey{}).(*pipeline.Context)
 	if pctx == nil {
@@ -278,7 +437,24 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	pctx.StatusCode = resp.StatusCode
 	pctx.ResponseHeaders = resp.Header.Clone()
 
-	if s.InboundPipeline.NeedsBody() && resp.Body != nil {
+	// SSE (text/event-stream) responses must not be buffered: reading the
+	// full body would block until the stream closes, preventing the client
+	// from receiving any events. Instead, wrap the backend body with
+	// sseFinalCapture which scans events as they flow, captures the last
+	// one, and signals EOF when it sees "final":true so proxy.ServeHTTP
+	// returns promptly and RunFinish can emit output.value.
+	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+	if isSSE && resp.Body != nil {
+		cap := &sseFinalCapture{src: &closeInterceptor{rc: resp.Body}, pctx: pctx}
+		resp.Body = cap
+		// Store the capture in pctx.Extensions.Custom so handleRequest
+		// can retrieve it after proxy.ServeHTTP returns.
+		if pctx.Extensions.Custom == nil {
+			pctx.Extensions.Custom = map[string]any{}
+		}
+		pctx.Extensions.Custom["sse.capture"] = cap
+	}
+	if s.InboundPipeline.NeedsBody() && resp.Body != nil && !isSSE {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 		if err != nil {
 			return err
