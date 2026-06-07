@@ -531,12 +531,30 @@ func ioInputValue(pctx *pipeline.Context) string {
 	return ""
 }
 
+// isA2AProtocolEvent returns true when s is a JSON object carrying an A2A
+// transport-level "kind" field (status-update, task-status-update, etc.)
+// rather than actual content. Used to avoid surfacing protocol metadata
+// as output.value when the a2a-parser captures a protocol event as the
+// artifact instead of the real agent response text.
+func isA2AProtocolEvent(s string) bool {
+	var obj map[string]json.RawMessage
+	if json.Unmarshal([]byte(s), &obj) != nil {
+		return false
+	}
+	var kind string
+	if raw, ok := obj["kind"]; ok {
+		_ = json.Unmarshal(raw, &kind)
+	}
+	return strings.Contains(kind, "status") || strings.Contains(kind, "artifact-update") ||
+		strings.Contains(kind, "Status") || kind == "working" || kind == "canceled"
+}
+
 // ioOutputValue returns the OpenInference output.value for a span: the parsed
 // response content for the hop's protocol, or "" if nothing is available.
 func ioOutputValue(pctx *pipeline.Context) string {
 	ext := pctx.Extensions
 	switch {
-	case ext.A2A != nil && ext.A2A.Artifact != "":
+	case ext.A2A != nil && ext.A2A.Artifact != "" && !isA2AProtocolEvent(ext.A2A.Artifact):
 		return ext.A2A.Artifact
 	case ext.A2A != nil && ext.A2A.ErrorMessage != "":
 		return ext.A2A.ErrorMessage

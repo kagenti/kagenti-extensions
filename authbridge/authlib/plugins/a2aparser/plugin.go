@@ -274,11 +274,19 @@ func extractStreamResponse(body []byte, ext *pipeline.A2AExtension) {
 		case "status-update":
 			if event.Result.Final {
 				ext.FinalStatus = event.Result.Status.State
-				// Extract error message on failure
 				if event.Result.Status.State == "failed" {
 					for _, part := range event.Result.Status.Message.Parts {
 						if part.Kind == "text" && part.Text != "" {
 							ext.ErrorMessage = part.Text
+							break
+						}
+					}
+				} else if ext.Artifact == "" {
+					// Fallback: some A2A SDKs embed the final reply in the
+					// completed status message rather than a separate artifact event.
+					for _, part := range event.Result.Status.Message.Parts {
+						if part.Kind == "text" && part.Text != "" {
+							ext.Artifact = part.Text
 							break
 						}
 					}
