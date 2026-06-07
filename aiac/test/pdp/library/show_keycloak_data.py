@@ -3,7 +3,7 @@
 Usage:
     python test/pdp/library/show_keycloak_data.py
 
-Requires the service to be reachable at AIAC_PDP_CONFIG_URL (default: http://localhost:7070).
+Requires the service to be reachable at AIAC_PDP_CONFIG_URL (default: http://localhost:7071).
 """
 
 import sys

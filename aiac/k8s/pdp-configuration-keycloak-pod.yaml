@@ -1,3 +1,11 @@
+# DEV / ISOLATED TESTING ONLY
+#
+# This manifest deploys the PDP Configuration Service as a standalone Pod for
+# isolated development and testing.  It does NOT reflect the production topology.
+#
+# In production both PDP services run as containers in a single PDP Interface Pod
+# defined in pdp-interface-deployment.yaml (issue 4.2).
+
 ---
 apiVersion: v1
 kind: Namespace
@@ -45,7 +53,7 @@ spec:
       image: localhost/aiac-pdp-configuration-keycloak-service:local
       imagePullPolicy: Never
       ports:
-        - containerPort: 7070
+        - containerPort: 7071
       envFrom:
         - configMapRef:
             name: aiac-pdp-configuration-keycloak-config

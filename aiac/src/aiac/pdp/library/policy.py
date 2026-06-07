@@ -10,7 +10,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 def _base_url() -> str:
-    return os.getenv("AIAC_PDP_POLICY_URL", "http://127.0.0.1:7073")
+    return os.getenv("AIAC_PDP_POLICY_URL", "http://127.0.0.1:7072")
 
 
 def _params(realm: str) -> dict[str, str]:

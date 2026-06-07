@@ -1,10 +1,17 @@
-# PDP Configuration Service — Installation
+# PDP Configuration Service — Standalone Dev Installation
+
+> **Dev / isolated testing only.**
+> This guide deploys the PDP Configuration Service as a standalone Pod.
+> It does not reflect the production topology.
+>
+> In production both PDP services run as containers in a single PDP Interface Pod
+> defined in `pdp-interface-deployment.yaml` (issue 4.2).
 
 The PDP Configuration Service is a read-only FastAPI proxy over the Keycloak Admin REST API.
 It exposes PDP-domain entity paths (`/subjects`, `/roles`, `/services`, `/scopes`, …) and is
 consumed by the AIAC agent and library clients.
 
-**Port:** 7070  
+**Port:** 7071  
 **Source:** `src/aiac/pdp/service/configuration/keycloak/`  
 **Manifest:** `k8s/pdp-configuration-keycloak-pod.yaml`
 
@@ -92,8 +99,8 @@ kubectl wait pod/pdp-configuration-keycloak-pod -n aiac-system \
 Port-forward and hit the health endpoint:
 
 ```bash
-kubectl port-forward pod/pdp-configuration-keycloak-pod 7070:7070 -n aiac-system &
-curl http://localhost:7070/health
+kubectl port-forward pod/pdp-configuration-keycloak-pod 7071:7071 -n aiac-system &
+curl http://localhost:7071/health
 # {"status":"ok"}
 ```
 

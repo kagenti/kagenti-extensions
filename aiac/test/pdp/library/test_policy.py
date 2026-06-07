@@ -7,7 +7,7 @@ from aiac.pdp.library.models import Permission, Scope
 from aiac.pdp.library import policy
 
 REALM = "kagenti"
-BASE = "http://127.0.0.1:7073"
+BASE = "http://127.0.0.1:7072"
 
 _WRITE_FUNCTIONS = [
     ("add_role_composites", ("admin", [], REALM), "post"),
@@ -136,4 +136,4 @@ def test_default_base_url_used_when_env_unset(monkeypatch):
     monkeypatch.delenv("AIAC_PDP_POLICY_URL", raising=False)
     with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
         policy.clear_all_composites(REALM)
-    assert m.call_args[0][0].startswith("http://127.0.0.1:7073")
+    assert m.call_args[0][0].startswith("http://127.0.0.1:7072")

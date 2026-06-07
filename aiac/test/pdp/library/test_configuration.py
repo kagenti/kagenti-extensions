@@ -7,7 +7,7 @@ from aiac.pdp.library.models import Subject, Role, Assignments, Service, Scope, 
 from aiac.pdp.library import configuration
 
 REALM = "kagenti"
-BASE = "http://127.0.0.1:7070"
+BASE = "http://127.0.0.1:7071"
 
 _ALL_FUNCTIONS = [
     ("get_subjects", (REALM,), "get"),
@@ -138,4 +138,4 @@ def test_default_base_url_used_when_env_unset(monkeypatch):
     payload = [{"id": "u1", "username": "alice", "enabled": True}]
     with patch("aiac.pdp.library.configuration.requests.get", return_value=_ok(payload)) as m:
         configuration.get_subjects(REALM)
-    assert m.call_args[0][0].startswith("http://127.0.0.1:7070")
+    assert m.call_args[0][0].startswith("http://127.0.0.1:7071")
