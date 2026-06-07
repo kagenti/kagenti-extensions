@@ -170,6 +170,17 @@ See the Technical Addendum for subject names and handler mapping.
 
 ---
 
+## Short-Term Objectives
+
+| # | Objective | Detail |
+|---|-----------|--------|
+| 1 | **Kagenti integration (UC-1 implementation)** | Plug AIAC into Kagenti and define its lifecycle |
+| 2 | **Improve AIAC decision reasoning** | Take into account richer context: User Role description, Agent card, Tool description, Policy digest |
+| 3 | **Rego / OPA integration (initially with Keycloak)** | OPA as the PDP; outcome: Rego access rules |
+| 4 | **GitHub demo reimplementation with Rego / OPA** | End-to-end demo using OPA as the Policy Decision Point |
+
+---
+
 ## Technical Addendum
 
 ### Key Interface Surface
