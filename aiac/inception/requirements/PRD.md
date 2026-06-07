@@ -106,9 +106,9 @@ Six components across six Kubernetes Pods plus a Python library layer, all imple
 │  Python library  (aiac/src/)                             │
 │                                                          │
 │  aiac.pdp.library.models   — Pydantic only               │
-│  aiac.pdp.library.configuration — HTTP client →               │
+│  aiac.pdp.library.configuration — HTTP client            │
 │                          PDP Configuration Service       │
-│  aiac.pdp.library.policy — HTTP client →              │
+│  aiac.pdp.library.policy — HTTP client →                 │
 │                          PDP Policy Service              │
 └──────────────────────────────────────────────────────────┘
 ```
