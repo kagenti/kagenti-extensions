@@ -175,7 +175,7 @@ Read from a `.env` file co-located with `configuration.py` (`aiac/src/aiac/pdp/l
 
 | Variable | Default |
 |----------|---------|
-| `AIAC_PDP_CONFIG_URL` | `http://127.0.0.1:7070` |
+| `AIAC_PDP_CONFIG_URL` | `http://127.0.0.1:7071` |
 
 ### Usage
 
@@ -239,7 +239,7 @@ def create_service_scope(service_id: str, scope_name: str, description: str, rea
 
 | Variable | Default |
 |----------|---------|
-| `AIAC_PDP_POLICY_URL` | `http://127.0.0.1:7073` |
+| `AIAC_PDP_POLICY_URL` | `http://127.0.0.1:7072` |
 
 ### Usage
 

@@ -16,7 +16,9 @@ ChromaDB
 The legal collection set is an open extension point governed by `AIAC_RAG_COLLECTIONS` on the RAG Ingest Service. Adding a new collection is a configuration-only change (new slug + ChromaDB name in the slug→name map) with no code modification required.
 
 ## Deployment
-Kubernetes Deployment in the RAG Pod, co-located with the RAG Ingest Service container. Exposed via the `aiac-rag-service` ClusterIP Service on port 7080.
+Kubernetes **StatefulSet** in the RAG Pod, co-located with the RAG Ingest Service container. Exposed via the `aiac-rag-service` ClusterIP Service on port 8000 (ChromaDB default). Manifest: `rag-statefulset.yaml`.
+
+ChromaDB runs with `IS_PERSISTENT=TRUE` and `PERSIST_DIRECTORY=/chroma/chroma`. Data is stored on a 1 Gi `ReadWriteOnce` PersistentVolumeClaim mounted at `/chroma/chroma`. On pod recreation the StatefulSet rebinds the same PVC; ChromaDB resumes from persisted state without re-ingestion. The RAG Pod runs as a single replica.
 
 ## Access patterns
 

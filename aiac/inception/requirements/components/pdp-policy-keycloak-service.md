@@ -6,7 +6,7 @@
 ## Description
 A FastAPI web service that applies RBAC policy changes to Keycloak by managing composite role mappings. Realm roles are made composites of service (client) permissions (roles), so that any subject (user) assigned a realm role automatically inherits the associated service permissions. Stateless — no caching.
 
-This is the **Phase 1** implementation of the PDP Policy Service. It is deployed as a Kubernetes Pod behind the `aiac-pdp-policy-service` ClusterIP — the same service name used by the Phase 2 OPA implementation. Swapping phases is a deployment replacement only; the service name and port remain stable so the AIAC Agent and library require no reconfiguration.
+This is the **Phase 1** implementation of the PDP Policy Service. It is deployed as a container in the **PDP Interface Pod** alongside the PDP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP. Phase 2 replaces only this container image (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`) within the same pod. The service name and port remain stable so the AIAC Agent and library require no reconfiguration.
 
 ## Endpoints
 
@@ -41,9 +41,10 @@ All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Ad
 
 - Framework: FastAPI
 - Server: uvicorn
-- Bind: `0.0.0.0:7073`
+- Bind: `0.0.0.0:7072`
 - Base image: `python:3.12-slim`
-- Kubernetes ClusterIP Service: `aiac-pdp-policy-service`
+- Kubernetes ClusterIP Service: `aiac-pdp-policy-service:7072`
+- Deployment: co-located with PDP Configuration Service as a container in the **PDP Interface Pod** (`pdp-interface-deployment.yaml`)
 
 ## Dependencies (`requirements.txt`)
 

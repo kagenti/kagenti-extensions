@@ -46,29 +46,21 @@ Six components across six Kubernetes Pods plus a Python library layer, all imple
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  PDP Configuration Pod                                   │
+│  PDP Interface Pod                                       │
 │                                                          │
-│  ┌────────────────────────┐                              │
-│  │  PDP Configuration     │  :7070  ClusterIP            │
-│  │  Service (FastAPI)     │  aiac-pdp-config-service     │
-│  └────────────────────────┘                              │
-│              ▲                                           │
-└──────────────┼───────────────────────────────────────────┘
-               │
-┌──────────────┼───────────────────────────────────────────┐
-│  PDP Policy Pod (Phase 1: Keycloak | Phase 2: OPA)       │
-│              │                                           │
-│  ┌────────────────────────┐                              │
-│  │  PDP Policy Service    │  :7073  ClusterIP            │
-│  │  (FastAPI)             │  aiac-pdp-policy-service     │
-│  └────────────────────────┘                              │
-│              ▲                                           │
-└──────────────┼───────────────────────────────────────────┘
-               │
-┌──────────────┼───────────────────────────────────────────┐
-│  Event Broker Pod                                        │
-│              │                                           │
-│  ┌────────────────────────┐                              │
+│  ┌────────────────────────┐  ┌────────────────────────┐  │
+│  │  PDP Configuration     │  │  PDP Policy Service    │  │
+│  │  Service (FastAPI)     │  │  (FastAPI)             │  │
+│  │  :7071  ClusterIP      │  │  :7072  ClusterIP      │  │
+│  │  aiac-pdp-config-svc   │  │  aiac-pdp-policy-svc   │  │
+│  └────────────────────────┘  └────────────────────────┘  │
+│              ▲                          ▲                │
+└──────────────┼──────────────────────────┼────────────────┘
+               │                          │
+┌──────────────┼──────────────────────────┼────────────────┐
+│  Event Broker Pod                       │                │
+│              │                          │                │
+│  ┌────────────────────────┐             │                │
 │  │  NATS JetStream        │  :4222  ClusterIP            │
 │  │                        │  aiac-event-broker-service   │
 │  │  stream: aiac-events   │                              │
@@ -89,7 +81,7 @@ Six components across six Kubernetes Pods plus a Python library layer, all imple
 │  │  creates: aiac-events JetStream stream             │  │
 │  └────────────────────────────────────────────────────┘  │
 │  ┌────────────────────────────────────────────────────┐  │
-│  │  AIAC Agent (FastAPI)  :7071  ClusterIP            │  │
+│  │  AIAC Agent (FastAPI)  :7070  ClusterIP            │  │
 │  │  LangGraph-based                                   │  │
 │  │  + NATS consumer (asyncio background task)         │  │
 │  │    consumer: aiac-agent-consumer queue group       │  │
@@ -98,15 +90,16 @@ Six components across six Kubernetes Pods plus a Python library layer, all imple
 └──────────────┼───────────────────────────────────────────┘
                │
 ┌──────────────┼───────────────────────────────────────────┐
-│  RAG Pod     │                                           │
+│  RAG Pod (StatefulSet)                                   │
 │              ▼                                           │
 │  ┌──────────────────────────┐  ┌──────────────────────┐  │
-│  │  ChromaDB  :7080         │  │  RAG Ingest Service  │  │
-│  │  collections:            │  │  (FastAPI) :7072     │  │
+│  │  ChromaDB  :8000         │  │  RAG Ingest Service  │  │
+│  │  collections:            │  │  (FastAPI) :7073     │  │
 │  │    aiac-policies         │  │                      │  │
 │  │    aiac-domain-knowledge │  │                      │  │
+│  │  PVC: 1Gi /chroma/chroma │  │                      │  │
 │  └──────────────────────────┘  └──────────────────────┘  │
-│  ClusterIP: aiac-rag-service (7080 + 7072)               │
+│  ClusterIP: aiac-rag-service (8000 + 7073)               │
 └──────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────┐
@@ -180,8 +173,8 @@ Role enforcement (event-driven):
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| PDP Configuration Service | `aiac.pdp.library.configuration` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
-| PDP Policy Service (Keycloak) | `aiac.pdp.library.policy` | Keycloak Admin REST API | 204/201 on success |
+| PDP Configuration Service (in PDP Interface Pod) | `aiac.pdp.library.configuration` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
+| PDP Policy Service (in PDP Interface Pod) | `aiac.pdp.library.policy` | Keycloak Admin REST API | 204/201 on success |
 | `aiac.pdp.library.models` | `aiac.pdp.library.configuration`, `aiac.pdp.library.policy`, AIAC Agent | — | Pydantic model definitions |
 | `aiac.pdp.library.configuration` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances |
 | `aiac.pdp.library.policy` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None |
@@ -192,10 +185,12 @@ Role enforcement (event-driven):
 
 ### Key architectural decisions
 
+- **PDP services are co-located in a single PDP Interface Pod.** PDP Configuration Service and PDP Policy Service run as two containers in one pod, sharing the same Keycloak credentials. Two separate ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) select the same pod. This eliminates the separate PDP Configuration and PDP Policy pods without changing the library's service URL interface.
+- **PDP Interface Pod phase transition is a container image swap.** Phase 2 replaces the PDP Policy container image (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`) within the same pod. The `aiac-pdp-policy-service` ClusterIP name and port `:7072` remain unchanged. No new pod or manifest is required — `pdp-policy-opa-deployment.yaml` does not exist.
 - **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
-- **PDP Policy Service ClusterIP name is stable across phases.** `aiac-pdp-policy-service` on `:7073` is used in both Phase 1 (Keycloak) and Phase 2 (OPA). Phase transition = deployment swap only.
 - **Phase 1 RBAC via composite roles.** AIAC manages realm role → service permission mappings at the role level, not per-user. Users inherit permissions automatically when assigned a realm role.
-- **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as `aiac-rag-service` on ports 7080 (ChromaDB) and 7072 (RAG Ingest Service).
+- **RAG Pod is a StatefulSet with persistent ChromaDB storage.** ChromaDB data is stored on a 1 Gi `ReadWriteOnce` PersistentVolumeClaim mounted at `/chroma/chroma` (ChromaDB default). On pod recreation, the StatefulSet rebinds the same PVC and ChromaDB resumes from persisted state without re-ingestion. The pod runs a single replica.
+- **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as `aiac-rag-service` on ports 8000 (ChromaDB default) and 7073 (RAG Ingest Service).
 - **AIAC Agent is stateless.** Changes are applied immediately on trigger — no pending session or human confirmation step.
 - **Event Broker decouples all automated triggers from the Agent.** The Keycloak SPI listener and RAG Ingest Service publish to NATS subjects; the Agent subscribes as a durable competing consumer. This removes all direct dependencies between trigger sources and the Agent.
 - **`rebuild` bypasses the Event Broker.** It is an operator-only command issued directly via HTTP (`kubectl port-forward`). It is never published to NATS and has no NATS listener.
@@ -212,7 +207,7 @@ Role enforcement (event-driven):
 
 ## 3. Component: PDP Configuration Service
 
-FastAPI service (`0.0.0.0:7070`) that proxies Keycloak Admin REST API read endpoints using generic PDP entity names. Exposes 7 read endpoints. Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter. Backed by Keycloak in both Phase 1 and Phase 2.
+FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Proxies Keycloak Admin REST API read endpoints using generic PDP entity names. Exposes 7 read endpoints. Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter. Backed by Keycloak in both Phase 1 and Phase 2.
 
 **Full spec:** [components/pdp-configuration-service.md](components/pdp-configuration-service.md)
 
@@ -220,10 +215,10 @@ FastAPI service (`0.0.0.0:7070`) that proxies Keycloak Admin REST API read endpo
 
 ## 4. Component: PDP Policy Service
 
-FastAPI service (`0.0.0.0:7073`) that applies policy changes to the active PDP backend. Two implementations share the same Kubernetes ClusterIP name (`aiac-pdp-policy-service`):
+FastAPI service (`0.0.0.0:7072`) co-located with the PDP Configuration Service in the **PDP Interface Pod**. Applies policy changes to the active PDP backend. Two container images share the same Kubernetes ClusterIP name (`aiac-pdp-policy-service:7072`):
 
-- **Phase 1 — Keycloak:** manages composite role mappings (realm role → service permissions) via Keycloak Admin API. 5 write endpoints.
-- **Phase 2 — OPA:** writes LLM-generated Rego rules to OPA. Interface TBD (separate PRD).
+- **Phase 1 — Keycloak** (`aiac-pdp-policy-keycloak`): manages composite role mappings (realm role → service permissions) via Keycloak Admin API. 5 write endpoints.
+- **Phase 2 — OPA** (`aiac-pdp-policy-opa`): writes LLM-generated Rego rules to OPA. Interface TBD (separate PRD). Phase transition = container image swap within the PDP Interface Pod; no manifest change required.
 
 **Phase 1 full spec:** [components/pdp-policy-keycloak-service.md](components/pdp-policy-keycloak-service.md)
 
@@ -251,7 +246,7 @@ NATS JetStream pod (`aiac-event-broker-service:4222`). Decouples event producers
 
 ## 7. Component: AIAC Agent
 
-FastAPI + LangGraph service (`0.0.0.0:7071`). Receives automated triggers via the **Event Broker** (NATS JetStream durable consumer, `aiac-agent-consumer` queue group) and the operator-only `rebuild` command directly via HTTP. Structured as a thin **Controller** (`controller/routes.py`) that dispatches `/apply/*` handlers to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents. A **NATS consumer** (asyncio background task in the FastAPI `lifespan` handler) is a thin adapter that receives NATS events and calls the same internal handler functions used by the HTTP endpoints:
+FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via the **Event Broker** (NATS JetStream durable consumer, `aiac-agent-consumer` queue group) and the operator-only `rebuild` command directly via HTTP. Structured as a thin **Controller** (`controller/routes.py`) that dispatches `/apply/*` handlers to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents. A **NATS consumer** (asyncio background task in the FastAPI `lifespan` handler) is a thin adapter that receives NATS events and calls the same internal handler functions used by the HTTP endpoints:
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
@@ -267,7 +262,7 @@ All sub-agent `StateGraph` instances are logically separated modules running wit
 
 ## 8. Component: RAG Knowledge Base
 
-ChromaDB vector store (`aiac-rag-service:7080`) hosting two collections: `aiac-policies` (access control policy rules) and `aiac-domain-knowledge` (org/business context such as team rosters, application ownership, and department mappings). Both collections are managed by the RAG Ingest Service and read by the AIAC Agent. Co-located with the RAG Ingest Service in the RAG Pod.
+ChromaDB vector store (`aiac-rag-service:8000`) hosting two collections: `aiac-policies` (access control policy rules) and `aiac-domain-knowledge` (org/business context such as team rosters, application ownership, and department mappings). Both collections are managed by the RAG Ingest Service and read by the AIAC Agent. Co-located with the RAG Ingest Service in the RAG Pod. ChromaDB data is persisted on a 1 Gi PVC mounted at `/chroma/chroma`; the RAG Pod is a StatefulSet.
 
 **Full spec:** [components/rag-knowledge-base.md](components/rag-knowledge-base.md)
 
@@ -275,7 +270,7 @@ ChromaDB vector store (`aiac-rag-service:7080`) hosting two collections: `aiac-p
 
 ## 9. Component: RAG Ingest Service
 
-FastAPI service (`0.0.0.0:7072`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
+FastAPI service (`0.0.0.0:7073`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
 
 **Full spec:** [components/rag-ingest-service.md](components/rag-ingest-service.md)
 
@@ -303,24 +298,22 @@ Six separate manifest files:
 
 | File | Contents |
 |------|----------|
-| `aiac/k8s/pdp-config-deployment.yaml` | `aiac-pdp-config` ConfigMap + PDP Configuration Service Pod Deployment + ClusterIP Service |
-| `aiac/k8s/pdp-policy-keycloak-deployment.yaml` | PDP Policy Service Pod Deployment (Keycloak implementation) + ClusterIP Service |
+| `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + PDP Interface Pod Deployment (PDP Configuration Service container + PDP Policy Service container) + two ClusterIP Services |
 | `aiac/k8s/event-broker-deployment.yaml` | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
-| `aiac/k8s/rag-deployment.yaml` | RAG Pod Deployment (ChromaDB + RAG Ingest Service containers) + ClusterIP Service |
+| `aiac/k8s/rag-statefulset.yaml` | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 | `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (aiac-init container + AIAC Agent container) + ClusterIP Service |
-| `aiac/k8s/pdp-policy-opa-deployment.yaml` | PDP Policy Service Pod Deployment (OPA implementation) — Phase 2, TBD |
 
-The PDP Configuration and PDP Policy (Keycloak) Pods mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars.
+Both containers in the PDP Interface Pod mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars.
 
 ### Docker images
 
 Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
-# Build PDP Configuration Service
+# Build PDP Configuration Service (deployed as a container in the PDP Interface Pod)
 docker build -f aiac/src/aiac/pdp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
-# Build PDP Policy Service (Keycloak)
+# Build PDP Policy Service — Keycloak implementation (Phase 1 container in the PDP Interface Pod)
 docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
 
 # Build Agent (includes aiac-init container)
@@ -332,6 +325,8 @@ docker build -t aiac-rag-ingest:latest aiac/rag-ingest/
 
 The Event Broker uses the official `nats` Docker image with JetStream enabled (`-js` flag). No custom build required.
 
+Phase 2 note: replacing the PDP Policy Service with an OPA implementation requires only building a new `aiac-pdp-policy-opa:latest` image and updating the Policy container image reference in `pdp-interface-deployment.yaml`. No other manifest changes are required.
+
 ### `aiac-pdp-config` ConfigMap template
 
 ```yaml
@@ -342,10 +337,11 @@ metadata:
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
   KEYCLOAK_REALM: "kagenti"
-  AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7070"
-  AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7073"
+  AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
+  AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   NATS_URL: "nats://aiac-event-broker-service:4222"
-  AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7072"
+  AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
+  AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
 ```
 
 Update `KEYCLOAK_URL` and `KEYCLOAK_REALM` for the target environment before applying.

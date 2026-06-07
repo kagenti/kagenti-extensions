@@ -96,12 +96,12 @@ The init container uses `python:3.12-slim` with `nats-py` and `httpx`. It is ver
 
 ### Init Container Configuration
 
-| Variable | Source |
-|---|---|
-| `NATS_URL` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_CONFIG_URL` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_POLICY_URL` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_RAG_INGEST_URL` | ConfigMap (`aiac-pdp-config`) |
+| Variable | Source | Resolves to |
+|---|---|---|
+| `NATS_URL` | ConfigMap (`aiac-pdp-config`) | `nats://aiac-event-broker-service:4222` |
+| `AIAC_PDP_CONFIG_URL` | ConfigMap (`aiac-pdp-config`) | `http://aiac-pdp-config-service:7071` |
+| `AIAC_PDP_POLICY_URL` | ConfigMap (`aiac-pdp-config`) | `http://aiac-pdp-policy-service:7072` |
+| `AIAC_RAG_INGEST_URL` | ConfigMap (`aiac-pdp-config`) | `http://aiac-rag-service:7073` |
 
 ### Init Container Dependencies (`requirements.txt`)
 

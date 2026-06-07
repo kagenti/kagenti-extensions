@@ -37,9 +37,10 @@ Environment variables (injected via Kubernetes Deployment manifest):
 
 - Framework: FastAPI
 - Server: uvicorn
-- Bind: `0.0.0.0:7070`
+- Bind: `0.0.0.0:7071`
 - Base image: `python:3.12-slim`
-- Kubernetes ClusterIP Service: `aiac-pdp-config-service`
+- Kubernetes ClusterIP Service: `aiac-pdp-config-service:7071`
+- Deployment: co-located with PDP Policy Service as a container in the **PDP Interface Pod** (`pdp-interface-deployment.yaml`)
 
 ## Dependencies (`requirements.txt`)
 

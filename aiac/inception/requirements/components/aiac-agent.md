@@ -567,9 +567,9 @@ flowchart TD
 | Variable | Default | Source |
 |---|---|---|
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7070` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7073` | ConfigMap (`aiac-pdp-config`) |
-| `CHROMA_URL` | `http://aiac-rag-service:7080` | ConfigMap |
+| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) |
+| `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | ConfigMap (`aiac-pdp-config`) |
 | `KEYCLOAK_REALM` | — | ConfigMap (`aiac-pdp-config`) |
 | `LLM_BASE_URL` | — | ConfigMap |
 | `LLM_MODEL` | — | ConfigMap |
@@ -600,7 +600,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 ## Runtime
 
 - Framework: FastAPI with uvicorn
-- Bind: `0.0.0.0:7071`
+- Bind: `0.0.0.0:7070`
 - State: stateless — changes applied immediately, no pending session required
 - Base image: `python:3.12-slim`
 

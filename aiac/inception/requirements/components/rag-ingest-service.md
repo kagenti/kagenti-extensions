@@ -61,7 +61,7 @@ The AIAC Agent's durable consumer receives the event and acknowledges it after s
 
 | Variable | Default | Source |
 |----------|---------|--------|
-| `CHROMA_URL` | `http://localhost:7080` | ConfigMap |
+| `CHROMA_URL` | `http://localhost:8000` | ConfigMap |
 | `AIAC_RAG_COLLECTIONS` | `policy,domain-knowledge` | ConfigMap |
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
 | `EMBEDDING_BASE_URL` | — | ConfigMap |
@@ -73,7 +73,7 @@ Adding a third collection is a configuration-only change: add a new slug to `AIA
 ## Runtime
 
 - Framework: FastAPI with uvicorn
-- Bind: `0.0.0.0:7072`
+- Bind: `0.0.0.0:7073`
 - Base image: `python:3.12-slim`
 
 ## Dependencies (`requirements.txt`)
