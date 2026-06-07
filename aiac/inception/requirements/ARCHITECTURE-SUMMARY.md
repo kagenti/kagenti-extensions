@@ -170,9 +170,11 @@ See the Technical Addendum for subject names and handler mapping.
 
 ---
 
-## Technical Addendum — Key Interface Surface
+## Technical Addendum
 
-### Event Broker subjects (NATS)
+### Key Interface Surface
+
+#### Event Broker subjects (NATS)
 
 | Subject | Trigger source | AIAC handler |
 |---|---|---|
@@ -184,7 +186,7 @@ See the Technical Addendum for subject names and handler mapping.
 The `rebuild` trigger is HTTP-only (`POST /apply/rebuild` on the Agent pod via
 `kubectl port-forward`); it is never published to NATS.
 
-### PDP Configuration Service — read endpoints
+#### PDP Configuration Service — read endpoints
 
 | Endpoint | Returns |
 |---|---|
@@ -198,7 +200,7 @@ The `rebuild` trigger is HTTP-only (`POST /apply/rebuild` on the Agent pod via
 
 Optional `?realm=` query parameter overrides the default realm on all endpoints.
 
-### PDP Policy Service — write endpoints (Phase 1 / Keycloak)
+#### PDP Policy Service — write endpoints (Phase 1 / Keycloak)
 
 | Endpoint | Operation |
 |---|---|
@@ -208,7 +210,7 @@ Optional `?realm=` query parameter overrides the default realm on all endpoints.
 | `DELETE /composite-roles` | Remove specific composite role mappings |
 | `DELETE /composite-roles/all` | Clear all composite mappings (used by `rebuild`) |
 
-### Python library modules
+#### Python library modules
 
 | Module | Purpose |
 |---|---|
@@ -216,7 +218,7 @@ Optional `?realm=` query parameter overrides the default realm on all endpoints.
 | `aiac.pdp.library.configuration` | HTTP client → PDP Configuration Service; returns typed instances |
 | `aiac.pdp.library.policy` | HTTP client → PDP Policy Service; stable interface across Phase 1/2 |
 
-### RAG Ingest Service — endpoint semantics
+#### RAG Ingest Service — endpoint semantics
 
 | Pattern | Semantics |
 |---|---|
@@ -225,3 +227,92 @@ Optional `?realm=` query parameter overrides the default realm on all endpoints.
 | `DELETE /ingest/{collection}/{doc_id}` | Explicit document removal |
 
 Collections: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
+
+### Call Flows
+
+#### UC-1a · Service On-boarding (`aiac.apply.service.{id}`)
+
+```
+ Keycloak SPI
+      │  CLIENT_CREATED
+      │ 1. publish aiac.apply.service.{id}
+      ▼
+ NATS JetStream
+      │  (durable consumer, at-least-once delivery)
+      │ 2. deliver event
+      ▼
+ AIAC Agent
+      │ 3. GET /services, /roles, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. GET /scopes, /permissions (target service) ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 5. semantic query (policy + domain knowledge) ──► ChromaDB
+      │ 6. [LLM] compute minimal permission diff for affected service
+      │ 7. [LLM] validate diff against retrieved policy (second pass)
+      │ 8. POST /permissions        (if new scope/permission required) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. POST /composite-roles    (add mappings from diff)           ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 10. DELETE /composite-roles (remove mappings from diff)        ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 11. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
+
+#### UC-1b · Realm Role On-boarding (`aiac.apply.realm-role.{id}`)
+
+```
+ Keycloak SPI
+      │  REALM_ROLE_CREATED / REALM_ROLE_UPDATED
+      │ 1. publish aiac.apply.realm-role.{id}
+      ▼
+ NATS JetStream
+      │ 2. deliver event
+      ▼
+ AIAC Agent
+      │ 3. GET /roles, /services, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. semantic query (policy + domain knowledge) ──► ChromaDB
+      │ 5. [LLM] compute minimal permission diff scoped to affected realm role
+      │ 6. [LLM] validate diff against retrieved policy (second pass)
+      │ 7. POST /composite-roles    (add mappings from diff)    ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 8. DELETE /composite-roles  (remove mappings from diff) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
+
+#### UC-2a · Incremental Policy Update (`aiac.apply.build`)
+
+```
+ Operator
+      │ 1. POST /ingest/policy/{text|file|url}
+      ▼
+ RAG Ingest Service
+      │ 2. upsert documents ──► ChromaDB
+      │ 3. publish aiac.apply.build
+      ▼
+ NATS JetStream
+      │ 4. deliver event
+      ▼
+ AIAC Agent
+      │ 5. GET /roles, /services, /assignments ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 6. retrieve full policy context        ──► ChromaDB
+      │ 7. [LLM] compute full composite role diff against current PDP state
+      │ 8. POST /composite-roles    (add delta mappings)    ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. DELETE /composite-roles  (remove delta mappings) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 10. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
+
+#### UC-2b · Full Rebuild (`POST /apply/rebuild`, operator-only)
+
+```
+ Operator
+      │ 1. POST /apply/rebuild  (kubectl port-forward → Agent pod)
+      ▼
+ AIAC Agent
+      │ 2. DELETE /composite-roles/all  (clear entire mapping table) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 3. GET /roles, /services        (read fresh entity state)    ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. retrieve full policy context                              ──► ChromaDB
+      │ 5. [LLM] compute complete composite role set from scratch
+      │ 6. POST /composite-roles  (write full mapping set)           ──► PDP Policy Service ──► Keycloak Admin REST
+      ▼
+ (synchronous HTTP response to operator)
+```
