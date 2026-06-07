@@ -40,7 +40,7 @@ Phase transition: before Phase 2 is activated, the agent clears all composite ma
 
 ## 2. Architecture Overview
 
-Six components across six Kubernetes Pods plus a Python library layer, all implemented in Python 3.12. External dependencies: Keycloak Admin API, an LLM API, and an embedding API. The Keycloak SPI listener is defined in a separate PRD.
+Six components across four Kubernetes Pods plus a Python library layer, all implemented in Python 3.12. External dependencies: Keycloak Admin API, an LLM API, and an embedding API. The Keycloak SPI listener is defined in a separate PRD.
 
 ### Deployment topology
 
@@ -294,7 +294,7 @@ A custom Keycloak Event Listener SPI (Java) that listens to Keycloak's internal 
 
 ### Kubernetes manifests
 
-Six separate manifest files:
+Four separate manifest files:
 
 | File | Contents |
 |------|----------|
