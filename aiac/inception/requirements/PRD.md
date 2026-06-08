@@ -72,7 +72,7 @@ Phase transition: before Phase 2 is activated, the agent clears all composite ma
 
 ## 4. Major Use-Cases
 
-### UC-1 · Continuous Access Reconciliation (Agent/Tool On-boarding / Off-boarding)
+### UC-1 · Continuous Access Reconciliation (On-boarding / Off-boarding)
 
 **Trigger:** A Realm Role or Keycloak Client is created, updated, or removed.
 

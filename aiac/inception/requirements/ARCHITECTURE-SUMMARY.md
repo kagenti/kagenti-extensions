@@ -49,7 +49,7 @@ PDP Policy Service. AuthBridge performs RFC 8693 token exchanges sending only th
 
 ## Major Use-Cases
 
-### UC-1 · Continuous Access Reconciliation (Agent/Tool On-boarding / Off-boarding)
+### UC-1 · Continuous Access Reconciliation (On-boarding / Off-boarding)
 
 **Trigger:** A Realm Role or Keycloak Client is created, updated, or removed.
 
@@ -119,7 +119,7 @@ Five components across four Kubernetes pods, plus a Python client library:
 │  └────────────────────────┘  └────────────────────────┘  │
 │              ▲                          ▲                │
 └──────────────┼──────────────────────────┼────────────────┘
-   (𝘨𝘦𝘵 𝘳𝘰𝘭𝘦𝘴, 𝘴𝘤𝘰𝘱𝘦𝘴, 𝘴𝘦𝘳𝘷𝘪𝘤𝘦𝘴)       (𝘴𝘦𝘵 𝘢𝘤𝘤𝘦𝘴𝘴 𝘳𝘶𝘭𝘦𝘴)
+               │                          │
 ┌──────────────┼──────────────────────────┼────────────────┐  ┌──────────────────────────────────┐
 │  Agent Pod   │    ┌─────────────────────┘                │  │  Event Broker Pod                │
 │              │    │                                      │  │                                  │
@@ -182,62 +182,6 @@ See the Technical Addendum for subject names and handler mapping.
 ---
 
 ## Technical Addendum
-
-### Key Interface Surface
-
-#### Event Broker subjects (NATS)
-
-| Subject | Trigger source | AIAC handler |
-|---|---|---|
-| `aiac.apply.service.{id}` | Keycloak SPI (`CLIENT_CREATED`) | Service Onboarding Orchestrator |
-| `aiac.apply.realm-role.{id}` | Keycloak SPI (role created/updated) | Realm Roles Orchestrator |
-| `aiac.apply.build` | RAG Ingest Service (post-ingest) | Policy Update Orchestrator |
-| `aiac.apply.dlq` | NATS (max redelivery exceeded) | Dead-letter — no handler |
-
-The `rebuild` trigger is HTTP-only (`POST /apply/rebuild` on the Agent pod via
-`kubectl port-forward`); it is never published to NATS.
-
-#### PDP Configuration Service — read endpoints
-
-| Endpoint | Returns |
-|---|---|
-| `GET /subjects` | All users mapped to PDP Subject model |
-| `GET /roles` | All realm roles |
-| `GET /services` | All clients (services) |
-| `GET /scopes` | All client scopes |
-| `GET /permissions` | All client roles (service permissions) |
-| `GET /assignments` | Current realm role → composite mappings |
-| `GET /subjects/{id}` | Single subject with role assignments |
-
-Optional `?realm=` query parameter overrides the default realm on all endpoints.
-
-#### PDP Policy Service — write endpoints (Phase 1 / Keycloak)
-
-| Endpoint | Operation |
-|---|---|
-| `POST /permissions` | Create a service permission (Keycloak client role) |
-| `POST /scopes` | Create a client scope and bind to a service |
-| `POST /composite-roles` | Add composite role mappings (realm role → permissions) |
-| `DELETE /composite-roles` | Remove specific composite role mappings |
-| `DELETE /composite-roles/all` | Clear all composite mappings (used by `rebuild`) |
-
-#### Python library modules
-
-| Module | Purpose |
-|---|---|
-| `aiac.pdp.library.models` | Pydantic models — no dependencies beyond `pydantic` |
-| `aiac.pdp.library.configuration` | HTTP client → PDP Configuration Service; returns typed instances |
-| `aiac.pdp.library.policy` | HTTP client → PDP Policy Service; stable interface across Phase 1/2 |
-
-#### RAG Ingest Service — endpoint semantics
-
-| Pattern | Semantics |
-|---|---|
-| `POST /ingest/{collection}/{text\|file\|url}` | Full collection replacement |
-| `POST /ingest/{collection}/update/{text\|file\|url}` | Document-level upsert |
-| `DELETE /ingest/{collection}/{doc_id}` | Explicit document removal |
-
-Collections: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
 
 ### Call Flows
 
