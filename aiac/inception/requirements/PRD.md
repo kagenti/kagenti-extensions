@@ -238,60 +238,93 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 └──────────────────────────────────────────────────────────┘
 ```
 
-### Call flow
+### Call Flows
+
+#### UC-1a · Service On-boarding (`aiac.apply.service.{id}`)
 
 ```
-Policy / domain knowledge ingestion (operator-driven):
+ Keycloak SPI
+      │  CLIENT_CREATED
+      │ 1. publish aiac.apply.service.{id}
+      ▼
+ NATS JetStream
+      │  (durable consumer, at-least-once delivery)
+      │ 2. deliver event
+      ▼
+ AIAC Agent
+      │ 3. GET /services, /roles, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. GET /scopes, /permissions (target service) ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 5. semantic query (policy + domain knowledge) ──► ChromaDB
+      │ 6. [LLM] compute minimal permission diff for affected service
+      │ 7. [LLM] validate diff against retrieved policy (second pass)
+      │ 8. POST /permissions        (if new scope/permission required) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. POST /composite-roles    (add mappings from diff)           ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 10. DELETE /composite-roles (remove mappings from diff)        ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 11. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
 
-  Developer ──(kubectl port-forward)──► RAG Ingest Service ──► ChromaDB aiac-policies          [policy rules]
-                                                           ├──► ChromaDB aiac-domain-knowledge  [org/business context]
-                                                           ├──► Embedding API (external)
-                                                           └──► Event Broker aiac.apply.build   [trigger policy recompute]
+#### UC-1b · Realm Role On-boarding (`aiac.apply.realm-role.{id}`)
 
-Role enforcement (event-driven):
+```
+ Keycloak SPI
+      │  REALM_ROLE_CREATED / REALM_ROLE_UPDATED
+      │ 1. publish aiac.apply.realm-role.{id}
+      ▼
+ NATS JetStream
+      │ 2. deliver event
+      ▼
+ AIAC Agent
+      │ 3. GET /roles, /services, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. semantic query (policy + domain knowledge) ──► ChromaDB
+      │ 5. [LLM] compute minimal permission diff scoped to affected realm role
+      │ 6. [LLM] validate diff against retrieved policy (second pass)
+      │ 7. POST /composite-roles    (add mappings from diff)    ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 8. DELETE /composite-roles  (remove mappings from diff) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
 
-  Policy build trigger (aiac.apply.build) → Policy Update Orchestrator:
+#### UC-2a · Incremental Policy Update (`aiac.apply.build`)
 
-  Event Broker ──► AIAC Agent (NATS consumer) ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
-                                                ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read state + composites]
-                                                ├──► LLM API (external)              [propose diff from policy + domain context + state]
-                                                ├──► LLM API (external)              [validate diff]
-                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite diff]
-                                                └──► NATS ack                        [message removed from stream]
+```
+ Operator
+      │ 1. POST /ingest/policy/{text|file|url}
+      ▼
+ RAG Ingest Service
+      │ 2. upsert documents ──► ChromaDB
+      │ 3. publish aiac.apply.build
+      ▼
+ NATS JetStream
+      │ 4. deliver event
+      ▼
+ AIAC Agent
+      │ 5. GET /roles, /services, /assignments ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 6. retrieve full policy context        ──► ChromaDB
+      │ 7. [LLM] compute full composite role diff against current PDP state
+      │ 8. POST /composite-roles    (add delta mappings)    ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 9. DELETE /composite-roles  (remove delta mappings) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 10. ACK message
+      ▼
+ NATS JetStream  (message removed from pending)
+```
 
-  Rebuild trigger (operator-only, HTTP direct):
+#### UC-2b · Full Rebuild (`POST /apply/rebuild`, operator-only)
 
-  Operator ──(kubectl port-forward)──► AIAC Agent /apply/rebuild ──┬── policy ──► PDP Policy Service  [clear all composite mappings]
-                                                                   ├──► ChromaDB aiac-policies
-                                                                   ├──► ChromaDB aiac-domain-knowledge
-                                                                   ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API
-                                                                   ├──► LLM API (external)
-                                                                   ├──► LLM API (external)
-                                                                   └──► policy ──► PDP Policy Service ──► Keycloak Admin API
-
-  Realm role trigger (aiac.apply.realm-role.{id}) → Realm Roles Orchestrator:
-
-  Event Broker ──► AIAC Agent (NATS consumer) ──┬──► ChromaDB aiac-policies         [retrieve policy chunks]
-                                                ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read scoped state]
-                                                ├──► LLM API (external)              [propose composite mappings scoped to affected role]
-                                                ├──► LLM API (external)              [validate mappings]
-                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
-                                                └──► NATS ack
-
-  Service onboarding trigger (aiac.apply.service.{id}) → Service Onboarding Orchestrator:
-
-  Event Broker ──► AIAC Agent (NATS consumer) ──┬──► Kubernetes API (in-cluster)    [retrieve AgentRuntime/AgentCard CR → ServiceInfo]
-                                                ├──► LLM API (external)              [analyze agent/tool → ServiceProvision]
-                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [provision permissions + scopes]
-                                                ├──► ChromaDB aiac-policies         [retrieve policy chunks]
-                                                ├──► ChromaDB aiac-domain-knowledge  [retrieve domain context chunks]
-                                                ├──► configuration ──► PDP Configuration Service ──► Keycloak Admin API  [read state]
-                                                ├──► LLM API (external)              [propose composite mappings for new service]
-                                                ├──► LLM API (external)              [validate mappings]
-                                                ├──► policy ──► PDP Policy Service ──► Keycloak Admin API  [apply composite mappings]
-                                                └──► NATS ack
+```
+ Operator
+      │ 1. POST /apply/rebuild  (kubectl port-forward → Agent pod)
+      ▼
+ AIAC Agent
+      │ 2. DELETE /composite-roles/all  (clear entire mapping table) ──► PDP Policy Service ──► Keycloak Admin REST
+      │ 3. GET /roles, /services        (read fresh entity state)    ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. retrieve full policy context                              ──► ChromaDB
+      │ 5. [LLM] compute complete composite role set from scratch
+      │ 6. POST /composite-roles  (write full mapping set)           ──► PDP Policy Service ──► Keycloak Admin REST
+      ▼
+ (synchronous HTTP response to operator)
 ```
 
 ### Component dependencies
