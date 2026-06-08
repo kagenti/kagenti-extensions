@@ -166,24 +166,10 @@ mappings. AuthBridge requires no changes.
 **AIAC ↔ Event Broker (NATS JetStream)**
 The Agent subscribes to the event stream as a durable consumer with at-least-once delivery.
 Unacknowledged messages survive pod restarts; failed messages are routed to a dead-letter subject.
-See the Technical Addendum for subject names and handler mapping.
 
 ---
 
-## Short-Term Objectives
-
-| # | Objective | Detail |
-|---|-----------|--------|
-| 1 | **Kagenti integration (UC-1 implementation)** | Plug AIAC into Kagenti and define its lifecycle |
-| 2 | **Improve AIAC decision reasoning** | Take into account richer context: User Role description, Agent card, Tool description, Policy digest |
-| 3 | **Rego / OPA integration (initially with Keycloak)** | OPA as the PDP; outcome: Rego access rules |
-| 4 | **GitHub demo reimplementation with Rego / OPA** | End-to-end demo using OPA as the Policy Decision Point |
-
----
-
-## Technical Addendum
-
-### Call Flows
+## Call Flows
 
 #### UC-1a · Service On-boarding (`aiac.apply.service.{id}`)
 
@@ -271,3 +257,14 @@ See the Technical Addendum for subject names and handler mapping.
       ▼
  (synchronous HTTP response to operator)
 ```
+
+---
+
+## Short-Term Objectives
+
+| # | Objective | Detail |
+|---|-----------|--------|
+| 1 | **Kagenti integration (UC-1 implementation)** | Plug AIAC into Kagenti and define its lifecycle |
+| 2 | **Improve AIAC decision reasoning** | Take into account richer context: User Role description, Agent card, Tool description, Policy digest |
+| 3 | **Rego / OPA integration (initially with Keycloak)** | OPA as the PDP; outcome: Rego access rules |
+| 4 | **GitHub demo reimplementation with Rego / OPA** | End-to-end demo using OPA as the Policy Decision Point |
