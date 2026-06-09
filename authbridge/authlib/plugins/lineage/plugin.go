@@ -227,9 +227,13 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	rawTarget := pctx.Host
 	targetID := shortHostname(rawTarget)
 
+	// Anonymous inbound: principal_to_agent with no identity. The span is still
+	// created (trace propagation must happen), but lineage.hop.kind is omitted so
+	// filter/lineage drops it — no "10 → agent" noise in Execution Flow.
+	anonymousInbound := info.Kind == HopPrincipalToAgent && pctx.Identity == nil && pctx.Agent == nil
+
 	spanKind, oiKind := hopSpanKinds(info)
 	spanAttrs := []attribute.KeyValue{
-		attribute.String("lineage.hop.kind", string(info.Kind)),
 		attribute.String("lineage.direction", pctx.Direction.String()),
 		attribute.String("lineage.protocol", info.Protocol),
 		attribute.String("lineage.source.id", sourceID),
@@ -241,7 +245,17 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		// an OTel transform fallback for authbridge-originated spans.
 		attribute.String("trust.source_id", sourceID),
 		attribute.String("trust.target_id", targetID),
-		attribute.String("trust.hop_kind", string(info.Kind)),
+	}
+	// lineage.hop.kind and trust.hop_kind are what the filter/lineage OTel
+	// processor uses to route spans to the lineage service. Omit them for
+	// anonymous inbound hops (no identity available) so those hops are
+	// silently dropped by filter/lineage and never appear in Execution Flow,
+	// while the span itself is still emitted and propagates trace context.
+	if !anonymousInbound {
+		spanAttrs = append(spanAttrs,
+			attribute.String("lineage.hop.kind", string(info.Kind)),
+			attribute.String("trust.hop_kind", string(info.Kind)),
+		)
 	}
 	if pctx.RemoteAddr != "" {
 		spanAttrs = append(spanAttrs, attribute.String("lineage.source.addr", pctx.RemoteAddr))
@@ -264,28 +278,17 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		}
 	}
 
-	// Skip principal_to_agent hops when there is no authenticated identity.
-	// Without auth (e.g. bypass_paths on demo clusters), the source can only
-	// be resolved to a pod IP, which creates confusing "10 → agent" hops.
-	// The corresponding outbound agent_to_agent hop already captures the
-	// relationship; the inbound duplicate adds no information.
-	// On auth-enabled clusters pctx.Identity is set from the JWT, so
-	// principal_to_agent hops are still created correctly.
-	//
-	// IMPORTANT: even when skipping the span we must still register the
-	// incoming trace context in inboundSpans / agentCurrentInbound.
-	// Outbound spans (tool calls, LLM calls) from this agent reparent
-	// themselves under the registered context so they stay in the same
-	// trace rather than starting orphaned child traces.
-	if info.Kind == HopPrincipalToAgent && pctx.Identity == nil && pctx.Agent == nil {
-		if inboundSC := trace.SpanContextFromContext(remoteCtx); inboundSC.IsValid() {
-			inboundSpans.Store(inboundSC.TraceID().String(), inboundSC)
-			if p.selfID != "" {
-				agentCurrentInbound.Store(p.selfID, inboundSC)
-			}
-		}
-		return pipeline.Action{Type: pipeline.Continue}
-	}
+	// For principal_to_agent hops with no authenticated identity (e.g. bypass_paths
+	// on demo clusters), we still create the span so that:
+	//   1. The authbridge injects a traceparent into the forwarded request headers,
+	//      keeping the Python agent's spans in the same trace as the callers.
+	//      Skipping the span entirely breaks this: Python starts a fresh trace.
+	//   2. inboundSpans / agentCurrentInbound are registered for outbound re-parenting.
+	// However, we suppress the hop from the lineage service by NOT setting
+	// lineage.hop.kind — the filter/lineage OTel processor drops spans with
+	// lineage.hop.kind == nil, so "10 → agent" noise never reaches Execution Flow.
+	// On auth-enabled clusters pctx.Identity is set, lineage.hop.kind is included,
+	// and the hop appears correctly in Execution Flow.
 
 	var method string
 	if pctx.Extensions.MCP != nil {
