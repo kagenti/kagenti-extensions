@@ -192,6 +192,11 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	remoteCtx := p.propagator.Extract(ctx, propagation.HeaderCarrier(pctx.Headers))
 
 	info := determineHop(pctx)
+	// IsPrincipal: reclassify outbound A2A hops so orchestrator agents
+	// (e.g. trip-demo) appear as chain initiators rather than peer agents.
+	if p.cfg.IsPrincipal && info.Kind == HopAgentToAgent && pctx.Direction == pipeline.Outbound {
+		info.Kind = HopPrincipalToAgent
+	}
 
 	// For outbound hops: re-parent directly under the inbound authbridge span
 	// (same trace_id) rather than under the Python httpx span. The OTel

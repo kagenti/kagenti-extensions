@@ -40,6 +40,11 @@ type Config struct {
 	// Default: ["otel-collector", "jaeger", "zipkin", "prometheus"]
 	BypassHosts []string `json:"bypass_hosts"`
 
+	// IsPrincipal when true classifies outbound A2A hops as principal_to_agent
+	// instead of agent_to_agent. Set this for demo-driver or orchestrator agents
+	// (e.g. trip-demo) that act as the chain initiator / human-user proxy.
+	IsPrincipal bool `json:"is_principal"`
+
 	// SelfID is the agent's own stable identifier, used as the caller ID on
 	// outbound spans where no identity is available from the JWT or SPIFFE
 	// context. Typically the Keycloak client ID of this workload.
