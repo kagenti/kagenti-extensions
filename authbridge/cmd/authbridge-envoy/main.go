@@ -39,6 +39,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 
 	// Only the ext_proc listener is compiled in (no ext_authz, no
@@ -52,6 +53,9 @@ import (
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/inferenceparser"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/mcpparser"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/opa"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/sparc"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
 )
 
@@ -99,12 +103,15 @@ func main() {
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured.
-	// envoy-sidecar mode currently doesn't terminate mTLS at this
-	// process — Envoy does TCP passthrough — so X509Source() is unused
+	// envoy-sidecar mode terminates mTLS in Envoy itself (via the
+	// file-based DownstreamTlsContext / UpstreamTlsContext referencing
+	// /opt/svid*.pem in the rendered envoy-config) — this binary
+	// doesn't see the TLS bytes directly, so X509Source() isn't read
 	// here. The Provider is still needed because token-exchange's
 	// spiffe identity path consumes a JWTSource via DI, and the file
-	// mirror keeps /opt/jwt_svid.token (and the X.509 SVID files)
-	// fresh on disk for Envoy and downstream consumers.
+	// mirror is what keeps /opt/svid.pem, /opt/svid_key.pem,
+	// /opt/svid_bundle.pem, and /opt/jwt_svid.token fresh on disk for
+	// Envoy and other consumers.
 	//
 	// We need cfg first to read the spiffe block, so do a one-shot
 	// Load before buildPipelines runs (buildPipelines re-Loads
@@ -148,6 +155,7 @@ func main() {
 		if err := config.Validate(c); err != nil {
 			return nil, nil, nil, err
 		}
+		config.WarnEmptyPipelines(c, slog.Default())
 		in, err := plugins.BuildWithSPIFFE(c.Pipeline.Inbound.Plugins, provider)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
@@ -207,8 +215,11 @@ func main() {
 		slog.Info("session tracking disabled")
 	}
 
+	store := shared.New()
+	defer store.Close() // stop the TTL janitor on normal main return
+
 	var grpcServers []*grpc.Server
-	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, cfg.Listener.ExtProcAddr))
+	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, store, cfg.Listener.ExtProcAddr))
 
 	statsProvider := func() *auth.Stats {
 		sources := plugins.CollectStats(inboundH.Load())
@@ -217,12 +228,18 @@ func main() {
 	}
 	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
 
+	// Warm the plugin catalog at boot so any factory that violates the
+	// constructor contract surfaces here rather than on the first
+	// /v1/plugins request.
+	plugins.WarmCatalog()
+
 	var sessionAPISrv *sessionapi.Server
 	if cfg.Listener.SessionAPIAddr != "" && sessions != nil {
 		sessionAPISrv = sessionapi.New(
 			cfg.Listener.SessionAPIAddr,
 			sessions,
 			sessionapi.WithPipelines(inboundH, outboundH),
+			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -285,12 +302,13 @@ func main() {
 	}
 }
 
-func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, addr string) *grpc.Server {
+func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, store pipeline.SharedStore, addr string) *grpc.Server {
 	srv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(srv, &extproc.Server{
 		InboundPipeline:  inbound,
 		OutboundPipeline: outbound,
 		Sessions:         sessions,
+		Shared:           store,
 	})
 	registerHealth(srv)
 	reflection.Register(srv)

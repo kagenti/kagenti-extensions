@@ -17,7 +17,7 @@
 # `-ldflags="-s -w"` drops the symbol table and DWARF debug info to
 # shave ~30% off the binary. Go's runtime keeps `pclntab` separately,
 # so panic stack traces still show function names.
-FROM golang:1.24-alpine@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191 AS builder
+FROM golang:1.25-alpine@sha256:a2ea69f8f07fe886989c61e9da297f932ddf50b42dad2f44d2664710c94dca37 AS builder
 
 RUN apk add --no-cache git
 

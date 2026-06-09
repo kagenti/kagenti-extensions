@@ -388,7 +388,7 @@ type bodyRecorderPlugin struct {
 
 func (p *bodyRecorderPlugin) Name() string { return "body-recorder" }
 func (p *bodyRecorderPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{BodyAccess: true}
+	return pipeline.PluginCapabilities{ReadsBody: true}
 }
 func (p *bodyRecorderPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	p.receivedBody = pctx.Body
@@ -1568,5 +1568,116 @@ func TestExtProc_PopulatesSchemeFromPseudoHeader(t *testing.T) {
 				t.Errorf("pctx.Scheme = %q, want %q", capturer.got, tc.want)
 			}
 		})
+	}
+}
+
+// streamingRecorderPlugin is a Plugin + StreamingResponder used to
+// verify the extproc listener dispatches the buffered response body
+// through OnResponseFrame. The pipeline.RunResponse skip introduced
+// for the proxy listeners would otherwise leave streaming-aware
+// plugins (mcp/inference/a2a parsers) with no response-phase
+// dispatch under envoy-sidecar — the regression this guards.
+type streamingRecorderPlugin struct {
+	frames          [][]byte
+	lasts           []bool
+	onResponseCalls int
+}
+
+func (p *streamingRecorderPlugin) Name() string { return "streaming-recorder" }
+func (p *streamingRecorderPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{ReadsBody: true}
+}
+func (p *streamingRecorderPlugin) OnRequest(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *streamingRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	p.onResponseCalls++
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *streamingRecorderPlugin) OnResponseFrame(_ context.Context, _ *pipeline.Context, frame []byte, last bool) pipeline.Action {
+	cp := make([]byte, len(frame))
+	copy(cp, frame)
+	p.frames = append(p.frames, cp)
+	p.lasts = append(p.lasts, last)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestExtProc_BufferedJSONResponse_DispatchesToStreamingResponder
+// asserts the framework's "pick one path" contract on extproc:
+// pipeline.RunResponse skips StreamingResponder plugins, so the
+// listener MUST deliver the buffered application/json body via
+// RunResponseFrame(last=true) — otherwise mcp/inference/a2a parsers
+// lose response observability under envoy-sidecar entirely.
+func TestExtProc_BufferedJSONResponse_DispatchesToStreamingResponder(t *testing.T) {
+	probe := &streamingRecorderPlugin{}
+	p, err := pipeline.New([]pipeline.Plugin{probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(p), OutboundPipeline: pipeline.NewHolder(p)}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		ResponseHeaders: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+	}
+	body := []byte(`{"jsonrpc":"2.0","id":1,"result":{"ok":true}}`)
+	resp := srv.handleResponseBody(context.Background(), body, pctx, "inbound")
+	if resp.GetImmediateResponse() != nil {
+		t.Fatalf("unexpected immediate response: %+v", resp.GetImmediateResponse())
+	}
+
+	if len(probe.frames) != 1 || !probe.lasts[0] {
+		t.Fatalf("frames=%d lasts=%v; want exactly one last=true frame", len(probe.frames), probe.lasts)
+	}
+	if string(probe.frames[0]) != string(body) {
+		t.Errorf("frame[0] = %q; want %q", probe.frames[0], body)
+	}
+	// OnResponse must NOT fire for a StreamingResponder plugin —
+	// pipeline.RunResponse skips it on purpose so the body isn't
+	// delivered through both hooks.
+	if probe.onResponseCalls != 0 {
+		t.Errorf("OnResponse called %d times; want 0", probe.onResponseCalls)
+	}
+}
+
+// TestExtProc_BufferedSSEResponse_DispatchesPerEvent verifies that
+// when Envoy buffers a text/event-stream body, the extproc listener
+// re-parses with sseframe and dispatches one OnResponseFrame call
+// per SSE event followed by a final last=true. Mirrors what the
+// proxy listeners do over their wire-streaming dispatch path so
+// streaming-aware plugins see the same shape regardless of mode.
+func TestExtProc_BufferedSSEResponse_DispatchesPerEvent(t *testing.T) {
+	probe := &streamingRecorderPlugin{}
+	p, err := pipeline.New([]pipeline.Plugin{probe})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{InboundPipeline: pipeline.NewHolder(p), OutboundPipeline: pipeline.NewHolder(p)}
+
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		ResponseHeaders: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+		},
+	}
+	body := []byte("data: {\"id\":1}\n\ndata: {\"id\":2}\n\ndata: {\"id\":3}\n\n")
+	resp := srv.handleResponseBody(context.Background(), body, pctx, "inbound")
+	if resp.GetImmediateResponse() != nil {
+		t.Fatalf("unexpected immediate response: %+v", resp.GetImmediateResponse())
+	}
+
+	// Three events as non-last + one final last=true call.
+	if len(probe.frames) != 4 {
+		t.Fatalf("got %d frames, want 4 (3 events + 1 last=true)", len(probe.frames))
+	}
+	for i := 0; i < 3; i++ {
+		if probe.lasts[i] {
+			t.Errorf("frame[%d] last=true, want false", i)
+		}
+	}
+	if !probe.lasts[3] {
+		t.Errorf("frame[3] last=false, want true (final)")
 	}
 }

@@ -84,6 +84,25 @@ and `expected_audience_host` (waypoint per-request derived audience, may
 be empty). Update saved queries and dashboards that filtered on the old
 key.
 
+### `jwt-validation`: `placeholder_mode` / `placeholder_ttl` (optional, off by default)
+
+Two fields enable the **mint** half of [credential placeholder
+swap](#credential-placeholder-swap) (read that section for the full
+model — these are the field-level reference).
+
+- **`placeholder_mode`** — bool, default `false`. After validating the
+  inbound token, replace it with an opaque `abph_`-prefixed placeholder
+  before forwarding to the agent. The real token is held in the
+  process-scoped shared store for the outbound path to resolve. Requires
+  `token-exchange` with `resolve_placeholders: true` on the outbound
+  chain to be coherent (see the matched-pair note below).
+- **`placeholder_ttl`** — Go duration string (e.g. `30m`, `1h`), default
+  `1h`. How long the real token is retained for outbound resolution.
+
+Mint requires `pctx.Shared` to be wired by the listener; if it is nil
+when `placeholder_mode` is on, the plugin fails fast at init (a deploy
+error) rather than silently forwarding the real token.
+
 ## `on_error` policy
 
 > **Naming caveat.** Despite the name, `on_error` controls how the
@@ -189,8 +208,8 @@ canaried; auth gates should stay on `enforce` (the default).
 
 ## Declaring plugin relationships
 
-`PluginCapabilities` carries four fields that let a plugin express how it
-relates to other plugins in the same chain. All four are checked at
+`PluginCapabilities` carries two fields that let a plugin express how it
+depends on other plugins in the same chain. Both are checked at
 `plugins.Build` time (startup and hot-reload), and misconfigurations
 fail loud before serving traffic.
 
@@ -198,24 +217,20 @@ fail loud before serving traffic.
 type PluginCapabilities struct {
     ReadsBody   bool
     WritesBody  bool
-    Reads       []string
-    Writes      []string
 
     Requires    []string   // ALL must be present + earlier (hard)
     RequiresAny []string   // AT LEAST ONE must be present + run after it (hard)
-    After       []string   // SOFT ordering; silent if absent
-    Claims      []string   // <=1 per claim per chain (mutex)
+
+    Description string
 }
 ```
 
-| Field | All present? | At least one? | Silent if absent? | Ordering enforced? |
-|---|---|---|---|---|
-| `Requires` | ✓ | — | — | ✓ |
-| `RequiresAny` | — | ✓ | — | ✓ |
-| `After` | — | — | ✓ | ✓ |
-| `Claims` | — | — | — | — (mutex) |
+| Field | All present? | At least one? | Ordering enforced? |
+|---|---|---|---|
+| `Requires` | ✓ | — | ✓ |
+| `RequiresAny` | — | ✓ | ✓ |
 
-All four are chain-scoped — validation runs within the inbound chain
+Both are chain-scoped — validation runs within the inbound chain
 OR within the outbound chain, independently. Plugin names are
 case-sensitive and must match the `Name()` returned by the plugin.
 
@@ -254,48 +269,6 @@ func (p *PIIScrubber) Capabilities() pipeline.PluginCapabilities {
     }
 }
 ```
-
-### `After` — soft ordering
-
-Use for optional ordering relationships: the plugin benefits from a
-named plugin running earlier when present, but runs fine without it.
-Absent named plugin is not an error.
-
-```go
-// Adds per-protocol labels to request counts if a parser is
-// present; falls back to generic labels otherwise.
-func (p *RequestCounter) Capabilities() pipeline.PluginCapabilities {
-    return pipeline.PluginCapabilities{
-        After: []string{"a2a-parser", "mcp-parser", "inference-parser"},
-    }
-}
-```
-
-### `Claims` — mutual exclusion
-
-A claim is a semantic resource that exactly one plugin per chain
-owns. Two plugins declaring the same claim fail startup.
-
-Claim strings are arbitrary, but the well-known set lives as Go
-constants in `authbridge/authlib/contracts/claims.go` — plugin
-authors reference the constants instead of string literals so
-typos are compile errors and the canonical set is greppable.
-
-```go
-import "github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
-
-// token-exchange and token-broker both declare this; they can't
-// coexist in the same outbound chain.
-func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
-    return pipeline.PluginCapabilities{
-        Claims: []string{contracts.ClaimAuthorizationHeader},
-    }
-}
-```
-
-Third-party plugins may declare arbitrary strings — the framework
-enforces uniqueness of whatever it sees, not "must be from the list."
-Upstream a new constant in a follow-up PR when a claim stabilizes.
 
 ### Error collection
 
@@ -725,11 +698,8 @@ before/after (never the raw body).
 
 ```go
 type PluginCapabilities struct {
-    Reads      []string // extension slot names this plugin reads
-    Writes     []string // extension slot names this plugin writes
-    ReadsBody  bool     // plugin reads pctx.Body / pctx.ResponseBody
-    WritesBody bool     // plugin may call pctx.SetBody / pctx.SetResponseBody
-    BodyAccess bool     // DEPRECATED alias for ReadsBody; folded by Normalize()
+    ReadsBody  bool  // plugin reads pctx.Body / pctx.ResponseBody
+    WritesBody bool  // plugin may call pctx.SetBody / pctx.SetResponseBody
 }
 ```
 
@@ -737,9 +707,6 @@ type PluginCapabilities struct {
 - `WritesBody`: implies `ReadsBody`. Listener propagates `pctx.SetBody`
   rewrites to the upstream (and `pctx.SetResponseBody` to the
   downstream client).
-- `BodyAccess`: deprecated. `PluginCapabilities.Normalize()` folds it
-  into `ReadsBody` for one release of migration grace; new plugins
-  should never set it.
 
 ### Build-time validation (enforced by `pipeline.New`)
 
@@ -957,6 +924,75 @@ Binary protocols, control-plane RPCs (MCP `initialize` / `ping`,
 tools/list), and identity-only auth messages have no inspectable text —
 simply don't implement the interface.
 
+## Classifying requests as actions vs protocol mechanics
+
+A second protocol-agnostic contract sits alongside `ContentSource`:
+parser plugins set `IsAction bool` on their extensions to tell guardrails
+"is this a user-meaningful action or just protocol mechanics?"
+Guardrails read the aggregated verdict via
+[`pctx.Classification()`](../authlib/pipeline/context.go) without
+importing any specific parser package.
+
+This is the mechanism that lets a defense-in-depth guardrail (IBAC, a
+rate limiter, an audit logger) handle multi-protocol traffic uniformly:
+each parser owns its own protocol's bypass-vs-action vocabulary; the
+guardrail asks one question and gets one answer.
+
+### The contract
+
+```go
+// On every protocol extension:
+type MCPExtension struct {
+    // ... existing fields ...
+    IsAction bool  // set true for user-meaningful action methods
+}
+```
+
+Default-false: zero-value (uninitialized) means "not classified as an
+action," which guardrails treat as bypass. Parsers explicitly set
+`IsAction = true` for the small set of methods that carry user intent
+on the wire. This matches IBAC's defense-in-depth posture: when in
+doubt, err toward letting traffic through, not toward judging it.
+
+### Classification per in-tree parser
+
+| Parser | `IsAction = true` for | Notes |
+|---|---|---|
+| `mcp-parser` | `tools/call`, `prompts/get`, `resources/read` | All other JSON-RPC methods (housekeeping, notifications, list ops, subscribe/unsubscribe) inherit default false. Synthetic transport extensions (`$transport/stream`, `$transport/terminate`) also stay at default false. |
+| `a2a-parser` | `message/send`, `message/stream` | Discovery / protocol setup methods inherit default false. |
+| `inference-parser` | every populated case | An LLM call is always an action on the wire; "don't judge inference by default" lives as IBAC operator policy, not in the classification. |
+
+### Consuming the classification in a guardrail
+
+```go
+func (p *RateLimiter) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+    isAction, isBypass := pctx.Classification()
+    if isBypass {
+        // Some parser said "this is protocol mechanics" — don't count it.
+        return pipeline.Action{Type: pipeline.Continue}
+    }
+    if !isAction {
+        // No parser claimed this request — defense in depth, pass through.
+        return pipeline.Action{Type: pipeline.Continue}
+    }
+    // Action — count it against the rate limit.
+    return p.limit(pctx)
+}
+```
+
+The shape matches IBAC's gate: skip on bypass, pass-through when
+unclassified, act on action.
+
+### When NOT to set IsAction=true
+
+Most parser methods are not actions. The bar for marking a method
+`IsAction = true` is "guardrails would correctly want to judge or
+rate-limit or audit this on a per-call basis." Discovery, capability
+listing, subscription management, notifications, transport
+housekeeping — none of those qualify. Adding a method to the action
+set is a security-relevant change because it pulls the method into
+every guardrail's evaluation surface; review accordingly.
+
 ## Registering a plugin
 
 A plugin advertises itself to the pipeline builder through `RegisterPlugin`
@@ -1046,6 +1082,82 @@ Plugins keep ownership of:
 - The mapping from LLM output to a pipeline `Action` (e.g. IBAC normalizes `verdict: "allow"|"deny"` and treats anything else as `ActionDeny` with reason `ibac.judge_uncertain`).
 
 The IBAC plugin (`authlib/plugins/ibac/judge.go`) is the in-tree reference; copy its shape when adding a new LLM-using plugin. For what IBAC actually does end-to-end (threat model, configuration, deny-reason vocabulary), see [`ibac-plugin.md`](ibac-plugin.md).
+
+## Credential placeholder swap
+
+An opt-in mode that keeps the **real** user token out of the agent. With
+it on, `jwt-validation` validates the inbound token and then replaces it
+with an opaque `abph_` placeholder before forwarding to the agent; the
+real token is held in a process-scoped shared store. On the way out,
+`token-exchange` resolves the placeholder back to the real token (on a
+matched route) before its normal RFC 8693 exchange. The agent thus holds
+only an opaque handle, never a usable credential.
+
+For the design rationale, data flow, and branch table, see
+[`docs/superpowers/specs/2026-06-02-credential-placeholder-swap-design.md`](./superpowers/specs/2026-06-02-credential-placeholder-swap-design.md).
+
+### The two flags are a matched pair
+
+| Flag | Plugin | Chain | Role |
+|---|---|---|---|
+| `placeholder_mode` | `jwt-validation` | inbound | **mint** — swap real token → `abph_` handle |
+| `resolve_placeholders` | `token-exchange` | outbound | **resolve** — swap `abph_` handle → real token, then exchange |
+
+Both must be on to be coherent:
+
+- **Mint on, resolve off** → the outbound side sees an `abph_` subject it
+  can't use and **fails closed (deny)**. Safe and visible, but broken.
+- **Resolve on, mint off** → no `abph_` tokens are ever produced, so
+  resolve is a **no-op**; normal exchange is unaffected.
+
+The pairing can't be expressed via `Requires` (that checks plugin
+*name*, not config *state*), so v1 relies on the fail-closed deny plus
+this documentation rather than build-time cross-validation.
+
+### `token-exchange`: `resolve_placeholders`
+
+Bool, default `false`. When the outbound bearer carries the `abph_`
+prefix, resolve it from the shared store to the real token before the
+normal exchange. An unresolvable placeholder (unknown or expired —
+e.g. after a sidecar restart) is **denied, fail-closed**; the opaque
+string is never sent to an upstream. A non-placeholder bearer skips
+resolve and runs the normal exchange (backward compatible). Resolve is
+gated by the same route match as the exchange — the handle is never
+resolved before a route is confirmed, so a leaked handle can't pull the
+real token into a header bound for an unmatched host.
+
+### Passthrough hosts receive the placeholder, not the real token
+
+With mint on, the agent never holds the real token, so any non-exchange
+(passthrough) egress forwards the opaque `abph_` handle as-is. It is
+useless off-box. Any host that needs a real credential MUST be
+configured as a `token-exchange` route — passthrough egress cannot
+produce one.
+
+### The store is in-memory and process-scoped
+
+The handle→token store lives in memory and is shared only within a
+single process. The mode therefore works only where inbound mint and
+outbound resolve run in the **same** process:
+
+- the reverse+forward proxy sidecar (`authbridge-proxy` /
+  `authbridge-lite`);
+- a **single-replica** extproc/extauthz (`authbridge-envoy`).
+
+Multi-replica (HA) or shared/scaled Istio ambient waypoint deployments
+can land mint and resolve on different processes, which the in-memory
+store cannot bridge. Those need an external store behind the same
+interface — a **current limitation**, tracked as a future enhancement.
+
+### Security
+
+- The handle is a random `abph_`-prefixed token (CSPRNG ≥256-bit),
+  meaningless outside the minting process's store.
+- The real token never reaches the agent and never persists to disk
+  (in-memory store only).
+- Neither the real token nor the handle is logged in cleartext —
+  records carry a hash or the prefix only (see the "NEVER put raw
+  tokens" rules under [Emitting session events](#emitting-session-events)).
 
 ## Cross-references
 

@@ -18,9 +18,6 @@ func TestA2AParser_Capabilities(t *testing.T) {
 	if !caps.ReadsBody {
 		t.Error("ReadsBody should be true")
 	}
-	if len(caps.Writes) != 1 || caps.Writes[0] != "a2a" {
-		t.Errorf("Writes = %v, want [a2a]", caps.Writes)
-	}
 }
 
 func TestA2AParser_MessageSend(t *testing.T) {
@@ -429,9 +426,13 @@ func TestA2AParser_OnResponse_NoRequestContext(t *testing.T) {
 	}
 }
 
+// TestA2AParser_OnResponse_EmptyBody locks the regression: when the
+// request side parsed (Extensions.A2A populated) but response body is
+// empty, the parser MUST record a Skip so abctl pairs the timeline rows.
 func TestA2AParser_OnResponse_EmptyBody(t *testing.T) {
 	p := NewA2AParser()
 	pctx := &pipeline.Context{
+		Direction:  pipeline.Inbound,
 		Extensions: pipeline.Extensions{A2A: &pipeline.A2AExtension{Method: "message/send"}},
 	}
 	action := p.OnResponse(context.Background(), pctx)
@@ -440,6 +441,13 @@ func TestA2AParser_OnResponse_EmptyBody(t *testing.T) {
 	}
 	if pctx.Extensions.A2A.SessionID != "" {
 		t.Errorf("SessionID should remain empty, got %q", pctx.Extensions.A2A.SessionID)
+	}
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("expected a Skip Invocation, got none")
+	}
+	invs := pctx.Extensions.Invocations.Inbound
+	if len(invs) != 1 || invs[0].Action != pipeline.ActionSkip || invs[0].Reason != "no_response_body" {
+		t.Fatalf("expected single Skip/no_response_body, got %+v", invs)
 	}
 }
 
@@ -533,5 +541,39 @@ func TestA2AParser_OnRequest_ContextIDPreferred(t *testing.T) {
 	}
 	if pctx.Extensions.A2A == nil || pctx.Extensions.A2A.SessionID != "ctx-resume" {
 		t.Errorf("SessionID from contextId: got %+v, want ctx-resume", pctx.Extensions.A2A)
+	}
+}
+
+// IsAction classification: message/send and message/stream are user-
+// meaningful action methods (judge them); everything else is protocol
+// mechanics (skip).
+func TestA2AParser_Classification(t *testing.T) {
+	cases := []struct {
+		method   string
+		body     string
+		isAction bool
+	}{
+		{"message/send", `{"jsonrpc":"2.0","method":"message/send","id":1,"params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}`, true},
+		{"message/stream", `{"jsonrpc":"2.0","method":"message/stream","id":2,"params":{"message":{"role":"user","parts":[{"kind":"text","text":"hi"}]}}}`, true},
+		// Hypothetical / future protocol-mechanics methods stay at the
+		// default false. We can't enumerate every A2A non-action method
+		// here (some don't exist yet) — the classification is "true for
+		// known actions, false for everything else" so the table only
+		// needs known-action coverage plus a representative non-action.
+		{"agent/discover", `{"jsonrpc":"2.0","method":"agent/discover","id":3}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.method, func(t *testing.T) {
+			p := NewA2AParser()
+			pctx := &pipeline.Context{Body: []byte(tc.body)}
+			_ = p.OnRequest(context.Background(), pctx)
+			if pctx.Extensions.A2A == nil {
+				t.Fatalf("A2A extension nil for method %q", tc.method)
+			}
+			if pctx.Extensions.A2A.IsAction != tc.isAction {
+				t.Errorf("IsAction = %v, want %v for method %q",
+					pctx.Extensions.A2A.IsAction, tc.isAction, tc.method)
+			}
+		})
 	}
 }

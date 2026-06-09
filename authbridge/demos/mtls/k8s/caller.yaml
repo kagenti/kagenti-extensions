@@ -36,6 +36,9 @@ spec:
         app.kubernetes.io/part-of: mtls-demo
         kagenti.io/inject: enabled
         kagenti.io/spire: enabled
+        # Required by the kagenti-operator's mutating-webhook
+        # objectSelector ({kagenti.io/type: [agent, tool]}).
+        kagenti.io/type: agent
     spec:
       serviceAccountName: mtls-caller
       securityContext:
@@ -44,7 +47,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: demo-app
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.11.1
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "while true; do sleep 30; done"]
           env:
@@ -55,6 +58,10 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            # curlimages/curl USERs as the non-numeric `curl_user`;
+            # an explicit numeric runAsUser is required for the
+            # kubelet's runAsNonRoot check to pass.
+            runAsUser: 100
             capabilities:
               drop: ["ALL"]
           resources:

@@ -219,6 +219,8 @@ Adding a named slot is an authlib-core change: edit `Extensions`, add a wire fie
 
 **Capability interfaces on the slot types.** Named-slot extensions may implement optional capability interfaces declared in [`authlib/contracts/`](../authlib/contracts/) so consumer plugins can interact with them without importing any specific parser package. The current capability is [`ContentSource`](../authlib/contracts/content.go) — implemented by `A2AExtension`, `MCPExtension`, and `InferenceExtension` — which lets guardrail plugins iterate inspectable text fragments via `pctx.ContentSources()`. Parser authors opt in by adding one method (`Fragments() []contracts.Fragment`); consumers see a uniform view across every protocol that implements the contract. See [`plugin-reference.md` "Exposing content to guardrails"](./plugin-reference.md#exposing-content-to-guardrails) for the pattern.
 
+**Classification on the slot types.** Each protocol extension also carries an `IsAction bool` field — the parser's verdict on whether the request is a user-meaningful action (judge it) or protocol mechanics (skip it). Parsers explicitly set `IsAction = true` for the small set of known action methods (`tools/call`, `prompts/get`, `resources/read` for MCP; `message/send`, `message/stream` for A2A; every populated case for inference); everything else inherits the zero-value false. Guardrails read the verdict aggregated across every populated extension via [`pctx.Classification()`](../authlib/pipeline/context.go), which returns `(anyAction, anyBypass)`. A defense-in-depth guardrail (IBAC pattern) skips on `anyBypass`, passes through on `!anyAction`, and judges only when `anyAction && !anyBypass`. This keeps protocol-specific knowledge in the parsers — adding a new guardrail or a new protocol doesn't multiply work at the guardrail layer.
+
 ### `Custom map[string]any` — plugin-private state + escape-hatch public events
 Two access patterns share the same map, disambiguated by key suffix.
 
@@ -260,24 +262,26 @@ All at `authbridge/authlib/pipeline/extensions.go`:
 
 ```go
 type MCPExtension struct {
-    Method string          // JSON-RPC method, e.g. "tools/call"
-    RPCID  any             // JSON-RPC id (could be int or string)
-    Params map[string]any  // request params
-    Result map[string]any  // response result (mutually exclusive with Err)
-    Err    *MCPError
+    Method   string          // JSON-RPC method, e.g. "tools/call"; or "$transport/stream" / "$transport/terminate" for body-less MCP transport patterns
+    RPCID    any             // JSON-RPC id (could be int or string)
+    Params   map[string]any  // request params
+    Result   map[string]any  // response result (mutually exclusive with Err)
+    Err      *MCPError
+    IsAction bool            // parser's classification verdict; true for tools/call, prompts/get, resources/read; false for housekeeping + transport
 }
 
 type A2AExtension struct {
-    Method      string
-    RPCID       any
-    SessionID   string  // contextId from the client, or server-assigned on first turn
-    MessageID   string
-    TaskID      string
-    Role        string  // "user" | "agent"
-    Parts       []A2APart
-    FinalStatus string  // response: "completed" | "failed" | "canceled"
-    Artifact    string  // response: assembled artifact text
-    ErrorMessage string // response: failure reason
+    Method       string
+    RPCID        any
+    SessionID    string  // contextId from the client, or server-assigned on first turn
+    MessageID    string
+    TaskID       string
+    Role         string  // "user" | "agent"
+    Parts        []A2APart
+    FinalStatus  string  // response: "completed" | "failed" | "canceled"
+    Artifact     string  // response: assembled artifact text
+    ErrorMessage string  // response: failure reason
+    IsAction     bool    // parser's classification verdict; true for message/send + message/stream
 }
 
 type InferenceExtension struct {
@@ -297,6 +301,8 @@ type InferenceExtension struct {
     CompletionTokens int
     TotalTokens      int
     ToolCalls        []InferenceToolCall
+    // Classification: every populated InferenceExtension is an outbound LLM call.
+    IsAction         bool  // unconditionally true when populated
 }
 
 type SecurityExtension struct {

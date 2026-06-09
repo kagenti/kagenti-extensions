@@ -288,14 +288,14 @@ func (f *fakePlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline
 func TestHandlePipeline(t *testing.T) {
 	inbound, err := pipeline.New([]pipeline.Plugin{
 		&fakePlugin{name: "jwt-validation"},
-		&fakePlugin{name: "a2a-parser", caps: pipeline.PluginCapabilities{Writes: []string{"a2a"}, BodyAccess: true}},
+		&fakePlugin{name: "a2a-parser", caps: pipeline.PluginCapabilities{ReadsBody: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	outbound, err := pipeline.New([]pipeline.Plugin{
 		&fakePlugin{name: "token-exchange"},
-		&fakePlugin{name: "mcp-parser", caps: pipeline.PluginCapabilities{Writes: []string{"mcp"}, BodyAccess: true}},
+		&fakePlugin{name: "mcp-parser", caps: pipeline.PluginCapabilities{ReadsBody: true}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,8 +329,8 @@ func TestHandlePipeline(t *testing.T) {
 	if body.Inbound[0].Name != "jwt-validation" || body.Inbound[0].Position != 1 {
 		t.Errorf("inbound[0] = %+v", body.Inbound[0])
 	}
-	if !body.Inbound[1].BodyAccess || len(body.Inbound[1].Writes) == 0 || body.Inbound[1].Writes[0] != "a2a" {
-		t.Errorf("inbound[1] = %+v", body.Inbound[1])
+	if !body.Inbound[1].ReadsBody {
+		t.Errorf("inbound[1] should have ReadsBody=true, got %+v", body.Inbound[1])
 	}
 	if body.Outbound[1].Direction != "outbound" {
 		t.Errorf("outbound direction = %q, want outbound", body.Outbound[1].Direction)
@@ -363,6 +363,65 @@ func TestHandlePipeline_NilPipelines(t *testing.T) {
 	}
 	if len(body.Inbound) != 0 || len(body.Outbound) != 0 {
 		t.Errorf("want empty, got inbound=%d outbound=%d", len(body.Inbound), len(body.Outbound))
+	}
+}
+
+// TestHandlePipelineSurfacesConfig verifies that the Config field on
+// /v1/pipeline carries each Configurable plugin's raw config bytes
+// (when wrapped by the registry's WrapConfigured), and that
+// non-Configurable plugins emit no Config field.
+func TestHandlePipelineSurfacesConfig(t *testing.T) {
+	configRaw := json.RawMessage(`{"hello":"world"}`)
+	wrapped := pipeline.WrapConfigured(&fakePlugin{name: "with-config"}, configRaw)
+	plain := &fakePlugin{name: "without-config"}
+
+	inbound, err := pipeline.New([]pipeline.Plugin{wrapped, plain})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithPipelines(pipeline.NewHolder(inbound), nil))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/pipeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+
+	var body struct {
+		Inbound []struct {
+			Name   string          `json:"name"`
+			Config json.RawMessage `json:"config,omitempty"`
+		} `json:"inbound"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Inbound) != 2 {
+		t.Fatalf("want 2 plugins, got %d", len(body.Inbound))
+	}
+	for _, p := range body.Inbound {
+		switch p.Name {
+		case "with-config":
+			if string(p.Config) != `{"hello":"world"}` {
+				t.Fatalf("with-config Config: got %q want %q",
+					string(p.Config), `{"hello":"world"}`)
+			}
+		case "without-config":
+			if len(p.Config) != 0 {
+				t.Fatalf("without-config should emit no Config, got %q",
+					string(p.Config))
+			}
+		default:
+			t.Fatalf("unexpected plugin name: %q", p.Name)
+		}
 	}
 }
 
@@ -550,5 +609,176 @@ func TestHandleGet_SerializesPluginsMap(t *testing.T) {
 	}
 	if !payload.Allowed || payload.TokensLeft != 42 {
 		t.Errorf("payload drift: %+v", payload)
+	}
+}
+
+// TestHandlePipelineSurfacesCapabilityMetadata verifies capability metadata
+// (Requires/RequiresAny/Description) flows through to /v1/pipeline and is
+// omitted when empty.
+func TestHandlePipelineSurfacesCapabilityMetadata(t *testing.T) {
+	rich := pipeline.PluginCapabilities{
+		Requires:    []string{"a2a-parser"},
+		RequiresAny: []string{"jwt-validation", "token-broker"},
+		Description: "Test plugin description",
+	}
+	inbound, err := pipeline.New([]pipeline.Plugin{
+		&fakePlugin{name: "rich-plugin", caps: rich},
+		&fakePlugin{name: "bare-plugin"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithPipelines(pipeline.NewHolder(inbound), nil))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/pipeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	// Decode into raw JSON to verify omitempty for the bare plugin.
+	var raw struct {
+		Inbound []map[string]any `json:"inbound"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw.Inbound) != 2 {
+		t.Fatalf("inbound = %d, want 2", len(raw.Inbound))
+	}
+
+	got := raw.Inbound[0]
+	if got["description"] != "Test plugin description" {
+		t.Errorf("description = %v", got["description"])
+	}
+	if reqs, _ := got["requires"].([]any); len(reqs) != 1 || reqs[0] != "a2a-parser" {
+		t.Errorf("requires = %v", got["requires"])
+	}
+	if reqA, _ := got["requiresAny"].([]any); len(reqA) != 2 {
+		t.Errorf("requiresAny = %v", got["requiresAny"])
+	}
+
+	bare := raw.Inbound[1]
+	for _, k := range []string{"requires", "requiresAny", "description"} {
+		if _, present := bare[k]; present {
+			t.Errorf("bare plugin should omit %q, got %v", k, bare[k])
+		}
+	}
+}
+
+func TestHandlePluginCatalog_ListsRegisteredPlugins(t *testing.T) {
+	stub := func() []CatalogEntry {
+		return []CatalogEntry{
+			{Name: "alpha", Description: "First plugin"},
+			{Name: "beta", Requires: []string{"alpha"}},
+		}
+	}
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithCatalog(stub))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body struct {
+		Plugins []CatalogEntry `json:"plugins"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Plugins) != 2 {
+		t.Fatalf("plugins = %d, want 2", len(body.Plugins))
+	}
+	if body.Plugins[0].Name != "alpha" || body.Plugins[0].Description != "First plugin" {
+		t.Errorf("plugins[0] = %+v", body.Plugins[0])
+	}
+	if len(body.Plugins[1].Requires) != 1 || body.Plugins[1].Requires[0] != "alpha" {
+		t.Errorf("plugins[1].Requires = %v", body.Plugins[1].Requires)
+	}
+}
+
+// TestHandlePluginCatalog_IncludesFieldSchemas confirms field-level
+// schemas attached by the catalog provider make it onto the wire
+// (and that omitempty hides them when absent).
+func TestHandlePluginCatalog_IncludesFieldSchemas(t *testing.T) {
+	stub := func() []CatalogEntry {
+		return []CatalogEntry{
+			{
+				Name:        "alpha",
+				Description: "Has fields",
+				Fields: []FieldSchemaEntry{
+					{Name: "endpoint", Type: "string", Required: true, Description: "API URL."},
+					{Name: "policy", Type: "string", Default: "allow", Enum: []string{"allow", "deny"}},
+				},
+			},
+			{Name: "beta", Description: "No fields"},
+		}
+	}
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store, WithCatalog(stub))
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	var body struct {
+		Plugins []CatalogEntry `json:"plugins"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Plugins) != 2 {
+		t.Fatalf("plugins = %d, want 2", len(body.Plugins))
+	}
+	// alpha: fields populated, including required/enum/default.
+	if got := len(body.Plugins[0].Fields); got != 2 {
+		t.Fatalf("alpha.Fields = %d, want 2", got)
+	}
+	if !body.Plugins[0].Fields[0].Required {
+		t.Errorf("alpha.endpoint should be required")
+	}
+	if body.Plugins[0].Fields[1].Default != "allow" {
+		t.Errorf("alpha.policy.Default = %q", body.Plugins[0].Fields[1].Default)
+	}
+	if got := len(body.Plugins[0].Fields[1].Enum); got != 2 {
+		t.Errorf("alpha.policy.Enum length = %d", got)
+	}
+	// beta: no fields → wire format omits the field; decoded slice is nil/empty.
+	if len(body.Plugins[1].Fields) != 0 {
+		t.Errorf("beta.Fields should be empty, got %+v", body.Plugins[1].Fields)
+	}
+}
+
+func TestHandlePluginCatalog_NoProvider404(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+	srv := New(":0", store) // no WithCatalog
+	ts := httptest.NewServer(srv.server.Handler)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/v1/plugins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 404 {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
 	}
 }

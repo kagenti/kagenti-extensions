@@ -1,0 +1,320 @@
+# Envoy configs for the envoy-sidecar mTLS demo.
+#
+# These are hand-crafted, self-contained Envoy configs for the demo
+# pods at k8s/{caller,callee}-envoy.yaml. They prove the mTLS design
+# (tls_inspector + filter_chain_match for permissive, single TLS chain
+# for strict, UpstreamTlsContext for outbound origination) at the
+# Envoy data-plane level.
+#
+# Two ConfigMaps below — one per mode. The Makefile creates a third
+# ConfigMap named `envoy-config-mtls-active` populated from one of
+# these variants; the demo deployments mount that.
+#
+# For demo simplicity these configs use STATIC clusters with explicit
+# upstream addresses (caller's outbound dials callee.team1:8080;
+# callee's inbound forwards to 127.0.0.1:8000). Production traffic
+# uses ORIGINAL_DST + iptables redirect — that's a deployment-shape
+# concern, not a mTLS-design concern, and reusing the same TLS blocks
+# in the operator's envoy.yaml.tmpl with ORIGINAL_DST is what the
+# follow-up PR does.
+#
+# X.509 SVID files are written to /opt by the in-process spiffe
+# Provider mirror inside the authbridge-envoy combined image. The
+# pod manifests mount /opt as an emptyDir (RW) — the operator's
+# default RO mount on this path is a separate bug tracked in the
+# operator follow-up.
+#
+# Semantics:
+#
+#   permissive — inbound listener accepts both TLS and plaintext via
+#                tls_inspector + filter_chain_match (transport_protocol).
+#                Outbound stays plaintext. This is byte-identical to
+#                Istio's PERMISSIVE inbound, and equivalent in spirit
+#                to proxy-sidecar's tlssniff byte-peek listener.
+#
+#   strict     — inbound listener accepts only TLS (single TLS chain;
+#                plaintext drops at filter chain match). Outbound
+#                originates TLS to the callee cluster (UpstreamTlsContext).
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config-mtls-permissive
+  namespace: team1
+  labels:
+    app.kubernetes.io/part-of: mtls-demo
+    kagenti.io/mtls-mode: permissive
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address:
+          protocol: TCP
+          address: 127.0.0.1
+          port_value: 9901
+
+    static_resources:
+      listeners:
+      # Outbound: caller's app -> envoy:15123 (via HTTP_PROXY) ->
+      # callee_cluster (which in permissive mode is plaintext).
+      - name: outbound_listener
+        address:
+          socket_address:
+            protocol: TCP
+            address: 0.0.0.0
+            port_value: 15123
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: outbound_http
+              codec_type: AUTO
+              route_config:
+                name: outbound_routes
+                virtual_hosts:
+                - name: catch_all
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: callee_cluster }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      # Inbound: callee receives traffic from caller. tls_inspector
+      # peeks the first bytes; filter_chain_match routes TLS to the
+      # mTLS chain and plaintext to the raw_buffer chain.
+      - name: inbound_listener
+        address:
+          socket_address:
+            protocol: TCP
+            address: 0.0.0.0
+            port_value: 15124
+        listener_filters:
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+        filter_chains:
+        # TLS chain — terminates mTLS, validates peer cert against
+        # the SPIRE trust bundle, requires a client certificate.
+        - filter_chain_match:
+            transport_protocol: tls
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificates:
+                - certificate_chain: { filename: /opt/svid.pem }
+                  private_key:       { filename: /opt/svid_key.pem }
+                validation_context:
+                  trusted_ca:        { filename: /opt/svid_bundle.pem }
+          filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: inbound_http_tls
+              codec_type: AUTO
+              route_config:
+                name: inbound_routes
+                virtual_hosts:
+                - name: local_app
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+        # Plaintext chain — accepts non-TLS traffic on the same port.
+        # Strict mode omits this chain entirely so plaintext drops at
+        # filter chain match.
+        - filter_chain_match:
+            transport_protocol: raw_buffer
+          filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: inbound_http_plain
+              codec_type: AUTO
+              route_config:
+                name: inbound_routes_plain
+                virtual_hosts:
+                - name: local_app_plain
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+      # callee_cluster — caller's outbound dials callee here.
+      # Permissive: plaintext upstream.
+      - name: callee_cluster
+        connect_timeout: 5s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: callee_cluster
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: mtls-callee-envoy.team1.svc.cluster.local
+                    port_value: 8080
+
+      # local_app — callee's inbound forwards decrypted traffic to
+      # the demo-app container on localhost:8000.
+      - name: local_app
+        connect_timeout: 5s
+        type: STATIC
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: local_app
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: 8000
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-config-mtls-strict
+  namespace: team1
+  labels:
+    app.kubernetes.io/part-of: mtls-demo
+    kagenti.io/mtls-mode: strict
+data:
+  envoy.yaml: |
+    admin:
+      address:
+        socket_address:
+          protocol: TCP
+          address: 127.0.0.1
+          port_value: 9901
+
+    static_resources:
+      listeners:
+      - name: outbound_listener
+        address:
+          socket_address:
+            protocol: TCP
+            address: 0.0.0.0
+            port_value: 15123
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: outbound_http
+              codec_type: AUTO
+              route_config:
+                name: outbound_routes
+                virtual_hosts:
+                - name: catch_all
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: callee_cluster_tls }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      - name: inbound_listener
+        address:
+          socket_address:
+            protocol: TCP
+            address: 0.0.0.0
+            port_value: 15124
+        listener_filters:
+        - name: envoy.filters.listener.tls_inspector
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.filters.listener.tls_inspector.v3.TlsInspector
+        # Strict — only the TLS chain. Plaintext drops at filter
+        # chain match (no chain matches transport_protocol: raw_buffer).
+        filter_chains:
+        - filter_chain_match:
+            transport_protocol: tls
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext
+              require_client_certificate: true
+              common_tls_context:
+                tls_certificates:
+                - certificate_chain: { filename: /opt/svid.pem }
+                  private_key:       { filename: /opt/svid_key.pem }
+                validation_context:
+                  trusted_ca:        { filename: /opt/svid_bundle.pem }
+          filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: inbound_http_tls
+              codec_type: AUTO
+              route_config:
+                name: inbound_routes
+                virtual_hosts:
+                - name: local_app
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { cluster: local_app }
+              http_filters:
+              - name: envoy.filters.http.router
+                typed_config:
+                  "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+      clusters:
+      # callee_cluster_tls — caller's outbound TLS-originates to the
+      # callee using the local SPIRE-issued SVID. Peer must present a
+      # cert validated against the SPIRE trust bundle.
+      - name: callee_cluster_tls
+        connect_timeout: 5s
+        type: STRICT_DNS
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: callee_cluster_tls
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: mtls-callee-envoy.team1.svc.cluster.local
+                    port_value: 8080
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            common_tls_context:
+              tls_certificates:
+              - certificate_chain: { filename: /opt/svid.pem }
+                private_key:       { filename: /opt/svid_key.pem }
+              validation_context:
+                trusted_ca:        { filename: /opt/svid_bundle.pem }
+
+      - name: local_app
+        connect_timeout: 5s
+        type: STATIC
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: local_app
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: 127.0.0.1
+                    port_value: 8000

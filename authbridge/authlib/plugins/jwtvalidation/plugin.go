@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
@@ -22,12 +24,17 @@ import (
 // jwtValidationConfig is the plugin's local config schema. See
 // authbridge/docs/plugin-reference.md for the decode → applyDefaults →
 // validate pattern.
+// Field tags drive both runtime decoding (json) and operator-facing
+// schema introspection (description / required / default / enum).
+// Inline doc comments retain the long-form rationale; struct tags
+// carry single-line summaries for templating. See pipeline/schema.go
+// for the consumer contract.
 type jwtValidationConfig struct {
 	// Issuer is the JWT `iss` claim expected on inbound tokens.
 	// In split-horizon deployments this is the PUBLIC Keycloak URL
 	// (whatever Keycloak stamps into the `iss` claim) — it only needs
 	// to match bit-for-bit, not be reachable from inside the pod.
-	Issuer string `json:"issuer"`
+	Issuer string `json:"issuer" required:"true" description:"Expected JWT iss claim. Public Keycloak URL in split-horizon deployments."`
 
 	// JWKSURL points at the JWKS endpoint used to verify signatures.
 	// The sidecar actually GETs this URL from inside the cluster, so
@@ -40,7 +47,7 @@ type jwtValidationConfig struct {
 	//      internal URL, when the operator supplies it)
 	//   2. Issuer (fallback for single-horizon deployments where the
 	//      issuer hostname is reachable from inside the cluster)
-	JWKSURL string `json:"jwks_url"`
+	JWKSURL string `json:"jwks_url" description:"JWKS endpoint URL (internal). Derived from KeycloakURL+Realm or Issuer when empty."`
 
 	// KeycloakURL and KeycloakRealm are a convenience for deriving
 	// JWKSURL from the internal Keycloak service URL, symmetric with
@@ -52,13 +59,13 @@ type jwtValidationConfig struct {
 	// via a cross-plugin pass; per-plugin configs don't share state,
 	// so each plugin now carries its own copy of the "where is
 	// Keycloak internally" hint.
-	KeycloakURL   string `json:"keycloak_url"`
-	KeycloakRealm string `json:"keycloak_realm"`
+	KeycloakURL   string `json:"keycloak_url" description:"Internal Keycloak base URL. Used to derive jwks_url when omitted."`
+	KeycloakRealm string `json:"keycloak_realm" description:"Keycloak realm name. Pairs with keycloak_url for jwks_url derivation."`
 
 	// Audience is the literal audience value expected on inbound
 	// tokens. One of {Audience, AudienceFile, AudienceMode:"per-host"}
 	// is required.
-	Audience string `json:"audience"`
+	Audience string `json:"audience" description:"Expected aud claim value. One of audience / audience_file / audience_mode=per-host is required."`
 
 	// AudienceFile reads the expected audience from a file. Used
 	// together with client-registration's /shared/client-id.txt. The
@@ -69,12 +76,12 @@ type jwtValidationConfig struct {
 	// will fill in /shared/client-id.txt. To opt out of any file poll,
 	// supply an explicit Audience instead; the file default only kicks
 	// in when both Audience and AudienceFile are empty.
-	AudienceFile string `json:"audience_file"`
+	AudienceFile string `json:"audience_file" description:"Read expected audience from this file. Default: /shared/client-id.txt when both audience fields are empty."`
 
 	// AudienceMode chooses how the expected audience is resolved:
 	// "static" (default) uses Audience/AudienceFile; "per-host" derives
 	// it from pctx.Host via routing.ServiceNameFromHost (waypoint mode).
-	AudienceMode string `json:"audience_mode"`
+	AudienceMode string `json:"audience_mode" description:"How to resolve expected audience: static or per-host." default:"static" enum:"static,per-host"`
 
 	// AllowedAudiences lists extra audience strings the sidecar accepts
 	// for inbound JWT validation (OR semantics: the token's aud claim
@@ -89,11 +96,14 @@ type jwtValidationConfig struct {
 	// multiple audiences (RFC 7519 string or array) and the agent must
 	// accept more than the workload client ID alone — prefer aligning
 	// IdP audience policy long-term. See plugin-reference.md.
-	AllowedAudiences []string `json:"allowed_audiences"`
+	AllowedAudiences []string `json:"allowed_audiences" description:"Extra audience strings accepted (OR semantics)."`
 
 	// BypassPaths are URL path globs (see authlib/bypass) that skip
 	// validation entirely.
-	BypassPaths []string `json:"bypass_paths"`
+	BypassPaths []string `json:"bypass_paths" description:"Path globs (path.Match) skipped without JWT validation. Defaults: /healthz /readyz /livez /.well-known/*."`
+
+	PlaceholderMode bool   `json:"placeholder_mode" default:"false" description:"After validating the inbound token, replace it with an opaque placeholder before forwarding to the agent; the real token is held in the shared store for the outbound path to resolve. Requires a shared store and token-exchange resolve_placeholders downstream."`
+	PlaceholderTTL  string `json:"placeholder_ttl" default:"1h" description:"How long the real token is retained for outbound resolution (Go duration, e.g. 30m). Default 1h."`
 }
 
 func (c *jwtValidationConfig) applyDefaults() {
@@ -196,6 +206,8 @@ type JWTValidation struct {
 	// so the lock-free guarantee is future-proofing rather than a
 	// correctness fix for current callers.
 	bgCancel atomic.Pointer[context.CancelFunc]
+
+	placeholderTTL time.Duration
 }
 
 // NewJWTValidation constructs an unconfigured plugin. Configure must be
@@ -209,7 +221,15 @@ func init() {
 func (p *JWTValidation) Name() string { return "jwt-validation" }
 
 func (p *JWTValidation) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{Writes: []string{"security"}}
+	return pipeline.PluginCapabilities{
+		Description: "Inbound JWT validation (signature, issuer, audience) against JWKS.",
+	}
+}
+
+// ConfigSchema implements pipeline.SchemaProvider; surfaces field
+// metadata to abctl edit templates and other config-aware tooling.
+func (p *JWTValidation) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(jwtValidationConfig{})
 }
 
 // Configure decodes the plugin's config subtree, applies defaults,
@@ -277,6 +297,15 @@ func (p *JWTValidation) Configure(raw json.RawMessage) error {
 		Bypass:   matcher,
 		Identity: auth.IdentityConfig{Audiences: audiences, Issuer: c.Issuer},
 	})
+
+	p.placeholderTTL = time.Hour
+	if c.PlaceholderTTL != "" {
+		d, err := time.ParseDuration(c.PlaceholderTTL)
+		if err != nil {
+			return fmt.Errorf("jwt-validation: invalid placeholder_ttl %q: %w", c.PlaceholderTTL, err)
+		}
+		p.placeholderTTL = d
+	}
 	return nil
 }
 
@@ -331,6 +360,26 @@ func (p *JWTValidation) Shutdown(_ context.Context) error {
 		(*cancel)()
 	}
 	return nil
+}
+
+// mint replaces the validated Authorization header with an opaque placeholder
+// and stores the real bearer token in the shared store. Returns the handle,
+// the stored token, and ok=false (fail closed) when no store is wired.
+func (p *JWTValidation) mint(pctx *pipeline.Context) (handle, real string, ok bool) {
+	if pctx.Shared == nil {
+		return "", "", false
+	}
+	real = auth.ExtractBearer(pctx.Headers.Get("Authorization"))
+	if real == "" {
+		return "", "", false
+	}
+	h, err := placeholder.New()
+	if err != nil {
+		return "", "", false
+	}
+	pctx.Shared.Put(placeholder.Key(h), real, p.placeholderTTL)
+	pctx.Headers.Set("Authorization", "Bearer "+h)
+	return h, real, true
 }
 
 func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Action {
@@ -397,6 +446,21 @@ func (p *JWTValidation) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 			"token_scopes":   strings.Join(result.Claims.Scopes, " "),
 		},
 	})
+	if p.cfg.PlaceholderMode {
+		handle, _, ok := p.mint(pctx)
+		if !ok {
+			pctx.Record(pipeline.Invocation{
+				Action: pipeline.ActionDeny,
+				Reason: "placeholder_mint_failed",
+			})
+			return pipeline.DenyStatus(503, "upstream.unreachable", "placeholder_mode requires a shared store")
+		}
+		pctx.Record(pipeline.Invocation{
+			Action:  pipeline.ActionModify,
+			Reason:  "placeholder_minted",
+			Details: map[string]string{"handle_prefix": handle[:len(placeholder.Prefix)+6]},
+		})
+	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
 

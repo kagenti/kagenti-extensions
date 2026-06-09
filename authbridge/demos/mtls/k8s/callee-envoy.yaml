@@ -1,0 +1,124 @@
+# mTLS demo (envoy-sidecar variant) — callee pod. Mirror of
+# caller-envoy.yaml; demo-app listens on :8000 (Envoy inbound on
+# :15124 forwards to it).
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mtls-callee-envoy
+  namespace: team1
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mtls-callee-envoy
+  namespace: team1
+  labels:
+    app.kubernetes.io/name: mtls-callee-envoy
+    app.kubernetes.io/part-of: mtls-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mtls-callee-envoy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mtls-callee-envoy
+        app.kubernetes.io/part-of: mtls-demo
+    spec:
+      serviceAccountName: mtls-callee-envoy
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: hashicorp/http-echo:1.0.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "-listen=:8000"
+            - "-text=mtls-callee-envoy ok"
+          ports:
+            - containerPort: 8000
+              name: http
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 65532
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits:   { cpu: 100m, memory: 64Mi }
+            requests: { cpu:  10m, memory: 32Mi }
+
+        - name: envoy-proxy
+          image: ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:latest
+          imagePullPolicy: IfNotPresent
+          args: ["--config", "/etc/authbridge/config.yaml"]
+          ports:
+            - containerPort: 15123
+              name: outbound
+            - containerPort: 15124
+              name: inbound
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1337
+            runAsGroup: 1337
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits:   { cpu: 200m, memory: 128Mi }
+            requests: { cpu:  20m, memory:  64Mi }
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: authbridge-runtime
+              mountPath: /etc/authbridge
+              readOnly: true
+            - name: spire-agent-socket
+              mountPath: /spiffe-workload-api
+              readOnly: true
+            - name: svid-output
+              mountPath: /opt
+            - name: shared-data
+              mountPath: /shared
+
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config-mtls-active
+        - name: authbridge-runtime
+          configMap:
+            name: authbridge-runtime-mtls
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        - name: svid-output
+          emptyDir: {}
+        - name: shared-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mtls-callee-envoy
+  namespace: team1
+  labels:
+    app.kubernetes.io/name: mtls-callee-envoy
+    app.kubernetes.io/part-of: mtls-demo
+spec:
+  selector:
+    app.kubernetes.io/name: mtls-callee-envoy
+  ports:
+    # Caller dials Service:8080 -> caller's Envoy outbound:15123 ->
+    # callee_cluster (resolved via DNS to this Service) :8080 ->
+    # this Service routes to targetPort 15124 = callee's Envoy
+    # inbound listener.
+    - port: 8080
+      targetPort: 15124
+      protocol: TCP
+      name: http
+  type: ClusterIP

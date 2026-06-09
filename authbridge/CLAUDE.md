@@ -11,7 +11,7 @@ binaries with shared auth logic in `authlib/`:
 
 - `cmd/authbridge-proxy/` — proxy-sidecar mode (default). HTTP forward + reverse
   proxies. Full plugin set (jwt-validation, token-exchange, a2a-parser,
-  mcp-parser, inference-parser, ibac).
+  mcp-parser, inference-parser, ibac, sparc).
 - `cmd/authbridge-envoy/` — envoy-sidecar mode. ext_proc gRPC server hooked
   into Envoy. Full plugin set.
 - `cmd/authbridge-lite/` — proxy-sidecar mode, lite plugin set (auth gates
@@ -140,6 +140,8 @@ wants to register.
 - `authlib/pipeline/` -- Plugin interface + lifecycle (`Configurable`, `Initializer`, `Shutdowner`); see [`docs/framework-architecture.md`](docs/framework-architecture.md)
 - `authlib/plugins/` -- The concrete plugins + registry; see [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin config convention
 
+**Plugin classification.** Protocol parsers (`mcp-parser`, `a2a-parser`, `inference-parser`) populate an `IsAction bool` field on their respective extensions to classify each request as either a user-meaningful action or protocol mechanics. Default-false means "not classified as action" — guardrails treat it as bypass. Parsers explicitly set `IsAction = true` for the small set of action methods (`tools/call` / `prompts/get` / `resources/read` for MCP; `message/send` / `message/stream` for A2A; every populated case for inference). Guardrails (`ibac` today; future rate limiters, audit loggers, etc.) read the aggregated verdict via `pctx.Classification()` which returns `(anyAction, anyBypass)`. A defense-in-depth guardrail skips on `anyBypass`, passes through on `!anyAction` (no parser claimed this traffic), and judges only when `anyAction && !anyBypass`. This puts the protocol-specific bypass-vs-action vocabulary in each parser — adding a new guardrail or new protocol does not multiply work at the guardrail layer. See [`docs/plugin-reference.md` "Classifying requests"](docs/plugin-reference.md#classifying-requests-as-actions-vs-protocol-mechanics) for the contract.
+
 ### init-iptables.sh
 
 Extensively documented shell script that sets up iptables for transparent traffic interception. Key features:
@@ -265,8 +267,8 @@ preserved.
 
 When the runtime config carries an `mtls:` block, authbridge enables
 transport-level mTLS on the proxy-sidecar listeners (forward + reverse
-proxy). envoy-sidecar mode is unaffected — Envoy handles its own TLS
-via SDS independently.
+proxy). envoy-sidecar mode handles mTLS at the Envoy data-plane level
+instead — see the **envoy-sidecar mTLS** subsection below.
 
 ```yaml
 # authbridge-runtime ConfigMap (top-level)
@@ -279,7 +281,7 @@ mtls:
 | Mode | Inbound (reverse proxy `:8080`) | Outbound (forward proxy) |
 |---|---|---|
 | (no `mtls` block) | Plaintext only. | Plaintext only. |
-| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Try TLS first; on handshake failure fall back to plain TCP (one-line WARN log). |
+| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Plaintext — no TLS-wrap attempt. Matches envoy-sidecar's permissive and Istio's PeerAuthentication semantics (permissive is inbound-only). A permissive caller cannot reach a strict peer; mixed-mode deployments need both ends compatible. |
 | `strict` | TLS only — non-TLS callers get the connection closed. | TLS or fail: handshake failure is a hard error, no fallback. |
 
 In both modes, a successful TLS handshake that fails certificate
@@ -293,6 +295,55 @@ per-caller decisions read `pctx.PeerCert` and check the URI SAN.
 **Hot-reload boundary:** mTLS config (`mtls.mode`, cert paths) requires a
 pod restart to apply, matching the existing rule for `listener.*`
 addresses. Plugin-pipeline config keeps its own hot-reload behavior.
+
+### envoy-sidecar mTLS
+
+In envoy-sidecar mode the listeners live in Envoy, not authbridge,
+so the top-level `mtls:` block is a no-op there. Equivalent semantics
+are configured at the Envoy data-plane level by extending the
+`envoy-config` ConfigMap with TLS blocks:
+
+| Mode | Inbound (`:15124`) | Outbound (`:15123`) |
+|---|---|---|
+| `disabled` | plaintext (today's behavior) | plaintext (today's behavior) |
+| `permissive` | `tls_inspector` listener filter + two filter chains: `transport_protocol: tls` chain terminates mTLS, `transport_protocol: raw_buffer` chain accepts plaintext | **plaintext** — no TLS-wrap attempt |
+| `strict` | `tls_inspector` + single TLS filter chain; plaintext drops at filter chain match | `UpstreamTlsContext` on the `original_destination` cluster: TLS-or-fail, blanket |
+
+X.509 SVIDs are read by Envoy directly from `/opt/svid.pem`,
+`/opt/svid_key.pem`, `/opt/svid_bundle.pem` — the same paths
+proxy-sidecar's mTLS uses. The spiffe Provider's file-mirror in
+the `authbridge-envoy` binary keeps these fresh on rotation.
+
+**Inbound parity with proxy-sidecar:** byte-identical observable
+semantics — TLS handshakes terminate against the SPIRE trust bundle,
+plaintext is served (permissive) or rejected (strict). Same outcome
+as proxy-sidecar's `tlssniff.Listener`, just expressed as Envoy
+filter chains. This matches Istio's PERMISSIVE/STRICT inbound exactly.
+
+**Outbound is Istio-shaped:** Envoy has no native primitive for
+"try TLS, fall back to plaintext on handshake failure" within an
+`ORIGINAL_DST` cluster (and Istio itself doesn't do it — Pilot
+pre-decides mesh membership). Permissive keeps outbound plaintext;
+strict does blanket TLS-or-fail to everything the listener sees.
+This works in practice because outbound calls that need plaintext —
+Keycloak, JWKS, external HTTPS — never reach the listener: plugin
+outbound uses Go `net/http` directly, and `proxy-init`'s iptables
+doesn't redirect arbitrary HTTPS egress. **Proxy-sidecar matches
+this**: its forward proxy now also dials plaintext in permissive
+mode, so the two deployment shapes share one outbound semantics.
+
+**Behavioral note:** a *permissive* caller cannot reach a *strict*
+peer regardless of mode (its outbound is plaintext; the peer's
+strict inbound rejects it). Mixed-mode deployments need both ends
+compatible — both strict, both permissive, or one strict + the
+other permissive on inbound only.
+
+The kagenti-operator's AgentRuntime CR's `Spec.MTLSMode` flows
+through to a per-agent rendered envoy-config with the matching TLS
+blocks (operator companion PR). The `authbridge/demos/mtls/`
+envoy-sidecar variant (`make demo-mtls-envoy*`) ships a hand-crafted
+demo that proves the same Envoy YAML design at the data-plane level
+without needing a CR.
 
 ## Build and Deploy
 
@@ -357,12 +408,17 @@ When `session.enabled` is true (default) and `listener.session_api_addr` is non-
 | `GET /v1/sessions` | `application/json` | List active sessions: `{sessions: [{id, createdAt, updatedAt, eventCount, active}]}`. |
 | `GET /v1/sessions/{id}` | `application/json` | Full snapshot of one session's events. 404 if unknown/expired. |
 | `GET /v1/events` | `text/event-stream` | SSE stream of new events. Optional `?session=<id>` filters to one session. Heartbeat every 30s. |
+| `GET /v1/pipeline` | `application/json` | Active pipeline composition: `{inbound: [...], outbound: [...]}`. Each plugin entry carries `name`, `direction`, `position`, `readsBody`, plus the static metadata (`requires`, `requiresAny`, `description`) and runtime `config` when present. abctl renders this as the Pipeline pane. |
+| `GET /v1/plugins` | `application/json` | Catalog of every registered plugin (whether or not in the active pipeline): `{plugins: [{name, requires, requiresAny, description, ...}]}`. abctl renders this as the Catalog pane (`P` key). 404s when the binary's session API was constructed without `WithCatalog`. |
 | `GET /healthz` | text | Liveness probe. |
 
 ### Quick examples
 
+The `abctl` TUI handles port-forward + connection automatically — pick a
+pod from the Namespaces → Pods picker. For raw HTTP exploration, set up
+your own port-forward first:
+
 ```sh
-# Port-forward to an agent pod
 POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-agent \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n team1 $POD 9094:9094 &
@@ -439,7 +495,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 ## Code Conventions
 
 ### Go (authlib, cmd/authbridge-{proxy,envoy,lite}, demo-app)
-- Go 1.24
+- Go 1.25
 - Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy,lite}/` (mode-specific binaries that wire listeners + plugins together)
 - `authbridge/go.work` workspace links the modules for local development
 - Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`, `authbridge-lite`)

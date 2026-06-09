@@ -37,7 +37,48 @@ type Server struct {
 	inbound   *pipeline.Holder
 	outbound  *pipeline.Holder
 	heartbeat time.Duration
+	// catalog returns the registered-plugin metadata for /v1/plugins.
+	// nil disables the endpoint (returns 404). The binary wires this to
+	// plugins.Catalog; tests inject a stub provider.
+	catalog CatalogProvider
 }
+
+// CatalogEntry is the wire shape for one plugin in /v1/plugins. Mirrors
+// pipelinePluginView's metadata fields so abctl can use the same
+// rendering paths for the active pipeline and the catalog browser.
+//
+// Uses readsBody (the modern field name) instead of pipelinePluginView's
+// legacy bodyAccess: this is a new wire shape introduced in the same PR
+// that documents bodyAccess as deprecated, so there's no compat cost to
+// emit the right name from day one.
+type CatalogEntry struct {
+	Name        string             `json:"name"`
+	Direction   string             `json:"direction,omitempty"`
+	ReadsBody   bool               `json:"readsBody,omitempty"`
+	Requires    []string           `json:"requires,omitempty"`
+	RequiresAny []string           `json:"requiresAny,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Fields      []FieldSchemaEntry `json:"fields,omitempty"`
+}
+
+// FieldSchemaEntry is the wire shape for one config field's schema
+// metadata. Mirrors pipeline.FieldSchema; lives in the sessionapi
+// package so consumers (abctl apiclient, future kagenti-UI clients)
+// don't have to import authlib/pipeline transitively.
+type FieldSchemaEntry struct {
+	Name        string             `json:"name"`
+	Type        string             `json:"type"`
+	Required    bool               `json:"required,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Default     string             `json:"default,omitempty"`
+	Enum        []string           `json:"enum,omitempty"`
+	Fields      []FieldSchemaEntry `json:"fields,omitempty"`
+}
+
+// CatalogProvider is the function the binary supplies to expose
+// registered-plugin metadata to /v1/plugins. Decoupled so the
+// sessionapi package doesn't import authlib/plugins.
+type CatalogProvider func() []CatalogEntry
 
 // Option configures a Server at construction time.
 type Option func(*Server)
@@ -58,6 +99,14 @@ func WithPipelines(inbound, outbound *pipeline.Holder) Option {
 	}
 }
 
+// WithCatalog attaches a CatalogProvider so the server exposes the
+// registered-plugin catalog at GET /v1/plugins. Without this option the
+// endpoint returns 404 — useful in tests, harmless in production
+// because plugins.Catalog is always available to the binary.
+func WithCatalog(c CatalogProvider) Option {
+	return func(s *Server) { s.catalog = c }
+}
+
 // New constructs an HTTP server serving the session API at addr. store must
 // be non-nil; callers should only instantiate when session tracking is on.
 func New(addr string, store *session.Store, opts ...Option) *Server {
@@ -74,6 +123,7 @@ func New(addr string, store *session.Store, opts ...Option) *Server {
 	mux.HandleFunc("GET /v1/sessions/{id}", s.handleGet)
 	mux.HandleFunc("GET /v1/events", s.handleStream)
 	mux.HandleFunc("GET /v1/pipeline", s.handlePipeline)
+	mux.HandleFunc("GET /v1/plugins", s.handlePluginCatalog)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	s.server = &http.Server{
@@ -103,13 +153,21 @@ func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 // pipelinePluginView is the wire shape for one plugin in /v1/pipeline.
+//
+// Capability fields (Requires/RequiresAny/Description) are static
+// type-level metadata: same for every instance produced by a given
+// factory. abctl uses them to render the plugin-detail pane and to
+// compute the "deps satisfied" indicator on the Pipeline pane without
+// needing a separate /v1/plugins call.
 type pipelinePluginView struct {
-	Name       string   `json:"name"`
-	Direction  string   `json:"direction"`
-	Position   int      `json:"position"` // 1-based order within its direction
-	BodyAccess bool     `json:"bodyAccess"`
-	Writes     []string `json:"writes,omitempty"`
-	Reads      []string `json:"reads,omitempty"`
+	Name        string          `json:"name"`
+	Direction   string          `json:"direction"`
+	Position    int             `json:"position"` // 1-based order within its direction
+	ReadsBody   bool            `json:"readsBody"`
+	Requires    []string        `json:"requires,omitempty"`
+	RequiresAny []string        `json:"requiresAny,omitempty"`
+	Description string          `json:"description,omitempty"`
+	Config      json.RawMessage `json:"config,omitempty"`
 }
 
 // handlePipeline returns the composition of the inbound and outbound
@@ -128,6 +186,30 @@ func (s *Server) handlePipeline(w http.ResponseWriter, _ *http.Request) {
 	}
 }
 
+// handlePluginCatalog returns every registered plugin's metadata —
+// not just the ones in the active pipeline. abctl renders this in
+// the catalog browser pane so operators can see what's available
+// before adding one to the pipeline.
+//
+// Auth: none, consistent with the rest of /v1/* (the package-level
+// trust model gates this server to in-cluster networking only). The
+// catalog reveals plugin metadata — names, dependency declarations,
+// descriptions — never user content or secrets, so this is fine for
+// the current posture. Revisit if sessionapi ever gates auth.
+func (s *Server) handlePluginCatalog(w http.ResponseWriter, _ *http.Request) {
+	if s.catalog == nil {
+		http.NotFound(w, nil)
+		return
+	}
+	body := struct {
+		Plugins []CatalogEntry `json:"plugins"`
+	}{Plugins: s.catalog()}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		slog.Debug("sessionapi: catalog encode failed", "error", err)
+	}
+}
+
 // describePipeline turns a *pipeline.Holder into its wire form, or an
 // empty slice when nil. Loads through the Holder so a hot-swap that
 // landed between requests is reflected immediately.
@@ -138,15 +220,30 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 	plugins := h.Plugins()
 	out := make([]pipelinePluginView, len(plugins))
 	for i, pl := range plugins {
-		caps := pl.Capabilities()
-		out[i] = pipelinePluginView{
-			Name:       pl.Name(),
-			Direction:  direction,
-			Position:   i + 1,
-			BodyAccess: caps.BodyAccess,
-			Writes:     caps.Writes,
-			Reads:      caps.Reads,
+		caps := pl.Capabilities().Normalize()
+		view := pipelinePluginView{
+			Name:        pl.Name(),
+			Direction:   direction,
+			Position:    i + 1,
+			ReadsBody:   caps.ReadsBody,
+			Requires:    caps.Requires,
+			RequiresAny: caps.RequiresAny,
+			Description: caps.Description,
 		}
+		// Surface raw config when the plugin was wrapped by the registry.
+		// Non-Configurable plugins don't satisfy RawConfigProvider; Config
+		// stays nil and json.Marshal omits it via omitempty.
+		//
+		// Trust note: bytes are emitted verbatim. The framework convention
+		// is that secrets live behind *_file paths, never inline (mirrors
+		// the policy at :9093/config). This endpoint is in-cluster only;
+		// a regex-based redaction layer would be illusory given how many
+		// secret-like field names exist in practice. Enforce no-inline-
+		// secrets at config-review time instead.
+		if rc, ok := pl.(pipeline.RawConfigProvider); ok {
+			view.Config = rc.RawConfig()
+		}
+		out[i] = view
 	}
 	return out
 }

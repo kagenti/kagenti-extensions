@@ -29,24 +29,37 @@ Produces a single static binary (~10 MB).
 
 ## Run
 
-`abctl` expects the sidecar's session API to be reachable. The common
-pattern is to port-forward a single pod:
+`abctl` discovers AuthBridge agents in your current `kubectl` context
+and lets you pick one:
 
 ```sh
-POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-agent \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward -n team1 $POD 9094:9094 &
-
-./abctl                                  # uses default http://localhost:9094
-./abctl --endpoint http://remote:9094    # or specify explicitly
+./abctl
 ```
 
-Quit with `q` or `Ctrl+C`. The binary reconnects automatically if the
-port-forward drops; the footer shows reconnect attempts with a countdown.
+You'll see a Namespaces pane listing each namespace that contains an
+AuthBridge agent. Enter drills into the Pods pane for that namespace;
+Enter on a pod starts a `kubectl port-forward` automatically and drops
+you into the session-events view. Esc backs out. `q` (or Ctrl+C) quits
+and tears the port-forward down.
+
+The picker shells out to `kubectl` — whatever context you're in is the
+context abctl uses. There's no separate auth.
+
+### Power-user / scripting bypass
+
+Pass `--endpoint` to skip the picker entirely:
+
+```sh
+kubectl port-forward -n team1 pod/weather-agent-xxxx 9094:9094 &
+./abctl --endpoint http://localhost:9094
+```
+
+This preserves the pre-picker behavior for scripts, CI, or remote
+session APIs that aren't in your kube context.
 
 ## Panes
 
-The UI has three panes. `Enter` drills in; `Esc` backs out.
+The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 
 - **Sessions** (default): table of active sessions in the store, most
   recently updated first. Columns: ID, updated (relative), event count,
@@ -58,21 +71,194 @@ The UI has three panes. `Enter` drills in; `Esc` backs out.
 - **Detail**: pretty-printed JSON of a single event. Scroll with arrow
   keys; `y` yanks to `/tmp/abctl-event-<timestamp>.json` and flashes the
   path in the footer.
+- **Pipeline**: the active plugin chain in inbound + outbound order.
+  Columns: position, direction, plugin name, DEPS (✓/✗ — see "Plugin
+  dependencies" below), writes, body access, event count. `e` opens
+  the editor.
+- **Plugin detail**: drill-into-row for Pipeline or Catalog. Shows
+  description, position, reads/writes, body access, plugin config, and
+  per-dependency satisfaction status against the active chain.
+- **Catalog**: registered-plugin browser, opened by `P` from anywhere.
+  Lists every plugin the running binary knows how to construct,
+  including ones not in the active pipeline. Useful for discovering
+  what's available before adding to the pipeline. Sourced from
+  `/v1/plugins`.
 
 ## Keybindings
 
 | Key | Context | Action |
 |---|---|---|
-| `↑ ↓` / `k j` | any list | navigate rows |
+| `↑ ↓` / `k j` | picker, list | navigate rows |
+| `Enter` | namespaces | open the namespace |
+| `Enter` | pods | port-forward + connect |
+| `Esc` | pods | back to namespaces |
+| `r` | namespaces, pods | reload agent list from cluster |
 | `Enter` / `→` / `l` | sessions, events | drill into selection |
 | `Esc` / `←` / `h` | detail, events | back out |
+| `Esc` | sessions, pipeline | (picker mode) tear down port-forward and back to pods |
 | `/` | sessions, events | filter (substring match; Enter commits, Esc cancels) |
 | `s` | events | toggle skip-row visibility (default: hidden; the events footer shows the hidden count) |
 | `p` | any | pause/resume stream |
 | `y` | detail | yank event JSON to `/tmp` |
 | `g` / `G` | lists | jump to top / bottom |
+| `P` | sessions, pipeline, plugin-detail | open the registered-plugin catalog |
+| `r` | catalog | refresh the catalog from `/v1/plugins` |
+| `e` | pipeline | edit pipeline subtree in `$EDITOR` |
+| `y` | edit/diff | apply the edit |
+| `N` | edit/diff | abort the edit |
+| `r` | edit/error | retry: re-open the editor (post-edit failure) or refetch (fetch failure) |
+| `Esc` | edit/{fetching,editing,applying} | abort the edit, return to Pipeline pane |
+| `Esc` | edit/{waiting,rollback} | background the watch; result lands as a footer flash |
 | `?` | any | (reserved for future help overlay) |
 | `q` / `Ctrl+C` | any | quit |
+
+## Editing the pipeline
+
+Press `e` on the Pipeline pane to edit the agent's runtime `pipeline:`
+subtree in `$EDITOR` (or `vi` if unset). On save, abctl shows a diff
+and asks `apply this change? (y/N)`. Confirming runs
+`kubectl apply --server-side` against the per-agent ConfigMap with
+`--field-manager=abctl --force-conflicts=true` (taking ownership of
+`data.config.yaml` from the kagenti-operator's webhook on first
+edit), then polls the framework's `/reload/status` until the reload
+completes (success or failure).
+
+The single edit flow covers four operations:
+- **Edit a value** — change a config field of an existing plugin
+- **Reorder** — move a plugin's lines up or down
+- **Remove** — delete a plugin's entry from `inbound:` or `outbound:`
+- **Add** — append a new plugin entry
+
+All four work because they're all just lines you change inside the
+pipeline subtree.
+
+`e` is only available in picker mode. With `--endpoint`, the cluster
+fields needed to fetch and apply aren't populated; pressing `e`
+flashes a hint instead of opening a broken edit.
+
+### Pre-apply validation
+
+After save, abctl runs the same Requires/RequiresAny/After/Claims
+checks the framework runs at reload-time, against the cached
+`/v1/plugins` catalog. Issues land as a red banner above the diff
+in ~50ms instead of waiting through the kubelet sync (~60s) to
+discover them at hot-reload:
+
+```text
+⚠ 1 validation issue — framework reload will reject:
+  • [outbound] ibac pos 1: Requires "mcp-parser", but it is not in the outbound chain
+```
+
+The y/N prompt becomes "apply anyway? (y/N)" — abctl's check is
+non-blocking. The framework's own validateRelationships is the
+source of truth and will fire again at reload regardless.
+
+Validation is silently skipped when the catalog isn't loaded
+(operator hasn't pressed `P` yet). Visit the catalog pane once to
+populate it for the rest of the session.
+
+### Agent-name resolution
+
+The per-agent ConfigMap is named `authbridge-config-<agent>`. abctl
+resolves `<agent>` from the selected pod's `app.kubernetes.io/name`
+label (kagenti-operator sets this). If the label is absent, abctl
+falls back to stripping the last two dash-separated segments of the
+pod name (the ReplicaSet hash + pod suffix).
+
+### Auto-rollback on reload failure
+
+If `kubectl apply` succeeds but the in-pod reload fails (unknown
+plugin name, malformed config, validation error), the framework
+keeps the previous in-memory pipeline serving requests. The on-disk
+ConfigMap, however, now holds the bad YAML. abctl detects this via
+`/reload/status` and re-applies the original ConfigMap content
+captured at Fetch time, reconciling the on-disk state back to what's
+actually running. The error overlay then reports
+`reload failed: <reason>; rolled back to previous ConfigMap`.
+
+The rollback is best-effort — with `--force-conflicts=true`, if a
+third party (controller, kubectl edit, kustomize) modified the
+ConfigMap between Fetch and the failed reload, the rollback
+overwrites their change. The running pipeline is unaffected.
+
+### Backgrounding the watch
+
+Pressing `Esc` while waiting for hot-reload (or during rollback)
+moves the watch to the background instead of aborting it. The
+overlay closes, the footer flashes
+`hot-reload watch moved to background; you'll be notified`, and you
+can resume navigating the TUI. When the watch terminates, the
+result lands as a one-line flash:
+
+- `hot-reload succeeded`
+- `hot-reload failed: <reason>; rolled back to previous ConfigMap`
+- `hot-reload failed: <reason>; rollback failed: <err>` (rare)
+
+Flashes auto-dismiss after a few seconds; if you miss one, query
+`/reload/status` directly via the port-forward.
+
+### Permissions
+
+abctl shells out to `kubectl`; kubectl uses your kubeconfig. Editing
+requires `update` on `configmaps` in the agent's namespace (in
+addition to `get pods` which the picker already needs). RBAC denial
+surfaces verbatim in the overlay.
+
+### Tempfile lifecycle
+
+abctl writes the editable pipeline subtree to `$TMPDIR/abctl-pipeline-*.yaml`
+on every edit. The tempfile is **left in place on every exit path**
+(success, error, abort) so an interrupted edit is recoverable. On
+abctl launch, files older than 24h in this glob are swept
+automatically — no manual cleanup needed.
+
+### Hot-reload window
+
+The framework reloads via a config-file watcher; kubelet syncs
+ConfigMap edits into the pod's mount within ~60s, then the framework
+debounces and reloads. Total wall-clock from `apply` to reload is
+typically under 90s. abctl shows a spinner during the wait.
+
+The poller terminates with one of:
+
+- **Success** — `/reload/status.last_success` advances past the apply
+  time.
+- **Failure** — `reloads_failed` increments past its baseline; the
+  framework's `last_error` is shown.
+- **Unreachable** — 5 consecutive transport errors against
+  `:9093/reload/status` (port-forward dropped, framework crashed,
+  etc.) surface as `reload status endpoint unreachable` after a few
+  seconds rather than waiting the full deadline.
+- **Timeout** — none of the above within 120s. Triggers an
+  auto-rollback so the on-disk ConfigMap doesn't drift from the
+  running pipeline.
+
+## Plugin dependencies
+
+Plugins declare dependencies in their `Capabilities()`:
+
+- **Requires**: hard dependency. The named plugin MUST be in the same
+  chain at a strictly-lower position; otherwise framework reload fails.
+- **RequiresAny**: soft OR. At least one of the listed plugins must
+  appear upstream; each one that IS present must be earlier.
+- **After**: ordering hint. If the named plugin IS present, it must
+  appear earlier; absent is OK.
+- **Claims**: exclusive ownership. Within one chain, two plugins
+  cannot both declare the same claim string.
+
+abctl surfaces these in three places:
+
+- **Pipeline pane DEPS column**: ✓ when all declared deps satisfied,
+  ✗ when any fail, blank when no deps declared. The footer hint
+  reports the count of plugins with unmet deps.
+- **Plugin detail pane**: per-dependency rows with ✓/✗ and the
+  satisfying upstream's position when applicable.
+- **Pre-apply validation in the editor**: catches missing/misordered
+  Requires before kubectl apply (~50ms vs ~60s framework roundtrip).
+  See the "Pre-apply validation" subsection above.
+
+The framework's own validateRelationships is the source of truth and
+runs at every reload. abctl's checks are the fast-feedback layer.
 
 ## Trust model
 
@@ -92,7 +278,6 @@ results; treat the output accordingly.
 ## Deferred to later PRs
 
 - Native clipboard (currently writes to `/tmp`).
-- In-process `kubectl port-forward` (currently manual).
 - Fuzzy search beyond substring match.
 - Per-user filtering (`Identity.Subject == X`).
 - Krew plugin packaging.

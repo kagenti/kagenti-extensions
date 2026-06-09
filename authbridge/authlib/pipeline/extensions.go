@@ -85,12 +85,21 @@ func GetState[T any](pctx *Context, key string) *T {
 
 // MCPExtension carries parsed MCP JSON-RPC metadata.
 // Result and Err are mutually exclusive: a response sets exactly one.
+//
+// IsAction is the parser's classification verdict (see
+// pipeline.Context.Classification). The parser explicitly sets it
+// true for user-meaningful action methods (tools/call, prompts/get,
+// resources/read); the zero value false means "protocol mechanics
+// or unclassified." Default-false reflects defense-in-depth: if the
+// parser can't confidently classify a method as an action, guardrails
+// err toward letting traffic through rather than judging it.
 type MCPExtension struct {
-	Method string         `json:"method,omitempty"`
-	RPCID  any            `json:"rpcId,omitempty"`
-	Params map[string]any `json:"params,omitempty"`
-	Result map[string]any `json:"result,omitempty"`
-	Err    *MCPError      `json:"error,omitempty"`
+	Method   string         `json:"method,omitempty"`
+	RPCID    any            `json:"rpcId,omitempty"`
+	Params   map[string]any `json:"params,omitempty"`
+	Result   map[string]any `json:"result,omitempty"`
+	Err      *MCPError      `json:"error,omitempty"`
+	IsAction bool           `json:"isAction,omitempty"`
 }
 
 // MCPError mirrors a JSON-RPC 2.0 error object.
@@ -102,6 +111,10 @@ type MCPError struct {
 
 // A2AExtension carries parsed A2A protocol metadata from inbound requests
 // and response summaries for debugging.
+//
+// IsAction is the parser's classification verdict; see MCPExtension.IsAction
+// for the contract. Set true for user-meaningful methods (message/send,
+// message/stream); zero value covers protocol/discovery methods.
 type A2AExtension struct {
 	// Request fields
 	Method    string    `json:"method,omitempty"`
@@ -116,6 +129,9 @@ type A2AExtension struct {
 	FinalStatus  string `json:"finalStatus,omitempty"`  // "completed", "failed", "canceled"
 	Artifact     string `json:"artifact,omitempty"`     // final artifact text
 	ErrorMessage string `json:"errorMessage,omitempty"` // failure reason if status is "failed"
+
+	// Classification — see MCPExtension.IsAction.
+	IsAction bool `json:"isAction,omitempty"`
 }
 
 // A2APart represents a message part in an A2A request.
@@ -126,6 +142,10 @@ type A2APart struct {
 
 // InferenceExtension carries parsed LLM inference request and response metadata.
 // Request fields are populated by OnRequest; response fields by OnResponse.
+//
+// IsAction is the parser's classification verdict; see MCPExtension.IsAction
+// for the contract. Inference calls are always actions when populated, so
+// inference-parser sets this true unconditionally.
 type InferenceExtension struct {
 	Model       string             `json:"model,omitempty"`
 	Messages    []InferenceMessage `json:"messages,omitempty"`
@@ -143,6 +163,9 @@ type InferenceExtension struct {
 	CompletionTokens int                 `json:"completionTokens,omitempty"`
 	TotalTokens      int                 `json:"totalTokens,omitempty"`
 	ToolCalls        []InferenceToolCall `json:"toolCalls,omitempty"`
+
+	// Classification — see MCPExtension.IsAction.
+	IsAction bool `json:"isAction,omitempty"`
 }
 
 // InferenceMessage represents a single message in the conversation.

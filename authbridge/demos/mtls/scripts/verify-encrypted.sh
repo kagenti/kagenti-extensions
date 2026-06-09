@@ -43,15 +43,13 @@ out=$(kubectl -n "$NAMESPACE" exec deploy/"$CALLER" -c demo-app -- \
 echo "  Response: $out"
 
 echo
-echo "[*] Confirming the wire was encrypted (via outbound forward-proxy logs)"
-if kubectl -n "$NAMESPACE" logs deploy/"$CALLER" -c authbridge-proxy --tail=100 2>/dev/null | \
-   grep -q "mtls fallback to plaintext.*${CALLEE}"; then
-  echo "  ERROR: caller's forward proxy fell back to plaintext for ${CALLEE}." >&2
-  echo "         This means strict mode is NOT actually encrypting the wire." >&2
-  exit 1
-fi
-echo "  No fallback-to-plaintext WARN observed; wire is encrypted."
-
+# No fallback-to-plaintext check anymore. Permissive outbound is now
+# plaintext (matches envoy-sidecar; aligns with Istio's
+# PeerAuthentication semantics) and strict outbound is TLS-or-fail —
+# either way there's no per-connection fallback to grep for. The
+# strict-callee + successful-response combination above is enough
+# evidence that the wire is encrypted: a plaintext outbound from a
+# strict caller would error before reaching the listener.
 echo
 echo "============================================="
 echo " mTLS verified — caller → callee is encrypted"

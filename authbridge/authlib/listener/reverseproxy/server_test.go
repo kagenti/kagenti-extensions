@@ -118,7 +118,7 @@ type bodyRecorderPlugin struct {
 
 func (p *bodyRecorderPlugin) Name() string { return "body-recorder" }
 func (p *bodyRecorderPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{BodyAccess: true}
+	return pipeline.PluginCapabilities{ReadsBody: true}
 }
 func (p *bodyRecorderPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	p.receivedBody = pctx.Body
@@ -560,5 +560,84 @@ func TestReverseProxy_ModifyResponse_RekeyAndResponseEvent(t *testing.T) {
 	}
 	if respEvent.Invocations == nil || len(respEvent.Invocations.Inbound) == 0 {
 		t.Errorf("response event has no Invocations; expected one a2a-stamp observe entry")
+	}
+}
+
+// TestInboundSessionID_NoActiveSessionFallback locks in the
+// reverseproxy's bucketing rule: when the A2A request has no
+// contextId (first turn of a conversation), inboundSessionID returns
+// DefaultSessionID — never falling back to ActiveSession(). The
+// previous fallback was a cross-conversation contamination vector:
+// a fresh chat's first turn would silently inherit a previous
+// conversation's still-alive session bucket, stranding all events
+// in the prior bucket and creating an orphan one-event session for
+// the rekeyed response.
+func TestInboundSessionID_NoActiveSessionFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  string // pctx.Extensions.A2A.SessionID
+		want string
+	}{
+		{"first turn — empty contextId", "", session.DefaultSessionID},
+		{"subsequent turn — explicit contextId", "ctx-abc", "ctx-abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pctx := &pipeline.Context{
+				Direction: pipeline.Inbound,
+				Extensions: pipeline.Extensions{
+					A2A: &pipeline.A2AExtension{SessionID: tc.ctx},
+				},
+			}
+			if got := inboundSessionID(pctx); got != tc.want {
+				t.Errorf("inboundSessionID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInboundSessionID_NoA2AExtension exercises the auth-only path:
+// non-A2A inbound (e.g. a denied request that never reached the
+// parser) routes to DefaultSessionID, where operators expect to find
+// unauthorized-access events.
+func TestInboundSessionID_NoA2AExtension(t *testing.T) {
+	pctx := &pipeline.Context{Direction: pipeline.Inbound}
+	if got := inboundSessionID(pctx); got != session.DefaultSessionID {
+		t.Errorf("inboundSessionID = %q, want %q", got, session.DefaultSessionID)
+	}
+}
+
+// TestRecordInbound_NewChatDoesntLeakIntoPriorBucket is the
+// integration regression for the original bug: with a previous
+// conversation's session still alive (so ActiveSession() returns it),
+// a new chat's first-turn inbound request lands in DefaultSessionID
+// rather than the previous bucket. The rekey-on-response path then
+// migrates Default → server-assigned contextId, keeping the new
+// conversation in its own bucket.
+func TestRecordInbound_NewChatDoesntLeakIntoPriorBucket(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	// Seed a "previous conversation" bucket and make it the active session.
+	store.Append("prev-conversation", pipeline.SessionEvent{
+		At: time.Now(), Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+	})
+	if got := store.ActiveSession(); got != "prev-conversation" {
+		t.Fatalf("setup: ActiveSession = %q, want prev-conversation", got)
+	}
+
+	// New chat's first turn arrives — empty contextId.
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		Extensions: pipeline.Extensions{
+			A2A: &pipeline.A2AExtension{Method: "message/stream"},
+		},
+	}
+	sid := inboundSessionID(pctx)
+	if sid == "prev-conversation" {
+		t.Fatal("regression: new chat's first turn leaked into previous bucket")
+	}
+	if sid != session.DefaultSessionID {
+		t.Errorf("first-turn sid = %q, want %q", sid, session.DefaultSessionID)
 	}
 }

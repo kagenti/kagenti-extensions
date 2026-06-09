@@ -4,21 +4,16 @@ import (
 	"fmt"
 )
 
-// Validate checks the top-level runtime config: mode, listener combo,
-// and that the pipeline composition is populated. Plugin-specific
-// validation (issuer, token URL, identity type, jwt_audience) lives
-// inside each plugin's Configure and runs at pipeline build time.
+// Validate checks the top-level runtime config: mode and listener combo.
+// Plugin-specific validation (issuer, token URL, identity type,
+// jwt_audience) lives inside each plugin's Configure and runs at
+// pipeline build time.
 //
-// Empty pipelines are rejected. Under the per-plugin config shape,
-// a valid runtime config always names at least one inbound plugin
-// (jwt-validation) and one outbound plugin (token-exchange). Silently
-// accepting empty pipelines caused the whole point of authbridge to
-// disappear — inbound traffic passing without JWT validation, outbound
-// passing without token exchange. Operators upgrading from the old
-// top-level-block schema ("inbound:", "outbound:", etc.) whose YAML
-// does not yet include a pipeline section fail loudly here rather
-// than shipping an open proxy. See the schema migration note in
-// cmd/authbridge/README.md.
+// Empty pipelines are permitted: AuthBridge will run as a pass-through
+// on any stage with no plugins. This supports testing scenarios and
+// asymmetric deployments (e.g. inbound auth only, no outbound token
+// exchange). Operators get a startup WARN per empty stage from
+// WarnEmptyPipelines so the open-proxy condition is visible in logs.
 func Validate(cfg *Config) error {
 	switch cfg.Mode {
 	case ModeEnvoySidecar, ModeWaypoint, ModeProxySidecar:
@@ -28,25 +23,7 @@ func Validate(cfg *Config) error {
 	default:
 		return fmt.Errorf("unknown mode %q (valid: envoy-sidecar, waypoint, proxy-sidecar)", cfg.Mode)
 	}
-	if err := validateListeners(cfg); err != nil {
-		return err
-	}
-	return validatePipeline(cfg)
-}
-
-func validatePipeline(cfg *Config) error {
-	if len(cfg.Pipeline.Inbound.Plugins) == 0 {
-		return fmt.Errorf("pipeline.inbound.plugins is empty; specify at least one plugin " +
-			"(typically jwt-validation) — see cmd/authbridge/README.md. " +
-			"If you see this after an upgrade, your config.yaml is using the old top-level shape " +
-			"(inbound:, outbound:, identity:, bypass:, routes:) — move those settings under " +
-			"pipeline.*.plugins[].config")
-	}
-	if len(cfg.Pipeline.Outbound.Plugins) == 0 {
-		return fmt.Errorf("pipeline.outbound.plugins is empty; specify at least one plugin " +
-			"(typically token-exchange) — see cmd/authbridge/README.md")
-	}
-	return nil
+	return validateListeners(cfg)
 }
 
 func validateListeners(cfg *Config) error {

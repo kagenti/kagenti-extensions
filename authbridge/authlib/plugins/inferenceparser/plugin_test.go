@@ -18,9 +18,6 @@ func TestInferenceParser_Capabilities(t *testing.T) {
 	if !caps.ReadsBody {
 		t.Error("ReadsBody should be true")
 	}
-	if len(caps.Writes) != 1 || caps.Writes[0] != "inference" {
-		t.Errorf("Writes = %v, want [inference]", caps.Writes)
-	}
 }
 
 func TestInferenceParser_ChatCompletions(t *testing.T) {
@@ -395,9 +392,14 @@ func TestInferenceParser_OnResponse_NoRequestContext(t *testing.T) {
 	}
 }
 
+// TestInferenceParser_OnResponse_EmptyBody locks the regression: when
+// the request side parsed (Extensions.Inference populated) but the
+// response body is empty, the parser MUST record a Skip so abctl pairs
+// the timeline rows.
 func TestInferenceParser_OnResponse_EmptyBody(t *testing.T) {
 	p := NewInferenceParser()
 	pctx := &pipeline.Context{
+		Direction:  pipeline.Outbound,
 		Extensions: pipeline.Extensions{Inference: &pipeline.InferenceExtension{Model: "gpt-4"}},
 	}
 	action := p.OnResponse(context.Background(), pctx)
@@ -406,6 +408,13 @@ func TestInferenceParser_OnResponse_EmptyBody(t *testing.T) {
 	}
 	if pctx.Extensions.Inference.Completion != "" {
 		t.Errorf("Completion = %q, want empty", pctx.Extensions.Inference.Completion)
+	}
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("expected a Skip Invocation, got none")
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 1 || invs[0].Action != pipeline.ActionSkip || invs[0].Reason != "no_response_body" {
+		t.Fatalf("expected single Skip/no_response_body, got %+v", invs)
 	}
 }
 
@@ -545,5 +554,24 @@ func TestInferenceParser_NullContent(t *testing.T) {
 	}
 	if pctx.Extensions.Inference.Messages[0].Content != "" {
 		t.Errorf("Content = %q, want empty for null", pctx.Extensions.Inference.Messages[0].Content)
+	}
+}
+
+// IsAction is unconditionally true on populated InferenceExtension.
+// Every outbound LLM call is, on the wire, an action — the operator
+// policy "don't judge inference by default" is encoded separately in
+// IBAC's judge_inference config, not in the classification.
+func TestInferenceParser_AlwaysClassifiesAsAction(t *testing.T) {
+	p := NewInferenceParser()
+	pctx := &pipeline.Context{
+		Path: "/v1/chat/completions",
+		Body: []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`),
+	}
+	_ = p.OnRequest(context.Background(), pctx)
+	if pctx.Extensions.Inference == nil {
+		t.Fatal("Inference extension is nil")
+	}
+	if !pctx.Extensions.Inference.IsAction {
+		t.Error("IsAction = false, want true (every populated inference call is an action)")
 	}
 }

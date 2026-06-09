@@ -56,6 +56,18 @@ func (h *Holder) RunResponse(ctx context.Context, pctx *Context) Action {
 	return h.p.Load().RunResponse(ctx, pctx)
 }
 
+// RunResponseFrame is equivalent to h.Load().RunResponseFrame(ctx, pctx, frame, last).
+// See Pipeline.RunResponseFrame.
+func (h *Holder) RunResponseFrame(ctx context.Context, pctx *Context, frame []byte, last bool) Action {
+	return h.p.Load().RunResponseFrame(ctx, pctx, frame, last)
+}
+
+// HasStreamingResponders is equivalent to h.Load().HasStreamingResponders().
+// Listeners read this to decide whether to take the streaming code path.
+func (h *Holder) HasStreamingResponders() bool {
+	return h.p.Load().HasStreamingResponders()
+}
+
 // RunFinish is equivalent to h.Load().RunFinish(ctx, pctx, outcome).
 // Listeners call this in a defer at request entry to guarantee
 // Finisher dispatch on every exit path. See Pipeline.RunFinish for
@@ -68,6 +80,12 @@ func (h *Holder) RunFinish(ctx context.Context, pctx *Context, outcome Outcome) 
 // NeedsBody is equivalent to h.Load().NeedsBody(). Hot path on listeners
 // that decide whether to buffer the request/response body.
 func (h *Holder) NeedsBody() bool { return h.p.Load().NeedsBody() }
+
+// WritesBody is equivalent to h.Load().WritesBody(). Listeners read this
+// when deciding whether streaming responses are safe — a pipeline with
+// a body mutator can't stream because the proxy can't rewrite a body
+// it has already started forwarding.
+func (h *Holder) WritesBody() bool { return h.p.Load().WritesBody() }
 
 // Ready is equivalent to h.Load().Ready().
 func (h *Holder) Ready() bool { return h.p.Load().Ready() }

@@ -107,25 +107,46 @@ they're ordered cheapest-first:
 3. **Host bypass.** If the request host matches one of `bypass_hosts`,
    record `skip/host_bypass` and `Continue`. Defaults cover Keycloak,
    SPIRE, OTel, Jaeger, Prometheus.
-4. **Inference bypass.** If `pctx.Extensions.Inference` is populated and
-   `judge_inference` is `false` (default), record `skip/inference_bypass`
-   and `Continue`. Judging the agent's own LLM-reasoning calls is
-   high-cost, low-value for typical deployments.
-5. **Intent extraction.** Read `pctx.Session.LastIntent()`. If empty
-   (operator forgot to put `a2a-parser` in the inbound chain, or the
-   session has received no user message), record `deny/no_intent` and
-   return `DenyStatus(403, "ibac.no_intent", ...)` — **fail closed**.
-6. **Build action description.** Always include the bare HTTP request
+4. **Classification gate.** Read `pctx.Classification()`, which aggregates
+   the `IsAction` verdict across every populated protocol extension
+   (`pctx.Extensions.{MCP, A2A, Inference}`):
+     - **`anyBypass=true`** (some parser explicitly classified the request
+       as protocol mechanics — MCP `tools/list`, A2A discovery, MCP
+       `$transport/stream` etc): record `skip/protocol_mechanics` and
+       `Continue`.
+     - **`!anyAction`** (no parser populated anything; IBAC has no opinion):
+       `Continue` silently with no recorded Skip — defense-in-depth
+       pass-through.
+     - **`anyAction=true && !anyBypass`** (action-classified): fall through
+       to the next step.
+
+   The protocol-specific bypass vocabulary (housekeeping methods, transport
+   shapes, etc.) lives in the parsers. Add support for a new protocol or a
+   new method to its parser; IBAC reads the classification verdict
+   uniformly without protocol-specific code.
+5. **Inference operator-policy bypass.** If `pctx.Extensions.Inference` is
+   populated and `judge_inference` is `false` (default), record
+   `skip/inference_bypass` and `Continue`. Distinct from the classification
+   gate above — inference-parser correctly classifies LLM calls as actions;
+   this step is operator policy ("don't judge the agent's own reasoning by
+   default"). Operators flip `judge_inference: true` to opt in.
+6. **Intent extraction.** Read `pctx.Session.LastIntent()`. If empty,
+   apply `no_intent_policy` (default `"allow"`): record
+   `skip/no_user_context` and `Continue` (treats the request as a
+   legitimate self-action). Operators wanting strict fail-closed semantics
+   set `no_intent_policy: "deny"` to get the previous `deny/no_intent`
+   403 behavior.
+7. **Build action description.** Always include the bare HTTP request
    line + body excerpt. If `mcp-parser` populated `Extensions.MCP`,
    append the tool name and args. If `inference-parser` populated
    `Extensions.Inference` and `judge_inference` is on, append the model
    name and first user message. **Authorization and Cookie headers are
    never included** — the judge LLM should never see bearer tokens or
    session cookies.
-7. **Call the judge.** Send a chat-completion request to the configured
+8. **Call the judge.** Send a chat-completion request to the configured
    endpoint. Caller-context deadlines apply on top of the per-call
    `timeout_ms`. Two error buckets (see Status Codes below).
-8. **Apply the verdict.** `allow` → record `allow/aligned` and
+9. **Apply the verdict.** `allow` → record `allow/aligned` and
    `Continue`. `deny` → record `deny/blocked` and return
    `DenyStatus(403, "ibac.blocked", reason)`.
 
@@ -164,35 +185,40 @@ pipeline:
 | `agent_llm_host` | No | `""` | Convenience: host of the agent's own LLM endpoint. Added to the bypass-host list so reasoning traffic is skipped regardless of `judge_inference`. |
 | `bypass_hosts` | No | Built-in list | Host globs (`path.Match` syntax) skipped without judging. Defaults: `keycloak.*`, `keycloak`, `spire-server.*`, `spire-agent.*`, `otel-collector.*`, `jaeger.*`, `prometheus.*`. **Bare `*` and similarly-broad patterns are rejected at startup.** |
 | `bypass_paths` | No | Built-in list | URL path globs skipped without judging. Defaults: `/.well-known/*`, `/healthz`, `/readyz`, `/livez`. |
+| `no_intent_policy` | No | `"allow"` | Behavior when an action-classified request has no recorded user intent. `"allow"` skips with `no_user_context`; `"deny"` rejects with `403 ibac.no_intent` / `ibac.no_session`. See "Default security posture" in Limitations. |
+| `unclassified_policy` | No | `"passthrough"` | Behavior at the classification gate when no parser populated any extension. `"passthrough"` returns Continue silently (defense in depth); `"judge"` falls through to the judge for plain-HTTP outbound coverage. The IBAC demo uses `"judge"`. See "Default security posture" in Limitations. |
 
 ### Pipeline Composition
 
-IBAC has a runtime dependency on `a2a-parser` (inbound) and an optional
-soft-ordering dependency on `mcp-parser` (outbound):
+IBAC declares `RequiresAny: ["mcp-parser", "inference-parser"]`
+in its `Capabilities()` — the pipeline validator boot-fails if none of
+those parsers is in the same outbound chain. Without a parser, IBAC has
+no classification to read and would silently no-op on every request, so
+the strict requirement catches misconfig at boot rather than letting it
+ship a broken pipeline.
 
 ```yaml
 pipeline:
   inbound:
     plugins:
-      - name: a2a-parser    # REQUIRED — populates Session.Intents
+      - name: a2a-parser    # populates Session.Intents for IBAC's intent extraction
       - name: jwt-validation
   outbound:
     plugins:
       - name: token-exchange
-      - name: mcp-parser    # OPTIONAL — enriches IBAC's view of the action
+      - name: mcp-parser    # at least one parser must precede ibac
       - name: ibac
 ```
 
-The `mcp-parser` ordering is enforced via the plugin's
-`Capabilities.After: ["mcp-parser"]` hint, so the pipeline validator
-will reject configurations where `ibac` precedes `mcp-parser` in the same
-chain.
+In practice every IBAC deployment includes `mcp-parser` (and usually
+`inference-parser`); the `RequiresAny` is the safety net for accidental
+"ibac-only" pipelines that would otherwise judge nothing.
 
-The `a2a-parser` dependency is **runtime, not chain-time** — the pipeline
-validator can't see across chains, so a missing `a2a-parser` in the
-inbound chain produces a `nil` intent at runtime and IBAC fails closed
-with `ibac.no_intent`. Operators see `403 ibac.no_intent` in agent logs
-when the inbound chain is misconfigured.
+The `a2a-parser` dependency for **intent extraction** is runtime, not
+chain-time — the pipeline validator can't see across chains, so a missing
+`a2a-parser` in the **inbound** chain leaves `Session.LastIntent()` empty
+at runtime. Behavior in that state is governed by `no_intent_policy`
+(default `"allow"` — pass through; `"deny"` — fail-closed 403).
 
 ## Status Codes & Reasons
 
@@ -303,10 +329,48 @@ SentinelHeaderName: "X-IBAC-Judge"})` — see
 - **No retry / circuit breaker.** Plugin authors retrying transient
   judge failures, or breaking a circuit on a flapping judge, layer
   that on the calling site or in the LLM-judge service itself.
-- **Plain-HTTP exfiltration is the primary target.** MCP-shaped
-  exfiltration is judged too (and gets richer enrichment via
-  `mcp-parser`), but the original threat shape is raw HTTP from local
-  function-calling tools.
+
+### Default security posture
+
+IBAC ships with two fail-open defaults that operators may want to
+override depending on threat model. Both are config knobs on the
+`ibac` plugin block.
+
+- **`unclassified_policy: "passthrough"`** (default). Traffic that no
+  protocol parser claimed — plain-HTTP outbound from local function-
+  calling tools, agent-card discovery, OAuth metadata fetches, CORS
+  preflights — passes through silently. IBAC's defense-in-depth
+  posture: only judge traffic a parser identified as user-meaningful.
+  Set `"judge"` for deployments where any outbound request from the
+  agent matters; the IBAC demo uses this setting to keep its plain-
+  HTTP exfiltration scenario operational. Production deployments
+  using MCP/A2A/inference exclusively should leave this at the
+  default and rely on egress allowlists / NetworkPolicy for plain-
+  HTTP outbound control.
+
+- **`no_intent_policy: "allow"`** (default). Action-classified
+  traffic that arrives before an inbound A2A turn has seeded a user
+  intent — agent startup, machine-to-machine flows, headless cron-
+  driven agents — passes through with a `skip/no_user_context`
+  Invocation. Set `"deny"` for deployments where every action is
+  required to be user-driven; missing intent then fails closed with
+  `403 ibac.no_intent` and `403 ibac.no_session` respectively.
+
+Both defaults reflect IBAC's posture: judge what the parsers tell us
+is a real action against a real user intent; let everything else
+through and rely on complementary controls (egress policy,
+NetworkPolicy, JWT validation) for the cases IBAC isn't suited to.
+
+### Threat-coverage notes
+
+- **Plain-HTTP exfiltration** is covered when `unclassified_policy:
+  "judge"` is set (and is the primary scenario the IBAC demo
+  exercises). Under the default `passthrough`, plain-HTTP outbound
+  passes through silently.
+- **MCP-shaped exfiltration** (the agent's tool-calling LLM emits a
+  `tools/call` that doesn't align with user intent) is covered by
+  default — `mcp-parser` populates `MCPExtension{IsAction:true}` and
+  the request flows to the judge regardless of `unclassified_policy`.
 
 ## Failure Modes (Detailed)
 

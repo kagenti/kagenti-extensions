@@ -1,318 +1,364 @@
-# Weather Agent — Advanced AuthBridge Demo (UI or kubectl)
+# Weather Agent — Advanced AuthBridge Demo (UI)
 
-This guide is the **advanced** companion to the beginner
-[Weather Agent demo](demo-ui.md). It keeps the same weather agent and MCP tool
-images, but turns on the full platform story:
+UI-driven companion to the beginner [Weather Agent demo](demo-ui.md). Same agent
+and tool images, but with the full **token-exchange + ingress validation** story
+turned on.
 
-- **Outbound token exchange** from the agent to the weather tool (RFC 8693),
-  so the tool receives an access token minted for its audience.
-- **AuthBridge on the tool** as well as the agent, so **JWT validation happens at
-  the tool’s Envoy ingress** (ext_proc) before traffic reaches the MCP server.
-- **Audience alignment**: the token exchange `target_audience` is the weather
-  tool’s **SPIFFE-based Keycloak client ID** (the same string written to
-  `/shared/client-id.txt` by client-registration). That matches what AuthBridge
-  expects for inbound JWT `aud`, so you can demonstrate ingress verification
-  without custom application code in the tool.
+## How this differs from the standard demo
 
-The beginner [demo-ui.md](demo-ui.md) is unchanged: new users can follow it
-without Keycloak scope tuning or token exchange.
+| | Standard ([demo-ui.md](demo-ui.md)) | **Advanced (this guide)** |
+|---|---|---|
+| AuthBridge on tool | Off (passthrough) | **On** — JWT validated at the tool's ingress |
+| Outbound from agent | Passthrough | **RFC 8693 token exchange** to the tool's audience |
+| Keycloak setup | None | One Python script (audience scopes + token-exchange enabled) |
+| `authproxy-routes` | Not used | One outbound route, set in the UI |
+| Resource names | `weather-service`, `weather-tool` | `weather-service-advanced`, `weather-tool-advanced` |
 
-For a UI-driven walkthrough that also covers GitHub PATs and privileged scopes,
-see [GitHub Issue Agent demo-ui](../github-issue/demo-ui.md). This advanced
-weather demo is smaller in scope but hits the same **exchange + validate**
-pattern with a trivial MCP backend.
-
-## What This Demo Shows
-
-1. **Agent identity** — SPIFFE registration with Keycloak for
-   `weather-service-advanced`.
-2. **Inbound validation on the agent** — same as the beginner demo.
-3. **Transparent token exchange** — when the agent calls the tool, AuthBridge
-   exchanges the caller’s token for one whose audience includes the tool’s
-   SPIFFE client ID.
-4. **Inbound validation on the tool** — AuthBridge on the tool pod validates
-   `iss`, signature (JWKS), and `aud` **before** the MCP process sees the
-   request. Logs show `[Inbound]` / `Token validated` on `envoy-proxy` (or the
-   combined `authbridge` container when that feature gate is enabled).
-5. **No GitHub tokens or PATs** — only Keycloak, SPIRE, and public weather APIs.
-
-## Kagenti 0.2+ / current operator (important)
-
-On current platforms, **three things** are required together for the full demo:
-
-1. **`AgentRuntime`** — The mutating webhook **skips** injection unless a matching
-   `agent.kagenti.dev/v1alpha1` `AgentRuntime` exists for the Deployment. Apply
-   `k8s/agentruntime-weather-tool-advanced.yaml` and
-   `k8s/agentruntime-weather-service-advanced.yaml` (the deploy script applies them
-   when the CRD is present) and restart the Deployments so new pods are admitted
-   after the CR exists.
-
-2. **AgentRuntime `spec.type` for the tool** — If `spec.type: tool`, the operator
-   can relabel the pod to `kagenti.io/type: tool`, and the **`injectTools` feature
-   gate** is off by default, so **no AuthBridge** is injected. This demo uses
-   **`spec.type: agent`** for the tool’s `AgentRuntime` so the pod keeps
-   `kagenti.io/type: agent` (the image is still `weather_tool`; only the API
-   classification changes).
-
-3. **Operator-managed Keycloak client registration**. The operator's
-   `ClientRegistrationReconciler` watches `kagenti.io/type: agent` pods and
-   creates the SPIFFE-shaped client in Keycloak (and the corresponding
-   `kagenti-keycloak-client-credentials-<hash>` Secret). The legacy
-   `kagenti.io/client-registration-inject: "true"` label is **no longer
-   used** — it referenced an in-pod `kagenti-client-registration`
-   sidecar that was removed in #411. Setting that label today disables
-   operator-managed registration and leaves the workload with no
-   credentials at all.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Kubernetes (e.g. namespace team1)                  │
-│                                                                              │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │  weather-service-advanced (agent + AuthBridge + SPIRE)                 │ │
-│  │    Inbound: validate user JWT (aud = agent SPIFFE)                     │ │
-│  │    Outbound: match host weather-tool-advanced-mcp → token exchange       │ │
-│  └───────────────────────────────┬────────────────────────────────────────┘ │
-│                                  │ Bearer: exchanged token (aud ⊇ tool SPIFFE)│
-│                                  ▼                                            │
-│  ┌────────────────────────────────────────────────────────────────────────┐ │
-│  │  weather-tool-advanced (MCP + AuthBridge + SPIRE)                      │ │
-│  │    Inbound: validate exchanged JWT at Envoy / ext_proc                 │ │
-│  │    mcp container: streamable HTTP MCP (port 8000)                        │ │
-│  └────────────────────────────────────────────────────────────────────────┘ │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-Unlike the GitHub MCP tool, the weather tool listens on **port 8000**. AuthBridge’s
-gRPC ext_proc listener uses **9090 inside the pod**, so there is no port clash
-with the pattern described for `github-tool` on 9090 in the
-[GitHub Issue demo-ui](../github-issue/demo-ui.md).
+The advanced names live alongside the beginner names so both demos can run in
+the same namespace.
 
 ## Prerequisites
 
-Same platform assumptions as
-[GitHub Issue demo-ui prerequisites](../github-issue/demo-ui.md#prerequisites):
-
-- Kagenti installed with Keycloak (`keycloak` namespace), SPIRE, and the
-  admission webhook that injects AuthBridge.
-- Target namespace (default `team1`) with installer-provided `authbridge-config`,
-  `envoy-config`, `spiffe-helper-config`, and `keycloak-admin-secret`.
-- Python 3.10+ and `pip install -r AuthBridge/requirements.txt` for the Keycloak
-  helper script.
-- For **chat-style** verification: an LLM (Ollama on the host with the model
-  referenced in the Deployment, or OpenAI with keys in a Secret) and outbound
-  port **11434** excluded on the agent (see below).
-
-## Resource Names (kubectl path)
-
-To avoid colliding with an existing beginner `weather-service` /
-`weather-tool`, this demo uses:
-
-| Kind | Name |
-|------|------|
-| Deployments | `weather-tool-advanced`, `weather-service-advanced` |
-| Services | `weather-tool-advanced-mcp` (port 8000), `weather-service-advanced` (8080→8000) |
-| ServiceAccounts | `weather-tool-advanced`, `weather-service-advanced` |
+- Beginner [demo-ui.md prerequisites](demo-ui.md#prerequisites) (Kagenti UI
+  reachable, an LLM provider).
+- In **`team1`**: installer-provided `authbridge-config`,
+  `authbridge-runtime-config`, `spiffe-helper-config`, `envoy-config`. No
+  extra Secrets or ConfigMaps are required up front. **`keycloak-admin-secret`
+  is not in `team1`.** Operator 0.2+ keeps it in **`kagenti-system`** for
+  client registration; `NotFound` in `team1` is expected:
+  ```bash
+  kubectl get secret keycloak-admin-secret -n kagenti-system
+  ```
+- Python 3.10+ for the Keycloak setup script (Step 1).
+- For OpenAI: a `team1` Secret named `openai-secret` (created in Step 3).
 
 SPIFFE IDs (trust domain `localtest.me`):
 
 - Agent: `spiffe://localtest.me/ns/team1/sa/weather-service-advanced`
 - Tool: `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced`
 
-If you change namespace or ServiceAccount names, update
-`k8s/configmaps-advanced.yaml` (`host`, `target_audience`) and re-run
-`setup_keycloak_weather_advanced.py` with matching `-n`, `-a`, and `-t`.
+---
 
-## Step 1: Keycloak (Python)
+## Step 1: Configure Keycloak (one-time)
 
-From the **AuthBridge** directory (repository path `AuthBridge/`):
+Adds the audience scopes and enables `standard.token.exchange.enabled` on the
+agent and tool clients.
 
 ```bash
-cd AuthBridge
-python -m venv venv
-source venv/bin/activate
+cd authbridge
+python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-```
 
-Port-forward Keycloak if you use the default public URL:
-
-```bash
-kubectl port-forward service/keycloak-service -n keycloak 8080:8080
-```
-
-Run setup **after** the tool pod has registered in Keycloak, or pass
-`--wait-tool-client` so the script waits for the tool SPIFFE client:
-
-```bash
-python demos/weather-agent/setup_keycloak_weather_advanced.py \
-  -n team1 \
-  -a weather-service-advanced \
-  -t weather-tool-advanced \
-  --wait-tool-client
-```
-
-Re-run once **after the agent** is running so optional exchange scopes attach to
-the agent’s dynamic client (same pattern as the GitHub demo).
-
-The script:
-
-- Ensures realm default scope `agent-team1-weather-service-advanced-aud` adds the
-  agent SPIFFE to access-token `aud` (UI / alice tokens).
-- Adds optional scope `weather-tool-exchange-aud` with an audience mapper to
-  the **tool SPIFFE** (used during token exchange).
-- Enables `standard.token.exchange.enabled` on the tool (and agent) Keycloak
-  clients once they exist.
-
-## Step 2: ConfigMap (authproxy-routes)
-
-```bash
-kubectl apply -f AuthBridge/demos/weather-agent/k8s/configmaps-advanced.yaml
-```
-
-If you are not using `team1`, edit `metadata.namespace` and the `target_audience`
-SPIFFE string first.
-
-## Step 3: Deploy Tool, Then Agent
-
-```bash
-kubectl apply -f AuthBridge/demos/weather-agent/k8s/weather-tool-advanced.yaml
-kubectl rollout status deployment/weather-tool-advanced -n team1 --timeout=300s
+# Port-forward Keycloak if your shell can't reach keycloak.localtest.me directly
+kubectl port-forward -n keycloak svc/keycloak-service 8080:8080 &
 
 python demos/weather-agent/setup_keycloak_weather_advanced.py \
   -n team1 --wait-tool-client
+```
 
-kubectl apply -f AuthBridge/demos/weather-agent/k8s/weather-service-advanced.yaml
-kubectl rollout status deployment/weather-service-advanced -n team1 --timeout=420s
+`--wait-tool-client` blocks until the tool pod (Step 2) registers its SPIFFE
+client. **Re-run the same command after Step 3** so the agent client picks up
+the optional exchange scope. The script:
 
+- Adds realm default scope `agent-team1-weather-service-advanced-aud` (puts the
+  agent SPIFFE in `aud` for UI / `alice` tokens).
+- Adds optional scope `weather-tool-exchange-aud` (puts the tool SPIFFE in
+  `aud` during token exchange).
+- Enables token exchange on both Keycloak clients.
+- Creates demo user `alice` (used by the optional CLI verify in Step 5).
+
+---
+
+## Step 2: Import the Weather Tool via Kagenti UI
+
+> ⚠️ **Use the `-advanced` names exactly.** **Tool Name** must be
+> `weather-tool-advanced` (not `weather-tool`). The Keycloak script in
+> Step 1 registered SPIFFE / audience scopes for the `-advanced`
+> ServiceAccount; if you import as `weather-tool`, the Service ends up as
+> `weather-tool-mcp` instead of `weather-tool-advanced-mcp` and the
+> `MCP_URL` + outbound route in Step 3 won't resolve.
+
+1. Open [Import Tool](http://kagenti-ui.localtest.me:8080/tools/import).
+2. **Namespace**: `team1` · **Tool Name**: `weather-tool-advanced` (exact).
+3. **Deploy From Image** · **Container Image**:
+   `ghcr.io/kagenti/agent-examples/weather_tool` · **Image Tag**: `latest`.
+4. **MCP Transport Protocol**: `streamable HTTP`.
+5. **Enable AuthBridge sidecar injection**: ✅ **check** (advanced demo
+   validates JWTs at the tool's ingress — this is the difference vs. the
+   standard demo).
+6. **Enable SPIRE identity (spiffe-helper sidecar)**: ✅ **check**.
+7. **Service Port** `8000` · **Target Port** `8000`.
+8. Click **Build & Deploy Tool**.
+
+Wait for the tool pod to be **Ready**. Once it registers in Keycloak, the
+`setup_keycloak_weather_advanced.py` from Step 1 unblocks.
+
+```bash
+kubectl get pods -n team1 -l app.kubernetes.io/name=weather-tool-advanced
+# Expect 3/3 (mcp + authbridge-proxy + spiffe-helper) in proxy-sidecar mode
+```
+
+---
+
+## Step 3: Import the Weather Agent via Kagenti UI
+
+(If you're using OpenAI, create the secret first — replace `<YOUR_OPENAI_API_KEY>`
+with your real key; the shell variable expansion shown is intentional and works
+only if you've already `export`ed it.)
+
+```bash
+kubectl create secret generic openai-secret -n team1 \
+  --from-literal=apikey="<YOUR_OPENAI_API_KEY>"
+```
+
+> The UI agent import references `openai-secret` for both `LLM_API_KEY` and
+> `OPENAI_API_KEY`. If the secret is empty (e.g. `$OPENAI_API_KEY` wasn't
+> exported), the agent fails with `Error: No LLM API key configured.` — see
+> [Troubleshooting](#troubleshooting).
+
+> ⚠️ **Use the `-advanced` name exactly.** **Agent Name** must be
+> `weather-service-advanced` (not `weather-service`). The Keycloak script
+> in Step 1 registered SPIFFE / audience scopes for the `-advanced`
+> ServiceAccount; the wrong name lands you with mismatched audiences and
+> a 401/503 from token exchange.
+
+Now the UI flow (order matches the actual import form top-to-bottom):
+
+1. Open [Import Agent](http://kagenti-ui.localtest.me:8080/agents/import).
+2. **Namespace**: `team1` · **Agent Name**: `weather-service-advanced` (exact).
+3. **Build from Source**:
+   - Git Repository URL: `https://github.com/kagenti/agent-examples`
+   - Git Branch or Tag: `main`
+   - Select Agent: `Weather Service Agent`
+   - Source Subfolder: `a2a/weather_service`
+4. **Protocol**: `A2A` · **Framework**: `LangGraph` · **Workload Type**:
+   `Deployment`.
+5. **Enable AuthBridge sidecar injection**: ✅ (default).
+6. **Enable SPIRE identity**: ✅ (default).
+7. Expand **Outbound Routing Rules** and add one route — this is what
+   triggers the RFC 8693 exchange when the agent calls the tool. The form
+   has three fields (currently unlabeled in the UI); fill them in this
+   order:
+
+   1. Host: `weather-tool-advanced-mcp`
+   2. Target Audience: `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced`
+   3. Token Scopes: `openid weather-tool-exchange-aud`
+
+   > If **Outbound Routing Rules** is missing or unresponsive, your Kagenti
+   > backend may pre-date [kagenti#1194](https://github.com/kagenti/kagenti/pull/1194).
+   > Apply the equivalent ConfigMap with kubectl (
+   > `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml`)
+   > and skip this expander. Same content, list-shaped `routes.yaml`.
+
+8. **Service Port** `8080` · **Target Port** `8000`.
+9. Under **Environment Variables**, click **Import from File/URL** → **From
+   URL**, paste one of the beginner agent's env files, and click
+   **Fetch & Parse**:
+   - OpenAI: `https://raw.githubusercontent.com/kagenti/agent-examples/refs/heads/main/a2a/weather_service/.env.openai`
+   - Ollama: `https://raw.githubusercontent.com/kagenti/agent-examples/refs/heads/main/a2a/weather_service/.env.ollama`
+
+   The OpenAI variant adds `LLM_API_KEY` and `OPENAI_API_KEY` as **Secret**
+   entries pointing at `openai-secret`.
+
+   After import, **edit `MCP_URL`** in the variable list to point at the
+   advanced tool service:
+   ```text
+   MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
+   ```
+10. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
+    **Outbound Ports to Exclude** to `11434`. OpenAI uses HTTPS and needs no
+    exclusion.
+11. Click **Build & Deploy Agent**.
+
+After the agent pod is **Ready**, re-run the Keycloak script so the agent's
+dynamic client gets the optional exchange scope:
+
+```bash
 python demos/weather-agent/setup_keycloak_weather_advanced.py -n team1
 ```
 
-### Ollama and outbound port exclusion
+---
 
-The sample agent manifest sets `LLM_API_BASE` to `host.docker.internal:11434` and
-annotates the pod with `kagenti.io/outbound-ports-exclude: "11434"`. If you
-import through the UI instead, set **Outbound Ports to Exclude** to `11434` the
-same way as in [demo-ui.md](demo-ui.md#ollama-port-exclusion).
+## Step 4: Chat via Kagenti UI
 
-## Step 4 (Optional): Kagenti UI
+> **Expected catalog quirk.** The **Agent Catalog** shows **two** entries:
+> `weather-service-advanced` *and* `weather-tool-advanced`. The **Tool
+> Catalog** is empty. This is by design — the advanced demo labels the
+> tool with `kagenti.io/type: agent` so AuthBridge gets injected on it
+> (the `injectTools` feature gate is off by default; see the
+> [kubectl appendix](#operator-gotchas)). Pick `weather-service-advanced`
+> for chat.
 
-You can mirror the GitHub Issue UI flow with these substitutions:
+1. **Agent Catalog** → namespace `team1` → `weather-service-advanced` →
+   **View Details**. The agent card should render (proves the agent is up and
+   `/.well-known/*` is bypassed).
+2. In the **Chat** panel, ask: *"What is the weather in New York?"*
+3. The response should be live weather. Behind the scenes:
+   - UI's JWT (audience `agent-...-advanced-aud`) hits the agent's AuthBridge
+     ingress.
+   - AuthBridge on the agent matches the outbound route, exchanges for a token
+     with `aud = weather-tool-advanced` SPIFFE.
+   - AuthBridge on the tool validates that JWT before MCP sees it.
 
-- **Tool**: enable **AuthBridge sidecar injection** and **SPIRE**; image
-  `ghcr.io/kagenti/agent-examples/weather_tool`; streamable HTTP; Service name
-  pattern ending in `-mcp` that matches the `host` entry in
-  `configmaps-advanced.yaml`.
-- **Agent**: image `ghcr.io/kagenti/agent-examples/weather_service`;
-  `MCP_URL` pointing at the advanced MCP service;
-  `authproxy-routes` list shape as in
-  [Kagenti version notes](../github-issue/demo-ui.md#kagenti-version-notes-ui-import-and-authbridge).
+If chat returns `Connection error` or `No LLM API key configured`, see
+[Troubleshooting](#troubleshooting) — those are LLM-side failures, not
+AuthBridge failures.
 
-If the UI backend cannot yet express the route list, apply
-`k8s/configmaps-advanced.yaml` with kubectl and avoid duplicating routes in the UI.
+---
 
-## Step 5: Verify Manually
+## Step 5 (Optional): Verify via CLI
 
-### Pods
-
-```bash
-kubectl get pods -n team1 | grep advanced
-# Expect 2/2 for both workloads when injection is on (proxy-sidecar
-# default = agent + authbridge-proxy; envoy-sidecar = agent + envoy-proxy
-# plus the proxy-init init container).
-```
-
-### Tool ingress logs
-
-```bash
-# Container name depends on the resolved AuthBridge mode:
-#   proxy-sidecar (default): -c authbridge-proxy
-#   envoy-sidecar:           -c envoy-proxy
-kubectl logs deployment/weather-tool-advanced -n team1 -c authbridge-proxy 2>&1 | grep "\[Inbound\]"
-```
-
-### Agent outbound exchange logs
+`deploy_and_verify_advanced.sh` exercises the AuthBridge / MCP path
+end-to-end **without an LLM**. It's the right tool to confirm token exchange
+and ingress validation when you want to isolate AuthBridge from agent-side
+issues.
 
 ```bash
-kubectl logs deployment/weather-service-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
+./authbridge/demos/weather-agent/deploy_and_verify_advanced.sh
 ```
 
-### CLI token + A2A
+What it does:
 
-Follow [demo-ui.md — Step 6](demo-ui.md#step-6-test-via-cli), but use:
+1. Password-grants `alice` against the `weather-advanced-e2e` Keycloak client.
+2. Token-exchanges to the tool SPIFFE audience with scope
+   `openid weather-tool-exchange-aud`.
+3. `POST /mcp` with the exchanged token → expects **2xx** (JWT accepted, MCP
+   `initialize` handshake completes). Sends
+   `Accept: application/json, text/event-stream` so streamable HTTP doesn't
+   return 406.
+4. Repeats `POST /mcp` **without** an `Authorization` header → expects **401**
+   (AuthBridge rejects before MCP runs).
 
-- Service: `weather-service-advanced:8080`
-- SPIFFE / client lookup: `spiffe://localtest.me/ns/team1/sa/weather-service-advanced`
+> **`deploy_and_verify_advanced.sh` does NOT call the LLM.** It can succeed
+> while UI chat still returns `Connection error` — see Troubleshooting.
 
-## Automated Deploy and Verify (CI-oriented)
-
-The script **`deploy_and_verify_advanced.sh`** applies the manifests, runs the
-Keycloak setup (including waiting for the tool client), waits for rollouts, and
-verifies **end-to-end** without relying on an LLM:
-
-1. Password grant for user **alice** (create `alice` / `alice123` if missing —
-   the setup script creates her).
-2. RFC 8693 token exchange using the **agent** Keycloak client credentials as
-   the authenticated client and alice’s token as the `subject_token`, with
-   `audience` set to the **tool SPIFFE** and scope `openid weather-tool-exchange-aud`.
-3. HTTP `POST` to `http://weather-tool-advanced-mcp:8000/mcp` with a minimal
-   JSON-RPC `initialize` body. The tool uses **streamable HTTP**; send
-   `Accept: application/json, text/event-stream` (otherwise the MCP server
-   often returns **406** even when AuthBridge already accepted the JWT). **HTTP
-   401 is a hard failure**; a **2xx** response means the JWT was accepted and
-   the initialize handshake completed.
-4. The same `initialize` request **without** an `Authorization` header must
-   return **401** (AuthBridge rejects the call before the MCP app runs).
-   `deploy_and_verify_advanced.sh` checks this as a negative test.
-
-Run from anywhere:
-
-```bash
-./AuthBridge/demos/weather-agent/deploy_and_verify_advanced.sh
-```
-
-Environment variables:
+Useful env knobs:
 
 | Variable | Purpose |
 |----------|---------|
-| `NAMESPACE` | Target namespace (default `team1`) |
-| `SKIP_DEPLOY=1` | Only run verification (resources must already exist) |
-| `KC_INTERNAL` | Keycloak base URL inside the cluster (default `http://keycloak-service.keycloak.svc:8080`) |
-| `KC_USER_CLIENT_ID` | Realm public client for password grant (default **`weather-advanced-e2e`**, created by the Keycloak script; the `kagenti` UI client often has direct access grants disabled) |
-| `KC_USER_CLIENT_SECRET` | Set only if the password client is confidential |
-| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | For admin REST calls from the verify pod |
+| `NAMESPACE` | Default `team1` |
+| `SKIP_DEPLOY=1` | Verify only, skip the apply step (resources must exist) |
+| `KC_INTERNAL` | Keycloak base URL inside the cluster (default `keycloak-service.keycloak.svc:8080`) |
+| `KC_USER_CLIENT_ID` | Public client for password grant (default `weather-advanced-e2e`) |
+| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Admin REST credentials |
 
-The script also **warns** if it cannot find obvious inbound/outbound log markers
-(the container name it inspects depends on the resolved AuthBridge mode —
-`authbridge-proxy` for proxy-sidecar, `envoy-proxy` for envoy-sidecar).
-
-## Cleanup
-
-```bash
-kubectl delete deployment -n team1 \
-  weather-service-advanced weather-tool-advanced --ignore-not-found
-kubectl delete svc -n team1 \
-  weather-service-advanced weather-tool-advanced-mcp --ignore-not-found
-kubectl delete sa -n team1 \
-  weather-service-advanced weather-tool-advanced --ignore-not-found
-```
-
-Keycloak clients for the SPIFFE IDs can be removed from the admin console if you
-no longer need them.
+---
 
 ## Troubleshooting
 
-| Symptom | Likely cause | Mitigation |
-|---------|--------------|------------|
-| Tool pod **CrashLoopBackOff** (container `mcp`) | The `weather_tool` image runs as **UID 1001**; a `securityContext` that forces a different UID (e.g. only `runAsNonRoot: true` with a project-assigned user on OpenShift, or a mismatch with `chown`ed `/app` in the image) prevents `uv run` from reading the app tree | The manifests set **`runAsUser` / `runAsGroup` / `fsGroup: 1001`** to match the [upstream Dockerfile](https://github.com/kagenti/agent-examples/blob/main/mcp/weather_tool/Dockerfile). Re-apply `weather-tool-advanced.yaml`. If it still fails, run `kubectl logs -n team1 deploy/weather-tool-advanced -c mcp --previous` and `kubectl describe pod` for OOMKilled or `CreateContainerError`. |
-| `invalid_scope` / 503 on agent | Optional exchange scope not on agent client | Re-run `setup_keycloak_weather_advanced.py` after the agent is running |
-| `invalid audience` / 401 on agent | Default agent audience scope missing on UI client | Re-run setup; log out and back in to the UI |
-| 401 on tool MCP | Wrong `target_audience` or scope mapper | `target_audience` must equal tool SPIFFE; scope `weather-tool-exchange-aud` must map that audience |
-| Token exchange denied | Tool Keycloak client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers |
-| No `[Inbound]` log line | Combined sidecar logging format | Grep for `Token validated` or increase log window |
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| UI returns `Error: LLM execution failed: Connection error.` | Agent can't reach its LLM. Ollama not running, or Outbound Ports to Exclude not set to `11434`. `deploy_and_verify_advanced.sh` doesn't catch this — it never calls the LLM. | Start Ollama (`ollama serve` + `ollama pull llama3.2:3b-instruct-fp16`), or re-import with the OpenAI `.env` URL. |
+| UI returns `Error: No LLM API key configured. Set the LLM_API_KEY environment variable.` | `openai-secret` is empty (often because `$OPENAI_API_KEY` wasn't exported when you ran `kubectl create secret`), or the agent wasn't restarted after fixing it. | Recreate with the literal value, then verify `kubectl get secret openai-secret -n team1 -o jsonpath='{.data.apikey}' \| base64 -d \| wc -c` is non-zero, then `kubectl rollout restart deploy/weather-service-advanced -n team1`. |
+| UI: **Outbound Routing Rules** expander missing | Kagenti backend pre-dates [kagenti#1194](https://github.com/kagenti/kagenti/pull/1194) | `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml` and skip the UI step. |
+| UI: agent card not available | AuthBridge failed to load `authproxy-routes` (invalid YAML shape) | See the same section in the [GitHub Issue UI demo](../github-issue/demo-ui.md#agent-card-not-available-in-the-ui). |
+| `401` on tool MCP from CLI verify | Wrong `target_audience` or scope mapper | `target_audience` must equal the tool SPIFFE; scope `weather-tool-exchange-aud` must map that audience. Re-run `setup_keycloak_weather_advanced.py`. |
+| `invalid_scope` / `503` from agent | Optional exchange scope not on agent client | Re-run `setup_keycloak_weather_advanced.py -n team1` **after** the agent is running. |
+| Token exchange denied | Tool client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers. |
+| Tool pod CrashLoopBackOff (`mcp` container) | The `weather_tool` image runs as UID 1001; a `securityContext` overriding the user breaks `uv run` | Use the manifests in `k8s/` as-is (they set `runAsUser/Group/fsGroup: 1001`). On OpenShift, see the [upstream Dockerfile](https://github.com/kagenti/agent-examples/blob/main/mcp/weather_tool/Dockerfile). |
+| Tool ingress logs missing `[Inbound]` | Combined sidecar uses different log text | Grep for `Token validated` instead, or increase log window. |
+| Deleted the agent or tool, but the Deployment + Service reappear within seconds | The Kagenti backend's reconciliation service finalizes "orphaned" Shipwright builds by re-creating workloads | Also delete the Shipwright `Build` and `BuildRun` (see the [Cleanup](#cleanup) snippet). |
+| Chat returns `Cannot connect to MCP weather service at http://weather-tool-advanced-mcp:8000/mcp` | UI import used the standard names (`weather-tool` / `weather-service`) instead of `-advanced`, so the actual Service is `weather-tool-mcp` and `MCP_URL` doesn't resolve | Re-import using the exact `-advanced` names. The Keycloak script from Step 1 also expects those names. |
 
-See also the operational table in the AuthBridge testing skill used for this repo.
+Tool ingress and agent outbound logs (container name varies by AuthBridge mode
+— `authbridge-proxy` for proxy-sidecar default, `envoy-proxy` for envoy-sidecar):
+
+```bash
+kubectl logs deploy/weather-tool-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Inbound|Token validated"
+kubectl logs deploy/weather-service-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
+```
+
+---
+
+## Cleanup
+
+Delete via the Kagenti UI (Tool Catalog / Agent Catalog), or via CLI:
+
+```bash
+kubectl delete deployment,svc,sa -n team1 \
+  -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
+kubectl delete deployment,svc,sa -n team1 \
+  -l app.kubernetes.io/name=weather-tool-advanced --ignore-not-found
+
+# Also delete the Shipwright Build/BuildRun, otherwise the Kagenti
+# backend's reconciliation service treats them as "orphaned" and
+# recreates the Deployment + Service + ServiceAccount within seconds:
+kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
+  -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
+kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
+  -l app.kubernetes.io/name=weather-tool-advanced --ignore-not-found
+```
+
+Keycloak clients for the SPIFFE IDs can be removed from the admin console.
+
+---
+
+## Appendix: kubectl-only path
+
+If you'd rather skip the UI entirely, the same demo runs via raw manifests.
+
+```bash
+# 1. Keycloak setup (same as Step 1 above, but with --wait-tool-client first)
+python authbridge/demos/weather-agent/setup_keycloak_weather_advanced.py \
+  -n team1 --wait-tool-client &
+
+# 2. Apply manifests (the deploy script applies AgentRuntime CRs too)
+kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml
+kubectl apply -f authbridge/demos/weather-agent/k8s/weather-tool-advanced.yaml
+kubectl rollout status deploy/weather-tool-advanced -n team1 --timeout=300s
+
+kubectl apply -f authbridge/demos/weather-agent/k8s/weather-service-advanced.yaml
+kubectl rollout status deploy/weather-service-advanced -n team1 --timeout=420s
+
+# 3. Re-run Keycloak setup so the agent client gets the optional exchange scope
+python authbridge/demos/weather-agent/setup_keycloak_weather_advanced.py -n team1
+```
+
+The shipped agent manifest defaults to Ollama. To switch to OpenAI without the
+UI:
+
+```bash
+kubectl create secret generic openai-secret -n team1 \
+  --from-literal=apikey="<YOUR_OPENAI_API_KEY>"
+
+kubectl set env deploy/weather-service-advanced -n team1 -c agent \
+  LLM_API_BASE="https://api.openai.com/v1" \
+  LLM_MODEL="gpt-4o-mini-2024-07-18" \
+  LLM_API_KEY-
+
+kubectl patch deploy weather-service-advanced -n team1 --type=json -p='[
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{
+    "name":"LLM_API_KEY",
+    "valueFrom":{"secretKeyRef":{"name":"openai-secret","key":"apikey"}}
+  }},
+  {"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{
+    "name":"OPENAI_API_KEY",
+    "valueFrom":{"secretKeyRef":{"name":"openai-secret","key":"apikey"}}
+  }}
+]'
+```
+
+(The `LLM_API_KEY-` clears the literal `"ollama"` value from the manifest;
+the `patch` re-adds it as a secret reference. Without the clear, both
+definitions exist and the secret wins, but it's noisy in `kubectl describe`.)
+
+### Operator gotchas
+
+If the demo silently produces unprotected pods, check these:
+
+- **`AgentRuntime` is required.** The mutating webhook **skips** AuthBridge
+  injection unless an `agent.kagenti.dev/v1alpha1` `AgentRuntime` matches the
+  Deployment. The k8s manifests here include them; if you build by hand,
+  add them and **restart the Deployment** so new pods are admitted.
+- **`spec.type: agent`, not `tool`.** With `spec.type: tool` the operator
+  relabels the pod and the `injectTools` feature gate (off by default)
+  controls injection — so the tool ends up with no AuthBridge. This demo
+  uses `spec.type: agent` for the tool's runtime CR.
+- **Don't set `kagenti.io/client-registration-inject: "true"`** — that label
+  references a removed in-pod sidecar and disables operator-managed
+  registration entirely (#411).
+
+---
 
 ## Related Files
 
@@ -322,4 +368,4 @@ See also the operational table in the AuthBridge testing skill used for this rep
 | [k8s/weather-tool-advanced.yaml](k8s/weather-tool-advanced.yaml) | Tool Deployment + Service + SA |
 | [k8s/weather-service-advanced.yaml](k8s/weather-service-advanced.yaml) | Agent Deployment + Service + SA |
 | [setup_keycloak_weather_advanced.py](setup_keycloak_weather_advanced.py) | Keycloak realm tuning |
-| [deploy_and_verify_advanced.sh](deploy_and_verify_advanced.sh) | One-shot deploy + CI-style verification |
+| [deploy_and_verify_advanced.sh](deploy_and_verify_advanced.sh) | One-shot deploy + CI-style verification (no LLM) |

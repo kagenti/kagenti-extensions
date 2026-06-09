@@ -90,3 +90,60 @@ func TestSetGetState_MultiplePlugins(t *testing.T) {
 		t.Errorf("audit state = %+v", au)
 	}
 }
+
+// --- Classification ---
+
+// No populated extensions → both booleans false. Defense-in-depth
+// guardrails (IBAC) treat this as "not our traffic, pass through."
+func TestClassification_NoExtensions(t *testing.T) {
+	pctx := &Context{}
+	anyAction, anyBypass := pctx.Classification()
+	if anyAction || anyBypass {
+		t.Errorf("Classification() = (%v, %v), want (false, false) on empty pctx",
+			anyAction, anyBypass)
+	}
+}
+
+// MCP populated with IsAction=true → action; default false → bypass.
+func TestClassification_MCPAction(t *testing.T) {
+	pctx := &Context{}
+	pctx.Extensions.MCP = &MCPExtension{Method: "tools/call", IsAction: true}
+	anyAction, anyBypass := pctx.Classification()
+	if !anyAction || anyBypass {
+		t.Errorf("Classification() = (%v, %v), want (true, false)", anyAction, anyBypass)
+	}
+}
+
+func TestClassification_MCPBypass(t *testing.T) {
+	pctx := &Context{}
+	pctx.Extensions.MCP = &MCPExtension{Method: "tools/list"} // IsAction=false default
+	anyAction, anyBypass := pctx.Classification()
+	if anyAction || !anyBypass {
+		t.Errorf("Classification() = (%v, %v), want (false, true)", anyAction, anyBypass)
+	}
+}
+
+// A2A and Inference behave the same way as MCP.
+func TestClassification_A2AAndInference(t *testing.T) {
+	pctx := &Context{}
+	pctx.Extensions.A2A = &A2AExtension{Method: "message/send", IsAction: true}
+	pctx.Extensions.Inference = &InferenceExtension{Model: "gpt-4o", IsAction: true}
+	anyAction, anyBypass := pctx.Classification()
+	if !anyAction || anyBypass {
+		t.Errorf("Classification() = (%v, %v), want (true, false) for two action extensions",
+			anyAction, anyBypass)
+	}
+}
+
+// Mixed: one extension says action, another says bypass — both flags
+// true. Callers decide their precedence (IBAC chooses bypass-wins).
+func TestClassification_Mixed(t *testing.T) {
+	pctx := &Context{}
+	pctx.Extensions.MCP = &MCPExtension{Method: "tools/call", IsAction: true}
+	pctx.Extensions.Inference = &InferenceExtension{Model: "gpt-4o"} // IsAction=false
+	anyAction, anyBypass := pctx.Classification()
+	if !anyAction || !anyBypass {
+		t.Errorf("Classification() = (%v, %v), want (true, true) on mixed classification",
+			anyAction, anyBypass)
+	}
+}

@@ -317,6 +317,19 @@ type ListenerConfig struct {
 	ReverseProxyAddr    string `yaml:"reverse_proxy_addr" json:"reverse_proxy_addr"`
 	ReverseProxyBackend string `yaml:"reverse_proxy_backend" json:"reverse_proxy_backend"`
 
+	// TransparentProxyAddr is the bind address for the outbound transparent
+	// listener used by proxy-sidecar enforce-redirect mode: iptables REDIRECTs
+	// the agent's bypass egress here, and the listener recovers the original
+	// destination via SO_ORIGINAL_DST and tunnels it through the same outbound
+	// pipeline as the forward proxy. The proxy-sidecar / lite presets default it
+	// to ":8082", so for those shapes the listener is effectively always on —
+	// binding is harmless when nothing is redirected to it (cooperative
+	// HTTP_PROXY deployments simply never receive connections on it). An empty
+	// value only disables the listener for modes that have no preset default for
+	// this field (e.g. waypoint / envoy-sidecar); under proxy-sidecar / lite the
+	// preset refills it, matching the always-on enforce-redirect design.
+	TransparentProxyAddr string `yaml:"transparent_proxy_addr" json:"transparent_proxy_addr"`
+
 	// SessionAPIAddr is the bind address for the session events HTTP server
 	// (JSON snapshots + SSE stream consumed by abctl or curl). Default per
 	// mode preset is ":9094". Set to empty string to disable the endpoint.

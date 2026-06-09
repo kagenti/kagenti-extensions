@@ -103,24 +103,19 @@ You should also have:
 
 ## Installer-Provided Resources
 
-The Kagenti installer creates everything this demo needs in the target namespace:
+In **`team1`**: `authbridge-config`, `authbridge-runtime-config`, `spiffe-helper-config`,
+`envoy-config`. No extra Secrets or ConfigMaps are required for this demo (outbound
+passthrough; inbound JWT uses issuer/signature checks).
 
-- **`kagenti` realm** in Keycloak
-- **`keycloak-admin-secret`** Secret (Keycloak admin credentials)
-- **`authbridge-config`**, **`authbridge-runtime-config`**, **`spiffe-helper-config`**, **`envoy-config`** ConfigMaps
+**`keycloak-admin-secret` is not in `team1`.** Operator 0.2+ keeps it in
+**`kagenti-system`** for client registration. `NotFound` in `team1` is expected:
 
-No additional Keycloak configuration, Secrets, or ConfigMaps are required for
-this demo. The weather agent uses outbound passthrough (no token exchange), and
-inbound JWT validation works with signature and issuer checks alone.
+```bash
+kubectl get secret keycloak-admin-secret -n kagenti-system
+```
 
-> If your Keycloak admin credentials differ from the default (`admin`/`admin`),
-> update the secret:
-> ```bash
-> kubectl create secret generic keycloak-admin-secret -n team1 \
->   --from-literal=KEYCLOAK_ADMIN_USERNAME=<your-admin-user> \
->   --from-literal=KEYCLOAK_ADMIN_PASSWORD=<your-admin-password> \
->   --dry-run=client -o yaml | kubectl apply -f -
-> ```
+UI login: secret **`kagenti-test-user`** in namespace **`keycloak`** (`admin` + password).
+Realm **`kagenti`** is created by the platform installer.
 
 ---
 
@@ -232,19 +227,24 @@ Wait for the Shipwright build to complete and the deployment to become ready.
 kubectl get pods -n team1
 ```
 
-Expected output:
+Expected output (Step 2 defaults — `proxy-sidecar` mode):
 
-```
+```text
 NAME                               READY   STATUS    RESTARTS   AGE
 weather-service-58768bdb67-xxxxx   2/2     Running   0          2m
 weather-tool-7f8c9d6b44-yyyyy     1/1     Running   0          5m
 ```
 
-> **Note:** The agent pod shows **2/2** containers — the agent itself plus
-> one combined AuthBridge sidecar (spiffe-helper is bundled inside; client
-> registration is handled by the operator outside the pod). In envoy-sidecar
-> mode you'll also see a `proxy-init` init container that exits after
-> setting up iptables.
+> **Note:** AuthBridge ships as a single combined sidecar image (since
+> kagenti-extensions#411). `weather-service` runs `agent` + the combined
+> AuthBridge sidecar — `2/2` — regardless of whether SPIRE identity is
+> enabled. The `spiffe-helper` is bundled inside the combined image and
+> activated per workload via `SPIRE_ENABLED` (driven by the
+> `kagenti.io/spire: enabled` label); it is not a separate container. In
+> `envoy-sidecar` mode the pod is still `2/2` (`agent` + the combined
+> sidecar) plus a `proxy-init` init container for iptables setup. See the
+> [AuthBridge deployment guide](https://github.com/kagenti/kagenti/blob/main/docs/authbridge/deployment-guide.md)
+> for the full mode/label reference.
 
 ### Verify injected containers
 
@@ -252,17 +252,20 @@ weather-tool-7f8c9d6b44-yyyyy     1/1     Running   0          5m
 kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service -o jsonpath='{.items[0].spec.containers[*].name}'
 ```
 
-Expected (proxy-sidecar mode, the cluster default):
+Expected (Step 2 defaults — `proxy-sidecar` mode):
 
-```
+```text
 agent authbridge-proxy
 ```
 
-Or, in envoy-sidecar mode:
+Or, in `envoy-sidecar` mode:
 
-```
+```text
 agent envoy-proxy
 ```
+
+The container *names* don't change with SPIRE — `spiffe-helper` runs inside
+the combined sidecar, not as a separate container.
 
 ### Check operator-managed client registration
 
@@ -565,13 +568,14 @@ kubectl delete pod test-client -n team1 --ignore-not-found
 **Symptom:** `{"error":"invalid_client","error_description":"Invalid client or Invalid client credentials"}`
 
 **Cause:** The `keycloak-admin-secret` Secret or `authbridge-config` ConfigMap was missing
-or incorrect at startup, so the client-registration sidecar couldn't register the client.
+or incorrect at startup, so the operator's `ClientRegistrationReconciler` couldn't reach
+Keycloak to register the client.
 
 **Fix:**
 
 ```bash
-# 1. Verify the keycloak-admin-secret exists
-kubectl get secret keycloak-admin-secret -n team1
+# 1. Verify the keycloak-admin-secret exists (operator 0.2+ keeps it in kagenti-system)
+kubectl get secret keycloak-admin-secret -n kagenti-system
 
 # 2. Verify the authbridge-config ConfigMap has the correct realm
 kubectl get configmap authbridge-config -n team1 -o jsonpath='{.data.KEYCLOAK_REALM}'

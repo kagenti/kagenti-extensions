@@ -14,6 +14,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
@@ -23,24 +24,28 @@ import (
 
 // tokenExchangeConfig is the plugin's local config schema. See
 // authbridge/docs/plugin-reference.md for the pattern.
+// Field tags drive both runtime decoding (json) and operator-facing
+// schema introspection (description / required / default / enum).
+// Inline doc comments retain long-form rationale; struct tags carry
+// single-line summaries for templating. See pipeline/schema.go.
 type tokenExchangeConfig struct {
 	// TokenURL is the OAuth token endpoint. Explicit value wins; else
 	// derived from KeycloakURL + KeycloakRealm using Keycloak's
 	// convention.
-	TokenURL string `json:"token_url"`
+	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Required unless keycloak_url + keycloak_realm are both set (the plugin derives token_url from the pair)."`
 
 	// KeycloakURL and KeycloakRealm are a convenience for deriving
 	// TokenURL when the operator prefers to supply Keycloak base + realm
 	// rather than the full token endpoint.
-	KeycloakURL   string `json:"keycloak_url"`
-	KeycloakRealm string `json:"keycloak_realm"`
+	KeycloakURL   string `json:"keycloak_url" description:"Internal Keycloak base URL. Required (with keycloak_realm) when token_url is empty."`
+	KeycloakRealm string `json:"keycloak_realm" description:"Keycloak realm name. Required (with keycloak_url) when token_url is empty."`
 
 	// DefaultPolicy is applied when a request's host matches no route:
 	// "passthrough" (default) forwards the request unchanged;
 	// "exchange" attempts a client-credentials exchange with an empty
 	// audience (usually fails — kept for rare use cases where the IdP
 	// allows it).
-	DefaultPolicy string `json:"default_policy"`
+	DefaultPolicy string `json:"default_policy" description:"Behavior when host matches no route: passthrough forwards unchanged, exchange attempts empty-audience client-credentials." default:"passthrough" enum:"passthrough,exchange"`
 
 	// NoTokenPolicy controls how the plugin handles outbound requests
 	// that arrive without a bearer token: "client-credentials" does an
@@ -48,41 +53,43 @@ type tokenExchangeConfig struct {
 	// unchanged; "deny" rejects. Default: "deny" in all modes.
 	// Operators who need a different behavior (e.g. waypoint's historic
 	// "allow" default) must set it explicitly per plugin entry.
-	NoTokenPolicy string `json:"no_token_policy"`
+	NoTokenPolicy string `json:"no_token_policy" description:"Behavior when outbound has no bearer token: client-credentials, allow, or deny." default:"deny" enum:"client-credentials,allow,deny"`
 
 	// Identity carries client credentials used for token exchange.
-	Identity tokenExchangeIdentity `json:"identity"`
+	Identity tokenExchangeIdentity `json:"identity" description:"Client credentials used for token exchange (spiffe or client-secret)."`
 
 	// Routes drives host-to-audience matching. A host that matches no
 	// route falls through to DefaultPolicy.
-	Routes tokenExchangeRoutes `json:"routes"`
+	Routes tokenExchangeRoutes `json:"routes" description:"Host-to-audience routing rules; non-matching hosts fall through to default_policy."`
 
 	// AudienceFromHost — when true, requests with no matching route use
 	// routing.ServiceNameFromHost(host) as the target audience. Used in
 	// waypoint mode.
-	AudienceFromHost bool `json:"audience_from_host"`
+	AudienceFromHost bool `json:"audience_from_host" description:"When true, derive audience from host for unrouted requests (waypoint mode)." default:"false"`
+
+	ResolvePlaceholders bool `json:"resolve_placeholders" default:"false" description:"Resolve an inbound bearer carrying the placeholder prefix from the shared store to the real token before exchange. Unresolvable placeholders are denied (fail closed)."`
 }
 
 type tokenExchangeIdentity struct {
 	// Type is one of "spiffe" or "client-secret".
-	Type string `json:"type"`
+	Type string `json:"type" required:"true" description:"Identity scheme: spiffe (JWT-SVID assertion) or client-secret." enum:"spiffe,client-secret"`
 
 	// ClientID identifies the client in Keycloak. Explicit value wins;
 	// else read from ClientIDFile at Configure time (or by Init if the
 	// file isn't yet available).
-	ClientID     string `json:"client_id"`
-	ClientIDFile string `json:"client_id_file"`
+	ClientID     string `json:"client_id" description:"Inline Keycloak client ID. One of client_id or client_id_file is required."`
+	ClientIDFile string `json:"client_id_file" description:"Read client ID from this file. Default: /shared/client-id.txt."`
 
 	// ClientSecret / ClientSecretFile are the client-secret credentials
 	// (type=client-secret).
-	ClientSecret     string `json:"client_secret"`
-	ClientSecretFile string `json:"client_secret_file"`
+	ClientSecret     string `json:"client_secret" description:"Inline Keycloak client secret (type=client-secret)."`
+	ClientSecretFile string `json:"client_secret_file" description:"Read client secret from file. Default: /shared/client-secret.txt."`
 
 	// JWTAudience is the audience claim minted on the JWT-SVID used as
 	// the RFC 8693 client assertion. Required when Type=="spiffe";
 	// ignored otherwise. Lives on the plugin (not the framework spiffe
 	// block) because only the spiffe identity path consumes it.
-	JWTAudience string `json:"jwt_audience"`
+	JWTAudience string `json:"jwt_audience" description:"Audience claim minted on the JWT-SVID assertion. REQUIRED when type=spiffe; ignored otherwise."`
 
 	// jwt_svid_path was historically a per-plugin path to the JWT-SVID
 	// file written by spiffe-helper. Removed in favor of injection via
@@ -94,11 +101,11 @@ type tokenExchangeIdentity struct {
 type tokenExchangeRoutes struct {
 	// File is an optional path to a routes.yaml file (see
 	// authlib/routing.LoadRoutes).
-	File string `json:"file"`
+	File string `json:"file" description:"Path to a routes.yaml file. Default: /etc/authproxy/routes.yaml."`
 
 	// Rules are inline route entries; combined with routes loaded from
 	// File.
-	Rules []tokenExchangeRoute `json:"rules"`
+	Rules []tokenExchangeRoute `json:"rules" description:"Inline route entries. Combined with rules loaded from file."`
 }
 
 type tokenExchangeRoute struct {
@@ -273,7 +280,15 @@ func init() {
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{}
+	return pipeline.PluginCapabilities{
+		Description: "RFC 8693 outbound token exchange against Keycloak per route.",
+	}
+}
+
+// ConfigSchema implements pipeline.SchemaProvider; surfaces field
+// metadata to abctl edit templates and other config-aware tooling.
+func (p *TokenExchange) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(tokenExchangeConfig{})
 }
 
 func (p *TokenExchange) Configure(raw json.RawMessage) error {
@@ -554,6 +569,14 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	authHeader := pctx.Headers.Get("Authorization")
 	host := pctx.Host
 
+	if p.cfg.ResolvePlaceholders && placeholder.IsPlaceholder(auth.ExtractBearer(authHeader)) {
+		real, ok := resolvePlaceholder(pctx, auth.ExtractBearer(authHeader))
+		if !ok {
+			return pctx.DenyAndRecord("placeholder_unresolved", "auth.unauthorized", "unresolvable credential placeholder")
+		}
+		authHeader = "Bearer " + real
+	}
+
 	result := p.inner.HandleOutbound(ctx, authHeader, host)
 	// Record an Auth.Outbound entry on every branch so operators have
 	// full outbound audit in the session stream — matches the inbound
@@ -619,6 +642,20 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		})
 	}
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// resolvePlaceholder looks a handle up in the shared store. Returns ok=false
+// (fail closed) when no store is wired or the handle is unknown/expired.
+func resolvePlaceholder(pctx *pipeline.Context, handle string) (string, bool) {
+	if pctx.Shared == nil {
+		return "", false
+	}
+	v, ok := pctx.Shared.Get(placeholder.Key(handle))
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
 }
 
 // boolStr renders a boolean as "true" / "false" for Invocation.Details.

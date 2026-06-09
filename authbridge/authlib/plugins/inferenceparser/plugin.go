@@ -26,8 +26,8 @@ func (p *InferenceParser) Name() string { return "inference-parser" }
 
 func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		Writes:    []string{"inference"},
-		ReadsBody: true,
+		ReadsBody:   true,
+		Description: "Parses LLM completions into pctx.Extensions.Inference.",
 	}
 }
 
@@ -59,6 +59,12 @@ func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) p
 		TopP:        req.TopP,
 		Stream:      req.Stream,
 		ToolChoice:  req.ToolChoice,
+		// Every populated InferenceExtension is an outbound LLM call —
+		// the agent making a real action. The "don't judge inference
+		// by default" choice is operator policy, lives in IBAC's
+		// judge_inference config; the classification verdict here is
+		// independent of that policy.
+		IsAction: true,
 	}
 
 	for _, msg := range req.Messages {
@@ -91,23 +97,138 @@ func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) p
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// OnResponse populates the response-side fields (Completion, FinishReason,
-// token counts) on pctx.Extensions.Inference. Handles both non-streaming
-// JSON responses and SSE streams from OpenAI-compatible servers.
+// OnResponse is the legacy buffered-path response hook. Because this
+// plugin implements StreamingResponder, pipeline.RunResponse skips it
+// and OnResponseFrame is the dispatch path under all listeners — this
+// method is unreachable from a normal listener. Kept for tests and
+// hypothetical pipelines that call OnResponse directly without going
+// through RunResponse, with a defensive guard against re-recording if
+// the streaming path has already populated state.
 func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
-	// No Invocation when the parser doesn't apply — request wasn't
-	// inference or no response body to parse.
-	if len(pctx.ResponseBody) == 0 || pctx.Extensions.Inference == nil {
+	if pctx.Extensions.Inference == nil {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	ext := pctx.Extensions.Inference
+	if ext.Completion != "" || ext.FinishReason != "" || ext.TotalTokens > 0 {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	if len(pctx.ResponseBody) == 0 {
+		pctx.Skip("no_response_body")
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	if pctx.Extensions.Inference.Stream {
-		parseInferenceSSE(pctx.ResponseBody, pctx.Extensions.Inference)
+	if ext.Stream {
+		parseInferenceSSE(pctx.ResponseBody, ext)
 	} else {
-		parseInferenceJSON(pctx.ResponseBody, pctx.Extensions.Inference)
+		parseInferenceJSON(pctx.ResponseBody, ext)
 	}
 
+	logInferenceFinalized(ext)
+	pctx.Observe("matched_" + ext.Model + "_response")
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// inferenceStreamState is the scratch state kept on the extension for
+// the duration of a streaming response. Lives in pctx.Extensions.Custom
+// under a private key — kept off the public InferenceExtension shape so
+// the API stays clean. The struct accumulates the in-progress
+// completion until last=true triggers finalization.
+type inferenceStreamState struct {
+	completion strings.Builder
+	usage      inferenceUsage
+}
+
+// streamStateKey scopes the scratch state to this plugin in
+// pctx.Extensions.Custom. Other plugins see pctx.Extensions.Custom
+// keys but won't collide with this one.
+const streamStateKey = "inference-parser/stream-state"
+
+// OnResponseFrame folds each SSE-data chunk into the running
+// completion. On last=true the finalized result is written to the
+// public InferenceExtension fields (Completion / FinishReason /
+// token counts) and the Observe row is recorded.
+//
+// Application/json responses are delivered as a single last=true
+// frame containing the full JSON body — the dual path keeps one
+// code path for both shapes.
+func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Context, frame []byte, last bool) pipeline.Action {
+	if pctx.Extensions.Inference == nil {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
 	ext := pctx.Extensions.Inference
+
+	// application/json one-shot: single last=true frame carrying the
+	// complete envelope. Streaming responses arrive as multiple frames
+	// where ext.Stream==true; tell them apart by the request-side flag.
+	if last && !ext.Stream {
+		if len(frame) == 0 {
+			pctx.Skip("no_response_body")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		parseInferenceJSON(frame, ext)
+		logInferenceFinalized(ext)
+		pctx.Observe("matched_" + ext.Model + "_response")
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
+	// Streaming path. Lazily allocate the per-stream scratch.
+	state := getOrCreateStreamState(pctx)
+
+	if len(frame) > 0 {
+		// Each frame is one OpenAI streaming chunk: data: { choices: [...], usage: ... }
+		// or the literal sentinel "[DONE]". Skip the sentinel.
+		if !bytes.Equal(bytes.TrimSpace(frame), []byte("[DONE]")) {
+			var chunk inferenceStreamChunk
+			if err := json.Unmarshal(frame, &chunk); err != nil {
+				slog.Debug("inference-parser: malformed streaming chunk, skipping", "error", err)
+			} else {
+				for _, c := range chunk.Choices {
+					if c.Delta.Content != "" {
+						state.completion.WriteString(c.Delta.Content)
+					}
+					if c.FinishReason != "" {
+						ext.FinishReason = c.FinishReason
+					}
+				}
+				if chunk.Usage.TotalTokens > 0 {
+					state.usage = chunk.Usage
+				}
+			}
+		}
+	}
+
+	if last {
+		ext.Completion = state.completion.String()
+		if state.usage.TotalTokens > 0 {
+			ext.PromptTokens = state.usage.PromptTokens
+			ext.CompletionTokens = state.usage.CompletionTokens
+			ext.TotalTokens = state.usage.TotalTokens
+		}
+		// Empty stream with no body and no chunks — record Skip to
+		// pair the response row with the request row.
+		if ext.Completion == "" && ext.FinishReason == "" && ext.TotalTokens == 0 {
+			pctx.Skip("no_response_body")
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		logInferenceFinalized(ext)
+		pctx.Observe("matched_" + ext.Model + "_response")
+	}
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+func getOrCreateStreamState(pctx *pipeline.Context) *inferenceStreamState {
+	if s := pipeline.GetState[inferenceStreamState](pctx, streamStateKey); s != nil {
+		return s
+	}
+	s := &inferenceStreamState{}
+	pipeline.SetState(pctx, streamStateKey, s)
+	return s
+}
+
+// logInferenceFinalized emits the operator-facing INFO log + Observe
+// once a response is finalized — shared by OnResponse and
+// OnResponseFrame so streaming and buffered finalize identically.
+func logInferenceFinalized(ext *pipeline.InferenceExtension) {
 	slog.Info("inference-parser: response",
 		"model", ext.Model,
 		"finishReason", ext.FinishReason,
@@ -115,8 +236,6 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 		"completionTokens", ext.CompletionTokens,
 	)
 	slog.Debug("inference-parser: completion", "text", parsercommon.Truncate(ext.Completion, parsercommon.DebugBodyMax))
-	pctx.Observe("matched_" + ext.Model + "_response")
-	return pipeline.Action{Type: pipeline.Continue}
 }
 
 // parseInferenceJSON parses a non-streaming OpenAI chat/completions response.

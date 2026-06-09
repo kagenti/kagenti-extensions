@@ -10,10 +10,18 @@
 // IBAC catches the outbound exfiltration by comparing the action
 // against the recorded intent via an LLM judge.
 //
+// IBAC is defense in depth, not a general gatekeeper. It only fires
+// on traffic a protocol parser classified — pctx.Classification()
+// reports whether any populated extension has IsAction=true. Requests
+// nobody classified pass through silently. Per-protocol bypass
+// vocabulary (MCP housekeeping methods, transport-layer SSE/session-
+// terminate idioms, A2A discovery, etc.) lives in the parsers, not
+// here — IBAC just reads the verdict.
+//
 // Per-request only — no cross-request session-scoped state. Requires
-// an a2a-parser in the inbound chain (runtime dependency, fail-closed
-// when LastIntent is nil) and works alongside an optional mcp-parser
-// (After ordering hint) for richer action descriptions.
+// at least one of mcp-parser, a2a-parser, or inference-parser in the
+// pipeline (RequiresAny) so there's something to drive classification
+// — otherwise IBAC would silently no-op on every request.
 package ibac
 
 import (
@@ -36,48 +44,112 @@ import (
 // ibacConfig is the plugin's local config schema. See
 // authbridge/docs/plugin-reference.md for the decode → applyDefaults →
 // validate convention shared with jwt-validation and token-exchange.
+//
+// Field tags drive both runtime decoding (json) and operator-facing
+// schema introspection (description / required / default / enum).
+// See pipeline/schema.go for the consumer contract; descriptions are
+// kept single-line — full prose lives in docs/ibac-plugin.md.
 type ibacConfig struct {
-	// JudgeEndpoint is the base URL of the LLM-judge service. The
-	// plugin POSTs OpenAI-compatible chat-completion requests to
-	// JudgeEndpoint+"/v1/chat/completions".
-	JudgeEndpoint string `json:"judge_endpoint"`
+	JudgeEndpoint string `json:"judge_endpoint" required:"true" description:"Base URL of the LLM-judge service. The plugin POSTs to {endpoint}/v1/chat/completions."`
 
-	// JudgeModel names the model to use for verdicts (e.g.
-	// "llama3.2:3b" for ollama, "gpt-4o-mini" for OpenAI).
-	JudgeModel string `json:"judge_model"`
+	JudgeModel string `json:"judge_model" required:"true" description:"Model name passed to the judge, e.g. \"llama3.2:3b\" or \"gpt-4o-mini\"."`
 
-	// JudgeBearer is an optional bearer token for the judge endpoint.
-	// Leave empty for unauthenticated local LLMs (ollama).
-	JudgeBearer string `json:"judge_bearer"`
+	JudgeBearer string `json:"judge_bearer" description:"Optional bearer token for the judge endpoint. Empty for unauthenticated local LLMs."`
 
-	// SystemPrompt overrides the default judge system prompt. Empty
-	// means "use the default" (see judge.go:defaultSystemPrompt).
-	SystemPrompt string `json:"system_prompt"`
+	SystemPrompt string `json:"system_prompt" description:"Override the default judge system prompt. Empty means use the built-in default."`
 
-	// TimeoutMs bounds each judge call. Defaults to 5000.
-	TimeoutMs int `json:"timeout_ms"`
+	TimeoutMs int `json:"timeout_ms" description:"Per-call judge timeout. Validation rejects values below 100." default:"5000"`
 
-	// JudgeInference, when true, also judges outbound traffic where
-	// pctx.Extensions.Inference is populated (the agent's own LLM
-	// reasoning loop). Default false — judging the agent's prompts
-	// is high-cost low-value for typical deployments.
-	JudgeInference bool `json:"judge_inference"`
+	JudgeMaxTokens int `json:"judge_max_tokens" description:"Cap on the judge LLM's reply length. Lower values risk truncating mid-key on hosted models that wrap output in markdown fences." default:"1024"`
 
-	// AgentLLMHost is a convenience: the host of the agent's own LLM
-	// endpoint. When set, it's added to the bypass-host list so the
-	// agent's reasoning traffic is never judged regardless of
-	// JudgeInference.
-	AgentLLMHost string `json:"agent_llm_host"`
+	JudgeJSONMode *bool `json:"judge_json_mode" description:"When true, sets response_format: json_object so hosted models suppress the markdown-fence wrapper around structured output." default:"true"`
 
-	// BypassHosts are host globs (path.Match syntax) skipped without
-	// judging. Defaults include common infrastructure hostnames so
-	// the judge isn't called on Keycloak / OTel / agent-card hops.
-	BypassHosts []string `json:"bypass_hosts"`
+	JudgeInference bool `json:"judge_inference" description:"When true, also judge outbound LLM-reasoning traffic. High-cost / low-value default off." default:"false"`
 
-	// BypassPaths are URL path globs skipped without judging.
-	// Defaults to bypass.DefaultPatterns (.well-known, healthz, etc).
-	BypassPaths []string `json:"bypass_paths"`
+	AgentLLMHost string `json:"agent_llm_host" description:"Convenience: agent's own LLM host. Added to bypass_hosts so reasoning traffic is never judged."`
+
+	BypassHosts []string `json:"bypass_hosts" description:"Host globs (path.Match) skipped without judging. Defaults include keycloak / spire / otel."`
+
+	BypassPaths []string `json:"bypass_paths" description:"URL path globs skipped without judging. Defaults: /.well-known/* /healthz /readyz /livez."`
+
+	// NoIntentPolicy controls behavior when a request reaches step 6
+	// without a recorded user intent — either because Session is nil
+	// (no inbound A2A turn has populated the active bucket yet) or
+	// because the session contains no extractable user-role A2A
+	// fragment. Two values:
+	//
+	//   - "allow" (default): Skip with reason "no_user_context" and
+	//     pass through. Right for deployments where agents take
+	//     legitimate self-actions (initialization, machine-to-machine
+	//     calls, headless cron-driven flows) — IBAC should not be in
+	//     the middle of those decisions because there's no user
+	//     intent to align against.
+	//
+	//   - "deny": Reject with 403 and the existing "no_session" /
+	//     "no_intent" reasons. Right for deployments where every
+	//     outbound is supposed to be user-driven and a missing intent
+	//     is a real misconfiguration worth surfacing as a denial.
+	//
+	// The default is "allow" because IBAC's threat model targets
+	// prompt-injection attacks where the LLM emits user-misaligned
+	// actions — that requires there to be a user in the first place.
+	// Deployments that mix user-driven and self-driven traffic get
+	// the right behavior automatically; deployments that want hard
+	// fail-closed semantics opt in via "deny".
+	NoIntentPolicy string `json:"no_intent_policy" description:"Behavior when an action lacks recorded user intent. allow=skip; deny=403." default:"allow" enum:"allow,deny"`
+
+	// UnclassifiedPolicy controls behavior at step 4 (the
+	// classification gate) when no protocol parser populated any
+	// extension on this request — i.e. the request is unclassified.
+	// Two values:
+	//
+	//   - "passthrough" (default): record no Skip, return Continue.
+	//     IBAC's defense-in-depth posture — only judge traffic that
+	//     a parser claimed. Plain-HTTP outbound, CORS preflights,
+	//     OAuth metadata fetches, agent-card discovery, and any
+	//     other request shape that the configured parsers don't
+	//     recognize all pass through silently. Pair with egress
+	//     allowlists / NetworkPolicy for plain-HTTP egress control.
+	//
+	//   - "judge": fall through to the inference policy and intent
+	//     extraction even when no parser claimed the request. Sends
+	//     plain-HTTP outbound (e.g. raw http.Post from local
+	//     function-calling tools) to the judge alongside the
+	//     classified action paths. Wider coverage; comes with the
+	//     standard IBAC operational cost (one extra LLM round-trip
+	//     per outbound request) for traffic that may not benefit
+	//     from intent alignment. Recommended for the IBAC demo and
+	//     for deployments where any outbound request from the agent
+	//     matters and there isn't a complementary egress control.
+	//
+	// The default is "passthrough" because production deployments
+	// using MCP / A2A / inference get full coverage from the
+	// parser-driven classification, and the cost of judging
+	// arbitrary HTTP traffic isn't paid for by most operators.
+	// The IBAC demo opts into "judge" to keep its plain-HTTP exfil
+	// scenario operational.
+	UnclassifiedPolicy string `json:"unclassified_policy" description:"Behavior when no parser claimed the request. passthrough=skip; judge=fall through to judge." default:"passthrough" enum:"passthrough,judge"`
 }
+
+// ConfigSchema exposes the ibacConfig fields for schema-aware tooling
+// (abctl edit templates, future kagenti-UI forms, etc.). Implements
+// pipeline.SchemaProvider; absence would simply make IBAC opaque to
+// such tooling without affecting runtime.
+func (p *IBAC) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(ibacConfig{})
+}
+
+// no_intent_policy values.
+const (
+	NoIntentPolicyAllow = "allow"
+	NoIntentPolicyDeny  = "deny"
+)
+
+// unclassified_policy values.
+const (
+	UnclassifiedPolicyPassthrough = "passthrough"
+	UnclassifiedPolicyJudge       = "judge"
+)
 
 // defaultBypassHosts is the conservative starting set. Operators with
 // SPIRE / Keycloak / observability stacks deployed under different
@@ -109,6 +181,13 @@ func (c *ibacConfig) applyDefaults() {
 	if c.TimeoutMs == 0 {
 		c.TimeoutMs = 5000
 	}
+	if c.JudgeMaxTokens == 0 {
+		c.JudgeMaxTokens = 1024
+	}
+	if c.JudgeJSONMode == nil {
+		t := true
+		c.JudgeJSONMode = &t
+	}
 	if len(c.BypassHosts) == 0 {
 		c.BypassHosts = defaultBypassHosts
 	}
@@ -117,6 +196,12 @@ func (c *ibacConfig) applyDefaults() {
 	}
 	if len(c.BypassPaths) == 0 {
 		c.BypassPaths = defaultBypassPaths
+	}
+	if c.NoIntentPolicy == "" {
+		c.NoIntentPolicy = NoIntentPolicyAllow
+	}
+	if c.UnclassifiedPolicy == "" {
+		c.UnclassifiedPolicy = UnclassifiedPolicyPassthrough
 	}
 }
 
@@ -129,6 +214,9 @@ func (c *ibacConfig) validate() error {
 	}
 	if c.TimeoutMs < 100 {
 		return fmt.Errorf("timeout_ms must be at least 100, got %d", c.TimeoutMs)
+	}
+	if c.JudgeMaxTokens < 64 {
+		return fmt.Errorf("judge_max_tokens must be at least 64, got %d", c.JudgeMaxTokens)
 	}
 	for _, p := range c.BypassHosts {
 		if _, err := path.Match(p, ""); err != nil {
@@ -152,6 +240,20 @@ func (c *ibacConfig) validate() error {
 			return fmt.Errorf("bypass_paths pattern %q matches everything; "+
 				"if you mean to disable IBAC, remove it from the pipeline instead", p)
 		}
+	}
+	switch c.NoIntentPolicy {
+	case NoIntentPolicyAllow, NoIntentPolicyDeny:
+		// ok
+	default:
+		return fmt.Errorf("no_intent_policy must be %q or %q, got %q",
+			NoIntentPolicyAllow, NoIntentPolicyDeny, c.NoIntentPolicy)
+	}
+	switch c.UnclassifiedPolicy {
+	case UnclassifiedPolicyPassthrough, UnclassifiedPolicyJudge:
+		// ok
+	default:
+		return fmt.Errorf("unclassified_policy must be %q or %q, got %q",
+			UnclassifiedPolicyPassthrough, UnclassifiedPolicyJudge, c.UnclassifiedPolicy)
 	}
 	return nil
 }
@@ -178,12 +280,26 @@ func (p *IBAC) Name() string { return "ibac" }
 
 func (p *IBAC) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		// mcp-parser is optional enrichment; if it's in the chain
-		// IBAC must come after so it can read the parsed tool name
-		// and args. If it's absent, IBAC still functions on raw
-		// HTTP — the judge sees method+host+path+body excerpt.
-		After:     []string{"mcp-parser"},
-		ReadsBody: true,
+		// At least one outbound protocol parser must run before IBAC.
+		// IBAC is a defense-in-depth layer that only fires on traffic
+		// a parser classified — without a parser, IBAC has no way to
+		// tell user-meaningful actions from protocol mechanics, and
+		// would either silently no-op or judge everything (defeats the
+		// parser-driven design). Boot-fail if no parser is present
+		// rather than ship a misconfigured pipeline.
+		//
+		// a2a-parser is deliberately NOT in this list. RequiresAny is
+		// a same-chain check, and a2a-parser runs in the INBOUND
+		// chain in every in-tree config (it seeds Session.LastIntent
+		// from inbound A2A user turns). IBAC's a2a dependency is the
+		// inbound session-intent seeding, which the validator can't
+		// enforce cross-chain anyway — that dependency is runtime,
+		// governed by no_intent_policy. Listing a2a-parser here would
+		// only make a misconfigured outbound chain [a2a-parser, ibac]
+		// pass validation while populating nothing useful for IBAC.
+		RequiresAny: []string{"mcp-parser", "inference-parser"},
+		ReadsBody:   true,
+		Description: "LLM-judge intent-based access control for outbound tool calls.",
 	}
 }
 
@@ -209,7 +325,8 @@ func (p *IBAC) Configure(raw json.RawMessage) error {
 	p.bypassPaths = matcher
 	p.bypassHosts = c.BypassHosts
 	p.timeoutCalls = time.Duration(c.TimeoutMs) * time.Millisecond
-	p.judge = newHTTPJudge(c.JudgeEndpoint, c.JudgeModel, c.JudgeBearer, c.SystemPrompt, p.timeoutCalls)
+	p.judge = newHTTPJudge(c.JudgeEndpoint, c.JudgeModel, c.JudgeBearer, c.SystemPrompt,
+		p.timeoutCalls, c.JudgeMaxTokens, *c.JudgeJSONMode)
 	return nil
 }
 
@@ -237,22 +354,130 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// 4. Inference-traffic skip when JudgeInference is false (default).
-	//    Judging the agent's own LLM reasoning is meta-judgment;
-	//    operators can opt in by flipping the config flag.
+	// 4. Classification gate. Parsers (mcp-parser, a2a-parser,
+	//    inference-parser) are the source of truth for "is this a
+	//    user-meaningful action vs protocol mechanics?" — IBAC just
+	//    reads their verdict via pctx.Classification(). Two outcomes
+	//    short-circuit IBAC here:
+	//
+	//      - anyBypass: at least one populated extension explicitly
+	//        classified the request as bypass-worthy (e.g. mcp-parser
+	//        saw "tools/list" or a $transport/* synthetic event;
+	//        a2a-parser saw a discovery method). Skip with reason
+	//        "protocol_mechanics".
+	//      - !anyAction: no populated extension classified this as an
+	//        action — i.e. the request is unclassified. Behavior is
+	//        controlled by UnclassifiedPolicy:
+	//          * "passthrough" (default): record no Skip, return
+	//            Continue. Defense-in-depth — IBAC only fires on
+	//            traffic a parser claimed.
+	//          * "judge": fall through to the inference policy and
+	//            intent extraction. Catches plain-HTTP outbound
+	//            (e.g. raw http.Post from local function-calling
+	//            tools) at the cost of one judge round-trip per
+	//            unclassified request. Used by the IBAC demo.
+	//
+	//    Action-classified traffic (anyAction=true && !anyBypass)
+	//    always falls through to the inference policy and judge below.
+	//    Mixed classification (anyAction=true && anyBypass=true) is
+	//    rare; the bypass branch wins because the safer default for
+	//    a defense-in-depth control is to defer to the more permissive
+	//    classification.
+	anyAction, anyBypass := pctx.Classification()
+	if anyBypass {
+		pctx.Skip("protocol_mechanics")
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+	if !anyAction {
+		if p.cfg.UnclassifiedPolicy == UnclassifiedPolicyPassthrough {
+			// Defense-in-depth pass-through: no parser claimed the
+			// request, IBAC has no basis to judge it. Don't record a
+			// Skip — there's no Invocation to pair with, and operators
+			// infer "ibac is in the pipeline" from config rather than
+			// from per-event rows.
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		// UnclassifiedPolicy == "judge" — fall through to the
+		// inference policy and intent / judge steps below. The IBAC
+		// demo's plain-HTTP exfiltration scenario relies on this
+		// branch.
+	}
+
+	// 5. Inference-traffic skip when JudgeInference is false (default).
+	//    This is operator policy ("don't judge the agent's own LLM
+	//    reasoning by default"), distinct from the parser classification
+	//    above — inference-parser correctly classifies LLM calls as
+	//    actions; this step decides whether to honor that classification
+	//    for inference traffic specifically. Operators flip
+	//    judge_inference: true to opt in to judging.
 	if pctx.Extensions.Inference != nil && !p.cfg.JudgeInference {
 		pctx.Skip("inference_bypass")
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// 5. Pull the user's most recent declared intent. nil here means
-	//    either a2a-parser isn't in the inbound chain, or no user
-	//    message has been received yet — both are operator-error /
-	//    suspicious states. Fail closed.
+	// 6. Pull the user's most recent declared intent. Two distinct
+	//    nil pathways, distinguished so operator dashboards can tell
+	//    them apart:
+	//      - no_session: no inbound A2A request has populated the
+	//        active session bucket yet (or session tracking is off
+	//        entirely). Common at agent startup before any user turn.
+	//      - no_intent: a session exists but contains no extractable
+	//        user message (a2a-parser missing from inbound chain, or
+	//        events present but none are user-role A2A requests).
+	//
+	//    Both states mean "IBAC has no user intent to align against"
+	//    — i.e., the request is either genuinely user-less (agent
+	//    self-action, machine-to-machine, headless cron) or there's
+	//    a misconfiguration upstream. NoIntentPolicy controls which
+	//    interpretation wins:
+	//      - allow (default): treat as self-action, Skip and Continue.
+	//        Right for deployments that mix user-driven and self-driven
+	//        traffic.
+	//      - deny: treat as misconfiguration, Reject 403. Right for
+	//        deployments where every outbound is user-driven and a
+	//        missing intent should surface as a hard failure.
+	if pctx.Session == nil {
+		action := describeAction(pctx, p.cfg.JudgeInference)
+		if p.cfg.NoIntentPolicy == NoIntentPolicyAllow {
+			pctx.Record(pipeline.Invocation{
+				Action: pipeline.ActionSkip,
+				Phase:  pipeline.InvocationPhaseRequest,
+				Reason: "no_user_context",
+				Details: map[string]string{
+					"action":      action,
+					"sub_reason":  "no_session",
+					"explanation": "no active session — treating as agent self-action per no_intent_policy=allow",
+				},
+			})
+			return pipeline.Action{Type: pipeline.Continue}
+		}
+		pctx.Record(pipeline.Invocation{
+			Action: pipeline.ActionDeny,
+			Phase:  pipeline.InvocationPhaseRequest,
+			Reason: "no_session",
+			Details: map[string]string{
+				"action": action,
+			},
+		})
+		return pipeline.DenyStatus(403, "ibac.no_session", "no active session for outbound request")
+	}
 	intent := pctx.Session.LastIntent()
 	intentText := extractIntentText(intent)
 	if intentText == "" {
 		action := describeAction(pctx, p.cfg.JudgeInference)
+		if p.cfg.NoIntentPolicy == NoIntentPolicyAllow {
+			pctx.Record(pipeline.Invocation{
+				Action: pipeline.ActionSkip,
+				Phase:  pipeline.InvocationPhaseRequest,
+				Reason: "no_user_context",
+				Details: map[string]string{
+					"action":      action,
+					"sub_reason":  "no_intent",
+					"explanation": "session exists but no user intent — treating as agent self-action per no_intent_policy=allow",
+				},
+			})
+			return pipeline.Action{Type: pipeline.Continue}
+		}
 		pctx.Record(pipeline.Invocation{
 			Action: pipeline.ActionDeny,
 			Phase:  pipeline.InvocationPhaseRequest,
@@ -264,11 +489,11 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 		return pipeline.DenyStatus(403, "ibac.no_intent", "no recorded user intent")
 	}
 
-	// 6. Build action description and call judge.
+	// 7. Build action description and call judge.
 	action := describeAction(pctx, p.cfg.JudgeInference)
 	verdict, reason, err := p.judge.Evaluate(ctx, intentText, action)
 
-	// 7. Fail closed on judge errors. Two flavors, distinguished
+	// 8. Fail closed on judge errors. Two flavors, distinguished
 	//    via the ErrJudgeUncertain sentinel so operator dashboards
 	//    don't conflate model-output bugs with infra outages:
 	//      - uncertain: judge is up but emitted unparseable / unknown
@@ -308,7 +533,7 @@ func (p *IBAC) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.A
 		return pipeline.DenyStatus(503, "ibac.judge_unavailable", errPreview)
 	}
 
-	// 8. Apply verdict.
+	// 9. Apply verdict.
 	if verdict == "deny" {
 		pctx.Record(pipeline.Invocation{
 			Action: pipeline.ActionDeny,

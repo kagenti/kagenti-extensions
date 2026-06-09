@@ -2,6 +2,8 @@ package plugins
 
 import (
 	"context"
+	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
@@ -257,140 +259,17 @@ func TestValidateRelationships_RequiresAny(t *testing.T) {
 	}
 }
 
-// TestValidateRelationships_After covers the soft-ordering rule:
-// silent when named plugin is absent, error when present but later.
-func TestValidateRelationships_After(t *testing.T) {
-	tests := []struct {
-		name      string
-		plugins   []pipeline.Plugin
-		wantErr   bool
-		wantInMsg []string
-	}{
-		{
-			name: "named plugin absent — no constraint",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("request-counter", pipeline.PluginCapabilities{
-					After: []string{"mcp-parser"},
-				}),
-			},
-			wantErr: false,
-		},
-		{
-			name: "named plugin present earlier — ok",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("mcp-parser", pipeline.PluginCapabilities{}),
-				mkRelPlugin("request-counter", pipeline.PluginCapabilities{
-					After: []string{"mcp-parser"},
-				}),
-			},
-			wantErr: false,
-		},
-		{
-			name: "named plugin present but later — error says reorder",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("request-counter", pipeline.PluginCapabilities{
-					After: []string{"mcp-parser"},
-				}),
-				mkRelPlugin("mcp-parser", pipeline.PluginCapabilities{}),
-			},
-			wantErr:   true,
-			wantInMsg: []string{"request-counter", "After", "mcp-parser", "reorder"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateRelationships(tc.plugins)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if err != nil {
-				msg := err.Error()
-				for _, want := range tc.wantInMsg {
-					if !containsSubstring(msg, want) {
-						t.Errorf("error %q missing %q", msg, want)
-					}
-				}
-			}
-		})
-	}
-}
-
-// TestValidateRelationships_Claims covers the mutual-exclusion rule:
-// exactly one plugin per claim string per chain.
-func TestValidateRelationships_Claims(t *testing.T) {
-	tests := []struct {
-		name      string
-		plugins   []pipeline.Plugin
-		wantErr   bool
-		wantInMsg []string
-	}{
-		{
-			name: "single claimant — ok",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("token-exchange", pipeline.PluginCapabilities{
-					Claims: []string{"authorization_header"},
-				}),
-			},
-			wantErr: false,
-		},
-		{
-			name: "distinct claims on different plugins — ok",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("token-exchange", pipeline.PluginCapabilities{
-					Claims: []string{"authorization_header"},
-				}),
-				mkRelPlugin("jwt-validation", pipeline.PluginCapabilities{
-					Claims: []string{"identity_resolution"},
-				}),
-			},
-			wantErr: false,
-		},
-		{
-			name: "two plugins claim the same string — error names both",
-			plugins: []pipeline.Plugin{
-				mkRelPlugin("token-exchange", pipeline.PluginCapabilities{
-					Claims: []string{"authorization_header"},
-				}),
-				mkRelPlugin("token-broker", pipeline.PluginCapabilities{
-					Claims: []string{"authorization_header"},
-				}),
-			},
-			wantErr:   true,
-			wantInMsg: []string{"token-exchange", "token-broker", "authorization_header", "configure only one"},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := validateRelationships(tc.plugins)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if err != nil {
-				msg := err.Error()
-				for _, want := range tc.wantInMsg {
-					if !containsSubstring(msg, want) {
-						t.Errorf("error %q missing %q", msg, want)
-					}
-				}
-			}
-		})
-	}
-}
-
 // TestValidateRelationships_CollectsAllErrors verifies the collector
 // policy: a chain with multiple problems reports them all in one
 // error, rather than short-circuiting on the first. Operators iterate
 // on a single YAML fix rather than a sequence of startups.
 func TestValidateRelationships_CollectsAllErrors(t *testing.T) {
 	plugins := []pipeline.Plugin{
-		mkRelPlugin("a-claims-x", pipeline.PluginCapabilities{
-			Claims: []string{"x"},
-		}),
-		mkRelPlugin("b-claims-x", pipeline.PluginCapabilities{
-			Claims: []string{"x"}, // conflicts with a-claims-x
-		}),
-		mkRelPlugin("c-requires-missing", pipeline.PluginCapabilities{
+		mkRelPlugin("a-requires-missing", pipeline.PluginCapabilities{
 			Requires: []string{"does-not-exist"},
+		}),
+		mkRelPlugin("b-requires-any-missing", pipeline.PluginCapabilities{
+			RequiresAny: []string{"also-missing"},
 		}),
 	}
 	err := validateRelationships(plugins)
@@ -399,10 +278,10 @@ func TestValidateRelationships_CollectsAllErrors(t *testing.T) {
 	}
 	msg := err.Error()
 	for _, want := range []string{
-		"a-claims-x",
-		"b-claims-x",
-		"c-requires-missing",
+		"a-requires-missing",
 		"does-not-exist",
+		"b-requires-any-missing",
+		"also-missing",
 	} {
 		if !containsSubstring(msg, want) {
 			t.Errorf("error message should mention %q: %s", want, msg)
@@ -431,8 +310,10 @@ type consumerPlugin struct {
 	setProvider *spiffe.Provider
 }
 
-func (p *consumerPlugin) Name() string                              { return p.name }
-func (p *consumerPlugin) Capabilities() pipeline.PluginCapabilities { return pipeline.PluginCapabilities{} }
+func (p *consumerPlugin) Name() string { return p.name }
+func (p *consumerPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
 func (p *consumerPlugin) OnRequest(context.Context, *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -499,5 +380,261 @@ func TestBuildWithSPIFFE_NonConsumerPlugin_Unaffected(t *testing.T) {
 	_, err := BuildWithSPIFFE([]config.PluginEntry{{Name: "test-non-consumer"}}, prov)
 	if err != nil {
 		t.Fatalf("BuildWithSPIFFE: %v", err)
+	}
+}
+
+// cfgPlugin is a Configurable wrapper around relPlugin used to verify
+// that the registry wraps Configurable plugins in pipeline.WrapConfigured
+// and that non-Configurable plugins (relPlugin alone) are NOT wrapped.
+type cfgPlugin struct {
+	relPlugin
+	configured json.RawMessage
+}
+
+func (c *cfgPlugin) Configure(raw json.RawMessage) error {
+	c.configured = raw
+	return nil
+}
+
+// TestRegistryWrapsConfigurablePluginsForRawConfig verifies that plugins
+// built through Build expose their raw config bytes via type-assertion
+// to pipeline.RawConfigProvider. This is the contract
+// /v1/pipeline relies on.
+func TestRegistryWrapsConfigurablePluginsForRawConfig(t *testing.T) {
+	// Register a Configurable plugin and a non-Configurable plugin under
+	// throwaway names so this test doesn't fight the global registry.
+	cfgName := "rawcfg-test-configurable"
+	relName := "rawcfg-test-relational"
+	RegisterPlugin(cfgName, func() pipeline.Plugin {
+		return &cfgPlugin{relPlugin: relPlugin{name: cfgName}}
+	})
+	defer UnregisterPlugin(cfgName)
+	RegisterPlugin(relName, func() pipeline.Plugin {
+		return &relPlugin{name: relName}
+	})
+	defer UnregisterPlugin(relName)
+
+	configRaw := json.RawMessage(`{"hello":"world"}`)
+	pipe, err := Build([]config.PluginEntry{
+		{Name: cfgName, Config: configRaw},
+		{Name: relName},
+	})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	plugins := pipe.Plugins()
+	if len(plugins) != 2 {
+		t.Fatalf("want 2 plugins, got %d", len(plugins))
+	}
+
+	// First plugin (Configurable) should expose RawConfig().
+	rc, ok := plugins[0].(pipeline.RawConfigProvider)
+	if !ok {
+		t.Fatal("Configurable plugin should be wrapped (RawConfig type-assert)")
+	}
+	if string(rc.RawConfig()) != `{"hello":"world"}` {
+		t.Fatalf("RawConfig: got %q want %q", string(rc.RawConfig()), `{"hello":"world"}`)
+	}
+	// Plugin's Name() still works through the wrapper.
+	if plugins[0].Name() != cfgName {
+		t.Fatalf("Name through wrapper: %q", plugins[0].Name())
+	}
+
+	// Second plugin (non-Configurable) must NOT be wrapped.
+	_, ok = plugins[1].(pipeline.RawConfigProvider)
+	if ok {
+		t.Fatal("non-Configurable plugin should NOT be wrapped")
+	}
+}
+
+// TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig is the parity test
+// for BuildWithSPIFFE — the second registry entry point shares the wrap site
+// with Build. Lock both paths so the wrapping invariant doesn't drift.
+func TestBuildWithSPIFFEWrapsConfigurablePluginsForRawConfig(t *testing.T) {
+	cfgName := "rawcfg-spiffe-test-configurable"
+	relName := "rawcfg-spiffe-test-relational"
+	RegisterPlugin(cfgName, func() pipeline.Plugin {
+		return &cfgPlugin{relPlugin: relPlugin{name: cfgName}}
+	})
+	defer UnregisterPlugin(cfgName)
+	RegisterPlugin(relName, func() pipeline.Plugin {
+		return &relPlugin{name: relName}
+	})
+	defer UnregisterPlugin(relName)
+
+	configRaw := json.RawMessage(`{"hello":"world"}`)
+	// nil provider is valid for plugins that don't implement
+	// spiffe.ProviderConsumer (BuildWithSPIFFE skips SetSPIFFEProvider in
+	// that case).
+	pipe, err := BuildWithSPIFFE([]config.PluginEntry{
+		{Name: cfgName, Config: configRaw},
+		{Name: relName},
+	}, nil)
+	if err != nil {
+		t.Fatalf("BuildWithSPIFFE: %v", err)
+	}
+	plugins := pipe.Plugins()
+	if len(plugins) != 2 {
+		t.Fatalf("want 2 plugins, got %d", len(plugins))
+	}
+
+	rc, ok := plugins[0].(pipeline.RawConfigProvider)
+	if !ok {
+		t.Fatal("Configurable plugin should be wrapped (RawConfig type-assert)")
+	}
+	if string(rc.RawConfig()) != `{"hello":"world"}` {
+		t.Fatalf("RawConfig: got %q want %q", string(rc.RawConfig()), `{"hello":"world"}`)
+	}
+	if plugins[0].Name() != cfgName {
+		t.Fatalf("Name through wrapper: %q", plugins[0].Name())
+	}
+	_, ok = plugins[1].(pipeline.RawConfigProvider)
+	if ok {
+		t.Fatal("non-Configurable plugin should NOT be wrapped")
+	}
+}
+
+// TestCatalog_IncludesRegisteredPlugins verifies Catalog() walks the
+// registry, calls each factory once, and returns sorted CatalogEntries
+// carrying the static capabilities each plugin advertises.
+func TestCatalog_IncludesRegisteredPlugins(t *testing.T) {
+	resetCatalogCache()
+	t.Cleanup(resetCatalogCache)
+	const a, b = "test-catalog-a", "test-catalog-b"
+	RegisterPlugin(a, func() pipeline.Plugin {
+		return &relPlugin{
+			name: a,
+			caps: pipeline.PluginCapabilities{
+				Description: "A plugin",
+			},
+		}
+	})
+	t.Cleanup(func() { UnregisterPlugin(a) })
+	RegisterPlugin(b, func() pipeline.Plugin {
+		return &relPlugin{
+			name: b,
+			caps: pipeline.PluginCapabilities{
+				Description: "B plugin",
+				Requires:    []string{a},
+			},
+		}
+	})
+	t.Cleanup(func() { UnregisterPlugin(b) })
+
+	entries := Catalog()
+	got := map[string]pipeline.PluginCapabilities{}
+	for _, e := range entries {
+		got[e.Name] = e.Capabilities
+	}
+
+	if got[a].Description != "A plugin" {
+		t.Fatalf("Catalog missing %s with Description: %+v", a, got[a])
+	}
+	if got[b].Description != "B plugin" {
+		t.Fatalf("Catalog missing %s with Description: %+v", b, got[b])
+	}
+	if len(got[b].Requires) != 1 || got[b].Requires[0] != a {
+		t.Fatalf("Catalog %s.Requires lost: %+v", b, got[b].Requires)
+	}
+
+	// Sorted order: walk entries and confirm a < b appear in that order
+	// (relative position only — other tests may register plugins).
+	idxA, idxB := -1, -1
+	for i, e := range entries {
+		if e.Name == a {
+			idxA = i
+		}
+		if e.Name == b {
+			idxB = i
+		}
+	}
+	if idxA == -1 || idxB == -1 || idxA > idxB {
+		t.Fatalf("Catalog not sorted: a@%d b@%d", idxA, idxB)
+	}
+}
+
+// TestCatalog_FactoryInvariant locks the load-bearing claim that every
+// plugin's factory produces instances with byte-identical Capabilities().
+// Catalog() reads metadata once (from the first instance) and caches the
+// result, so a future plugin that varies Capabilities() based on instance
+// state would silently produce wrong catalog entries.
+//
+// Walks every registered plugin, calls its factory twice, and asserts the
+// two Capabilities() return values are equal. Failure points to a plugin
+// that needs to either (a) make its Capabilities() purely static, or
+// (b) split into multiple registered names per behavioral variant.
+func TestCatalog_FactoryInvariant(t *testing.T) {
+	registryMu.RLock()
+	names := make([]string, 0, len(registry))
+	for n := range registry {
+		names = append(names, n)
+	}
+	registryMu.RUnlock()
+
+	for _, name := range names {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			factory, ok := factoryFor(name)
+			if !ok {
+				t.Fatalf("factory missing")
+			}
+			capsA := factory().Capabilities().Normalize()
+			capsB := factory().Capabilities().Normalize()
+			if !reflect.DeepEqual(capsA, capsB) {
+				t.Fatalf("Capabilities() differs across factory instances:\n  A: %+v\n  B: %+v",
+					capsA, capsB)
+			}
+		})
+	}
+}
+
+// TestCatalog_ReturnsDefensiveCopy verifies callers can mutate the
+// returned slice (and its nested capability slices) without tainting
+// the cached snapshot or future Catalog() reads.
+func TestCatalog_ReturnsDefensiveCopy(t *testing.T) {
+	resetCatalogCache()
+	t.Cleanup(resetCatalogCache)
+	const name = "test-defensive-copy"
+	RegisterPlugin(name, func() pipeline.Plugin {
+		return &relPlugin{name: name, caps: pipeline.PluginCapabilities{
+			Requires: []string{"dep-a"},
+		}}
+	})
+	t.Cleanup(func() { UnregisterPlugin(name) })
+
+	first := Catalog()
+	// Find our entry.
+	var idx int = -1
+	for i, e := range first {
+		if e.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		t.Fatal("seeded plugin missing from Catalog")
+	}
+
+	// Mutate the returned slice and the nested Requires slice.
+	first[idx].Capabilities.Requires[0] = "MUTATED"
+	first[idx].Capabilities.Description = "MUTATED"
+
+	// A second call must still see the original values.
+	second := Catalog()
+	var idx2 int = -1
+	for i, e := range second {
+		if e.Name == name {
+			idx2 = i
+			break
+		}
+	}
+	if idx2 < 0 {
+		t.Fatal("seeded plugin missing from second Catalog call")
+	}
+	if got := second[idx2].Capabilities.Requires[0]; got != "dep-a" {
+		t.Errorf("cache tainted by caller mutation: Requires[0] = %q, want dep-a", got)
+	}
+	if got := second[idx2].Capabilities.Description; got != "" {
+		t.Errorf("cache tainted by caller mutation: Description = %q, want empty", got)
 	}
 }

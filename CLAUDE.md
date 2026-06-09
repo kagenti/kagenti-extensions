@@ -66,7 +66,7 @@ kagenti-extensions/
 **Three mode-specific binaries** providing transparent traffic interception for both inbound JWT validation and outbound OAuth 2.0 token exchange (RFC 8693). Each binary is hardcoded to its deployment shape; mode is no longer selected at runtime.
 
 **Library:** `authbridge/authlib/` (shared)
-**Language:** Go 1.24
+**Language:** Go 1.25
 **Detailed guide:** [`authbridge/CLAUDE.md`](authbridge/CLAUDE.md)
 
 **Binaries:**
@@ -193,7 +193,7 @@ Hooks:
 
 | Area | Technology |
 |------|------------|
-| AuthBridge unified binary | Go 1.24, envoy-control-plane, lestrrat-go/jwx |
+| AuthBridge unified binary | Go 1.25, envoy-control-plane, lestrrat-go/jwx |
 | Client Registration | Python 3.12, python-keycloak, PyJWT |
 | Proxy | Envoy 1.28 |
 | Traffic interception | iptables (via init container) |
@@ -297,7 +297,7 @@ cd authbridge && podman build -f cmd/authbridge-lite/Dockerfile  -t authbridge-l
 
 ## Gotchas and Known Issues
 
-1. **One Go module:** The repo has a single Go module at `authbridge/proxy-init/go.mod` (Go 1.24).
+1. **One Go module:** The repo has a single Go module at `authbridge/proxy-init/go.mod` (Go 1.25).
 
 2. **Avoid committing venvs:** Virtual environment directories (e.g. `authbridge/proxy-init/quickstart/venv/`) should be gitignored (the repo's `.gitignore` has a `venv` pattern). Do not create and commit new virtual environments under version control.
 

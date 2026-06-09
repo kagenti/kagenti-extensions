@@ -1,0 +1,89 @@
+# SPARC reflection service — the backend the AuthBridge `sparc` plugin calls.
+#
+# Deploy this ONCE per cluster (any namespace; kagenti-system by convention)
+# BEFORE enabling the `sparc` plugin on an agent. Agents reach it at
+# http://sparc-service.<namespace>.svc:8090/reflect.
+#
+# Config comes from two objects the installer (Makefile) creates:
+#   - sparc-service-config  ConfigMap  — provider / model / track / etc.
+#   - sparc-creds           Secret     — provider credentials (optional)
+#
+# No namespace is baked in — apply with `kubectl -n <namespace> apply -f`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sparc-service
+  labels:
+    app.kubernetes.io/name: sparc-service
+    app.kubernetes.io/component: reflection-service
+    app.kubernetes.io/part-of: authbridge
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sparc-service
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sparc-service
+        # The service makes its own egress to the LLM provider; keep it out of
+        # agent-side sidecar injection / ambient capture.
+        kagenti.io/inject: disabled
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sparc-service
+          image: ghcr.io/kagenti/kagenti-extensions/sparc-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8090
+              name: http
+          envFrom:
+            - configMapRef:
+                name: sparc-service-config
+            - secretRef:
+                name: sparc-creds
+                optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sparc-service
+  labels:
+    app.kubernetes.io/name: sparc-service
+    app.kubernetes.io/component: reflection-service
+    app.kubernetes.io/part-of: authbridge
+spec:
+  selector:
+    app.kubernetes.io/name: sparc-service
+  ports:
+    - port: 8090
+      targetPort: http
+      name: http

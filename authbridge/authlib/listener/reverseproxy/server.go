@@ -14,9 +14,11 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/sseframe"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/tlssniff"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
@@ -50,7 +52,8 @@ func (e *responseRejectedError) Error() string {
 // in-flight requests finish on the pipeline they started with.
 type Server struct {
 	InboundPipeline *pipeline.Holder
-	Sessions        *session.Store // nil when session tracking is disabled
+	Sessions        *session.Store       // nil when session tracking is disabled
+	Shared          pipeline.SharedStore // process-scoped store; set by main, may be nil
 	proxy           *httputil.ReverseProxy
 	backend         string
 
@@ -90,6 +93,16 @@ func NewServer(inbound *pipeline.Holder, sessions *session.Store, backendURL str
 		return nil, err
 	}
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	// FlushInterval -1 makes ReverseProxy flush after every Read of
+	// the response body. Required for streaming text/event-stream
+	// responses where each frame must hit the client immediately —
+	// the default 0 buffers until the client connection's write
+	// buffer is full. ReverseProxy already auto-flushes on
+	// text/event-stream Content-Type but only when FlushInterval is
+	// non-zero, and the explicit -1 makes the streaming behavior
+	// uniform across content types we install via
+	// installStreamingResponseBody.
+	proxy.FlushInterval = -1
 	s := &Server{
 		InboundPipeline: inbound,
 		Sessions:        sessions,
@@ -164,10 +177,12 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	pctx := &pipeline.Context{
 		Direction: pipeline.Inbound,
+		Method:    r.Method,
 		Scheme:    requestScheme(r),
 		Host:      r.Host,
 		Path:      r.URL.Path,
 		Headers:   r.Header.Clone(),
+		Shared:    s.Shared,
 		StartedAt: time.Now(),
 	}
 
@@ -206,6 +221,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("reverse-proxy: buffered request body", "host", r.Host, "bodyLen", len(body))
 	}
 
+	originalAuth := pctx.Headers.Get("Authorization")
 	action := s.InboundPipeline.Run(r.Context(), pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -223,20 +239,25 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Del("Content-Encoding")
 	}
 
-	// Inbound recording is gated on A2A by design: reverseproxy is the
-	// A2A-only listener (its session keying and rekey logic are A2A-specific
-	// — see modifyResponse). Forwardproxy widens the analogous gate to
-	// cover MCP/Inference/Invocations/plugins because outbound traffic is
-	// not A2A-only. A non-A2A inbound, or an A2A request that fails to
-	// parse, is intentionally not recorded here.
-	if s.Sessions != nil && pctx.Extensions.A2A != nil {
-		sid := pctx.Extensions.A2A.SessionID
-		if sid == "" {
-			sid = s.Sessions.ActiveSession()
-		}
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+	// Propagate an inbound Authorization mutation to the forwarded
+	// request. A plugin (e.g. jwt-validation in mint mode) may have
+	// replaced the caller's token on pctx.Headers; the proxy forwards
+	// r.Header, so without this the backend would still see the original
+	// token. Only rewrite when the value actually changed.
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		r.Header.Set("Authorization", newAuth)
+	}
+
+	// Record the inbound request event whenever there is something
+	// observable: an A2A conversation, plugin invocations, or plugin-public
+	// Custom entries. Mirrors extproc.recordInboundSession's widened gate so
+	// observability does not depend on the a2a-parser being in the pipeline
+	// (e.g. a jwt-validation allow on an auth-only agent must still show, just
+	// as denials already do via recordInboundReject). The A2A-specific session
+	// rekey in modifyResponse stays A2A-gated.
+	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+	if s.Sessions != nil && (pctx.Extensions.A2A != nil || pctx.Extensions.Invocations != nil || plugins != nil) {
+		sid := inboundSessionID(pctx)
 		// Snapshot-copy the protocol extension and use the shared helpers
 		// for plugin invocations / observability / identity. Mirrors what
 		// extproc does so request events don't pick up response-phase
@@ -247,7 +268,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			Phase:       pipeline.SessionRequest,
 			A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
 			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
-			Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
+			Plugins:     plugins,
 			Identity:    pipeline.SnapshotIdentity(pctx),
 			Host:        pctx.Host,
 			TLS:         eventTLS(pctx),
@@ -267,6 +288,33 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	pctx.StatusCode = resp.StatusCode
 	pctx.ResponseHeaders = resp.Header.Clone()
 
+	// Branch on Content-Type per response. Streaming-aware pipelines on
+	// text/event-stream responses (A2A message/stream, MCP tools/call
+	// result over Streamable HTTP) replace resp.Body with a streaming
+	// reader that pulls one frame at a time, dispatches it to the
+	// pipeline, and rewrites the SSE event back. RunResponse is NOT
+	// called on this path — streaming-aware plugins finalize via
+	// OnResponseFrame(last=true).
+	//
+	// WritesBody is incompatible with streaming (we can't rewrite a
+	// body we've already started forwarding) — fall back to buffered
+	// with a warning.
+	if isEventStream(resp.Header.Get("Content-Type")) &&
+		s.InboundPipeline.HasStreamingResponders() &&
+		resp.Body != nil {
+		if s.InboundPipeline.WritesBody() {
+			slog.Warn("reverse-proxy: text/event-stream response with WritesBody plugin — falling back to buffered path", "host", pctx.Host)
+		} else {
+			s.installStreamingResponseBody(resp, pctx)
+			// Strip Content-Length — the framing reader doesn't know
+			// the final length and net/http handles chunked encoding
+			// when Content-Length is unset.
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+			return nil
+		}
+	}
+
 	if s.InboundPipeline.NeedsBody() && resp.Body != nil {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodySize+1))
 		if err != nil {
@@ -283,6 +331,16 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	action := s.InboundPipeline.RunResponse(resp.Request.Context(), pctx)
 	if action.Type == pipeline.Reject {
 		return &responseRejectedError{action: action}
+	}
+
+	// Streaming-aware plugins use a single code path for both shapes:
+	// for buffered application/json we deliver the body as one
+	// last=true frame so plugins can finalize via OnResponseFrame.
+	if s.InboundPipeline.HasStreamingResponders() && resp.Body != nil {
+		frameAction := s.InboundPipeline.RunResponseFrame(resp.Request.Context(), pctx, pctx.ResponseBody, true)
+		if frameAction.Type == pipeline.Reject {
+			return &responseRejectedError{action: frameAction}
+		}
 	}
 
 	// A plugin that called pctx.SetResponseBody flipped the mutation flag.
@@ -319,21 +377,16 @@ func (s *Server) modifyResponse(resp *http.Response) error {
 	// SSE responses still get recorded — the body is whatever the
 	// pipeline saw at this point (may be empty for streamed bodies),
 	// but the status code and plugin invocations are always meaningful.
-	if s.Sessions != nil && pctx.Extensions.A2A != nil {
-		sid := pctx.Extensions.A2A.SessionID
-		if sid == "" {
-			sid = s.Sessions.ActiveSession()
-		}
-		if sid == "" {
-			sid = session.DefaultSessionID
-		}
+	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+	if s.Sessions != nil && (pctx.Extensions.A2A != nil || pctx.Extensions.Invocations != nil || plugins != nil) {
+		sid := inboundSessionID(pctx)
 		s.Sessions.Append(sid, pipeline.SessionEvent{
 			At:          time.Now(),
 			Direction:   pipeline.Inbound,
 			Phase:       pipeline.SessionResponse,
 			A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
 			Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
-			Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
+			Plugins:     plugins,
 			Identity:    pipeline.SnapshotIdentity(pctx),
 			Host:        pctx.Host,
 			StatusCode:  resp.StatusCode,
@@ -367,18 +420,10 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		return
 	}
 	// Inbound uses the A2A-stated contextId when available; otherwise
-	// falls through to the default bucket. Matches the accept path's
-	// bucketing rule (A2A request event at line 112-125).
-	sid := ""
-	if pctx.Extensions.A2A != nil {
-		sid = pctx.Extensions.A2A.SessionID
-	}
-	if sid == "" {
-		sid = s.Sessions.ActiveSession()
-	}
-	if sid == "" {
-		sid = session.DefaultSessionID
-	}
+	// the default bucket. Same rule as the accept path's
+	// inboundSessionID helper, kept consistent so denial events land
+	// in the same bucket the accepted request would have.
+	sid := inboundSessionID(pctx)
 	var status int
 	var code, message string
 	if action.Violation != nil {
@@ -429,4 +474,206 @@ func requestScheme(r *http.Request) string {
 		return "https"
 	}
 	return "http"
+}
+
+// installStreamingResponseBody replaces resp.Body with a streaming
+// reader that pulls SSE frames off the upstream, dispatches each frame
+// through the pipeline's StreamingResponder hook, and emits the
+// framed bytes downstream. ReverseProxy's normal io.Copy then ferries
+// those bytes to the client; FlushInterval=-1 (set in NewServer)
+// flushes after each Read so frames hit the client as they arrive.
+//
+// On end-of-stream the reader emits a final last=true call to
+// finalize aggregating plugins, then records the inbound response
+// SessionEvent (the call site that buffered responses use is below
+// modifyResponse, which doesn't run on the streaming path because
+// modifyResponse returned early).
+func (s *Server) installStreamingResponseBody(resp *http.Response, pctx *pipeline.Context) {
+	upstream := resp.Body
+	resp.Body = &streamingResponseBody{
+		upstream: upstream,
+		reader:   sseframe.NewReader(upstream, maxBodySize),
+		ctx:      resp.Request.Context(),
+		pipeline: s.InboundPipeline,
+		pctx:     pctx,
+		onClose: func(statusCode int) {
+			s.recordInboundResponseEvent(pctx, statusCode)
+		},
+		statusCode: resp.StatusCode,
+	}
+}
+
+// recordInboundResponseEvent emits the SessionResponse event for an
+// inbound streaming response. Mirrors the buffered-path block at the
+// bottom of modifyResponse; lives here so the streaming body's
+// onClose callback can record without holding a reference to the
+// status code that close arrived with.
+func (s *Server) recordInboundResponseEvent(pctx *pipeline.Context, statusCode int) {
+	if s.Sessions == nil {
+		return
+	}
+	plugins := pipeline.SnapshotPlugins(pctx.Extensions.Custom)
+	if !(pctx.Extensions.A2A != nil || pctx.Extensions.Invocations != nil || plugins != nil) {
+		return
+	}
+	sid := inboundSessionID(pctx)
+	// Rekey default → contextId mirroring the buffered path's behavior;
+	// streaming A2A message/stream may discover the contextId mid-stream.
+	if pctx.Extensions.A2A != nil && pctx.Extensions.A2A.SessionID != "" &&
+		pctx.Extensions.A2A.SessionID != session.DefaultSessionID {
+		s.Sessions.Rekey(session.DefaultSessionID, pctx.Extensions.A2A.SessionID)
+	}
+	s.Sessions.Append(sid, pipeline.SessionEvent{
+		At:          time.Now(),
+		Direction:   pipeline.Inbound,
+		Phase:       pipeline.SessionResponse,
+		A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
+		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
+		Plugins:     plugins,
+		Identity:    pipeline.SnapshotIdentity(pctx),
+		Host:        pctx.Host,
+		StatusCode:  statusCode,
+		Error:       pipeline.DeriveError(pctx),
+		Duration:    pipeline.DurationSince(pctx.StartedAt),
+		TLS:         eventTLS(pctx),
+	})
+}
+
+// streamingResponseBody is the io.ReadCloser ReverseProxy ferries
+// downstream. Each Read call pulls one SSE frame from the upstream,
+// dispatches it through the pipeline, and writes the re-framed event
+// into the caller's buffer. On end-of-stream a final last=true
+// dispatch lets aggregating plugins finalize, and onClose records
+// the response SessionEvent.
+//
+// The struct holds an internal buffer (`pending`) that may not
+// drain in one Read — large frames are returned across multiple
+// Reads, byte-for-byte. Streaming preserves SSE wire framing
+// (`data: <payload>\n\n`) regardless of how the upstream emitted
+// each frame's data lines.
+type streamingResponseBody struct {
+	upstream   io.ReadCloser
+	reader     *sseframe.Reader
+	ctx        context.Context
+	pipeline   *pipeline.Holder
+	pctx       *pipeline.Context
+	onClose    func(statusCode int)
+	statusCode int
+
+	pending  []byte
+	finished bool
+	closed   bool
+}
+
+func (b *streamingResponseBody) Read(p []byte) (int, error) {
+	if len(b.pending) > 0 {
+		n := copy(p, b.pending)
+		b.pending = b.pending[n:]
+		return n, nil
+	}
+	if b.finished {
+		return 0, io.EOF
+	}
+
+	frame, err := b.reader.ReadFrame()
+	if err == io.EOF {
+		// End of upstream. Finalize aggregating plugins.
+		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finished = true
+		return 0, io.EOF
+	}
+	if err != nil {
+		// Stream errored mid-flight. Finalize so plugins can record
+		// what they have, then propagate the error so net/http closes
+		// the downstream connection.
+		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finished = true
+		return 0, err
+	}
+
+	action := b.pipeline.RunResponseFrame(b.ctx, b.pctx, frame, false)
+	if action.Type == pipeline.Reject {
+		// Mid-stream reject from a streaming-aware plugin. Headers and
+		// earlier frames are already on the wire, so the cleanest
+		// signal is to abort the read; the client sees a truncated
+		// stream. Finalize first so plugin state is consistent.
+		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finished = true
+		return 0, fmt.Errorf("reverseproxy: streaming response rejected mid-stream")
+	}
+
+	// Re-frame as SSE. The decoder folds multi-line `data:` events
+	// with `\n` separators per spec; split here so each original line
+	// gets its own `data: ` prefix and the downstream parser sees the
+	// same event boundaries the upstream produced. For single-line
+	// JSON-RPC payloads this is equivalent to one `data: <payload>\n\n`.
+	out := make([]byte, 0, len(frame)+8)
+	rest := frame
+	for len(rest) > 0 {
+		nl := bytes.IndexByte(rest, '\n')
+		var line []byte
+		if nl < 0 {
+			line = rest
+			rest = nil
+		} else {
+			line = rest[:nl]
+			rest = rest[nl+1:]
+		}
+		out = append(out, "data: "...)
+		out = append(out, line...)
+		out = append(out, '\n')
+	}
+	out = append(out, '\n')
+
+	n := copy(p, out)
+	if n < len(out) {
+		b.pending = out[n:]
+	}
+	return n, nil
+}
+
+func (b *streamingResponseBody) Close() error {
+	if b.closed {
+		return nil
+	}
+	b.closed = true
+	// Ensure plugins finalize even if Read never reached EOF (client
+	// disconnect, ReverseProxy error).
+	if !b.finished {
+		b.pipeline.RunResponseFrame(b.ctx, b.pctx, nil, true)
+		b.finished = true
+	}
+	if b.onClose != nil {
+		b.onClose(b.statusCode)
+	}
+	return b.upstream.Close()
+}
+
+// isEventStream reports whether a Content-Type header value names the
+// SSE media type. Tolerates parameters and ASCII case differences.
+// Mirrors the forwardproxy helper of the same name.
+func isEventStream(contentType string) bool {
+	if contentType == "" {
+		return false
+	}
+	if idx := strings.IndexByte(contentType, ';'); idx >= 0 {
+		contentType = contentType[:idx]
+	}
+	return strings.EqualFold(strings.TrimSpace(contentType), "text/event-stream")
+}
+
+// inboundSessionID returns the bucket ID for an inbound event. Mirrors
+// extproc's inboundSessionID: trusts the A2A-stated contextId when
+// non-empty, otherwise routes to DefaultSessionID. Does NOT fall back
+// to ActiveSession() — that fallback was a cross-conversation
+// contamination vector (a new conversation's first turn would inherit
+// the previous conversation's rekeyed bucket, stranding the current
+// turn's events in the prior bucket and creating an orphan one-event
+// session for the response). Rekey on response migrates the Default
+// bucket into the contextId once the agent reveals it.
+func inboundSessionID(pctx *pipeline.Context) string {
+	if pctx.Extensions.A2A != nil && pctx.Extensions.A2A.SessionID != "" {
+		return pctx.Extensions.A2A.SessionID
+	}
+	return session.DefaultSessionID
 }

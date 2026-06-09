@@ -16,6 +16,10 @@ func ApplyPreset(cfg *Config) {
 	case ModeProxySidecar:
 		setDefault(&cfg.Listener.ReverseProxyAddr, ":8080")
 		setDefault(&cfg.Listener.ForwardProxyAddr, ":8081")
+		// Outbound transparent listener for enforce-redirect mode. Binding it
+		// is harmless when nothing is redirected here (cooperative HTTP_PROXY
+		// deployments simply never receive connections on it).
+		setDefault(&cfg.Listener.TransparentProxyAddr, ":8082")
 	}
 
 	// Session events API is default-on for every mode. Operators who

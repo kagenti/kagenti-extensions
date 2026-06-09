@@ -92,12 +92,21 @@ func (m *model) rebuildEventsTable() {
 		if m.filter != "" && !matchInvocationRow(rs, m.filter) {
 			continue
 		}
-		// Hide plugin-didn't-act rows by default. The footer hint
-		// shows the count + the toggle key so an operator who
-		// expected more rows can press `s` to surface them.
+		// Hide plugin-didn't-act rows by default. Exception: if a skip
+		// row's pair partner (the other side of the req/resp span) is
+		// NOT a skip, keep this row visible — the partner's ┌/└ glyph
+		// would otherwise orphan, making a successful exchange read
+		// as a missing response. This is exactly what
+		// notifications/initialized produces: a request observe paired
+		// with a response skip ("no_response_body"). Both visible
+		// preserves the pair semantics; both hidden when both are
+		// skips keeps the noise down.
 		if !m.showSkips && isSkipRow(rs) {
-			m.hiddenSkips++
-			continue
+			partnerIdx, paired := pairs[i]
+			if !paired || isSkipRow(rowSpecs[partnerIdx]) {
+				m.hiddenSkips++
+				continue
+			}
 		}
 		// A "continuation" row is one whose event is the same as the
 		// previous RENDERED row's event (filtering-aware). We blank the
@@ -116,22 +125,22 @@ func (m *model) rebuildEventsTable() {
 		// budget: outer (1) + inner (1) + base phase ("resp"/"deny" =
 		// 4) → 6 max.
 		prefix := spanGlyphs[i].prefix()
+		// PHASE is always populated (prefix + "req"/"resp") so a quick
+		// scan down the column reveals lifecycle position even on
+		// continuation rows. Earlier the continuation case rendered
+		// only the prefix, which left operators wondering whether the
+		// row was a request or response invocation.
+		phaseCell = prefix + shortPhase(rs.event.Phase)
 		if !continuation {
 			if id, ok := eventIDs[rs.event]; ok {
 				idCell = strconv.Itoa(id)
 			}
 			timeCell = rs.event.At.Format("15:04:05.00")
 			dirCell = shortDirection(rs.event.Direction)
-			phaseCell = prefix + shortPhase(rs.event.Phase)
 			statusC = statusCell(*rs.event)
 			durCell = durationCell(*rs.event)
 			tokC = tokensCell(*rs.event)
 			hostC = truncStr(rs.event.Host, 20)
-		} else if prefix != "" {
-			// Continuation row inside a pair span: render only the
-			// connectors (no base phase text) so the operator's eye
-			// can follow the pair across multi-invocation events.
-			phaseCell = prefix
 		}
 
 		rows = append(rows, table.Row{
@@ -173,6 +182,19 @@ func (m *model) selectedEvent() *pipeline.SessionEvent {
 		return nil
 	}
 	return m.visibleRows[cur].event
+}
+
+// selectedInvocation returns the plugin invocation for the highlighted events
+// row, or nil (pseudo-row for an event with no invocations, or no rows).
+func (m *model) selectedInvocation() *pipeline.Invocation {
+	if len(m.visibleRows) == 0 {
+		return nil
+	}
+	cur := m.eventsTbl.Cursor()
+	if cur < 0 || cur >= len(m.visibleRows) {
+		return nil
+	}
+	return m.visibleRows[cur].inv
 }
 
 // invocationRow is one table row — the cartesian product of SessionEvent

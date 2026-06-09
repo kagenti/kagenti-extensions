@@ -1,0 +1,139 @@
+# mTLS demo (envoy-sidecar variant) — caller pod.
+#
+# This is hand-crafted (no kagenti.io/inject label) so we control
+# every volume mount. Two operator-side bugs (RO /opt mount in
+# envoy-sidecar mode, runtime CM auto-reconciliation) make the
+# operator-injected path unworkable today; the operator follow-up
+# PR fixes both.
+#
+# SPIRE registration happens automatically via the cluster's default
+# ClusterSPIFFEID (template
+#   spiffe://<trust-domain>/ns/<namespace>/sa/<sa-name>
+# ). Any ServiceAccount-bound pod gets an SVID — no kagenti.io/spire
+# label or operator help required.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mtls-caller-envoy
+  namespace: team1
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mtls-caller-envoy
+  namespace: team1
+  labels:
+    app.kubernetes.io/name: mtls-caller-envoy
+    app.kubernetes.io/part-of: mtls-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mtls-caller-envoy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mtls-caller-envoy
+        app.kubernetes.io/part-of: mtls-demo
+    spec:
+      serviceAccountName: mtls-caller-envoy
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: demo-app
+          image: curlimages/curl:8.11.1
+          imagePullPolicy: IfNotPresent
+          # HTTP_PROXY routes the app's curl through the local Envoy
+          # outbound listener — same pattern the proxy-sidecar demo
+          # uses for its forward proxy on :8081.
+          env:
+            - name: HTTP_PROXY
+              value: "http://127.0.0.1:15123"
+            - name: http_proxy
+              value: "http://127.0.0.1:15123"
+          command: ["sh", "-c", "while true; do sleep 30; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 100
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits:   { cpu: 100m, memory: 64Mi }
+            requests: { cpu:  10m, memory: 32Mi }
+
+        - name: envoy-proxy
+          image: ghcr.io/kagenti/kagenti-extensions/authbridge-envoy:latest
+          imagePullPolicy: IfNotPresent
+          # The combined image's entrypoint runs authbridge-envoy
+          # with these args (which it forwards to the binary), then
+          # starts Envoy.
+          args: ["--config", "/etc/authbridge/config.yaml"]
+          ports:
+            - containerPort: 15123
+              name: outbound
+            - containerPort: 15124
+              name: inbound
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsUser: 1337
+            runAsGroup: 1337
+            capabilities: { drop: ["ALL"] }
+          resources:
+            limits:   { cpu: 200m, memory: 128Mi }
+            requests: { cpu:  20m, memory:  64Mi }
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: authbridge-runtime
+              mountPath: /etc/authbridge
+              readOnly: true
+            - name: spire-agent-socket
+              mountPath: /spiffe-workload-api
+              readOnly: true
+            - name: svid-output
+              mountPath: /opt
+              # NOT readOnly — the spiffe Provider mirror writes here.
+            - name: shared-data
+              mountPath: /shared
+
+      volumes:
+        - name: envoy-config
+          configMap:
+            name: envoy-config-mtls-active
+        - name: authbridge-runtime
+          configMap:
+            name: authbridge-runtime-mtls
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        - name: svid-output
+          emptyDir: {}
+        - name: shared-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mtls-caller-envoy
+  namespace: team1
+  labels:
+    app.kubernetes.io/name: mtls-caller-envoy
+    app.kubernetes.io/part-of: mtls-demo
+spec:
+  selector:
+    app.kubernetes.io/name: mtls-caller-envoy
+  ports:
+    - port: 8080
+      # No demo-app listener; this Service exists only so the SPIRE
+      # ClusterSPIFFEID auto-populates DNS names. Caller is a client.
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  type: ClusterIP

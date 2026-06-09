@@ -9,6 +9,43 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 )
 
+// eventScopedToPlugin returns a shallow copy of e whose Invocations and
+// per-plugin Plugins map are limited to the given plugin. Event-level context
+// (protocol slot, identity) is preserved; filterForDetail still trims those by
+// phase. Returns e unchanged when plugin is empty.
+func eventScopedToPlugin(e *pipeline.SessionEvent, plugin string) *pipeline.SessionEvent {
+	if e == nil || plugin == "" {
+		return e
+	}
+	scoped := *e // shallow copy
+	if e.Invocations != nil {
+		scoped.Invocations = &pipeline.Invocations{
+			Inbound:  filterInvocationsByPlugin(e.Invocations.Inbound, plugin),
+			Outbound: filterInvocationsByPlugin(e.Invocations.Outbound, plugin),
+		}
+	}
+	if e.Plugins != nil {
+		if raw, ok := e.Plugins[plugin]; ok {
+			scoped.Plugins = map[string]json.RawMessage{plugin: raw}
+		} else {
+			scoped.Plugins = nil
+		}
+	}
+	return &scoped
+}
+
+// filterInvocationsByPlugin returns the invocations in invs whose Plugin
+// matches plugin, preserving order. Returns nil when none match.
+func filterInvocationsByPlugin(invs []pipeline.Invocation, plugin string) []pipeline.Invocation {
+	var out []pipeline.Invocation
+	for _, iv := range invs {
+		if iv.Plugin == plugin {
+			out = append(out, iv)
+		}
+	}
+	return out
+}
+
 // showDetail loads e into the detail viewport as colorized JSON and
 // remembers the focused event so yank (y) can find it.
 //
@@ -21,9 +58,18 @@ import (
 // When the event arrived over TLS (SessionEvent.TLS non-nil), a small
 // header block is prepended to the JSON so operators can see the
 // connection-level identity at a glance. Absent for plaintext events.
-func (m *model) showDetail(e *pipeline.SessionEvent) {
+//
+// The events list is one row per plugin invocation, so showDetail takes the
+// selected invocation and renders a copy of the event scoped to that plugin
+// (see eventScopedToPlugin). A nil invocation renders the whole event.
+func (m *model) showDetail(e *pipeline.SessionEvent, inv *pipeline.Invocation) {
 	m.detailEvent = e
-	data, err := json.Marshal(e)
+	m.detailInvocation = inv
+	ev := e
+	if inv != nil {
+		ev = eventScopedToPlugin(e, inv.Plugin)
+	}
+	data, err := json.Marshal(ev)
 	if err != nil {
 		m.detailVp.SetContent("error marshaling event: " + err.Error())
 		return

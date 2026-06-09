@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,6 +31,7 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
 
@@ -37,9 +39,12 @@ import (
 	// (no gRPC, no envoy types).
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/forwardproxy"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/reverseproxy"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/transparentproxy"
 
-	// Only two plugins: drop the parsers and token-broker.
+	// Auth gates only: drop the parsers and token-broker.
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/opa"
+	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
 )
 
@@ -136,6 +141,7 @@ func main() {
 		if err := config.Validate(c); err != nil {
 			return nil, nil, nil, err
 		}
+		config.WarnEmptyPipelines(c, slog.Default())
 		in, err := plugins.BuildWithSPIFFE(c.Pipeline.Inbound.Plugins, provider)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
@@ -211,8 +217,15 @@ func main() {
 		strict := cfg.MTLS.ResolvedMode() == config.MTLSModeStrict
 		src := provider.X509Source()
 		mtlsMetrics = authtls.NewMetrics()
+		// Inbound permissive peeks-and-routes; strict rejects non-TLS.
 		rpMTLS = &reverseproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
-		fpMTLS = &forwardproxy.MTLSOptions{Source: src, Strict: strict, Metrics: mtlsMetrics}
+		// Outbound: TLS-or-fail in strict only. Permissive is plaintext
+		// outbound — see authbridge-proxy/main.go for the architectural
+		// note on why proxy-sidecar's outbound semantics now match
+		// envoy-sidecar's (no per-connection try-TLS-with-fallback).
+		if strict {
+			fpMTLS = &forwardproxy.MTLSOptions{Source: src, Metrics: mtlsMetrics}
+		}
 		slog.Info("mTLS enabled", "mode", cfg.MTLS.ResolvedMode())
 	} else {
 		slog.Info("mTLS disabled (no mtls block in config)")
@@ -228,8 +241,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("creating forward proxy: %v", err)
 	}
+	sharedStore := shared.New()
+	defer sharedStore.Close() // stop the TTL janitor on normal main return
+	rpSrv.Shared = sharedStore
+	fpSrv.Shared = sharedStore
 	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
 	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+
+	// Outbound transparent listener (enforce-redirect mode); shares the forward
+	// proxy's outbound pipeline. Closed explicitly on shutdown.
+	transparentLn := startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
 
 	statsProvider := func() *auth.Stats {
@@ -239,12 +261,18 @@ func main() {
 	}
 	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
 
+	// Warm the plugin catalog at boot so any factory that violates the
+	// constructor contract surfaces here rather than on the first
+	// /v1/plugins request.
+	plugins.WarmCatalog()
+
 	var sessionAPISrv *sessionapi.Server
 	if cfg.Listener.SessionAPIAddr != "" && sessions != nil {
 		sessionAPISrv = sessionapi.New(
 			cfg.Listener.SessionAPIAddr,
 			sessions,
 			sessionapi.WithPipelines(inboundH, outboundH),
+			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -290,6 +318,9 @@ func main() {
 	for _, srv := range httpServers {
 		srv.Shutdown(shutdownCtx)
 	}
+	if transparentLn != nil {
+		_ = transparentLn.Close()
+	}
 	statSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
@@ -316,6 +347,33 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 		}
 	}()
 	return srv
+}
+
+// startTransparentProxy binds the outbound transparent listener (enforce-redirect
+// mode) and serves it in a goroutine, dispatching each REDIRECTed connection
+// through the forward proxy's outbound pipeline. Returns the listener for
+// shutdown, or nil when addr is empty. Bind failures are fatal — enforce-redirect
+// iptables would otherwise REDIRECT to a dead port and break all egress silently.
+func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListener {
+	if addr == "" {
+		return nil
+	}
+	la, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		log.Fatalf("resolve transparent-proxy addr %q: %v", addr, err)
+	}
+	ln, err := net.ListenTCP("tcp", la)
+	if err != nil {
+		log.Fatalf("transparent-proxy listen on %q: %v", addr, err)
+	}
+	srv := transparentproxy.NewServer(fp.HandleTransparentConn)
+	go func() {
+		slog.Info("transparent proxy listening", "addr", addr)
+		if err := srv.Serve(ln); err != nil {
+			log.Fatalf("transparent-proxy serve: %v", err)
+		}
+	}()
+	return ln
 }
 
 // startReverseProxyServer mirrors startHTTPServer but routes through

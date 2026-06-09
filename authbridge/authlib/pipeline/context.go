@@ -29,6 +29,15 @@ type Identity interface {
 	Scopes() []string // granted scopes / roles
 }
 
+// SharedStore is a process-scoped key→value store with TTL, injected by the
+// listener so plugins can share state across the inbound→outbound request
+// boundary (e.g. credential placeholders). Implemented by authlib/shared.Store.
+type SharedStore interface {
+	Put(key string, val any, ttl time.Duration)
+	Get(key string) (any, bool)
+	Delete(key string)
+}
+
 // Direction indicates whether a request is inbound (caller → this agent) or
 // outbound (this agent → target service).
 type Direction int
@@ -122,6 +131,10 @@ type Context struct {
 	// to extract the URI SAN. Listeners use it to populate
 	// SessionEvent.TLS for the observability surface.
 	TLS *tls.ConnectionState
+
+	// Shared is the process-scoped store the listener injects. May be nil
+	// when no store is wired; plugins that require it must fail closed.
+	Shared SharedStore
 
 	// Response-phase fields (populated by listener before RunResponse).
 	// ResponseBody may be nil even during response phase if no plugin declared BodyAccess.
@@ -474,6 +487,67 @@ func (c *Context) ContentSources() []contracts.ContentSource {
 		out = append(out, c.Extensions.Inference)
 	}
 	return out
+}
+
+// Classification reports the request's protocol classification, aggregated
+// across every populated protocol extension on Extensions:
+//
+//   - anyAction is true if at least one populated extension has IsAction=true
+//     (e.g. mcp-parser saw "tools/call"; inference-parser saw any inference call).
+//   - anyBypass is true if at least one populated extension has IsAction=false
+//     (e.g. mcp-parser saw "tools/list" or a $transport/* synthetic event).
+//
+// Both false means no parser populated anything and the request is
+// unclassified — guardrails treating IBAC-style defense in depth (only
+// fire on traffic a parser claimed) should pass through.
+//
+// Parser-disjointness assumption. The current in-tree parsers fire on
+// disjoint request shapes — mcp-parser on JSON-RPC bodies (or body-
+// less MCP-shaped requests on configured paths), a2a-parser on A2A
+// JSON-RPC bodies, inference-parser on /v1/{chat/,}completions paths
+// — so a single request typically populates at most one extension.
+// The aggregation above is defensive (handles the multi-extension
+// case if a future hybrid transport ever does double-claim), but
+// parser authors should not rely on the aggregation as a feature: a
+// parser that populates an extension on a request another parser
+// already classified breaks the contract that classification belongs
+// to whichever parser owns the wire shape.
+//
+// Conflict resolution. If anyAction && anyBypass both end up true,
+// callers decide their own precedence:
+//
+//   - Defense-in-depth gates (IBAC, rate limiters): treat anyBypass
+//     as winning — skip first. Safer default when you can't tell who
+//     to trust.
+//   - Audit-style guardrails: probably want to log the action even
+//     if some extension said bypass; flip the precedence.
+//
+// Either choice is valid; the contract here just provides both signals.
+// In practice the question rarely comes up because of the disjointness
+// above.
+func (c *Context) Classification() (anyAction, anyBypass bool) {
+	if ext := c.Extensions.MCP; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.A2A; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.Inference; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	return anyAction, anyBypass
 }
 
 // emitBodyMutation records the Invocation and publishes the

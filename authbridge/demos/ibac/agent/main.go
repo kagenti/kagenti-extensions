@@ -710,6 +710,22 @@ func handleA2A(w http.ResponseWriter, r *http.Request) {
 		// session header. Keep this for parity with the legacy endpoint.
 		sessionID = r.Header.Get("X-Session-Id")
 	}
+	if sessionID == "" {
+		// A2A spec §6.6: when the client omits a contextId, the server
+		// SHOULD assign one and return it. The kagenti UI currently
+		// sends bare message/send calls without any contextId field;
+		// without this mint, every conversation collapses into the
+		// "default" session bucket on the authbridge side (the rekey-
+		// on-response path needs a contextId on the response to
+		// migrate Default → <contextId>). Each test run / chat turn
+		// then becomes indistinguishable in abctl, which defeats the
+		// IBAC demo's per-conversation forensic view. Returning a
+		// fresh UUID restores per-conversation bucketing while staying
+		// backward-compatible: a UI that ever does start round-
+		// tripping contextIds gets the original sessionID through the
+		// outer branches.
+		sessionID = newUUID()
+	}
 	log.Printf("[Agent] A2A query (session=%s): %s", sessionID, query)
 
 	result, err := runAgent(query, sessionID)

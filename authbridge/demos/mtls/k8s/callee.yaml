@@ -33,6 +33,9 @@ spec:
         app.kubernetes.io/part-of: mtls-demo
         kagenti.io/inject: enabled
         kagenti.io/spire: enabled
+        # Required by the kagenti-operator's mutating-webhook
+        # objectSelector ({kagenti.io/type: [agent, tool]}).
+        kagenti.io/type: agent
     spec:
       serviceAccountName: mtls-callee
       securityContext:
@@ -41,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: demo-app
-          image: hashicorp/http-echo:latest
+          image: hashicorp/http-echo:1.0.0
           imagePullPolicy: IfNotPresent
           args:
             - "-listen=:8000"

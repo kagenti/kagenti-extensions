@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -120,31 +119,25 @@ func TestValidate_ValidConfigs(t *testing.T) {
 	}
 }
 
-// TestValidate_EmptyPipelineRejected guards the "open proxy" failure
-// mode: before this check, an operator who kept the pre-migration
-// top-level schema (inbound:, outbound:, identity:, bypass:, routes:)
-// in their ConfigMap would upgrade the image, land on a config where
-// yaml.v3 silently dropped the unknown top-level keys, end up with an
-// empty Pipeline, and boot successfully. Listeners would then run
-// pipelines with zero plugins — every request would pass through
-// without JWT validation or token exchange.
+// TestValidate_EmptyPipelineAllowed pins the "empty pipeline = pass-through"
+// contract. An operator who wants to run AuthBridge without inbound
+// validation (e.g. for testing, or asymmetric deployments where only
+// outbound token exchange is desired) should be able to do so without
+// adding a new opt-in config item. WarnEmptyPipelines emits a startup
+// WARN so the open-proxy condition is still visible in logs.
 //
-// Empty pipelines being a configuration error forces the operator to
-// either migrate to the new shape or leave the old image tagged. The
-// error message names the offending section and points at the new
-// schema.
-func TestValidate_EmptyPipelineRejected(t *testing.T) {
+// Previously this case was a hard rejection. The schema-migration
+// scenario it guarded against (operators upgrading from the pre-migration
+// top-level schema and silently landing on an empty pipeline) is now
+// surfaced by the WARN log instead of by a boot failure.
+func TestValidate_EmptyPipelineAllowed(t *testing.T) {
 	cfg := &Config{Mode: ModeEnvoySidecar}
-	err := Validate(cfg)
-	if err == nil {
-		t.Fatal("expected error for empty pipeline")
-	}
-	if !strings.Contains(err.Error(), "pipeline.inbound.plugins is empty") {
-		t.Errorf("error does not name the offending section: %q", err)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("empty pipeline should be allowed, got: %v", err)
 	}
 }
 
-func TestValidate_EmptyOutboundPipelineRejected(t *testing.T) {
+func TestValidate_EmptyOutboundPipelineAllowed(t *testing.T) {
 	cfg := &Config{
 		Mode: ModeEnvoySidecar,
 		Pipeline: PipelineConfig{
@@ -152,12 +145,8 @@ func TestValidate_EmptyOutboundPipelineRejected(t *testing.T) {
 			// Outbound intentionally empty
 		},
 	}
-	err := Validate(cfg)
-	if err == nil {
-		t.Fatal("expected error for empty outbound pipeline")
-	}
-	if !strings.Contains(err.Error(), "pipeline.outbound.plugins is empty") {
-		t.Errorf("error does not name the offending section: %q", err)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("empty outbound pipeline should be allowed, got: %v", err)
 	}
 }
 
@@ -759,4 +748,3 @@ listener:
 		t.Errorf("MTLS = %+v, want nil (absent block)", cfg.MTLS)
 	}
 }
-
