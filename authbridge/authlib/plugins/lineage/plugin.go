@@ -264,9 +264,27 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		}
 	}
 
+	// Skip principal_to_agent hops when there is no authenticated identity.
+	// Without auth (e.g. bypass_paths on demo clusters), the source can only
+	// be resolved to a pod IP, which creates confusing "10 → agent" hops.
+	// The corresponding outbound agent_to_agent hop already captures the
+	// relationship; the inbound duplicate adds no information.
+	// On auth-enabled clusters pctx.Identity is set from the JWT, so
+	// principal_to_agent hops are still created correctly.
+	if info.Kind == HopPrincipalToAgent && pctx.Identity == nil && pctx.Agent == nil {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
 	var method string
 	if pctx.Extensions.MCP != nil {
 		method = pctx.Extensions.MCP.Method
+		// For tool calls, use the tool name (e.g. "search_destinations") as
+		// the span label rather than the generic "tools/call" MCP method name.
+		if method == "tools/call" && pctx.Extensions.MCP.Params != nil {
+			if name, ok := pctx.Extensions.MCP.Params["name"].(string); ok && name != "" {
+				method = name
+			}
+		}
 	} else if pctx.Extensions.A2A != nil {
 		method = pctx.Extensions.A2A.Method
 	}
