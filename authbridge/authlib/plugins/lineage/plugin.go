@@ -271,7 +271,19 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	// relationship; the inbound duplicate adds no information.
 	// On auth-enabled clusters pctx.Identity is set from the JWT, so
 	// principal_to_agent hops are still created correctly.
+	//
+	// IMPORTANT: even when skipping the span we must still register the
+	// incoming trace context in inboundSpans / agentCurrentInbound.
+	// Outbound spans (tool calls, LLM calls) from this agent reparent
+	// themselves under the registered context so they stay in the same
+	// trace rather than starting orphaned child traces.
 	if info.Kind == HopPrincipalToAgent && pctx.Identity == nil && pctx.Agent == nil {
+		if inboundSC := trace.SpanContextFromContext(remoteCtx); inboundSC.IsValid() {
+			inboundSpans.Store(inboundSC.TraceID().String(), inboundSC)
+			if p.selfID != "" {
+				agentCurrentInbound.Store(p.selfID, inboundSC)
+			}
+		}
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
