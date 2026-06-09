@@ -223,7 +223,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	}
 
 	// Normalize IDs to short service names; keep raw addresses separately.
-	sourceID := serviceLabel(sourceIdentity(pctx, p.selfID))
+	sourceID := serviceLabel(sourceIdentity(pctx, p.selfID, info.Kind == HopPrincipalToAgent))
 	rawTarget := pctx.Host
 	targetID := shortHostname(rawTarget)
 
@@ -387,9 +387,14 @@ func (p *LineageTelemetry) OnFinish(_ context.Context, pctx *pipeline.Context) {
 
 // sourceIdentity extracts a stable source identifier from the request context.
 // Prefers Subject (end-user ID) over ClientID (service account / client name).
-// Falls back to selfID (the agent's own ID) for outbound requests where no
+//
+// For outbound hops: falls back to selfID (the agent's own ID) when no
 // inbound identity has been established.
-func sourceIdentity(pctx *pipeline.Context, selfID string) string {
+//
+// For inbound hops (isInbound=true): falls back to the caller's remote address
+// rather than selfID, which would produce a confusing self-edge when JWT
+// validation is bypassed (e.g. no-auth demo clusters).
+func sourceIdentity(pctx *pipeline.Context, selfID string, isInbound bool) string {
 	if pctx.Identity != nil {
 		if s := pctx.Identity.Subject(); s != "" {
 			return s
@@ -401,6 +406,15 @@ func sourceIdentity(pctx *pipeline.Context, selfID string) string {
 	}
 	if pctx.Agent != nil && pctx.Agent.ClientID != "" {
 		return pctx.Agent.ClientID
+	}
+	if isInbound {
+		// No JWT on an inbound request (auth bypassed): use the caller's
+		// remote address so the source ≠ target.  shortHostname strips the
+		// port, leaving a pod IP that is at least unambiguous.
+		if pctx.RemoteAddr != "" {
+			return shortHostname(pctx.RemoteAddr)
+		}
+		return "unknown"
 	}
 	// Outbound requests carry no inbound identity; use the agent's own ID.
 	return selfID
@@ -524,6 +538,15 @@ func ioInputValue(pctx *pipeline.Context) string {
 			return string(b)
 		}
 	case ext.MCP != nil && ext.MCP.Params != nil:
+		// For tools/call, surface just the arguments (the semantically
+		// meaningful part) rather than the full {"name":…,"arguments":…} wrapper.
+		if ext.MCP.Method == "tools/call" {
+			if args, ok := ext.MCP.Params["arguments"]; ok {
+				if b, err := json.Marshal(args); err == nil {
+					return string(b)
+				}
+			}
+		}
 		if b, err := json.Marshal(ext.MCP.Params); err == nil {
 			return string(b)
 		}
@@ -565,6 +588,28 @@ func ioOutputValue(pctx *pipeline.Context) string {
 			return string(b)
 		}
 	case ext.MCP != nil && ext.MCP.Result != nil:
+		// For tools/call results, extract the text content from the MCP
+		// content array rather than returning the full {"content":[…],"_meta":…}
+		// envelope, so the output matches what Phoenix shows for the tool span.
+		if ext.MCP.Method == "tools/call" {
+			if content, ok := ext.MCP.Result["content"]; ok {
+				if items, ok := content.([]any); ok {
+					var texts []string
+					for _, item := range items {
+						if m, ok := item.(map[string]any); ok {
+							if m["type"] == "text" {
+								if t, ok := m["text"].(string); ok && t != "" {
+									texts = append(texts, t)
+								}
+							}
+						}
+					}
+					if len(texts) > 0 {
+						return strings.Join(texts, "\n")
+					}
+				}
+			}
+		}
 		if b, err := json.Marshal(ext.MCP.Result); err == nil {
 			return string(b)
 		}
