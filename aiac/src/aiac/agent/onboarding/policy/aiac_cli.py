@@ -75,8 +75,6 @@ def generate_policy_only(
     policy_file: Path, config_path: Path, output_file: str
 ) -> None:
     """
-    Run only the agent's natural-language to YAML step (no Keycloak interaction).
-    
     Args:
         policy_file: Path to file containing natural language policy description
         config_path: Path to Keycloak realm configuration YAML
