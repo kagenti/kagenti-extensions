@@ -235,7 +235,11 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	// Anonymous inbound: principal_to_agent with no identity. The span is still
 	// created (trace propagation must happen), but lineage.hop.kind is omitted so
 	// filter/lineage drops it — no "10 → agent" noise in Execution Flow.
-	anonymousInbound := info.Kind == HopPrincipalToAgent && pctx.Identity == nil && pctx.Agent == nil
+	// anonymousInbound only applies to ACTUAL inbound hops (reverse proxy),
+	// not to outbound hops reclassified as principal_to_agent via is_principal.
+	anonymousInbound := info.Kind == HopPrincipalToAgent &&
+		pctx.Direction == pipeline.Inbound &&
+		pctx.Identity == nil && pctx.Agent == nil
 
 	spanKind, oiKind := hopSpanKinds(info)
 	spanAttrs := []attribute.KeyValue{
