@@ -111,9 +111,14 @@ def generate_policy_only(
         print("✓ Access rules generated successfully!\n")
         print("Generated YAML:")
         print("-" * 80)
-        print(result["yaml_output"])
+        print(builder.get_yaml_output())
         print("-" * 80)
-        builder.save_policy(result["yaml_output"], output_file)
+        builder.save_policy(output_file)
+        
+        # Generate Rego policy files
+        print("\nGenerating Rego policy files...")
+        rego_dir = Path(output_file).parent / "rego_policy"
+        builder.save_policy_rego(str(rego_dir))
     else:
         print("✗ Policy generation failed with errors:")
         for error in result["errors"]:

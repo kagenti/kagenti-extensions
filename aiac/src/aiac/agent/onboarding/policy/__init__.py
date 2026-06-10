@@ -17,7 +17,7 @@ Quick Start:
     >>> result = builder.generate_policy("Admins have full access to all services")
     >>>
     >>> if result["success"]:
-    ...     builder.save_policy(result["yaml_output"], "policy.yaml")
+    ...     builder.save_policy("policy.yaml")
 
 For detailed documentation, see README.md in this directory.
 """
