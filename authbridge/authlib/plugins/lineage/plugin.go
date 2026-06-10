@@ -228,7 +228,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	}
 
 	// Normalize IDs to short service names; keep raw addresses separately.
-	sourceID := serviceLabel(sourceIdentity(pctx, p.selfID, info.Kind == HopPrincipalToAgent))
+	sourceID := serviceLabel(sourceIdentity(pctx, p.selfID, pctx.Direction == pipeline.Inbound))
 	rawTarget := pctx.Host
 	targetID := shortHostname(rawTarget)
 
