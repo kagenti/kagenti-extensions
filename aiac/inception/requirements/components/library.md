@@ -92,6 +92,7 @@ Represents a service (Keycloak: `client`).
 |-------|------|----------------|---------|
 | `id` | `str` | `id` | |
 | `name` | `str \| None` | `name` | |
+| `description` | `str \| None` | `description` | `None` |
 | `enabled` | `bool` | `enabled` | |
 | `type` | `Literal["Agent", "Tool"] \| None` | `attributes.type` | `None` |
 | `roles` | `list[Role]` | _(realm roles for this client)_ | `[]` |
