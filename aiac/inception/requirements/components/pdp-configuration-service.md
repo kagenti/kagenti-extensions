@@ -14,15 +14,44 @@ A FastAPI web service that proxies Keycloak Admin REST API read endpoints. Retur
 | GET | `/roles` | `GET /admin/realms/{realm}/roles` | All realm-level roles |
 | GET | `/subjects/{subject_id}/assignments` | `GET /admin/realms/{realm}/users/{subject_id}/role-mappings` | Realm and service permission assignments for a subject |
 | GET | `/services` | `GET /admin/realms/{realm}/clients` | All services (clients) |
+| GET | `/services/{service_id}` | `GET /admin/realms/{realm}/clients/{service_id}` | Single service by ID |
 | GET | `/scopes` | `GET /admin/realms/{realm}/client-scopes` | All scopes |
 | GET | `/services/{service_id}/permissions` | `GET /admin/realms/{realm}/clients/{service_id}/roles` | Permissions (roles) defined for a specific service |
 | GET | `/roles/{role_name}/composites` | `GET /admin/realms/{realm}/roles/{role-name}/composites` | Current composite permissions assigned to a realm role |
-| POST | `/services/{service_id}/scopes` | `POST /admin/realms/{realm}/client-scopes` + `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Create realm scope and assign as default scope to service |
+| POST | `/scopes` | `POST /admin/realms/{realm}/client-scopes` | Create realm-level scope |
+| POST | `/services/{service_id}/scopes/{scope_id}` | `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Assign existing scope as default scope to service |
+| POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
+| POST | `/services/{service_id}/roles/{role_id}` | `POST /admin/realms/{realm}/clients/{service_id}/scope-mappings/realm` | Assign existing realm role to service |
 
-The `POST /services/{service_id}/scopes` endpoint accepts a JSON body `{"name": ..., "description": ...}`. It:
-1. Calls `admin.create_client_scope({"name": ..., "description": ..., "protocol": "openid-connect"})` to create the scope at realm level and get back the scope ID.
-2. Calls `admin.add_default_default_client_scope(service_id, scope_id)` to assign the new scope as a default scope to the given service.
-3. Returns `201 Created` with the created scope JSON (`{"id": ..., "name": ..., "description": ...}`).
+`GET /services/{service_id}`:
+1. Calls `admin.get_client(service_id)`.
+2. Returns `200 OK` with the client JSON on success.
+3. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`POST /scopes`:
+Accepts JSON body `{"name": ..., "description": ...}`. It:
+1. Calls `admin.create_client_scope({"name": ..., "description": ..., "protocol": "openid-connect"})` to create the scope at realm level.
+2. Returns `201 Created` with the created scope JSON (`{"id": ..., "name": ..., "description": ...}`).
+3. Returns `409 Conflict` if a scope with that name already exists.
+4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`POST /services/{service_id}/scopes/{scope_id}`:
+1. Calls `admin.add_default_default_client_scope(service_id, scope_id)` to assign the scope as a default scope to the service.
+2. Returns `201 Created` on success.
+3. Returns `409 Conflict` if the scope is already assigned to the service.
+4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`POST /roles`:
+Accepts JSON body `{"name": ..., "description": ...}`. It:
+1. Calls `admin.create_realm_role({"name": ..., "description": ...})` to create the role at realm level.
+2. Returns `201 Created` with the created role JSON (`{"id": ..., "name": ..., "description": ...}`).
+3. Returns `409 Conflict` if a role with that name already exists.
+4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`POST /services/{service_id}/roles/{role_id}`:
+1. Calls `admin.assign_realm_roles_to_client_scope(service_id, [{"id": role_id}])` to assign the realm role to the service's scope mappings.
+2. Returns `201 Created` on success.
+3. Returns `409 Conflict` if the role is already assigned to the service.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 Every endpoint accepts an optional `realm` query parameter. When supplied, the request targets the named Keycloak realm instead of the service default (`KEYCLOAK_REALM`); a new `KeycloakAdmin` bound to that realm is instantiated per request. When omitted, the singleton admin initialised at startup is used.

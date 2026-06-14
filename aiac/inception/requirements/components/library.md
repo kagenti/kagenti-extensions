@@ -147,7 +147,11 @@ class Configuration:
     def get_services(self) -> list[Service]: ...
     def get_scopes(self) -> list[Scope]: ...
 
-    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope: ...
+    def create_scope(self, scope_name: str, scope_description: str) -> Scope: ...
+    def map_scope_to_service(self, service: Service, scope: Scope) -> Service: ...
+
+    def create_role(self, role_name: str, role_description: str) -> Role: ...
+    def map_role_to_service(self, service: Service, role: Role) -> Service: ...
 ```
 
 Read methods (`get_*`):
@@ -156,10 +160,26 @@ Read methods (`get_*`):
 3. Parse the response into the appropriate Pydantic model(s).
 
 `create_scope`:
-1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<self.realm>`.
-2. The service creates the scope at realm level and assigns it to the service as a default scope in a single atomic operation.
-3. Raises `RuntimeError` on non-2xx HTTP status.
-4. Returns the created `Scope` instance parsed from the response.
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/scopes` with body `{"name": scope_name, "description": scope_description}`, appending `?realm=<self.realm>`.
+2. Raises `RuntimeError` on non-2xx HTTP status (including 409 if a scope with that name already exists).
+3. Returns the created `Scope` instance parsed from the response.
+
+`map_scope_to_service`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/scopes/{scope.id}`, appending `?realm=<self.realm>`.
+2. Raises `RuntimeError` on non-2xx HTTP status (including 409 if the scope is already mapped to the service).
+3. Re-fetches the service via `GET {AIAC_PDP_CONFIG_URL}/services/{service.id}`, appending `?realm=<self.realm>`.
+4. Returns the updated `Service` instance parsed from the response.
+
+`create_role`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/roles` with body `{"name": role_name, "description": role_description}`, appending `?realm=<self.realm>`.
+2. Raises `RuntimeError` on non-2xx HTTP status (including 409 if a role with that name already exists).
+3. Returns the created `Role` instance parsed from the response.
+
+`map_role_to_service`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/roles/{role.id}`, appending `?realm=<self.realm>`.
+2. Raises `RuntimeError` on non-2xx HTTP status (including 409 if the role is already mapped to the service).
+3. Re-fetches the service via `GET {AIAC_PDP_CONFIG_URL}/services/{service.id}`, appending `?realm=<self.realm>`.
+4. Returns the updated `Service` instance parsed from the response.
 
 ### Configuration
 
@@ -179,7 +199,13 @@ subjects = cfg.get_subjects()
 for s in subjects:
     print(s.username, s.email)
 
-scope = cfg.create_scope(service_id="abc123", scope_name="read", description="Read access")
+scope = cfg.create_scope(scope_name="read", scope_description="Read access")
+services = cfg.get_services()
+service = next(s for s in services if s.id == "abc123")
+updated_service = cfg.map_scope_to_service(service, scope)
+
+role = cfg.create_role(role_name="reader", role_description="Read-only access")
+updated_service = cfg.map_role_to_service(updated_service, role)
 ```
 
 ---
