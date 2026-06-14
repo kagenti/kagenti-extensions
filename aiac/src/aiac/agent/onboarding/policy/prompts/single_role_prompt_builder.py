@@ -91,8 +91,10 @@ ANALYSIS GUIDELINES:
 
 2. ENABLING / GATEWAY SERVICES - CRITICAL - READ CAREFULLY:
    An enabling service is one whose description says it provides access TO another service
-   or technology (e.g., "Access to the data warehouse connector", "Access to the payment
-   gateway", "Access to the data pipeline").
+   or technology. Common phrasings include: "Access to the X connector", "Provides access
+   to X services", "Gateway to X", "Enables access to X", "Access to the X agent".
+   Examples: "Access to the data warehouse connector", "Provides access to GitHub services",
+   "Access to the payment gateway", "Access to the data pipeline".
 
    DOMAIN REQUIREMENT - AN ENABLING SERVICE MUST BE IN THE SAME DOMAIN AS THE POLICY:
    - "Access to the data warehouse connector" IS an enabling service for a data warehouse policy (same domain)
@@ -159,9 +161,13 @@ TASK STEPS:
    - "Access to the demo UI interface" — domain: web UI. Policy about GitHub repos — DIFFERENT → []
      (Even though "developers" may use demo UIs in general, the policy says nothing about UI access → [])
 2. CLASSIFY this privilege: is it a FINAL resource privilege or an ENABLING/GATEWAY service?
-   - ENABLING/GATEWAY: description says "access to [some service/agent/pipeline/gateway]"
+   - ENABLING/GATEWAY: description says "access to [some service/agent/pipeline/gateway]",
+     "provides access to [some service/technology]", "gateway to [...]", or similar phrasing
+     that positions this role as a PREREQUISITE to reach the downstream resource —
      AND the service is in the same domain as the policy
    - FINAL RESOURCE: description says "access to [data/repos/files/records]"
+   NOTE: A privilege named "X-agent" or "X-gateway" with a description like
+   "Provides access to X services" IS an enabling service, NOT a final resource.
 3. IDENTIFY USER CATEGORIES: List all user categories mentioned in the policy.
 4. APPLY RULE:
    - ENABLING/GATEWAY: grant to ALL user categories that need the downstream resource
@@ -238,6 +244,21 @@ Realm role mapping: role-a → Group A.
 ```
 ```json
 {{"privilege": "restricted-data-access", "real_roles_with_access": ["role-a"]}}
+```
+
+Example D — enabling/gateway service using "Provides access to" phrasing:
+```explanation
+Step 1 RELEVANCE CHECK: privilege domain is "GitHub services". Policy domain is
+"GitHub repository access". SAME domain (GitHub) — continue.
+Step 2 CLASSIFY: ENABLING SERVICE — "Provides access to GitHub services" positions this
+as a prerequisite gateway; without it, no user can reach GitHub repositories at all.
+Policy identifies two user categories: R&D (→ developer) gets full access; technical
+support (→ tech-support) gets read-only access. Both need ANY level of GitHub access,
+so BOTH need this enabling service. Access level does NOT matter for enabling services.
+Realm role mapping: developer → R&D, tech-support → technical support.
+```
+```json
+{{"privilege": "github-agent", "real_roles_with_access": ["developer", "tech-support"]}}
 ```
 """
 
