@@ -204,6 +204,68 @@ class TestHealth:
 
 
 # ---------------------------------------------------------------------------
+# POST /services/{service_id}/scopes
+# ---------------------------------------------------------------------------
+
+
+class TestCreateScope:
+    def test_returns_201_with_scope_json(self):
+        admin = MagicMock()
+        admin.create_client_scope.return_value = "new-scope-id"
+        admin.get_client_scope.return_value = {
+            "id": "new-scope-id",
+            "name": "read:data",
+            "description": "Read access",
+        }
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/scopes?realm={REALM}",
+            json={"name": "read:data", "description": "Read access"},
+        )
+        assert resp.status_code == 201
+        body = resp.json()
+        assert body["id"] == "new-scope-id"
+        assert body["name"] == "read:data"
+
+    def test_assigns_scope_as_default_to_service(self):
+        admin = MagicMock()
+        admin.create_client_scope.return_value = "scope-id-42"
+        admin.get_client_scope.return_value = {"id": "scope-id-42", "name": "write"}
+        _make_client(admin).post(
+            f"/services/svc-abc/scopes?realm={REALM}",
+            json={"name": "write", "description": "Write access"},
+        )
+        admin.add_default_default_client_scope.assert_called_once_with("svc-abc", "scope-id-42")
+
+    def test_creates_scope_with_openid_connect_protocol(self):
+        admin = MagicMock()
+        admin.create_client_scope.return_value = "sid"
+        admin.get_client_scope.return_value = {"id": "sid", "name": "read"}
+        _make_client(admin).post(
+            f"/services/svc/scopes?realm={REALM}",
+            json={"name": "read", "description": "desc"},
+        )
+        call_payload = admin.create_client_scope.call_args[0][0]
+        assert call_payload["protocol"] == "openid-connect"
+        assert call_payload["name"] == "read"
+        assert call_payload["description"] == "desc"
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.create_client_scope.side_effect = KeycloakError(
+            error_message="backend failure", response_code=500
+        )
+        resp = _make_client(admin).post(
+            f"/services/svc/scopes?realm={REALM}",
+            json={"name": "read", "description": "desc"},
+        )
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # KeycloakError → 502 on all endpoints
 # ---------------------------------------------------------------------------
 

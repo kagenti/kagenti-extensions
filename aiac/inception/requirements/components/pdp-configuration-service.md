@@ -17,6 +17,13 @@ A FastAPI web service that proxies Keycloak Admin REST API read endpoints. Retur
 | GET | `/scopes` | `GET /admin/realms/{realm}/client-scopes` | All scopes |
 | GET | `/services/{service_id}/permissions` | `GET /admin/realms/{realm}/clients/{service_id}/roles` | Permissions (roles) defined for a specific service |
 | GET | `/roles/{role_name}/composites` | `GET /admin/realms/{realm}/roles/{role-name}/composites` | Current composite permissions assigned to a realm role |
+| POST | `/services/{service_id}/scopes` | `POST /admin/realms/{realm}/client-scopes` + `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Create realm scope and assign as default scope to service |
+
+The `POST /services/{service_id}/scopes` endpoint accepts a JSON body `{"name": ..., "description": ...}`. It:
+1. Calls `admin.create_client_scope({"name": ..., "description": ..., "protocol": "openid-connect"})` to create the scope at realm level and get back the scope ID.
+2. Calls `admin.add_default_default_client_scope(service_id, scope_id)` to assign the new scope as a default scope to the given service.
+3. Returns `201 Created` with the created scope JSON (`{"id": ..., "name": ..., "description": ...}`).
+4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 Every endpoint accepts an optional `realm` query parameter. When supplied, the request targets the named Keycloak realm instead of the service default (`KEYCLOAK_REALM`); a new `KeycloakAdmin` bound to that realm is instantiated per request. When omitted, the singleton admin initialised at startup is used.
 

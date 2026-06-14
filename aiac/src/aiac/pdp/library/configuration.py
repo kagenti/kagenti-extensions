@@ -46,3 +46,13 @@ class Configuration:
         resp = requests.get(f"{self._base_url()}/scopes", params=self._params())
         self._check(resp)
         return [Scope.model_validate(s) for s in resp.json()]
+
+    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope:
+        url = f"{self._base_url()}/services/{service_id}/scopes"
+        resp = requests.post(
+            url,
+            json={"name": scope_name, "description": description},
+            params=self._params(),
+        )
+        self._check(resp)
+        return Scope.model_validate(resp.json())

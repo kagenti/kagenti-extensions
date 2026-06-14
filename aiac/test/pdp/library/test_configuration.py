@@ -131,6 +131,54 @@ class TestGetScopes:
 
 
 # ---------------------------------------------------------------------------
+# create_scope
+# ---------------------------------------------------------------------------
+
+
+class TestCreateScope:
+    def test_returns_scope_instance(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        created = {"id": "sc1", "name": "read:data", "description": "Read access"}
+        with patch("aiac.pdp.library.configuration.requests.post", return_value=_ok(created, 201)) as m:
+            result = Configuration.for_realm(REALM).create_scope(
+                service_id="svc-uuid", scope_name="read:data", description="Read access"
+            )
+        assert isinstance(result, Scope)
+        assert result.name == "read:data"
+        assert result.id == "sc1"
+
+    def test_posts_to_correct_url(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        created = {"id": "sc1", "name": "write"}
+        with patch("aiac.pdp.library.configuration.requests.post", return_value=_ok(created, 201)) as m:
+            Configuration.for_realm(REALM).create_scope("svc-abc", "write", "Write access")
+        url = m.call_args[0][0]
+        assert url == f"{BASE}/services/svc-abc/scopes"
+
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        created = {"id": "sc1", "name": "read"}
+        with patch("aiac.pdp.library.configuration.requests.post", return_value=_ok(created, 201)) as m:
+            Configuration.for_realm(REALM).create_scope("svc-uuid", "read", "desc")
+        params = m.call_args[1].get("params", {})
+        assert params == {"realm": REALM}
+
+    def test_json_body_contains_name_and_description(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        created = {"id": "sc1", "name": "read"}
+        with patch("aiac.pdp.library.configuration.requests.post", return_value=_ok(created, 201)) as m:
+            Configuration.for_realm(REALM).create_scope("svc-uuid", "read", "Read access")
+        body = m.call_args[1].get("json", {})
+        assert body == {"name": "read", "description": "Read access"}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.pdp.library.configuration.requests.post", return_value=_err()):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).create_scope("svc-uuid", "read", "desc")
+
+
+# ---------------------------------------------------------------------------
 # realm forwarded as ?realm= on all methods
 # ---------------------------------------------------------------------------
 
