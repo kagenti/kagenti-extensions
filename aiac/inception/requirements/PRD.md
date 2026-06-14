@@ -232,9 +232,9 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 │                                                          │
 │  aiac.pdp.library.models   — Pydantic only               │
 │  aiac.pdp.library.configuration — HTTP client            │
-│                          PDP Configuration Service       │
+│                    (read/write) PDP Configuration Svc    │
 │  aiac.pdp.library.policy — HTTP client →                 │
-│                          PDP Policy Service              │
+│                    (read/write) PDP Policy Service       │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -334,8 +334,8 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | PDP Configuration Service (in PDP Interface Pod) | `aiac.pdp.library.configuration` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
 | PDP Policy Service (in PDP Interface Pod) | `aiac.pdp.library.policy` | Keycloak Admin REST API | 204/201 on success |
 | `aiac.pdp.library.models` | `aiac.pdp.library.configuration`, `aiac.pdp.library.policy`, AIAC Agent | — | Pydantic model definitions |
-| `aiac.pdp.library.configuration` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances |
-| `aiac.pdp.library.policy` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None |
+| `aiac.pdp.library.configuration` | AIAC Agent, Python scripts | PDP Configuration Service (HTTP) | Typed Pydantic instances (reads and writes configuration entities) |
+| `aiac.pdp.library.policy` | AIAC Agent, Python scripts | PDP Policy Service (HTTP) | Typed Pydantic instances or None (writes policy rules/mappings) |
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, Event Broker | — |
 | Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
@@ -393,7 +393,7 @@ See Section 7.4 (Event Broker) and Section 8 (Deployment) for subject names and 
 
 ### 7.1 PDP Configuration Service
 
-FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Proxies Keycloak Admin REST API read endpoints using generic PDP entity names. Exposes 7 read endpoints. Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter. Backed by Keycloak in both Phase 1 and Phase 2.
+FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Manages PDP configuration entities (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless, no caching. Supports per-request realm override via optional `?realm=` query parameter. Backed by Keycloak in both Phase 1 and Phase 2.
 
 **Full spec:** [components/pdp-configuration-service.md](components/pdp-configuration-service.md)
 
@@ -415,7 +415,7 @@ FastAPI service (`0.0.0.0:7072`) co-located with the PDP Configuration Service i
 Python package at `aiac/src/`. Three submodules:
 
 - **`aiac.pdp.library.models`** — dependency-free Pydantic models for all PDP entities (`Subject`, `Role`, `Service`, `Permission`, `Scope`, `Assignments`).
-- **`aiac.pdp.library.configuration`** — HTTP client wrapping the PDP Configuration Service; returns typed Pydantic instances; all functions require a `realm: str` parameter.
+- **`aiac.pdp.library.configuration`** — HTTP client wrapping the PDP Configuration Service; read and write access to configuration entities (subjects, roles, services, scopes); returns typed Pydantic instances; all methods require a `realm: str` parameter.
 - **`aiac.pdp.library.policy`** — HTTP client wrapping the PDP Policy Service; abstracts Phase 1 (Keycloak composite mappings) and Phase 2 (OPA Rego) behind a stable function interface.
 
 **Full spec:** [components/library.md](components/library.md)

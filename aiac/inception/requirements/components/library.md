@@ -122,7 +122,7 @@ subjects = [Subject.model_validate(s) for s in raw]
 ## Submodule: `aiac.pdp.library.configuration`
 
 ### Description
-HTTP client library that wraps the PDP Configuration Service REST API and returns typed Pydantic model instances from `aiac.pdp.library.models`.
+HTTP client library that wraps the PDP Configuration Service REST API. Provides both read and write access to PDP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.pdp.library.models`.
 
 ### Dependencies
 ```
@@ -146,12 +146,20 @@ class Configuration:
     def get_roles(self) -> list[Role]: ...
     def get_services(self) -> list[Service]: ...
     def get_scopes(self) -> list[Scope]: ...
+
+    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope: ...
 ```
 
-Each method:
-1. Issues `GET {AIAC_PDP_CONFIG_URL}/<endpoint>`, always appending `?realm=<self.realm>`.
-2. Raises `RuntimeError` on non-2xx HTTP status.
-3. Parses the response into the appropriate Pydantic model(s).
+Read methods (`get_*`):
+1. Issue `GET {AIAC_PDP_CONFIG_URL}/<endpoint>`, always appending `?realm=<self.realm>`.
+2. Raise `RuntimeError` on non-2xx HTTP status.
+3. Parse the response into the appropriate Pydantic model(s).
+
+`create_scope`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<self.realm>`.
+2. The service creates the scope at realm level and assigns it to the service as a default scope in a single atomic operation.
+3. Raises `RuntimeError` on non-2xx HTTP status.
+4. Returns the created `Scope` instance parsed from the response.
 
 ### Configuration
 
@@ -170,6 +178,8 @@ cfg = Configuration.for_realm("kagenti")
 subjects = cfg.get_subjects()
 for s in subjects:
     print(s.username, s.email)
+
+scope = cfg.create_scope(service_id="abc123", scope_name="read", description="Read access")
 ```
 
 ---
@@ -177,7 +187,9 @@ for s in subjects:
 ## Submodule: `aiac.pdp.library.policy`
 
 ### Description
-HTTP client library that wraps the PDP Policy Service REST API. Abstracts the Phase 1 (Keycloak) and Phase 2 (OPA) policy write backends behind a stable function interface — callers never interact with the backend directly. The active backend is determined by `AIAC_PDP_POLICY_URL`, which points to whichever policy service pod is deployed.
+HTTP client library that wraps the PDP Policy Service REST API. Abstracts the Phase 1 (Keycloak) and Phase 2 (OPA) policy backends behind a stable function interface — callers never interact with the backend directly. The active backend is determined by `AIAC_PDP_POLICY_URL`, which points to whichever policy service pod is deployed.
+
+Handles policy operations: composite role mappings (Phase 1) and Rego rules (Phase 2). Configuration entity operations (e.g. scope creation) belong to `aiac.pdp.library.configuration`.
 
 ### Dependencies
 ```
@@ -196,15 +208,9 @@ class Policy:
 
     @classmethod
     def for_realm(cls, realm: str) -> "Policy": ...
-
-    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope: ...
 ```
 
-`create_scope`:
-1. Issues `POST {AIAC_PDP_POLICY_URL}/services/{service_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<self.realm>`.
-2. The service creates the scope at realm level and assigns it to the service as a default scope in a single atomic operation.
-3. Raises `RuntimeError` on non-2xx HTTP status.
-4. Returns the created `Scope` instance parsed from the response.
+Policy write methods (composite role management and permissions) are defined in the PDP Policy Service component PRD.
 
 ### Configuration
 
@@ -218,5 +224,4 @@ class Policy:
 from aiac.pdp.library.policy import Policy
 
 policy = Policy.for_realm("kagenti")
-scope = policy.create_scope(service_id="abc123", scope_name="read", description="Read access")
 ```
