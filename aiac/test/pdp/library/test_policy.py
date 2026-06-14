@@ -3,22 +3,14 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from aiac.pdp.library.models import Permission, Scope
-from aiac.pdp.library import policy
+from aiac.pdp.library.models import Scope
+from aiac.pdp.library.policy import Policy
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7072"
 
-_WRITE_FUNCTIONS = [
-    ("add_role_composites", ("admin", [], REALM), "post"),
-    ("remove_role_composites", ("admin", [], REALM), "delete"),
-    ("clear_all_composites", (REALM,), "delete"),
-    ("create_service_permission", ("svc-uuid", "view-data", "desc", REALM), "post"),
-    ("create_service_scope", ("svc-uuid", "read:data", "desc", REALM), "post"),
-]
 
-
-def _ok(json_data=None, status=204):
+def _ok(json_data=None, status=201):
     resp = MagicMock()
     resp.ok = True
     resp.status_code = status
@@ -35,96 +27,67 @@ def _err(status=500):
 
 
 # ---------------------------------------------------------------------------
-# add_role_composites
+# Factory method
 # ---------------------------------------------------------------------------
 
 
-class TestAddRoleComposites:
-    def test_posts_and_returns_none(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        perms = [Permission(id="r1", name="viewer", composite=False, clientRole=False)]
-        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok()) as m:
-            result = policy.add_role_composites("admin", perms, REALM)
-        assert result is None
-        m.assert_called_once()
-        url, kwargs = m.call_args[0][0], m.call_args[1]
-        assert "/roles/admin/composites" in url
-        assert "realm" in kwargs.get("params", {})
+class TestForRealm:
+    def test_returns_policy_bound_to_realm(self):
+        p = Policy.for_realm(REALM)
+        assert isinstance(p, Policy)
+        assert p.realm == REALM
+
+    def test_direct_init_sets_realm(self):
+        p = Policy(REALM)
+        assert p.realm == REALM
 
 
 # ---------------------------------------------------------------------------
-# remove_role_composites
+# create_scope
 # ---------------------------------------------------------------------------
 
 
-class TestRemoveRoleComposites:
-    def test_deletes_and_returns_none(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        perms = [Permission(id="r1", name="viewer", composite=False, clientRole=False)]
-        with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
-            result = policy.remove_role_composites("admin", perms, REALM)
-        assert result is None
-        m.assert_called_once()
-        url = m.call_args[0][0]
-        assert "/roles/admin/composites" in url
-
-
-# ---------------------------------------------------------------------------
-# clear_all_composites
-# ---------------------------------------------------------------------------
-
-
-class TestClearAllComposites:
-    def test_deletes_and_returns_none(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
-            result = policy.clear_all_composites(REALM)
-        assert result is None
-        url = m.call_args[0][0]
-        assert url.endswith("/composites")
-
-
-# ---------------------------------------------------------------------------
-# create_service_permission
-# ---------------------------------------------------------------------------
-
-
-class TestCreateServicePermission:
-    def test_returns_permission_instance(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        created = {"id": "cr1", "name": "view-data", "composite": False, "clientRole": True}
-        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created, 201)):
-            result = policy.create_service_permission("svc-uuid", "view-data", "desc", REALM)
-        assert isinstance(result, Permission)
-        assert result.name == "view-data"
-
-
-# ---------------------------------------------------------------------------
-# create_service_scope
-# ---------------------------------------------------------------------------
-
-
-class TestCreateServiceScope:
+class TestCreateScope:
     def test_returns_scope_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-        created = {"id": "sc1", "name": "read:data"}
-        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created, 201)):
-            result = policy.create_service_scope("svc-uuid", "read:data", "desc", REALM)
+        created = {"id": "sc1", "name": "read:data", "description": "Read access"}
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created)) as m:
+            result = Policy.for_realm(REALM).create_scope(
+                service_id="svc-uuid", scope_name="read:data", description="Read access"
+            )
         assert isinstance(result, Scope)
         assert result.name == "read:data"
+        assert result.id == "sc1"
 
+    def test_posts_to_correct_url(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
+        created = {"id": "sc1", "name": "write"}
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created)) as m:
+            Policy.for_realm(REALM).create_scope("svc-abc", "write", "Write access")
+        url = m.call_args[0][0]
+        assert url == f"{BASE}/services/svc-abc/scopes"
 
-# ---------------------------------------------------------------------------
-# Non-2xx → RuntimeError for all functions
-# ---------------------------------------------------------------------------
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
+        created = {"id": "sc1", "name": "read"}
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created)) as m:
+            Policy.for_realm(REALM).create_scope("svc-uuid", "read", "desc")
+        params = m.call_args[1].get("params", {})
+        assert params == {"realm": REALM}
 
+    def test_json_body_contains_name_and_description(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
+        created = {"id": "sc1", "name": "read"}
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created)) as m:
+            Policy.for_realm(REALM).create_scope("svc-uuid", "read", "Read access")
+        body = m.call_args[1].get("json", {})
+        assert body == {"name": "read", "description": "Read access"}
 
-@pytest.mark.parametrize("fn_name,args,method", _WRITE_FUNCTIONS)
-def test_non_2xx_raises_runtime_error(fn_name, args, method, monkeypatch):
-    monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
-    with patch(f"aiac.pdp.library.policy.requests.{method}", return_value=_err()):
-        with pytest.raises(RuntimeError):
-            getattr(policy, fn_name)(*args)
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_POLICY_URL", BASE)
+        with patch("aiac.pdp.library.policy.requests.post", return_value=_err()):
+            with pytest.raises(RuntimeError):
+                Policy.for_realm(REALM).create_scope("svc-uuid", "read", "desc")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +97,7 @@ def test_non_2xx_raises_runtime_error(fn_name, args, method, monkeypatch):
 
 def test_default_base_url_used_when_env_unset(monkeypatch):
     monkeypatch.delenv("AIAC_PDP_POLICY_URL", raising=False)
-    with patch("aiac.pdp.library.policy.requests.delete", return_value=_ok()) as m:
-        policy.clear_all_composites(REALM)
+    created = {"id": "sc1", "name": "read"}
+    with patch("aiac.pdp.library.policy.requests.post", return_value=_ok(created)) as m:
+        Policy.for_realm(REALM).create_scope("svc-uuid", "read", "desc")
     assert m.call_args[0][0].startswith("http://127.0.0.1:7072")

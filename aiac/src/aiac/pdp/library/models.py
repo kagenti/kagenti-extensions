@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -12,6 +12,7 @@ class Subject(BaseModel):
     firstName: str | None = None
     lastName: str | None = None
     enabled: bool
+    roles: list["Role"] = []
 
 
 class Role(BaseModel):
@@ -21,26 +22,20 @@ class Role(BaseModel):
     name: str
     description: str | None = None
     composite: bool
-    clientRole: bool
-
-
-class Assignments(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    realmMappings: list[Role] = []
-    serviceMappings: dict[str, Any] = {}
+    childRoles: list["Role"] = []
+    mappedScopes: list["Scope"] = []
 
 
 class Service(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str
-    clientId: str
     name: str | None = None
     description: str | None = None
     enabled: bool
-    protocol: str | None = None
-    publicClient: bool
+    type: Literal["Agent", "Tool"] | None = None
+    roles: list["Role"] = []
+    scopes: list["Scope"] = []
 
 
 class Scope(BaseModel):
@@ -49,14 +44,8 @@ class Scope(BaseModel):
     id: str
     name: str
     description: str | None = None
-    protocol: str | None = None
 
 
-class Permission(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    id: str
-    name: str
-    description: str | None = None
-    composite: bool
-    clientRole: bool
+Subject.model_rebuild()
+Role.model_rebuild()
+Service.model_rebuild()
