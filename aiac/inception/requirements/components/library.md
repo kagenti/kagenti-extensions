@@ -55,54 +55,47 @@ pydantic
 
 All models use `model_config = ConfigDict(extra='ignore')` to silently discard unknown fields, ensuring stability across backend version upgrades.
 
+Model definition order in the module: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` all reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
+
 #### `Subject`
 
 Represents a user (Keycloak: `user`).
 
-| Field | Type | Keycloak field |
-|-------|------|----------------|
-| `id` | `str` | `id` |
-| `username` | `str` | `username` |
-| `email` | `str \| None` | `email` |
-| `firstName` | `str \| None` | `firstName` |
-| `lastName` | `str \| None` | `lastName` |
-| `enabled` | `bool` | `enabled` |
+| Field | Type | Keycloak field | Default |
+|-------|------|----------------|---------|
+| `id` | `str` | `id` | |
+| `username` | `str` | `username` | |
+| `email` | `str \| None` | `email` | |
+| `firstName` | `str \| None` | `firstName` | |
+| `lastName` | `str \| None` | `lastName` | |
+| `enabled` | `bool` | `enabled` | |
+| `roles` | `list[Role]` | `realmRoles` | `[]` |
 
 #### `Role`
 
 Represents a realm-level role (Keycloak: `realm role`).
 
-| Field | Type | Keycloak field |
-|-------|------|----------------|
-| `id` | `str` | `id` |
-| `name` | `str` | `name` |
-| `description` | `str \| None` | `description` |
-| `composite` | `bool` | `composite` |
-| `clientRole` | `bool` | `clientRole` |
-
-#### `Assignments`
-
-Represents the current role and permission assignments for a subject (Keycloak: `GET /users/{id}/role-mappings` response).
-
 | Field | Type | Keycloak field | Default |
 |-------|------|----------------|---------|
-| `realmMappings` | `list[Role]` | `realmMappings` | `[]` |
-| `serviceMappings` | `dict[str, Any]` | `clientMappings` | `{}` |
-
-`realmMappings` is a typed list of `Role` instances. `serviceMappings` is kept as a raw dict (structure varies by Keycloak version). `Assignments` is defined after `Role` in the module.
+| `id` | `str` | `id` | |
+| `name` | `str` | `name` | |
+| `description` | `str \| None` | `description` | |
+| `composite` | `bool` | `composite` | |
+| `childRoles` | `list[Role]` | `composites.realm` | `[]` |
+| `mappedScopes` | `list[Scope]` | _(client scopes mapped to role)_ | `[]` |
 
 #### `Service`
 
 Represents a service (Keycloak: `client`).
 
-| Field | Type | Keycloak field |
-|-------|------|----------------|
-| `id` | `str` | `id` |
-| `clientId` | `str` | `clientId` |
-| `name` | `str \| None` | `name` |
-| `enabled` | `bool` | `enabled` |
-| `protocol` | `str \| None` | `protocol` |
-| `publicClient` | `bool` | `publicClient` |
+| Field | Type | Keycloak field | Default |
+|-------|------|----------------|---------|
+| `id` | `str` | `id` | |
+| `name` | `str \| None` | `name` | |
+| `enabled` | `bool` | `enabled` | |
+| `type` | `Literal["Agent", "Tool"] \| None` | `attributes.type` | `None` |
+| `roles` | `list[Role]` | _(realm roles for this client)_ | `[]` |
+| `scopes` | `list[Scope]` | _(default client scopes)_ | `[]` |
 
 #### `Scope`
 
@@ -113,24 +106,11 @@ Represents a service scope (Keycloak: `client scope`).
 | `id` | `str` | `id` |
 | `name` | `str` | `name` |
 | `description` | `str \| None` | `description` |
-| `protocol` | `str \| None` | `protocol` |
-
-#### `Permission`
-
-Represents a service permission (Keycloak: `client role`). Used as both the return type of `get_service_permissions` / `get_role_composites` and the payload element for composite add/remove operations.
-
-| Field | Type | Keycloak field |
-|-------|------|----------------|
-| `id` | `str` | `id` |
-| `name` | `str` | `name` |
-| `description` | `str \| None` | `description` |
-| `composite` | `bool` | `composite` |
-| `clientRole` | `bool` | `clientRole` |
 
 ### Usage
 
 ```python
-from aiac.pdp.library.models import Subject
+from aiac.pdp.library.models import Subject, Role, Scope, Service
 
 raw = tool_result["content"]   # raw JSON list
 subjects = [Subject.model_validate(s) for s in raw]
@@ -150,22 +130,25 @@ pydantic
 python-dotenv
 ```
 
-### Functions
+### Class: `Configuration`
 
-All seven functions require a mandatory `realm: str` parameter, forwarded to the Service as `?realm=<name>`.
+Stateful client bound to a single realm. Construct via the factory method or directly.
 
 ```python
-def get_subjects(realm: str) -> list[Subject]: ...
-def get_roles(realm: str) -> list[Role]: ...
-def get_subject_assignments(subject_id: str, realm: str) -> Assignments: ...
-def get_services(realm: str) -> list[Service]: ...
-def get_scopes(realm: str) -> list[Scope]: ...
-def get_service_permissions(service_id: str, realm: str) -> list[Permission]: ...
-def get_role_composites(role_name: str, realm: str) -> list[Permission]: ...
+class Configuration:
+    def __init__(self, realm: str) -> None: ...
+
+    @classmethod
+    def for_realm(cls, realm: str) -> "Configuration": ...
+
+    def get_subjects(self) -> list[Subject]: ...
+    def get_roles(self) -> list[Role]: ...
+    def get_services(self) -> list[Service]: ...
+    def get_scopes(self) -> list[Scope]: ...
 ```
 
-Each function:
-1. Issues `GET {AIAC_PDP_CONFIG_URL}/<endpoint>` (with path parameters substituted as needed), always appending `?realm=<name>`.
+Each method:
+1. Issues `GET {AIAC_PDP_CONFIG_URL}/<endpoint>`, always appending `?realm=<self.realm>`.
 2. Raises `RuntimeError` on non-2xx HTTP status.
 3. Parses the response into the appropriate Pydantic model(s).
 
@@ -180,9 +163,10 @@ Read from a `.env` file co-located with `configuration.py` (`aiac/src/aiac/pdp/l
 ### Usage
 
 ```python
-from aiac.pdp.library.configuration import get_subjects, get_roles
+from aiac.pdp.library.configuration import Configuration
 
-subjects = get_subjects(realm="kagenti")
+cfg = Configuration.for_realm("kagenti")
+subjects = cfg.get_subjects()
 for s in subjects:
     print(s.username, s.email)
 ```
@@ -201,36 +185,22 @@ pydantic
 python-dotenv
 ```
 
-### Functions
+### Class: `Policy`
 
-All functions require a mandatory `realm: str` parameter.
+Stateful client bound to a single realm. Construct via the factory method or directly.
 
 ```python
-def add_role_composites(role_name: str, permissions: list[Permission], realm: str) -> None: ...
-def remove_role_composites(role_name: str, permissions: list[Permission], realm: str) -> None: ...
-def clear_all_composites(realm: str) -> None: ...
-def create_service_permission(service_id: str, permission_name: str, description: str, realm: str) -> Permission: ...
-def create_service_scope(service_id: str, scope_name: str, description: str, realm: str) -> Scope: ...
+class Policy:
+    def __init__(self, realm: str) -> None: ...
+
+    @classmethod
+    def for_realm(cls, realm: str) -> "Policy": ...
+
+    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope: ...
 ```
 
-`add_role_composites` and `remove_role_composites`:
-1. Issue `POST` / `DELETE {AIAC_PDP_POLICY_URL}/roles/{role_name}/composites` with the serialised permission list as JSON body, appending `?realm=<name>`.
-2. Raise `RuntimeError` on non-2xx HTTP status.
-3. Return `None` on success.
-
-`clear_all_composites`:
-1. Issues `DELETE {AIAC_PDP_POLICY_URL}/composites`, appending `?realm=<name>`.
-2. The service iterates all realm roles and removes all composite mappings.
-3. Raises `RuntimeError` on non-2xx HTTP status.
-4. Returns `None` on success.
-
-`create_service_permission`:
-1. Issues `POST {AIAC_PDP_POLICY_URL}/services/{service_id}/permissions` with body `{"name": permission_name, "description": description}`, appending `?realm=<name>`.
-2. Raises `RuntimeError` on non-2xx HTTP status.
-3. Returns the created `Permission` instance parsed from the response.
-
-`create_service_scope`:
-1. Issues `POST {AIAC_PDP_POLICY_URL}/services/{service_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<name>`.
+`create_scope`:
+1. Issues `POST {AIAC_PDP_POLICY_URL}/services/{service_id}/scopes` with body `{"name": scope_name, "description": description}`, appending `?realm=<self.realm>`.
 2. The service creates the scope at realm level and assigns it to the service as a default scope in a single atomic operation.
 3. Raises `RuntimeError` on non-2xx HTTP status.
 4. Returns the created `Scope` instance parsed from the response.
@@ -244,9 +214,8 @@ def create_service_scope(service_id: str, scope_name: str, description: str, rea
 ### Usage
 
 ```python
-from aiac.pdp.library.policy import add_role_composites
-from aiac.pdp.library.models import Permission
+from aiac.pdp.library.policy import Policy
 
-permissions = [Permission(id="abc", name="editor", description=None, composite=False, clientRole=True)]
-add_role_composites(role_name="developer", permissions=permissions, realm="kagenti")
+policy = Policy.for_realm("kagenti")
+scope = policy.create_scope(service_id="abc123", scope_name="read", description="Read access")
 ```
