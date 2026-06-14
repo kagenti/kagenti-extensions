@@ -47,12 +47,40 @@ class Configuration:
         self._check(resp)
         return [Scope.model_validate(s) for s in resp.json()]
 
-    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope:
-        url = f"{self._base_url()}/services/{service_id}/scopes"
+    def create_scope(self, scope_name: str, scope_description: str) -> Scope:
         resp = requests.post(
-            url,
-            json={"name": scope_name, "description": description},
+            f"{self._base_url()}/scopes",
+            json={"name": scope_name, "description": scope_description},
             params=self._params(),
         )
         self._check(resp)
         return Scope.model_validate(resp.json())
+
+    def map_scope_to_service(self, service: Service, scope: Scope) -> Service:
+        resp = requests.post(
+            f"{self._base_url()}/services/{service.id}/scopes/{scope.id}",
+            params=self._params(),
+        )
+        self._check(resp)
+        get_resp = requests.get(f"{self._base_url()}/services/{service.id}", params=self._params())
+        self._check(get_resp)
+        return Service.model_validate(get_resp.json())
+
+    def create_role(self, role_name: str, role_description: str) -> Role:
+        resp = requests.post(
+            f"{self._base_url()}/roles",
+            json={"name": role_name, "description": role_description},
+            params=self._params(),
+        )
+        self._check(resp)
+        return Role.model_validate(resp.json())
+
+    def map_role_to_service(self, service: Service, role: Role) -> Service:
+        resp = requests.post(
+            f"{self._base_url()}/services/{service.id}/roles/{role.id}",
+            params=self._params(),
+        )
+        self._check(resp)
+        get_resp = requests.get(f"{self._base_url()}/services/{service.id}", params=self._params())
+        self._check(get_resp)
+        return Service.model_validate(get_resp.json())
