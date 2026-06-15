@@ -645,6 +645,4 @@ if __name__ == "__main__":
     print("  python main.py <policy_file.txt> <config.yaml> <output_file.yaml>")
     sys.exit(1)
 
-# Made with Bob
-
 

@@ -124,7 +124,6 @@ def extract_explanation_and_json_single_role(content: str) -> tuple[str, Optiona
 
     return explanation, json_data
 
-
 def print_explanation_single_role(explanation: str, is_retry: bool = False, verbose: bool = True):
     """
     Print the LLM's explanation if verbose mode is enabled.
@@ -247,7 +246,6 @@ def _analyze_role_mapping(
         "validation_passed": True  # Assume passed until validation runs
     }
 
-
 def _validate_role_mapping(
     state: SinglePrivilegeState,
     verbose: bool,
@@ -326,7 +324,6 @@ def _validate_role_mapping(
         "retry_count": retry_count
     }
 
-
 def _verify_semantic_mapping(
     state: SinglePrivilegeState,
     llm: BaseChatModel,
@@ -404,7 +401,6 @@ def _verify_semantic_mapping(
         # Allow the pipeline to proceed on transient errors (rate limits, etc.)
         return {**state, "errors": [], "validation_passed": True}
 
-
 def _should_route_after_structural_validation(state: SinglePrivilegeState, max_retries: int) -> str:
     """
     Route after structural validation: retry, proceed to semantic check, or end.
@@ -429,7 +425,6 @@ def _should_route_after_structural_validation(state: SinglePrivilegeState, max_r
 
     return END
 
-
 def _should_retry_after_semantic(state: SinglePrivilegeState, max_retries: int) -> str:
     """
     Determine if semantic verification failure should retry analyze_role_mapping.
@@ -449,7 +444,6 @@ def _should_retry_after_semantic(state: SinglePrivilegeState, max_retries: int) 
         return "analyze_role_mapping"
 
     return END
-
 
 # ============================================================================
 # GRAPH CONSTRUCTION
@@ -521,7 +515,6 @@ def create_single_privilege_mapper_graph(config: SinglePrivilegeMapperConfig):
     )
 
     return workflow.compile()
-
 
 # ============================================================================
 # MAIN CLASS
