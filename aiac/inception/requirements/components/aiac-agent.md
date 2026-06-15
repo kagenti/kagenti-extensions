@@ -19,7 +19,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 |---|---|---|
 | Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Realm Roles | `realm-role/{id}` | Realm Role sub-agent |
+| Role Update | `realm-role/{id}` | Realm Role sub-agent |
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -50,7 +50,7 @@ flowchart TD
         ORC2 --> SA4
     end
 
-    subgraph RR["Realm Roles"]
+    subgraph RR["Role Update"]
         ORC3["Orchestrator"]
         SA5["Realm Role"]
         ORC3 --> SA5
@@ -73,7 +73,7 @@ A thin adapter started as an **asyncio background task** in the FastAPI `lifespa
 | Subject pattern | Internal handler |
 |---|---|
 | `aiac.apply.service.{id}` | Service Onboarding Orchestrator |
-| `aiac.apply.realm-role.{id}` | Realm Roles Orchestrator |
+| `aiac.apply.realm-role.{id}` | Role Update Orchestrator |
 | `aiac.apply.build` | Policy Update Orchestrator (Build) |
 
 ### Ack contract
@@ -106,240 +106,15 @@ No business logic, retry handling, or state assembly lives in the Controller.
 
 ---
 
-## Service Onboarding Orchestrator
+## Use Cases
 
-Handles `POST /apply/service/{service_id}`.
+Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 
-The orchestrator sequences two sub-agents and assembles the final response:
-
-```
-ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → assemble response
-```
-
-### Service Provision Sub-agent
-
-```
-START → classify_service → [analyze_agent | analyze_tool] → provision_service → format_response → END
-```
-
-- `classify_service`: determines service type and populates `ServiceInfo`.
-  1. **Parse `trigger.service_id`**:
-     - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract namespace.
-     - Short format `{namespace}/{workloadName}` → split on first `/`.
-     - Unrecognised format → treat as `ServiceType.tool`.
-  2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) by namespace + name via the in-cluster Kubernetes API.
-     - **Found** → `service_type = agent`: read the `AgentCard` CR; populate `ServiceInfo(service_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
-     - **Not found** → `service_type = tool`: call `get_services(realm)` from `aiac.pdp.library.configuration`; locate the `Service` by `service_id`; populate `ServiceInfo(service_type=tool, description=service.description or service.name, skills=[])`.
-  3. Returns `502` on Kubernetes API failure or if the Service record is not found for a tool.
-
-  > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev` and `agentcards.agent.kagenti.dev`.
-
-  > **kagenti-operator note:** The operator does not expose an HTTP API. `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) are stored alongside workloads. Absence of an `AgentRuntime` CR is the authoritative signal for `ServiceType.tool`.
-
-- `analyze_agent` / `analyze_tool`: LLM node producing a `ServiceProvision` from `ServiceInfo`. Routing is a conditional edge on `ServiceInfo.service_type`.
-- `provision_service`: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`.
-- `format_response`: assembles the provision result for the orchestrator.
-
-```mermaid
-flowchart TD
-    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. Lookup AgentRuntime CR K8s\n3. Populate ServiceInfo"]
-
-    CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ServiceProvision"]
-    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ServiceProvision"]
-
-    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
-    ANALYZE_TOOL --> PROVISION
-
-    PROVISION --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style CLASSIFY fill:#dbeafe
-    style ANALYZE_AGENT fill:#fef9c3
-    style ANALYZE_TOOL fill:#fef9c3
-    style PROVISION fill:#dcfce7
-```
-
-**State:** `OnboardingProvisionState` extends `BaseAgentState` with:
-
-| Field | Type | Description |
+| Use Case | Sub-PRD | Trigger(s) |
 |---|---|---|
-| `service_info` | `ServiceInfo \| None` | Populated by `classify_service` |
-| `service_provision` | `ServiceProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
-
-### Service Policy Sub-agent
-
-Runs after Service Provision completes. Freshly provisioned permissions/scopes are live in Keycloak before this sub-agent starts.
-
-```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
-```
-
-- Examines all realm roles and determines which realm role → service permission/scope composite mappings to create for the newly added service, based on the access control policy and domain knowledge.
-- `fetch_pdp_state`: fetches all realm roles and their current composites, the new service's permissions and scopes.
-- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the new service only.
-- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy` for each entry in the validated diff.
-- `format_response`: assembles the policy result for the orchestrator.
-
-```mermaid
-flowchart TD
-    START(("START"))
-
-    START --> FP["fetch_policy\nChromaDB: aiac-policies"]
-    START --> FDK["fetch_domain_knowledge\nChromaDB: aiac-domain-knowledge"]
-    START --> FKC["fetch_pdp_state\nroles + composites,\nnew service permissions/scopes"]
-
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to new service only"]
-
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails <= MAX_CHANGES\n3. Auditor LLM re-confirmation\n4. Scope check new service only"]
-
-    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
-```
-
-**State:** `BaseAgentState` (no extensions required).
-
-**Prompts** (`onboarding/policy/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM` — scoped to single-service composite mapping context.
-
----
-
-## Policy Update Orchestrator
-
-Handles `POST /apply/build` and `POST /apply/rebuild`. Dispatches to one sub-agent based on trigger type.
-
-The Policy Update agent compares the **current composite role mappings** (authoritative record of previously applied rules) against the **current policy in ChromaDB** and applies the delta: adding missing composite mappings and removing stale ones.
-
-### Build Sub-agent
-
-```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
-```
-
-- `fetch_pdp_state`: fetches all realm roles and their current composites, all services and their permissions, all scopes.
-- `propose_diff`: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
-- `validate_diff`: existence check + safety guard rails + auditor LLM re-confirmation + scope check.
-- `apply_diff`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
-- `format_response`: assembles the build result.
-
-```mermaid
-flowchart TD
-    START(("START"))
-
-    START --> FP["fetch_policy\nChromaDB"]
-    START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_pdp_state\nall roles + composites,\nall services + permissions"]
-
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nminimal delta vs live composites"]
-
-    PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
-
-    VALIDATE --> APPLY["apply_diff\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
-```
-
-**State:** `BaseAgentState` (no extensions required).
-
-**Prompts** (`policy_update/build/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
-
-### Rebuild Sub-agent
-
-```
-START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
-```
-
-- `clear_composites`: calls `clear_all_composites(realm)` from `aiac.pdp.library.policy` before the fetch fan-out. Removes all composite mappings from all realm roles. `propose_diff` receives a `PDPSnapshot` with empty `role_composites` and produces an add-only diff.
-- All other nodes: identical in contract to Build sub-agent.
-
-```mermaid
-flowchart TD
-    START(("START")) --> CLEAR["clear_composites\nclear_all_composites\nrealm-wide wipe"]
-
-    CLEAR --> FP["fetch_policy\nChromaDB"]
-    CLEAR --> FDK["fetch_domain_knowledge\nChromaDB"]
-    CLEAR --> FKC["fetch_pdp_state\nempty role_composites\nafter wipe"]
-
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nadd-only: composites are empty"]
-
-    PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
-
-    VALIDATE --> APPLY["apply_diff\nadd_role_composites only"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style CLEAR fill:#fee2e2
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
-```
-
-**State:** `BaseAgentState` (no extensions required).
-
-**Prompts** (`policy_update/rebuild/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
-
----
-
-## Realm Roles Orchestrator
-
-Handles `POST /apply/realm-role/{role_id}`. Dispatches to the Realm Role sub-agent.
-
-### Realm Role Sub-agent
-
-```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
-```
-
-- `fetch_pdp_state`: fetches all services and their permissions, all realm roles, and the current composites for the affected realm role.
-- `propose_mappings`: LLM node; produces `ProposedDiff` scoped to the affected realm role.
-- `validate_mappings`: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected realm role).
-- `apply_mappings`: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
-- `format_response`: assembles the result.
-
-```mermaid
-flowchart TD
-    START(("START"))
-
-    START --> FP["fetch_policy\nChromaDB"]
-    START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_pdp_state\naffected role composites,\nall services + permissions"]
-
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected realm role"]
-
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected role only"]
-
-    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
-```
-
-**State:** `BaseAgentState` (no extensions required).
-
-**Prompts** (`realm_roles/realm_role/prompts.py`): `PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
+| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` |
+| Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.build`, `POST /apply/build`, `POST /apply/rebuild` |
+| Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.realm-role.{id}`, `POST /apply/realm-role/{id}` |
 
 ---
 
@@ -450,40 +225,7 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-#### Service Onboarding types (in `onboarding/provision/state.py`)
-
-```python
-class ServiceType(str, Enum):
-    agent = "agent"
-    tool = "tool"
-
-class Skill(BaseModel):
-    id: str
-    name: str
-    description: str
-
-class ServiceInfo(BaseModel):
-    service_type: ServiceType
-    description: str
-    skills: list[Skill] = []
-
-class RoleDefinition(BaseModel):
-    name: str
-    description: str
-
-class ScopeDefinition(BaseModel):
-    name: str
-    description: str
-
-class ServiceProvision(BaseModel):
-    roles: list[RoleDefinition]
-    scopes: list[ScopeDefinition]
-    reasoning: str
-
-class OnboardingProvisionState(BaseAgentState):
-    service_info: ServiceInfo | None = None
-    service_provision: ServiceProvision | None = None
-```
+Service Onboarding types (`ServiceType`, `ServiceInfo`, `ServiceProvision`, `OnboardingProvisionState`, etc.) are defined in `onboarding/provision/state.py` — see [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
@@ -542,7 +284,7 @@ flowchart TD
 |---|---|---|---|
 | POST | `/apply/build` | Policy Update | Build |
 | POST | `/apply/rebuild` | Policy Update | Rebuild |
-| POST | `/apply/realm-role/{role_id}` | Realm Roles | Realm Role |
+| POST | `/apply/realm-role/{role_id}` | Role Update | Realm Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
 
 **Success response (Service Onboarding):**

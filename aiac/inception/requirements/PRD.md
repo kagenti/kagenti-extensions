@@ -339,7 +339,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, Event Broker | — |
 | Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
-| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/rebuild` HTTP direct) | Policy Update / Realm Roles / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
+| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/rebuild` HTTP direct) | Policy Update / Role Update / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
 
 ### Key architectural decisions
 
@@ -438,9 +438,9 @@ FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via th
 |---|---|---|
 | Service Onboarding | `aiac.apply.service.{id}` | Service Provision → Service Policy (sequential) |
 | Policy Update | `aiac.apply.build`, `/apply/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
-| Realm Roles | `aiac.apply.realm-role.{id}` | Realm Role sub-agent |
+| Role Update | `aiac.apply.realm-role.{id}` | Realm Role sub-agent |
 
-All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Realm Roles** sub-agent applies scoped composite mappings for a single affected realm role. The **Service Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Role Update** orchestrator applies scoped composite mappings for a single affected realm role. The **Service Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 
