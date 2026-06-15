@@ -174,11 +174,11 @@ Runs after Service Provision completes. Freshly provisioned permissions/scopes a
 START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
 ```
 
-Examines all realm roles and determines which realm role → service permission/scope composite mappings to create for the newly added service, based on the access control policy and domain knowledge.
+Examines all roles and determines which role → service permission/scope composite mappings to create for the newly added service, based on the access control policy and domain knowledge.
 
 #### Nodes
 
-- **`fetch_pdp_state`**: fetches all realm roles and their current composites, the new service's permissions and scopes.
+- **`fetch_pdp_state`**: fetches all roles and their current composites, the new service's permissions and scopes.
 - **`propose_mappings`**: LLM node; produces `ProposedDiff` scoped to the new service only.
 - **`validate_mappings`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents).
 - **`apply_mappings`**: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy` for each entry in the validated diff.

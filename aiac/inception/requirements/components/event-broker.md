@@ -28,7 +28,7 @@ The Event Broker is a single-node NATS JetStream instance. It owns no business l
 | Subject | Publisher | Consumer | Trigger |
 |---|---|---|---|
 | `aiac.apply.service.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak `CLIENT_CREATED` event |
-| `aiac.apply.realm-role.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak realm role created/updated |
+| `aiac.apply.role.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak role created/updated |
 | `aiac.apply.policy.build` | RAG Ingest Service | AIAC Agent | Post-ingest completion (any collection) |
 | `aiac.apply.dlq` | NATS JetStream (automatic) | Operator (manual inspection) | Max delivery attempts exceeded |
 

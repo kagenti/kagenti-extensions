@@ -27,7 +27,7 @@ has been removed — requirements state what the system must do, not how.
 | FR1 | Events must survive the Agent pod going down and be re-delivered when it restarts — no silent event loss on transient consumer failure | §5 arch decisions, §7.4 |
 | FR2 | Each event must be processed by exactly one Agent instance across competing replicas (work-queue semantics) | §7.4, §5 arch decisions |
 | FR3 | Failed event processing must be retried a bounded number of times, then moved to a dead-letter destination for operator inspection — a persistently broken event must not block the queue | §7.4, §9 |
-| FR4 | The broker must support per-entity event addressing: a new Keycloak client and a new realm role each produce distinct, independently routable events carrying the entity ID — the consumer must be able to subscribe to a wildcard that covers all entity-scoped events without inspecting message payloads | §7.4, §7.5, §7.8, §5 ("no business logic lives in the consumer") |
+| FR4 | The broker must support per-entity event addressing: a new Keycloak client and a new role each produce distinct, independently routable events carrying the entity ID — the consumer must be able to subscribe to a wildcard that covers all entity-scoped events without inspecting message payloads | §7.4, §7.5, §7.8, §5 ("no business logic lives in the consumer") |
 | FR5 | The Agent (Python 3.12, FastAPI, asyncio) must be able to consume events asynchronously as a background task; processing must complete before the event is acknowledged | §7.5, §10 |
 | FR6 | The RAG Ingest Service (Python 3.12, FastAPI) must be able to publish events to the broker | §7.7 |
 | FR7 | The Keycloak SPI (Java) must be able to publish events to the broker | §7.8 |
@@ -88,7 +88,7 @@ Kubernetes. Python client: `aiokafka` or `confluent-kafka-python`. Java client: 
 | **FR1** | Events survive Agent pod restart | **Pass** | Kafka topic retention provides message replay for a configured consumer group |
 | **FR2** | Work-queue: one consumer per event | **Partial** | Kafka consumer groups deliver one message per partition. Work-queue semantics emerge only when partition count equals consumer count — it is not a single-setting guarantee and requires careful partition design |
 | **FR3** | Bounded retry + dead-letter | **Fail** | Kafka has no native dead-letter queue or `max-delivery-attempts` concept. A DLQ must be implemented as application code: a separate retry topic, a retry consumer service, and a DLQ topic. This is infrastructure the PRD expects the broker to provide natively |
-| **FR4** | Per-entity dynamic addressing | **Fail** | Kafka topics are static, pre-declared strings. A runtime-generated entity ID cannot become a new topic without administrator intervention. Per-entity routing collapses to per-type topics (e.g. one topic for all realm-role events), requiring the consumer to inspect message payloads to identify the target entity. The PRD (§5) mandates a consumer that carries no business logic — payload-based routing contradicts this |
+| **FR4** | Per-entity dynamic addressing | **Fail** | Kafka topics are static, pre-declared strings. A runtime-generated entity ID cannot become a new topic without administrator intervention. Per-entity routing collapses to per-type topics (e.g. one topic for all role events), requiring the consumer to inspect message payloads to identify the target entity. The PRD (§5) mandates a consumer that carries no business logic — payload-based routing contradicts this |
 | **FR5** | Python asyncio consumer, ack-after-processing | **Pass** | `aiokafka` is a mature asyncio Kafka client; manual commit after processing is idiomatic |
 | **FR6** | Python publisher | **Pass** | `aiokafka` or `confluent-kafka-python` |
 | **FR7** | Java publisher (Keycloak SPI) | **Pass** | Kafka Java producer is the most mature producer client available |
@@ -105,7 +105,7 @@ consumer service, a retry topic, and a DLQ topic. This is application infrastruc
 configuration. The PRD (§7.4) treats dead-lettering as a broker-level property.
 
 **FR4 — static topics vs dynamic addressing:** The PRD's per-entity event addressing is a
-first-class routing feature. Collapsing `aiac.apply.realm-role.{id}` to a static topic and
+first-class routing feature. Collapsing `aiac.apply.role.{id}` to a static topic and
 embedding the entity ID in the message payload changes the consumer contract and adds routing
 logic to what §5 explicitly defines as a thin adapter with no business logic. This is a
 PRD-level design change, not an implementation detail.

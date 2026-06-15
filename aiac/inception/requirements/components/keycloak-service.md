@@ -17,7 +17,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns ra
 | Method | Path | Keycloak Admin API call | Description |
 |--------|------|------------------------|-------------|
 | GET | `/users` | `GET /admin/realms/{realm}/users` | All users in realm |
-| GET | `/realm-roles` | `GET /admin/realms/{realm}/roles` | All realm-level roles |
+| GET | `/roles` | `GET /admin/realms/{realm}/roles` | All realm-level roles |
 | GET | `/users/{user_id}/role-mappings` | `GET /admin/realms/{realm}/users/{user_id}/role-mappings` | Realm and client role mappings for a user |
 | GET | `/clients` | `GET /admin/realms/{realm}/clients` | All clients |
 | GET | `/client-scopes` | `GET /admin/realms/{realm}/client-scopes` | All client scopes |

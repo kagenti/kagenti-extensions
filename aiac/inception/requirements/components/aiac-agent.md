@@ -5,7 +5,7 @@
 A LangGraph-based AI agent service that enforces a natural-language access control policy against the live PDP state. Triggered via the **Event Broker** (NATS JetStream) for all automated triggers, and directly via HTTP for the operator-only `rebuild` command:
 
 - **Event Broker** → `aiac.apply.service.{id}` subject (originated by Keycloak SPI `CLIENT_CREATED`)
-- **Event Broker** → `aiac.apply.realm-role.{id}` subject (originated by Keycloak SPI realm role created/updated)
+- **Event Broker** → `aiac.apply.role.{id}` subject (originated by Keycloak SPI role created/updated)
 - **Event Broker** → `aiac.apply.policy.build` subject (originated by RAG Ingest Service post-ingest)
 - **Operator/admin call** → `POST /apply/policy/rebuild` directly via `kubectl port-forward` (HTTP only — not routed through Event Broker)
 
@@ -19,7 +19,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 |---|---|---|
 | Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Role Update | `realm-role/{id}` | Realm Role sub-agent |
+| Role Update | `role/{id}` | Role sub-agent |
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -52,12 +52,12 @@ flowchart TD
 
     subgraph RR["Role Update"]
         ORC3["Orchestrator"]
-        SA5["Realm Role"]
+        SA5["Role"]
         ORC3 --> SA5
     end
 
     TRIGGERS --> CTRL
-    CTRL -->|"realm-role/:id"| ORC3
+    CTRL -->|"role/:id"| ORC3
     CTRL -->|"build / rebuild"| ORC2
     CTRL -->|"service/:id"| ORC1
 ```
@@ -73,7 +73,7 @@ A thin adapter started as an **asyncio background task** in the FastAPI `lifespa
 | Subject pattern | Internal handler |
 |---|---|
 | `aiac.apply.service.{id}` | Service Onboarding Orchestrator |
-| `aiac.apply.realm-role.{id}` | Role Update Orchestrator |
+| `aiac.apply.role.{id}` | Role Update Orchestrator |
 | `aiac.apply.policy.build` | Policy Update Orchestrator (Build) |
 
 ### Ack contract
@@ -114,7 +114,7 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 |---|---|---|
 | Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` |
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
-| Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.realm-role.{id}`, `POST /apply/realm-role/{id}` |
+| Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
 
 ---
 
@@ -143,7 +143,7 @@ flowchart TD
 
     subgraph QUERY_KEYS["ChromaDB query strings by trigger"]
         Q1["build / rebuild -> all access control rules"]
-        Q2["realm-role/:id -> realm role assignment rules"]
+        Q2["role/:id -> role assignment rules"]
         Q3["service/:id -> service access control rules"]
     end
 
@@ -165,7 +165,7 @@ Both nodes use the same trigger-type-keyed query strings:
 |---|---|
 | `build` | `"all access control rules"` |
 | `rebuild` | `"all access control rules"` |
-| `realm-role/{id}` | `"realm role assignment rules"` |
+| `role/{id}` | `"role assignment rules"` |
 | `service/{id}` | `"service access control rules"` |
 
 Number of results capped by `CHROMA_N_RESULTS` (default `10`).
@@ -284,7 +284,7 @@ flowchart TD
 |---|---|---|---|
 | POST | `/apply/policy/build` | Policy Update | Build |
 | POST | `/apply/policy/rebuild` | Policy Update | Rebuild |
-| POST | `/apply/realm-role/{role_id}` | Role Update | Realm Role |
+| POST | `/apply/role/{role_id}` | Role Update | Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
 
 **Success response (Service Onboarding):**
@@ -385,12 +385,12 @@ aiac/src/aiac/agent/
 │       ├── nodes.py                     ← clear_composites, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
-├── realm_roles/
+├── roles/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← dispatches to realm_role sub-agent
-│   └── realm_role/
+│   ├── orchestrator.py                  ← dispatches to role sub-agent
+│   └── role/
 │       ├── __init__.py
-│       ├── graph.py                     ← Realm Role StateGraph
+│       ├── graph.py                     ← Role StateGraph
 │       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │

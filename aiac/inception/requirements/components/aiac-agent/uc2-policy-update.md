@@ -66,7 +66,7 @@ START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → prop
 
 #### Nodes
 
-- **`fetch_pdp_state`**: fetches all realm roles and their current composites, all services and their permissions, all scopes.
+- **`fetch_pdp_state`**: fetches all roles and their current composites, all services and their permissions, all scopes.
 - **`propose_diff`**: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
 - **`validate_diff`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check. See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents).
 - **`apply_diff`**: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
@@ -120,7 +120,7 @@ START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetc
 
 #### Delta from Build
 
-- **`clear_composites`**: calls `clear_all_composites(realm)` from `aiac.pdp.library.policy` before the fetch fan-out. Removes all composite mappings from all realm roles.
+- **`clear_composites`**: calls `clear_all_composites(realm)` from `aiac.pdp.library.policy` before the fetch fan-out. Removes all composite mappings from all roles.
 - **`fetch_pdp_state`**: receives a `PDPSnapshot` with empty `role_composites` after the wipe.
 - **`propose_diff`**: produces an add-only diff (no removals — composites are empty).
 - All remaining nodes (`validate_diff`, `apply_diff`, `format_response`): identical contract to Build.

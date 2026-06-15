@@ -51,7 +51,7 @@ PDP Policy Service. AuthBridge performs RFC 8693 token exchanges sending only th
 
 ### UC-1 · Continuous Access Reconciliation (On-boarding / Off-boarding)
 
-**Trigger:** A Realm Role or Keycloak Client is created, updated, or removed.
+**Trigger:** A Role or Keycloak Client is created, updated, or removed.
 
 The Keycloak SPI listener publishes a scoped event to the Event Broker. The AIAC Agent retrieves
 relevant context from the RAG store, reads the current composite role
@@ -61,7 +61,7 @@ entity. The diff is validated by a second LLM pass and applied to Keycloak. Supp
 
 **Two-phase implementation — trigger, RAG retrieval, LLM reasoning, and validation are identical in both phases; only the policy-write target differs:**
 
-- **Phase 1 (current):** diff applied as Keycloak composite role mappings (realm role → service permissions)
+- **Phase 1 (current):** diff applied as Keycloak composite role mappings (role → service permissions)
 - **Phase 2 (planned):** diff applied as LLM-generated Rego rules written to OPA; PDP Policy container image swap only — no other component changes
 
 ### UC-2 · Policy Update Reconciliation
@@ -98,7 +98,7 @@ Five components across four Kubernetes pods, plus a Python client library:
 | # | Component | Description |
 |---|-----------|-------------|
 | 1 | **PDP Configuration Service** | REST service that exposes PDP entity data (subjects, roles, services, scopes, permissions, composite mappings) for read operations. Backed by Keycloak in both phases; the read interface is stable across phases. |
-| 2 | **PDP Policy Service** | REST service that applies policy changes to the active PDP backend. Phase 1 writes Keycloak composite role mappings (realm role → service permissions). Phase 2 writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a container image swap only. |
+| 2 | **PDP Policy Service** | REST service that applies policy changes to the active PDP backend. Phase 1 writes Keycloak composite role mappings (role → service permissions). Phase 2 writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a container image swap only. |
 | 3 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
 | 4 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
 | 5 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
@@ -154,7 +154,7 @@ is the integration surface for other Kagenti components needing typed access to 
 **AIAC ↔ Keycloak (Phase 1)**
 The PDP Configuration Service proxies Keycloak Admin REST read endpoints under generic PDP entity
 names (subjects, roles, services, scopes, permissions, assignments). The PDP Policy Service writes
-composite role mappings (realm role → service permissions) to Keycloak. The Keycloak SPI listener
+role composite mappings (role → service permissions) to Keycloak. The Keycloak SPI listener
 publishes entity lifecycle events to NATS; it is a separate component outside the AIAC codebase.
 
 **AIAC ↔ OPA (Phase 2, planned)**
@@ -196,12 +196,12 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-1b · Realm Role On-boarding (`aiac.apply.realm-role.{id}`)
+#### UC-1b · Role On-boarding (`aiac.apply.role.{id}`)
 
 ```
  Keycloak SPI
       │  REALM_ROLE_CREATED / REALM_ROLE_UPDATED
-      │ 1. publish aiac.apply.realm-role.{id}
+      │ 1. publish aiac.apply.role.{id}
       ▼
  NATS JetStream
       │ 2. deliver event
@@ -209,7 +209,7 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
  AIAC Agent
       │ 3. GET /roles, /services, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
       │ 4. semantic query (policy + domain knowledge) ──► ChromaDB
-      │ 5. [LLM] compute minimal permission diff scoped to affected realm role
+      │ 5. [LLM] compute minimal permission diff scoped to affected role
       │ 6. [LLM] validate diff against retrieved policy (second pass)
       │ 7. POST /composite-roles    (add mappings from diff)    ──► PDP Policy Service ──► Keycloak Admin REST
       │ 8. DELETE /composite-roles  (remove mappings from diff) ──► PDP Policy Service ──► Keycloak Admin REST
