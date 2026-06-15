@@ -6,8 +6,8 @@ A LangGraph-based AI agent service that enforces a natural-language access contr
 
 - **Event Broker** → `aiac.apply.service.{id}` subject (originated by Keycloak SPI `CLIENT_CREATED`)
 - **Event Broker** → `aiac.apply.realm-role.{id}` subject (originated by Keycloak SPI realm role created/updated)
-- **Event Broker** → `aiac.apply.build` subject (originated by RAG Ingest Service post-ingest)
-- **Operator/admin call** → `POST /apply/rebuild` directly via `kubectl port-forward` (HTTP only — not routed through Event Broker)
+- **Event Broker** → `aiac.apply.policy.build` subject (originated by RAG Ingest Service post-ingest)
+- **Operator/admin call** → `POST /apply/policy/rebuild` directly via `kubectl port-forward` (HTTP only — not routed through Event Broker)
 
 The Agent subscribes to the Event Broker as a durable competing consumer (`aiac-agent-consumer` queue group). It acknowledges each message only after successful processing — ensuring at-least-once delivery and automatic replay on pod restart.
 
@@ -74,7 +74,7 @@ A thin adapter started as an **asyncio background task** in the FastAPI `lifespa
 |---|---|
 | `aiac.apply.service.{id}` | Service Onboarding Orchestrator |
 | `aiac.apply.realm-role.{id}` | Role Update Orchestrator |
-| `aiac.apply.build` | Policy Update Orchestrator (Build) |
+| `aiac.apply.policy.build` | Policy Update Orchestrator (Build) |
 
 ### Ack contract
 
@@ -113,7 +113,7 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 | Use Case | Sub-PRD | Trigger(s) |
 |---|---|---|
 | Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` |
-| Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.build`, `POST /apply/build`, `POST /apply/rebuild` |
+| Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.realm-role.{id}`, `POST /apply/realm-role/{id}` |
 
 ---
@@ -282,8 +282,8 @@ flowchart TD
 
 | Method | Path | Orchestrator | Sub-agent |
 |---|---|---|---|
-| POST | `/apply/build` | Policy Update | Build |
-| POST | `/apply/rebuild` | Policy Update | Rebuild |
+| POST | `/apply/policy/build` | Policy Update | Build |
+| POST | `/apply/policy/rebuild` | Policy Update | Rebuild |
 | POST | `/apply/realm-role/{role_id}` | Role Update | Realm Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
 
@@ -354,7 +354,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 aiac/src/aiac/agent/
 ├── controller/
 │   ├── __init__.py
-│   └── routes.py                        ← FastAPI app + four /apply/* route handlers
+│   └── routes.py                        ← FastAPI app + four route handlers
 │
 ├── onboarding/
 │   ├── __init__.py

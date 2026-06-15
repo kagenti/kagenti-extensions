@@ -29,10 +29,10 @@ The Event Broker is a single-node NATS JetStream instance. It owns no business l
 |---|---|---|---|
 | `aiac.apply.service.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak `CLIENT_CREATED` event |
 | `aiac.apply.realm-role.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak realm role created/updated |
-| `aiac.apply.build` | RAG Ingest Service | AIAC Agent | Post-ingest completion (any collection) |
+| `aiac.apply.policy.build` | RAG Ingest Service | AIAC Agent | Post-ingest completion (any collection) |
 | `aiac.apply.dlq` | NATS JetStream (automatic) | Operator (manual inspection) | Max delivery attempts exceeded |
 
-**`rebuild` is not routed through the Event Broker.** It is an operator-only command issued directly via `POST /apply/rebuild` on the AIAC Agent using `kubectl port-forward`.
+**`rebuild` is not routed through the Event Broker.** It is an operator-only command issued directly via `POST /apply/policy/rebuild` on the AIAC Agent using `kubectl port-forward`.
 
 ---
 
@@ -44,7 +44,7 @@ All messages carry a minimal JSON payload containing only the entity ID:
 { "id": "<entity-id>" }
 ```
 
-For `aiac.apply.build`, the payload is empty (`{}`). The AIAC Agent pulls all required state from the PDP Configuration Service at processing time — the event payload is a trigger, not a data carrier.
+For `aiac.apply.policy.build`, the payload is empty (`{}`). The AIAC Agent pulls all required state from the PDP Configuration Service at processing time — the event payload is a trigger, not a data carrier.
 
 ---
 

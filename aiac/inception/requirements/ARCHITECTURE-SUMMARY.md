@@ -218,7 +218,7 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2a · Incremental Policy Update (`aiac.apply.build`)
+#### UC-2a · Incremental Policy Update (`aiac.apply.policy.build`)
 
 ```
  Operator
@@ -226,7 +226,7 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
       ▼
  RAG Ingest Service
       │ 2. upsert documents ──► ChromaDB
-      │ 3. publish aiac.apply.build
+      │ 3. publish aiac.apply.policy.build
       ▼
  NATS JetStream
       │ 4. deliver event
@@ -242,11 +242,11 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2b · Full Rebuild (`POST /apply/rebuild`, operator-only)
+#### UC-2b · Full Rebuild (`POST /apply/policy/rebuild`, operator-only)
 
 ```
  Operator
-      │ 1. POST /apply/rebuild  (kubectl port-forward → Agent pod)
+      │ 1. POST /apply/policy/rebuild  (kubectl port-forward → Agent pod)
       ▼
  AIAC Agent
       │ 2. DELETE /composite-roles/all  (clear entire mapping table) ──► PDP Policy Service ──► Keycloak Admin REST

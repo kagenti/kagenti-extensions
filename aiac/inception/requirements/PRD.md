@@ -287,7 +287,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2a · Incremental Policy Update (`aiac.apply.build`)
+#### UC-2a · Incremental Policy Update (`aiac.apply.policy.build`)
 
 ```
  Operator
@@ -295,7 +295,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
       ▼
  RAG Ingest Service
       │ 2. upsert documents ──► ChromaDB
-      │ 3. publish aiac.apply.build
+      │ 3. publish aiac.apply.policy.build
       ▼
  NATS JetStream
       │ 4. deliver event
@@ -311,11 +311,11 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2b · Full Rebuild (`POST /apply/rebuild`, operator-only)
+#### UC-2b · Full Rebuild (`POST /apply/policy/rebuild`, operator-only)
 
 ```
  Operator
-      │ 1. POST /apply/rebuild  (kubectl port-forward → Agent pod)
+      │ 1. POST /apply/policy/rebuild  (kubectl port-forward → Agent pod)
       ▼
  AIAC Agent
       │ 2. DELETE /composite-roles/all  (clear entire mapping table) ──► PDP Policy Service ──► Keycloak Admin REST
@@ -339,7 +339,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, Event Broker | — |
 | Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
-| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/rebuild` HTTP direct) | Policy Update / Role Update / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
+| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/policy/rebuild` HTTP direct) | Policy Update / Role Update / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
 
 ### Key architectural decisions
 
@@ -352,8 +352,8 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **AIAC Agent is stateless.** Changes are applied immediately on trigger — no pending session or human confirmation step.
 - **Event Broker decouples all automated triggers from the Agent.** The Keycloak SPI listener and RAG Ingest Service publish to NATS subjects; the Agent subscribes as a durable competing consumer. This removes all direct dependencies between trigger sources and the Agent.
 - **`rebuild` bypasses the Event Broker.** It is an operator-only command issued directly via HTTP (`kubectl port-forward`). It is never published to NATS and has no NATS listener.
-- **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal `/apply/*` handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
-- **Agent `/apply/*` HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
+- **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
+- **Agent HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
 - **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
 - **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, PDP Configuration Service, PDP Policy Service, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently.
 - **`aiac.pdp.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
@@ -437,7 +437,7 @@ FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via th
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
 | Service Onboarding | `aiac.apply.service.{id}` | Service Provision → Service Policy (sequential) |
-| Policy Update | `aiac.apply.build`, `/apply/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
+| Policy Update | `aiac.apply.policy.build`, `/apply/policy/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
 | Role Update | `aiac.apply.realm-role.{id}` | Realm Role sub-agent |
 
 All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Role Update** orchestrator applies scoped composite mappings for a single affected realm role. The **Service Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
@@ -456,7 +456,7 @@ ChromaDB vector store (`aiac-rag-service:8000`) hosting two collections: `aiac-p
 
 ### 7.7 RAG Ingest Service
 
-FastAPI service (`0.0.0.0:7073`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
+FastAPI service (`0.0.0.0:7073`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.policy.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
 
 **Full spec:** [components/rag-ingest-service.md](components/rag-ingest-service.md)
 

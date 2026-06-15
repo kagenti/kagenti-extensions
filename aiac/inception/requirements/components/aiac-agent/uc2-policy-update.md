@@ -10,9 +10,9 @@
 
 ```mermaid
 flowchart TD
-    NATS["Event Broker\nNATS JetStream\naiac.apply.build"]
+    NATS["Event Broker\nNATS JetStream\naiac.apply.policy.build"]
     NATS_CONSUMER["NATS Consumer\nasyncio background task\nthin adapter"]
-    TRIGGERS["HTTP Triggers\nPOST /apply/build (debug)\nPOST /apply/rebuild (operator)"]
+    TRIGGERS["HTTP Triggers\nPOST /apply/policy/build (debug)\nPOST /apply/policy/rebuild (operator)"]
     CTRL["Controller\nroutes.py"]
 
     NATS -->|"durable queue group\naiac-agent-consumer"| NATS_CONSUMER
@@ -36,9 +36,9 @@ flowchart TD
 
 | Source | Subject / Path | Sub-agent |
 |---|---|---|
-| Event Broker (NATS) | `aiac.apply.build` (originated by RAG Ingest Service post-ingest) | Build |
-| HTTP (operator only) | `POST /apply/rebuild` (via `kubectl port-forward`) | Rebuild |
-| HTTP (debug) | `POST /apply/build` | Build |
+| Event Broker (NATS) | `aiac.apply.policy.build` (originated by RAG Ingest Service post-ingest) | Build |
+| HTTP (operator only) | `POST /apply/policy/rebuild` (via `kubectl port-forward`) | Rebuild |
+| HTTP (debug) | `POST /apply/policy/build` | Build |
 
 ---
 
