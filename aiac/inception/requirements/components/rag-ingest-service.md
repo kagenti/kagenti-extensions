@@ -3,7 +3,7 @@
 ## Description
 A FastAPI REST service co-located with ChromaDB in the RAG Pod. Accepts knowledge documents for any configured collection, chunks and embeds them, and writes the resulting vectors into the ChromaDB instance in the same Pod. Supports both access control policies (`aiac-policies`) and org/business domain context (`aiac-domain-knowledge`) through a single collection-parameterized API surface. Developer-driven ingestion is performed via `kubectl port-forward`.
 
-After every successful ingest operation the service publishes a trigger event to the **Event Broker** (NATS JetStream) on the `aiac.apply.build` subject. This causes the AIAC Agent to recompute and apply the updated policy against the live PDP state. All three ingest semantics (replace, update, delete) publish `build`; `rebuild` is an explicit operator-only command issued directly to the Agent and is never triggered by the ingest service.
+After every successful ingest operation the service publishes a trigger event to the **Event Broker** (NATS JetStream) on the `aiac.apply.policy.build` subject. This causes the AIAC Agent to recompute and apply the updated policy against the live PDP state. All three ingest semantics (replace, update, delete) publish `build`; `rebuild` is an explicit operator-only command issued directly to the Agent and is never triggered by the ingest service.
 
 ## Endpoints
 
@@ -39,7 +39,7 @@ The `{collection}` path segment must be a slug from `AIAC_RAG_COLLECTIONS` (defa
 
 ## Post-ingest Event Broker notification
 
-After every successful ingest operation (replace, update, or delete), the service publishes `{"id": ""}` to `aiac.apply.build` on the Event Broker (`NATS_URL`). The publish is non-blocking: ingest success is reported to the caller before the NATS publish completes. Publish failures are logged but do not cause the ingest endpoint to return an error. This preserves ingest availability even when the Event Broker is temporarily unavailable.
+After every successful ingest operation (replace, update, or delete), the service publishes `{"id": ""}` to `aiac.apply.policy.build` on the Event Broker (`NATS_URL`). The publish is non-blocking: ingest success is reported to the caller before the NATS publish completes. Publish failures are logged but do not cause the ingest endpoint to return an error. This preserves ingest availability even when the Event Broker is temporarily unavailable.
 
 The AIAC Agent's durable consumer receives the event and acknowledges it after successful processing. Delivery guarantees (at-least-once, replay on Agent restart) are managed by the Event Broker — the RAG Ingest Service is fire-and-forget from its perspective.
 

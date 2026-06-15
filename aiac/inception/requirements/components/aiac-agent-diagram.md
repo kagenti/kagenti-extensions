@@ -23,16 +23,16 @@ flowchart TD
         ORC2 --> SA4
     end
 
-    subgraph URR["Users and Realm Roles"]
+    subgraph URR["Users and Roles"]
         ORC3["Orchestrator"]
         SA5["Users"]
-        SA6["Realm Roles"]
+        SA6["Roles"]
         ORC3 --> SA5
         ORC3 --> SA6
     end
 
     TRIGGERS --> CTRL
-    CTRL -->|"user/:id or realm-role/:id"| ORC3
+    CTRL -->|"user/:id or role/:id"| ORC3
     CTRL -->|"build / rebuild"| ORC2
     CTRL -->|"client/:id"| ORC1
 ```
@@ -73,7 +73,7 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB: aiac-policies"]
     START --> FDK["fetch_domain_knowledge\nChromaDB: aiac-domain-knowledge"]
-    START --> FKC["fetch_keycloak_state\nusers, realm roles,\nclient roles/scopes,\nuser role mappings"]
+    START --> FKC["fetch_keycloak_state\nusers, roles,\nclient roles/scopes,\nuser role mappings"]
 
     FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to new client only"]
 
@@ -105,7 +105,7 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB"]
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_keycloak_state\nall users, clients,\nrealm roles, all\nrole mappings"]
+    START --> FKC["fetch_keycloak_state\nall users, clients,\nroles, all\nrole mappings"]
 
     FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nminimal delta vs live state"]
 
@@ -154,7 +154,7 @@ flowchart TD
 
 ---
 
-## 4. Users & Realm Roles Sub-agents
+## 4. Users & Roles Sub-agents
 
 Both sub-agents share the same graph shape; only `fetch_keycloak_state` scope differs.
 
@@ -164,9 +164,9 @@ flowchart TD
 
     START --> FP["fetch_policy\nChromaDB"]
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_keycloak_state\n\nUser: that users\ncurrent mappings\nand all clients/roles\n\nRealm Role: all users\nand all realm roles"]
+    START --> FKC["fetch_keycloak_state\n\nUser: that users\ncurrent mappings\nand all clients/roles\n\nRole: all users\nand all roles"]
 
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected\nuser OR realm role"]
+    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected\nuser OR role"]
 
     PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected entity only"]
 
@@ -208,7 +208,7 @@ flowchart TD
     subgraph QUERY_KEYS["ChromaDB query strings by trigger"]
         Q1["build / rebuild -> all access control rules"]
         Q2["user/:id -> user role assignment rules"]
-        Q3["realm-role/:id -> realm role assignment rules"]
+        Q3["role/:id -> role assignment rules"]
         Q4["client/:id -> client access control rules"]
     end
 

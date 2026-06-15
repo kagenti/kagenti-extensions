@@ -55,7 +55,7 @@ AIAC enforces a strict three-layer model across both phases:
 | **Policy Decision (PDP)** | Keycloak (Phase 1) / OPA (Phase 2) | Decides what a caller may access; issues scoped tokens |
 | **Policy Enforcement (PEP)** | AuthBridge | Intercepts traffic; exchanges tokens; carries no policy knowledge |
 
-The PEP (AuthBridge) is a pure enforcement layer. It performs RFC 8693 token exchanges sending only the target `audience` — no `scope` parameter. The PDP evaluates the caller's realm role and issues a token containing exactly the entitlements that role grants on the target service.
+The PEP (AuthBridge) is a pure enforcement layer. It performs RFC 8693 token exchanges sending only the target `audience` — no `scope` parameter. The PDP evaluates the caller's role and issues a token containing exactly the entitlements that role grants on the target service.
 
 This means `token_scopes` is absent from `authproxy-routes`. Route configuration carries routing intent only (`host` → `target_audience`). Policy intent lives entirely in the PDP, kept current by AIAC.
 
@@ -63,7 +63,7 @@ This means `token_scopes` is absent from `authproxy-routes`. Route configuration
 
 | Phase | PDP Policy write target | Write operation | PEP behaviour |
 |---|---|---|---|
-| Phase 1 | Keycloak | Composite role mappings (realm role → service permissions) | `audience` only — Keycloak resolves entitlements from composites |
+| Phase 1 | Keycloak | Composite role mappings (role → service permissions) | `audience` only — Keycloak resolves entitlements from composites |
 | Phase 2 | OPA | LLM-generated Rego rules | `audience` only — OPA evaluates Rego; PEP is unchanged |
 
 Phase transition: before Phase 2 is activated, the agent clears all composite mappings from Keycloak, then the PDP Policy pod is replaced with the OPA implementation. AuthBridge requires no changes — the PEP is identical in both phases.
@@ -74,7 +74,7 @@ Phase transition: before Phase 2 is activated, the agent clears all composite ma
 
 ### UC-1 · Continuous Access Reconciliation (On-boarding / Off-boarding)
 
-**Trigger:** A Realm Role or Keycloak Client is created, updated, or removed.
+**Trigger:** A Role or Keycloak Client is created, updated, or removed.
 
 The Keycloak SPI listener publishes a scoped event to the Event Broker. The AIAC Agent retrieves
 relevant context from the RAG store, reads the current composite role
@@ -84,7 +84,7 @@ entity. The diff is validated by a second LLM pass and applied to Keycloak. Supp
 
 **Two-phase implementation — trigger, RAG retrieval, LLM reasoning, and validation are identical in both phases; only the policy-write target differs:**
 
-- **Phase 1 (current):** diff applied as Keycloak composite role mappings (realm role → service permissions)
+- **Phase 1 (current):** diff applied as Keycloak composite role mappings (role → service permissions)
 - **Phase 2 (planned):** diff applied as LLM-generated Rego rules written to OPA; PDP Policy container image swap only — no other component changes
 
 ### UC-2 · Policy Update Reconciliation
@@ -123,7 +123,7 @@ Six components across four Kubernetes Pods plus a Python library layer, all impl
 | # | Component | Description |
 |---|-----------|-------------|
 | 1 | **PDP Configuration Service** | REST service that exposes PDP entity data (subjects, roles, services, scopes, permissions, composite mappings) for read operations. Backed by Keycloak in both phases; the read interface is stable across phases. |
-| 2 | **PDP Policy Service** | REST service that applies policy changes to the active PDP backend. Phase 1 writes Keycloak composite role mappings (realm role → service permissions). Phase 2 writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a container image swap only. |
+| 2 | **PDP Policy Service** | REST service that applies policy changes to the active PDP backend. Phase 1 writes Keycloak composite role mappings (role → service permissions). Phase 2 writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a container image swap only. |
 | 3 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
 | 4 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
 | 5 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
@@ -265,12 +265,12 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-1b · Realm Role On-boarding (`aiac.apply.realm-role.{id}`)
+#### UC-1b · Role On-boarding (`aiac.apply.role.{id}`)
 
 ```
  Keycloak SPI
       │  REALM_ROLE_CREATED / REALM_ROLE_UPDATED
-      │ 1. publish aiac.apply.realm-role.{id}
+      │ 1. publish aiac.apply.role.{id}
       ▼
  NATS JetStream
       │ 2. deliver event
@@ -278,7 +278,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  AIAC Agent
       │ 3. GET /roles, /services, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
       │ 4. semantic query (policy + domain knowledge) ──► ChromaDB
-      │ 5. [LLM] compute minimal permission diff scoped to affected realm role
+      │ 5. [LLM] compute minimal permission diff scoped to affected role
       │ 6. [LLM] validate diff against retrieved policy (second pass)
       │ 7. POST /composite-roles    (add mappings from diff)    ──► PDP Policy Service ──► Keycloak Admin REST
       │ 8. DELETE /composite-roles  (remove mappings from diff) ──► PDP Policy Service ──► Keycloak Admin REST
@@ -287,7 +287,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2a · Incremental Policy Update (`aiac.apply.build`)
+#### UC-2a · Incremental Policy Update (`aiac.apply.policy.build`)
 
 ```
  Operator
@@ -295,7 +295,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
       ▼
  RAG Ingest Service
       │ 2. upsert documents ──► ChromaDB
-      │ 3. publish aiac.apply.build
+      │ 3. publish aiac.apply.policy.build
       ▼
  NATS JetStream
       │ 4. deliver event
@@ -311,11 +311,11 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
  NATS JetStream  (message removed from pending)
 ```
 
-#### UC-2b · Full Rebuild (`POST /apply/rebuild`, operator-only)
+#### UC-2b · Full Rebuild (`POST /apply/policy/rebuild`, operator-only)
 
 ```
  Operator
-      │ 1. POST /apply/rebuild  (kubectl port-forward → Agent pod)
+      │ 1. POST /apply/policy/rebuild  (kubectl port-forward → Agent pod)
       ▼
  AIAC Agent
       │ 2. DELETE /composite-roles/all  (clear entire mapping table) ──► PDP Policy Service ──► Keycloak Admin REST
@@ -339,27 +339,27 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | ChromaDB | RAG Ingest Service (writes), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Embedding API, Event Broker | — |
 | Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
-| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/rebuild` HTTP direct) | Policy Update / Realm Roles / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
+| AIAC Agent | Event Broker (NATS consumer), operator (`/apply/policy/rebuild` HTTP direct) | Policy Update / Role Update / Service Onboarding orchestrators → `aiac.pdp.library.*`, ChromaDB, LLM API, Kubernetes API | Applied composite diff; provisioned service permissions/scopes (onboarding) |
 
 ### Key architectural decisions
 
 - **PDP services are co-located in a single PDP Interface Pod.** PDP Configuration Service and PDP Policy Service run as two containers in one pod, sharing the same Keycloak credentials. Two separate ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) select the same pod. This eliminates the separate PDP Configuration and PDP Policy pods without changing the library's service URL interface.
 - **PDP Interface Pod phase transition is a container image swap.** Phase 2 replaces the PDP Policy container image (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`) within the same pod. The `aiac-pdp-policy-service` ClusterIP name and port `:7072` remain unchanged. No new pod or manifest is required — `pdp-policy-opa-deployment.yaml` does not exist.
 - **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
-- **Phase 1 RBAC via composite roles.** AIAC manages realm role → service permission mappings at the role level, not per-user. Users inherit permissions automatically when assigned a realm role.
+- **Phase 1 RBAC via composite roles.** AIAC manages role → service permission mappings at the role level, not per-user. Users inherit permissions automatically when assigned a role.
 - **RAG Pod is a StatefulSet with persistent ChromaDB storage.** ChromaDB data is stored on a 1 Gi `ReadWriteOnce` PersistentVolumeClaim mounted at `/chroma/chroma` (ChromaDB default). On pod recreation, the StatefulSet rebinds the same PVC and ChromaDB resumes from persisted state without re-ingestion. The pod runs a single replica.
 - **RAG Pod runs ChromaDB and RAG Ingest Service together.** Exposed as `aiac-rag-service` on ports 8000 (ChromaDB default) and 7073 (RAG Ingest Service).
 - **AIAC Agent is stateless.** Changes are applied immediately on trigger — no pending session or human confirmation step.
 - **Event Broker decouples all automated triggers from the Agent.** The Keycloak SPI listener and RAG Ingest Service publish to NATS subjects; the Agent subscribes as a durable competing consumer. This removes all direct dependencies between trigger sources and the Agent.
 - **`rebuild` bypasses the Event Broker.** It is an operator-only command issued directly via HTTP (`kubectl port-forward`). It is never published to NATS and has no NATS listener.
-- **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal `/apply/*` handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
-- **Agent `/apply/*` HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
+- **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
+- **Agent HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
 - **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
 - **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, PDP Configuration Service, PDP Policy Service, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently.
 - **`aiac.pdp.library.models` is dependency-free** (only `pydantic`). Agents can import it without pulling in `requests` or `python-dotenv`.
 - **`aiac.__init__`, `aiac.pdp.__init__`, `aiac.pdp.library.__init__`, `aiac.pdp.service.__init__`, `aiac.pdp.service.configuration.__init__`, `aiac.pdp.service.configuration.keycloak.__init__`, `aiac.pdp.service.policy.__init__`, and `aiac.pdp.service.policy.keycloak.__init__` are empty.** Callers use explicit submodule paths: `from aiac.pdp.library.models import Subject`, `from aiac.pdp.library.configuration import get_subjects`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
-- **`user/{id}` trigger removed.** Composite role mappings are realm-role-scoped; individual user creation/update does not require agent intervention — composites apply automatically.
+- **`user/{id}` trigger removed.** Composite role mappings are role-scoped; individual user creation/update does not require agent intervention — composites apply automatically.
 
 ---
 
@@ -372,8 +372,7 @@ is the integration surface for other Kagenti components needing typed access to 
 
 **AIAC ↔ Keycloak (Phase 1)**
 The PDP Configuration Service proxies Keycloak Admin REST read endpoints under generic PDP entity
-names (subjects, roles, services, scopes, permissions, assignments). The PDP Policy Service writes
-composite role mappings (realm role → service permissions) to Keycloak. The Keycloak SPI listener
+names (subjects, roles, services, scopes, permissions, assignments). The PDP Policy Service writes role composite mappings (role → service permissions) to Keycloak. The Keycloak SPI listener
 publishes entity lifecycle events to NATS; it is a separate component outside the AIAC codebase.
 
 **AIAC ↔ OPA (Phase 2, planned)**
@@ -403,7 +402,7 @@ FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the *
 
 FastAPI service (`0.0.0.0:7072`) co-located with the PDP Configuration Service in the **PDP Interface Pod**. Applies policy changes to the active PDP backend. Two container images share the same Kubernetes ClusterIP name (`aiac-pdp-policy-service:7072`):
 
-- **Phase 1 — Keycloak** (`aiac-pdp-policy-keycloak`): manages composite role mappings (realm role → service permissions) via Keycloak Admin API. 5 write endpoints.
+- **Phase 1 — Keycloak** (`aiac-pdp-policy-keycloak`): manages role composite mappings (role → service permissions) via Keycloak Admin API. 5 write endpoints.
 - **Phase 2 — OPA** (`aiac-pdp-policy-opa`): writes LLM-generated Rego rules to OPA. Interface TBD (separate PRD). Phase transition = container image swap within the PDP Interface Pod; no manifest change required.
 
 **Phase 1 full spec:** [components/pdp-policy-keycloak-service.md](components/pdp-policy-keycloak-service.md)
@@ -437,10 +436,10 @@ FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via th
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
 | Service Onboarding | `aiac.apply.service.{id}` | Service Provision → Service Policy (sequential) |
-| Policy Update | `aiac.apply.build`, `/apply/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
-| Realm Roles | `aiac.apply.realm-role.{id}` | Realm Role sub-agent |
+| Policy Update | `aiac.apply.policy.build`, `/apply/policy/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
+| Role Update | `aiac.apply.role.{id}` | Role sub-agent |
 
-All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Realm Roles** sub-agent applies scoped composite mappings for a single affected realm role. The **Service Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps realm roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. The **Policy Update** sub-agents compute a minimal delta between the current ChromaDB policy and live composite role state. The **Rebuild** variant additionally clears all composite mappings before computing the diff. The **Role Update** orchestrator applies scoped composite mappings for a single affected role. The **Service Onboarding** orchestrator first provisions service permissions/scopes (via the Kubernetes in-cluster API to read `AgentRuntime`/`AgentCard` CRs), then maps roles to the new service's permissions via composite role additions. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 
@@ -456,7 +455,7 @@ ChromaDB vector store (`aiac-rag-service:8000`) hosting two collections: `aiac-p
 
 ### 7.7 RAG Ingest Service
 
-FastAPI service (`0.0.0.0:7073`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
+FastAPI service (`0.0.0.0:7073`) co-located with ChromaDB. Thirteen collection-parameterized endpoints across three semantics: complete collection replacement (`POST /ingest/{collection}/{text|file|url}`), document-level upsert (`POST /ingest/{collection}/update/{text|file|url}`), and explicit removal (`DELETE /ingest/{collection}/{doc_id}`). The `{collection}` slug is validated against `AIAC_RAG_COLLECTIONS` (default: `policy,domain-knowledge`). After every successful ingest the service publishes to `aiac.apply.policy.build` on the Event Broker (`NATS_URL`). Developer access via `kubectl port-forward`.
 
 **Full spec:** [components/rag-ingest-service.md](components/rag-ingest-service.md)
 
@@ -470,7 +469,7 @@ A custom Keycloak Event Listener SPI (Java) that listens to Keycloak's internal 
 |---|---|
 | `REGISTER`, `UPDATE_PROFILE` (user events) | — (dropped; composite roles handle user permission inheritance automatically) |
 | `CLIENT_CREATED` | `aiac.apply.service.{id}` |
-| Realm role created/updated | `aiac.apply.realm-role.{id}` |
+| Role created/updated | `aiac.apply.role.{id}` |
 
 **Full spec:** TBD (separate PRD).
 

@@ -73,7 +73,7 @@ Represents a user (Keycloak: `user`).
 
 #### `Role`
 
-Represents a realm-level role (Keycloak: `realm role`).
+Represents a role (Keycloak: realm role).
 
 | Field | Type | Keycloak field | Default |
 |-------|------|----------------|---------|
@@ -95,7 +95,7 @@ Represents a service (Keycloak: `client`).
 | `description` | `str \| None` | `description` | `None` |
 | `enabled` | `bool` | `enabled` | |
 | `type` | `Literal["Agent", "Tool"] \| None` | `attributes.type` | `None` |
-| `roles` | `list[Role]` | _(realm roles for this client)_ | `[]` |
+| `roles` | `list[Role]` | _(roles for this client)_ | `[]` |
 | `scopes` | `list[Scope]` | _(default client scopes)_ | `[]` |
 
 #### `Scope`
