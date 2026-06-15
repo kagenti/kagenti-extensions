@@ -28,11 +28,7 @@ from langchain_core.language_models import BaseChatModel
 from config import create_llm
 from service_policy_agent.state import ServicePolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.read_api_from_config import (
-    get_roles,
-    get_services,
-    get_service_permissions,
-)
+from aiac.pdp.library.read_api_from_config import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 
@@ -96,7 +92,11 @@ def _filter_and_extract_scopes(
 
         for realm_role_name in result.get("real_roles_with_access", []):
             realm_role_to_privileges.setdefault(realm_role_name, []).append(
-                {"service": service_id, "privilege": privilege["name"]}
+                {
+                    "service": service_id,
+                    "privilege": privilege["name"],
+                    "service_type": privilege.get("service_type")
+                }
             )
 
     parsed_scopes = [
@@ -335,21 +335,28 @@ class ServicePolicyBuilder:
             max_retries=max_retries,
         )
 
-        roles_models = get_roles(realm=realm)
+        config_api = Configuration.for_realm(realm)
+        
+        roles_models = config_api.get_roles()
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
             for r in roles_models
         ]
 
-        services = get_services(realm=realm)
+        services = config_api.get_services()
         self.privileges = []
         for service in services:
-            if service.clientId != service_id:
+            if service.id != service_id:
                 continue
-            permissions = get_service_permissions(service.id, realm=realm)
+            # Note: Service.roles contains the privileges/permissions for this service
+            # These are the roles/scopes that belong to this specific service
             self.privileges = [
-                {"name": permission.name, "description": permission.description or ""}
-                for permission in permissions
+                {
+                    "name": role.name,
+                    "description": role.description or "",
+                    "service_type": service.type
+                }
+                for role in service.roles
             ]
             break
 

@@ -39,13 +39,13 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def fixtures_dir():
     """Return path to test fixtures directory."""
-    return Path(__file__).parent / "fixtures"
+    return Path(__file__).parent.parent / "fixtures"
 
 
 @pytest.fixture
 def config_file():
     """Return path to the main config.yaml file."""
-    return Path(__file__).parent / "fixtures" / "config.yaml"
+    return Path(__file__).parent.parent / "fixtures" / "config.yaml"
 
 
 @pytest.fixture
@@ -170,8 +170,11 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
                 )
                 continue
 
+            # Get YAML output from builder (generated on-demand)
+            yaml_output = builder.get_yaml_output()
+            
             # Parse generated YAML
-            generated_policy = normalize_policy_yaml(result["yaml_output"])
+            generated_policy = normalize_policy_yaml(yaml_output)
 
             # Compare policies
             match, differences = compare_policies(generated_policy, expected_policy)
@@ -203,35 +206,22 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
 
 def test_policy_builder_can_generate_yaml_from_structure(config_file):
     """PolicyBuilder can generate YAML from a policy structure (bypasses LLM)."""
-    from full_policy_agent.graph import _generate_yaml
-    from full_policy_agent.state import PolicyState
+    from utils.output_generators import generate_yaml_output
 
-    # Create a valid policy state with all required fields
-    state: PolicyState = {
-        "description": "Test policy description",
-        "explanation": "Test explanation",
-        "policy_structure": {
-            "policy": {
-                "developer": [
-                    {"service": "kagenti", "role": "demo-ui"},
-                    {"service": "github-tool", "role": "github-full-access"}
-                ]
-            }
-        },
-        "parsed_scopes": [],
-        "yaml_output": "",
-        "messages": [],
-        "errors": [],
-        "retry_count": 0,
-        "validation_passed": True
+    # Create a valid policy structure
+    policy_structure = {
+        "policy": {
+            "developer": [
+                {"service": "kagenti", "privilege": "demo-ui"},
+                {"service": "github-tool", "privilege": "github-full-access"}
+            ]
+        }
     }
+    
+    description = "Test policy description"
 
     # Generate YAML
-    result_state = _generate_yaml(state)
-
-    # Verify YAML was generated
-    assert "yaml_output" in result_state
-    yaml_output = result_state["yaml_output"]
+    yaml_output = generate_yaml_output(policy_structure, description)
 
     # Verify YAML contains expected content
     assert "policy:" in yaml_output

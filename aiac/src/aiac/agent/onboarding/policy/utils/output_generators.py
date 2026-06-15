@@ -148,7 +148,7 @@ def generate_default_rego() -> str:
     Returns:
         Rego file content as string
     """
-    return """package authbridge.inbound.request
+    return """package authbridge.outbound.request
 
 default allow := false
 """
@@ -173,7 +173,7 @@ def generate_policy_rego(
     Returns:
         Rego file content as string
     """
-    rego_content = """package authbridge.inbound.request
+    rego_content = """package authbridge.outbound.request
 
 import data.authz.realm_roles.realm_roles
 
@@ -204,7 +204,15 @@ import data.authz.realm_roles.realm_roles
         for priv in privileges:
             service = priv.get("service", "")
             privilege = priv.get("privilege", "")
+            service_type = priv.get("service_type")
             
+            # Determine protocol based on service type
+            # "msp" for Tool type, "a2a" for Agent type
+            if service_type == "Tool":
+                protocol = "mcp"
+            else:
+                protocol = "a2a"
+
             # Skip if service_filter is set and this privilege is for a different service
             if service_filter and service != service_filter:
                 continue
@@ -217,7 +225,7 @@ import data.authz.realm_roles.realm_roles
             
             rego_content += f'allow if {{\n'
             rego_content += f'  "{role_name_escaped}" in object.get(realm_roles, input.identity.subject, [])\n'
-            rego_content += f'  input.identity.client_id == "{service_escaped}"\n'
+            rego_content += f'  input.{protocol}.client_id == "{service_escaped}"\n'
             rego_content += f'  "{privilege_escaped}" in input.identity.scopes\n'
             rego_content += "}\n\n"
    

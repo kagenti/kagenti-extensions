@@ -41,13 +41,13 @@ pytestmark = pytest.mark.integration
 @pytest.fixture
 def fixtures_dir():
     """Return path to test fixtures directory."""
-    return Path(__file__).parent / "fixtures"
+    return Path(__file__).parent.parent / "fixtures"
 
 
 @pytest.fixture
 def config_file():
     """Return path to the main config.yaml file."""
-    return Path(__file__).parent / "fixtures" / "config.yaml"
+    return Path(__file__).parent.parent / "fixtures" / "config.yaml"
 
 
 @pytest.fixture

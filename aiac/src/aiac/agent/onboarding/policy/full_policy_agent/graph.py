@@ -43,14 +43,7 @@ from langchain_core.language_models import BaseChatModel
 from config import create_llm
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.read_api_from_config import (
-    get_roles,
-    get_services,
-    get_service_permissions,
-    get_subjects,
-    get_subject_assignments,
-    get_scopes,
-)
+from aiac.pdp.library.read_api_from_config import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 from utils.output_generators import (
@@ -132,7 +125,11 @@ def _parse_and_extract_scopes(
 
             for realm_role_name in result.get('real_roles_with_access', []):
                 realm_role_to_privileges.setdefault(realm_role_name, []).append(
-                    {'service': service_name, 'privilege': privilege['name']}
+                    {
+                        'service': service_name,
+                        'privilege': privilege['name'],
+                        'service_type': privilege.get('service_type')
+                    }
                 )
 
     parsed_scopes = [
@@ -409,21 +406,27 @@ class PolicyBuilder:
             max_retries=max_retries
         )
 
-        roles_models = get_roles(realm=realm)
+        config_api = Configuration.for_realm(realm)
+        
+        roles_models = config_api.get_roles()
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
             for r in roles_models
         ]
-        services = get_services(realm=realm)
+        services = config_api.get_services()
         self.privileges_map = {}
         self.service_names = []
         for service in services:
-            permissions = get_service_permissions(service.id, realm=realm)
-            self.privileges_map[service.clientId] = [
-                {"name": permission.name, "description": permission.description or ""}
-                for permission in permissions
+            # Service.roles contains the privileges/permissions for this service
+            self.privileges_map[service.id] = [
+                {
+                    "name": role.name,
+                    "description": role.description or "",
+                    "service_type": service.type
+                }
+                for role in service.roles
             ]
-            self.service_names.append(service.clientId)
+            self.service_names.append(service.id)
 
         # Build and compile the LangGraph state machine
         self.graph = create_policy_builder_graph(
@@ -572,21 +575,20 @@ class PolicyBuilder:
         dir_path = Path(file_dir)
         dir_path.mkdir(parents=True, exist_ok=True)
         
-        # Build user_to_roles mapping using get_subject_assignments
         user_to_roles = {}
         
         # Get all subjects and their role assignments
-        subjects = get_subjects(realm=self.realm)
+        config_api = Configuration.for_realm(self.realm)
+        subjects = config_api.get_subjects()
         for subject in subjects:
-            assignments = get_subject_assignments(subject.id, realm=self.realm)
             user_to_roles[subject.username] = [
-                role.name for role in assignments.realmMappings
+                role.name for role in subject.roles
             ]
         
         # Fetch scopes (if available in config)
         scopes = []
         try:
-            scopes = get_scopes(realm=self.realm)
+            scopes = config_api.get_scopes()
         except Exception:
             # If no scopes in config, that's okay - we'll just have empty scope lists
             pass
@@ -644,4 +646,5 @@ if __name__ == "__main__":
     sys.exit(1)
 
 # Made with Bob
+
 
