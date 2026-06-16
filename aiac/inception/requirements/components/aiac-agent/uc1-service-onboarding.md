@@ -109,17 +109,20 @@ flowchart TD
 
   > **Kubernetes API access:** Requires `list` on `agentcards.agent.kagenti.dev` in the target namespace.
 
-- **`analyze_tool`**: non-LLM node; discovers MCP tools via the tool's service endpoint and maps to `ServiceProvision`.
-  1. LIST `v1/Services` in `namespace`; find the one whose `spec.selector` includes `app: {workloadName}`.
-  2. Construct the MCP endpoint: `http://{service.name}.{namespace}.svc.cluster.local:{service.spec.ports[0].port}/mcp`
-  3. Call `tools/list` (HTTP POST, MCP protocol) on that endpoint.
+- **`analyze_tool`**: non-LLM node; discovers MCP tools and maps to `ServiceProvision`.
+
+  > **TBD** — The lookup strategy for tool services is unresolved. Tool `client_id` format is undefined (not SPIFFE); `namespace` and `workload_name` cannot be parsed from it. The kagenti-operator does not manage tools, so no operator-stamped K8s labels or attributes are available. The K8s Service discovery approach below (steps 1–5) assumes parseable coordinates and **cannot be implemented as-is**. See issue [6.2](../../../issues/6.2-analyze-tool-lookup-strategy.md) for the design decision.
+
+  1. ~~LIST `v1/Services` in `namespace`; find the one whose `spec.selector` includes `app: {workloadName}`.~~
+  2. ~~Construct the MCP endpoint: `http://{service.name}.{namespace}.svc.cluster.local:{service.spec.ports[0].port}/mcp`~~
+  3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
   4. Produce `ServiceProvision`:
      - `roles`: `[]` (tools are reactive — they do not initiate further calls)
      - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{tool.name}", description=tool.description) for tool in manifest.tools]`
      - `reasoning`: `f"derived from MCP manifest: {len(tools)} tools"`
-  5. Returns `502` on Kubernetes API failure, service not found, or MCP call failure.
+  5. Returns `502` on lookup failure or MCP call failure.
 
-  > **Kubernetes API access:** Requires `list` on `services` (core API group) in the target namespace.
+  > **Kubernetes API access:** TBD — depends on lookup strategy decision in issue 6.2.
 
   > **MCP path convention:** All MCP tool services in the kagenti platform must serve at `/mcp`.
 
