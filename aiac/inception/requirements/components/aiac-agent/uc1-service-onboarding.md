@@ -67,10 +67,10 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
 ```mermaid
 flowchart TD
-    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. LIST AgentRuntime CRs, filter by targetRef.name\n3. Fallback: check pod kagenti.io/type label\n4. Populate ServiceInfo"]
+    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. LIST pods, find by SA name\n3. Check kagenti.io/type label\n4. Route on service_type"]
 
-    CLASSIFY -->|"service_type = agent\n(full or partial)"| ANALYZE_AGENT["analyze_agent\nLLM -> ServiceProvision\n(handles empty description/skills)"]
-    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ServiceProvision"]
+    CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLIST AgentCard CRs\n→ ServiceProvision\n(roles + scopes per skill)"]
+    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nK8s Service lookup\n+ tools/list\n→ ServiceProvision\n(scopes per tool)"]
 
     ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
     ANALYZE_TOOL --> PROVISION
@@ -81,30 +81,48 @@ flowchart TD
 
 #### Nodes
 
-- **`classify_service`**: determines service type and populates `ServiceInfo`.
+- **`classify_service`**: determines service type only; does not populate `ServiceProvision`.
   1. **Parse `trigger.service_id`**:
-     - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workloadName = serviceAccount`. The SPIFFE service account name matches the workload name and the pod's `ServiceAccount` name 1:1 (confirmed against `spiffe://localtest.me/ns/team1/sa/git-issue-agent`).
+     - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workloadName = serviceAccount`.
      - Short format `{namespace}/{workloadName}` → split on first `/`.
-     - Unrecognised format → treat as `ServiceType.tool`.
-  2. **Look up `AgentRuntime` CR** (`agent.kagenti.dev/v1alpha1`) via the in-cluster Kubernetes API.
-     - **Do not** GET by CR name — `AgentRuntime` CR names are user-chosen (e.g. `weather-agent-runtime`) and do not match the workload name. Instead, **LIST** all `AgentRuntime` CRs in the namespace and find the one whose `spec.targetRef.name == workloadName`.
-     - **Found** → `service_type = agent`: find the corresponding `AgentCard` CR in the same namespace (also LIST, filter by `spec.targetRef.name == workloadName`); populate `ServiceInfo(service_type=agent, description=card.description, skills=[Skill(id, name, description) for each AgentSkill])`.
-     - **Not found** → proceed to step 3 (legacy agent check).
-  3. **Legacy agent check** (SPIFFE-format `service_id` only): if no `AgentRuntime` CR was found, look up the pod in the namespace whose `spec.serviceAccountName == workloadName`.
-     - **Pod found with `kagenti.io/type: agent` label** → `service_type = agent` (legacy deployment pattern — no `AgentCard` available): populate `ServiceInfo(service_type=agent, description="", skills=[])`. This signals to downstream nodes that classification is partial.
-     - **Pod not found or label absent** → `service_type = tool`: call `get_services(realm)` from `aiac.pdp.library.configuration`; locate the `Service` by `service_id`; populate `ServiceInfo(service_type=tool, description=service.description or service.name, skills=[])`.
-  4. For short or unrecognised `service_id` formats, skip step 3 and go directly to the tool lookup in step 3's else branch.
-  5. Returns `502` on Kubernetes API failure or if the `Service` record is not found for a tool.
+     - Unrecognised format → `service_type = tool`.
+  2. **Find the pod**: LIST pods in `namespace`, find one whose `spec.serviceAccountName == workloadName`.
+  3. **Check `kagenti.io/type` label** on the pod (applied exclusively by the kagenti-operator admission webhook — authoritative):
+     - `kagenti.io/type: agent` → `service_type = agent`.
+     - Label absent or any other value → `service_type = tool`.
+  4. Routes to `analyze_agent` or `analyze_tool` on `service_type`. Returns `502` on Kubernetes API failure or if the pod is not found.
 
-  > **Kubernetes API access:** The agent pod `ServiceAccount` requires `get`/`list` on `agentruntimes.agent.kagenti.dev`, `agentcards.agent.kagenti.dev`, and `pods` (core API group) in the target namespace.
+  > **Kubernetes API access:** Requires `get`/`list` on `pods` (core API group) in the target namespace.
 
-  > **AgentRuntime CR naming:** The CR name is user-chosen and does not match the workload. The workload is referenced via `spec.targetRef.name`. Always use a LIST + filter, never a GET by name.
+  > **`kagenti.io/type` label authority:** Applied exclusively by the kagenti-operator admission webhook, not by the workload itself. Safe to treat as authoritative for service type classification.
 
-  > **Two deployment patterns:** The kagenti-operator supports two patterns: (1) **AgentRuntime-managed** — an `AgentRuntime` CR is created first; the operator injects sidecars and creates an `AgentCard` CR automatically. (2) **Legacy label-based** — the deployment carries `kagenti.io/inject: enabled` and `kagenti.io/type: agent` labels directly; the operator injects sidecars but no `AgentRuntime` or `AgentCard` CR is created. Both patterns produce a running pod with `kagenti.io/type: agent` label (applied by the webhook); only the first produces structured `AgentCard` data. `classify_service` must handle both.
+- **`analyze_agent`**: non-LLM node; reads AgentCard CR and maps directly to `ServiceProvision`.
+  1. LIST `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) in `namespace`; find the one whose `spec.targetRef.name == workloadName`.
+  2. **AgentCard found** → produce `ServiceProvision`:
+     - `roles`: `[RoleDefinition(name=f"{workloadName}.agent", description="Agent role")]`
+     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{skill.name}", description=skill.description) for skill in card.skills]`
+     - `reasoning`: `f"derived from AgentCard: {len(skills)} skills"`
+  3. **AgentCard not found** (legacy deployment — operator injected sidecars via label only, no AgentCard CR created) → produce minimal `ServiceProvision`:
+     - `roles`: `[RoleDefinition(name=f"{workloadName}.agent", description="Agent role")]`
+     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.access", description="Default access scope")]`
+     - `reasoning`: `"partial: no AgentCard found, default scope assigned"`
 
-  > **`kagenti.io/type` label authority:** This label is applied exclusively by the kagenti-operator admission webhook, not by the workload itself. It is safe to treat as authoritative for service type classification when no `AgentRuntime` CR is present.
+  > **Kubernetes API access:** Requires `list` on `agentcards.agent.kagenti.dev` in the target namespace.
 
-- **`analyze_agent`** / **`analyze_tool`**: LLM node producing a `ServiceProvision` from `ServiceInfo`. Routing is a conditional edge on `ServiceInfo.service_type`. `analyze_agent` must handle the partial-data case: when `ServiceInfo.description` is empty and `skills` is empty (legacy deployment, no `AgentCard`), the LLM should derive a minimal provision from the workload name alone rather than failing. The `ANALYZE_AGENT_SYSTEM` prompt must instruct the LLM to treat an empty description/skills list as "insufficient data — produce conservative minimal permissions only, and set `reasoning` to indicate the classification was partial".
+- **`analyze_tool`**: non-LLM node; discovers MCP tools via the tool's service endpoint and maps to `ServiceProvision`.
+  1. LIST `v1/Services` in `namespace`; find the one whose `spec.selector` includes `app: {workloadName}`.
+  2. Construct the MCP endpoint: `http://{service.name}.{namespace}.svc.cluster.local:{service.spec.ports[0].port}/mcp`
+  3. Call `tools/list` (HTTP POST, MCP protocol) on that endpoint.
+  4. Produce `ServiceProvision`:
+     - `roles`: `[]` (tools are reactive — they do not initiate further calls)
+     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{tool.name}", description=tool.description) for tool in manifest.tools]`
+     - `reasoning`: `f"derived from MCP manifest: {len(tools)} tools"`
+  5. Returns `502` on Kubernetes API failure, service not found, or MCP call failure.
+
+  > **Kubernetes API access:** Requires `list` on `services` (core API group) in the target namespace.
+
+  > **MCP path convention:** All MCP tool services in the kagenti platform must serve at `/mcp`.
+
 - **`provision_service`**: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`.
 - **`format_response`**: assembles the provision result for the orchestrator.
 
@@ -114,7 +132,6 @@ Extends `BaseAgentState` with:
 
 | Field | Type | Description |
 |---|---|---|
-| `service_info` | `ServiceInfo \| None` | Populated by `classify_service` |
 | `service_provision` | `ServiceProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
 
 #### Types (`onboarding/provision/state.py`)
@@ -123,16 +140,6 @@ Extends `BaseAgentState` with:
 class ServiceType(str, Enum):
     agent = "agent"
     tool = "tool"
-
-class Skill(BaseModel):
-    id: str
-    name: str
-    description: str
-
-class ServiceInfo(BaseModel):
-    service_type: ServiceType
-    description: str
-    skills: list[Skill] = []
 
 class RoleDefinition(BaseModel):
     name: str
@@ -145,16 +152,11 @@ class ScopeDefinition(BaseModel):
 class ServiceProvision(BaseModel):
     roles: list[RoleDefinition]
     scopes: list[ScopeDefinition]
-    reasoning: str
+    reasoning: str  # machine-generated provenance string
 
 class OnboardingProvisionState(BaseAgentState):
-    service_info: ServiceInfo | None = None
     service_provision: ServiceProvision | None = None
 ```
-
-#### Prompts (`onboarding/provision/prompts.py`)
-
-`ANALYZE_AGENT_SYSTEM`, `ANALYZE_TOOL_SYSTEM`
 
 ---
 
@@ -217,8 +219,7 @@ aiac/src/aiac/agent/onboarding/
 │   ├── __init__.py
 │   ├── graph.py                     ← Service Provision StateGraph
 │   ├── nodes.py                     ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
-│   ├── prompts.py                   ← ANALYZE_AGENT_SYSTEM, ANALYZE_TOOL_SYSTEM
-│   └── state.py                     ← ServiceType, Skill, ServiceInfo, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
+│   └── state.py                     ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
 └── policy/
     ├── __init__.py
     ├── graph.py                     ← Service Policy StateGraph
@@ -226,10 +227,3 @@ aiac/src/aiac/agent/onboarding/
     └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 ```
 
----
-
-## Open Questions
-
-1. **`analyze_agent` with partial data — downstream quality**: When `ServiceInfo.description` and `skills` are both empty (legacy deployment), the LLM in `analyze_agent` produces conservative minimal permissions. Should the orchestrator surface a warning to the caller that the onboarding result is based on incomplete service metadata? Or is silent degraded output acceptable?
-
-2. **AgentCard lookup for legacy pattern**: Once a legacy workload is migrated to the AgentRuntime-managed pattern (an `AgentRuntime` CR is created retroactively), the next trigger will find the CR and use full AgentCard data. No spec change needed, but the transition has no explicit re-onboarding trigger — is that acceptable, or should `classify_service` re-check and re-provision if it previously produced a partial result?

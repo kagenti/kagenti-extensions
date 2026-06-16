@@ -225,7 +225,7 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-Service Onboarding types (`ServiceType`, `ServiceInfo`, `ServiceProvision`, `OnboardingProvisionState`, etc.) are defined in `onboarding/provision/state.py` — see [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py` — see [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
@@ -237,8 +237,6 @@ Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants i
 
 - **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped PDP snapshot summary.
 - **Auditor prompt**: system message — auditor role for the specific agent's scope; user message — proposed diff + policy chunks + domain knowledge chunks.
-
-Service Provision sub-agent additionally defines `ANALYZE_AGENT_SYSTEM` and `ANALYZE_TOOL_SYSTEM` in `onboarding/provision/prompts.py`.
 
 ---
 
@@ -359,8 +357,7 @@ aiac/src/aiac/agent/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Service Provision StateGraph
 │   │   ├── nodes.py                     ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
-│   │   ├── prompts.py                   ← ANALYZE_AGENT_SYSTEM, ANALYZE_TOOL_SYSTEM
-│   │   └── state.py                     ← ServiceType, Skill, ServiceInfo, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
+│   │   └── state.py                     ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
 │   └── policy/
 │       ├── __init__.py
 │       ├── graph.py                     ← Service Policy StateGraph
