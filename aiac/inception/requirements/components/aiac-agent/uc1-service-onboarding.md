@@ -67,7 +67,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
 ```mermaid
 flowchart TD
-    START(("START")) --> CLASSIFY["classify_service\n\n1. client_id = trigger.entity_id\n2. SPIFFE? → parse ns + workload_name\n3. LIST pods, validate kagenti.io/type\n4. non-SPIFFE → service_type=tool\n5. Route on service_type"]
+    START(("START")) --> CLASSIFY["classify_service\n\n1. service_id = trigger.entity_id\n2. SPIFFE? → parse ns + workload_name\n3. LIST pods, validate kagenti.io/type\n4. non-SPIFFE → service_type=tool\n5. Route on service_type"]
 
     CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLIST AgentCard CRs\n→ ServiceProvision\n(roles + scopes per skill)"]
     CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nconfig API: get_service\n+ tools/list (TBD)\n→ ServiceProvision\n(scopes per tool)"]
@@ -82,7 +82,7 @@ flowchart TD
 #### Nodes
 
 - **`classify_service`**: determines service type; stores parsed coordinates in state; does not populate `ServiceProvision`.
-  1. **Store `client_id`**: `state.client_id = trigger.entity_id` (the Keycloak `client_id` as received — the NATS payload carries `{ "id": "<entity-id>" }` which is the Keycloak `client_id`).
+  1. **Store `service_id`**: `state.service_id = trigger.entity_id` (the Keycloak `client_id` as received — the NATS payload carries `{ "id": "<entity-id>" }` which is the Keycloak `client_id`).
   2. **Check format**:
      - **SPIFFE format** `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workload_name = serviceAccount`; store both in state; continue to step 3.
      - **Any other format** → `state.service_type = tool`; `state.namespace = None`; `state.workload_name = None`; route to `analyze_tool`. No K8s access.
@@ -110,7 +110,7 @@ flowchart TD
 
 - **`analyze_tool`**: non-LLM node; discovers MCP tools and maps to `ServiceProvision`.
 
-  1. **Resolve `workload_name`**: call `get_service(client_id)` from `aiac.pdp.library.configuration` → `state.workload_name = client.name`. No K8s access.
+  1. **Resolve `workload_name`**: call `get_service(service_id)` from `aiac.pdp.library.configuration` → `state.workload_name = client.name`. No K8s access.
   2. **Locate MCP endpoint**: **TBD** — how `analyze_tool` reaches the MCP endpoint is unresolved. See issue [6.2](../../../issues/6.2-analyze-tool-lookup-strategy.md). Steps 3–4 depend on this being resolved.
   3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
   4. Produce `ServiceProvision`:
@@ -123,7 +123,7 @@ flowchart TD
 
   > **MCP path convention:** All MCP tool services in the kagenti platform must serve at `/mcp`.
 
-- **`provision_service`**: non-LLM node; calls `create_service_role(client_id, role)` and `create_service_scope(client_id, scope)` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`. Reads `client_id` from state.
+- **`provision_service`**: non-LLM node; calls `create_service_role(service_id, role)` and `create_service_scope(service_id, scope)` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`. Reads `service_id` from state.
 - **`format_response`**: assembles the provision result for the orchestrator.
 
 #### State: `OnboardingProvisionState`
@@ -132,7 +132,7 @@ Extends `BaseAgentState` with:
 
 | Field | Type | Description |
 |---|---|---|
-| `client_id` | `str \| None` | Keycloak `client_id` = `trigger.entity_id`; set by `classify_service` |
+| `service_id` | `str \| None` | Keycloak `client_id` = `trigger.entity_id`; set by `classify_service` |
 | `namespace` | `str \| None` | Parsed from SPIFFE URI; set by `classify_service` for agents; `None` for tools |
 | `workload_name` | `str \| None` | Parsed from SPIFFE URI (agents) or `client.name` from config API (tools); set by `classify_service` or `analyze_tool` |
 | `service_type` | `ServiceType \| None` | `agent` or `tool`; set by `classify_service`; used by conditional edge routing |
@@ -159,7 +159,7 @@ class ServiceProvision(BaseModel):
     reasoning: str  # machine-generated provenance string
 
 class OnboardingProvisionState(BaseAgentState):
-    client_id: str | None = None          # Keycloak client_id = trigger.entity_id
+    service_id: str | None = None          # Keycloak client_id = trigger.entity_id
     namespace: str | None = None          # agents only; None for tools
     workload_name: str | None = None      # agents: from SPIFFE; tools: client.name via config API
     service_type: ServiceType | None = None  # routing field; set by classify_service
