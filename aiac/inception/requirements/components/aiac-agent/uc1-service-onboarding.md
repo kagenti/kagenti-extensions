@@ -67,12 +67,12 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
 ```mermaid
 flowchart TD
-    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. LIST pods, find by SA name\n3. Check kagenti.io/type label\n4. Route on service_type"]
+    START(("START")) --> CLASSIFY["classify_service\n\n1. client_id = trigger.entity_id\n2. SPIFFE? → parse ns + workload_name\n3. LIST pods, validate kagenti.io/type\n4. non-SPIFFE → service_type=tool\n5. Route on service_type"]
 
     CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLIST AgentCard CRs\n→ ServiceProvision\n(roles + scopes per skill)"]
-    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nK8s Service lookup\n+ tools/list\n→ ServiceProvision\n(scopes per tool)"]
+    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nconfig API: get_service\n+ tools/list (TBD)\n→ ServiceProvision\n(scopes per tool)"]
 
-    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
+    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_role\ncreate_service_scope\nper ServiceProvision entry"]
     ANALYZE_TOOL --> PROVISION
 
     PROVISION --> FORMAT["format_response"]
@@ -81,18 +81,17 @@ flowchart TD
 
 #### Nodes
 
-- **`classify_service`**: determines service type only; does not populate `ServiceProvision`.
-  1. **Parse `trigger.service_id`**:
-     - SPIFFE format `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workloadName = serviceAccount`.
-     - Short format `{namespace}/{workloadName}` → split on first `/`.
-     - Unrecognised format → `service_type = tool`.
-  2. **Find the pod**: LIST pods in `namespace`, find one whose `spec.serviceAccountName == workloadName`.
-  3. **Check `kagenti.io/type` label** on the pod (applied exclusively by the kagenti-operator admission webhook — authoritative):
-     - `kagenti.io/type: agent` → `service_type = agent`.
-     - Label absent or any other value → `service_type = tool`.
-  4. Routes to `analyze_agent` or `analyze_tool` on `service_type`. Returns `502` on Kubernetes API failure or if the pod is not found.
+- **`classify_service`**: determines service type; stores parsed coordinates in state; does not populate `ServiceProvision`.
+  1. **Store `client_id`**: `state.client_id = trigger.entity_id` (the Keycloak `client_id` as received — the NATS payload carries `{ "id": "<entity-id>" }` which is the Keycloak `client_id`).
+  2. **Check format**:
+     - **SPIFFE format** `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workload_name = serviceAccount`; store both in state; continue to step 3.
+     - **Any other format** → `state.service_type = tool`; `state.namespace = None`; `state.workload_name = None`; route to `analyze_tool`. No K8s access.
+  3. **Find the pod** (SPIFFE path only): LIST pods in `namespace`, find one whose `spec.serviceAccountName == workload_name`. Returns `502` on Kubernetes API failure or if pod not found.
+  4. **Validate `kagenti.io/type` label** (SPIFFE path only) on the pod (applied exclusively by the kagenti-operator admission webhook):
+     - `kagenti.io/type: agent` → `state.service_type = agent`; route to `analyze_agent`.
+     - Label absent or any other value → returns `502` (SPIFFE ID registered in Keycloak without operator label is an inconsistent deployment — surface as error rather than mis-classify).
 
-  > **Kubernetes API access:** Requires `get`/`list` on `pods` (core API group) in the target namespace.
+  > **Kubernetes API access:** Requires `list` on `pods` (core API group) in the target namespace. Agent path only — tool path performs no K8s access.
 
   > **`kagenti.io/type` label authority:** Applied exclusively by the kagenti-operator admission webhook, not by the workload itself. Safe to treat as authoritative for service type classification.
 
@@ -111,22 +110,20 @@ flowchart TD
 
 - **`analyze_tool`**: non-LLM node; discovers MCP tools and maps to `ServiceProvision`.
 
-  > **TBD** — The lookup strategy for tool services is unresolved. Tool `client_id` format is undefined (not SPIFFE); `namespace` and `workload_name` cannot be parsed from it. The kagenti-operator does not manage tools, so no operator-stamped K8s labels or attributes are available. The K8s Service discovery approach below (steps 1–5) assumes parseable coordinates and **cannot be implemented as-is**. See issue [6.2](../../../issues/6.2-analyze-tool-lookup-strategy.md) for the design decision.
-
-  1. ~~LIST `v1/Services` in `namespace`; find the one whose `spec.selector` includes `app: {workloadName}`.~~
-  2. ~~Construct the MCP endpoint: `http://{service.name}.{namespace}.svc.cluster.local:{service.spec.ports[0].port}/mcp`~~
+  1. **Resolve `workload_name`**: call `get_service(client_id)` from `aiac.pdp.library.configuration` → `state.workload_name = client.name`. No K8s access.
+  2. **Locate MCP endpoint**: **TBD** — how `analyze_tool` reaches the MCP endpoint is unresolved. See issue [6.2](../../../issues/6.2-analyze-tool-lookup-strategy.md). Steps 3–4 depend on this being resolved.
   3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
   4. Produce `ServiceProvision`:
      - `roles`: `[]` (tools are reactive — they do not initiate further calls)
-     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{tool.name}", description=tool.description) for tool in manifest.tools]`
+     - `scopes`: `[ScopeDefinition(name=f"{workload_name}.{tool.name}", description=tool.description) for tool in manifest.tools]`
      - `reasoning`: `f"derived from MCP manifest: {len(tools)} tools"`
-  5. Returns `502` on lookup failure or MCP call failure.
+  5. Returns `502` on config API failure, endpoint lookup failure, or MCP call failure.
 
-  > **Kubernetes API access:** TBD — depends on lookup strategy decision in issue 6.2.
+  > **Kubernetes API access:** None — tool path uses config API only (pending issue 6.2 resolution).
 
   > **MCP path convention:** All MCP tool services in the kagenti platform must serve at `/mcp`.
 
-- **`provision_service`**: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`.
+- **`provision_service`**: non-LLM node; calls `create_service_role(client_id, role)` and `create_service_scope(client_id, scope)` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`. Reads `client_id` from state.
 - **`format_response`**: assembles the provision result for the orchestrator.
 
 #### State: `OnboardingProvisionState`
@@ -135,6 +132,10 @@ Extends `BaseAgentState` with:
 
 | Field | Type | Description |
 |---|---|---|
+| `client_id` | `str \| None` | Keycloak `client_id` = `trigger.entity_id`; set by `classify_service` |
+| `namespace` | `str \| None` | Parsed from SPIFFE URI; set by `classify_service` for agents; `None` for tools |
+| `workload_name` | `str \| None` | Parsed from SPIFFE URI (agents) or `client.name` from config API (tools); set by `classify_service` or `analyze_tool` |
+| `service_type` | `ServiceType \| None` | `agent` or `tool`; set by `classify_service`; used by conditional edge routing |
 | `service_provision` | `ServiceProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
 
 #### Types (`onboarding/provision/state.py`)
@@ -158,6 +159,10 @@ class ServiceProvision(BaseModel):
     reasoning: str  # machine-generated provenance string
 
 class OnboardingProvisionState(BaseAgentState):
+    client_id: str | None = None          # Keycloak client_id = trigger.entity_id
+    namespace: str | None = None          # agents only; None for tools
+    workload_name: str | None = None      # agents: from SPIFFE; tools: client.name via config API
+    service_type: ServiceType | None = None  # routing field; set by classify_service
     service_provision: ServiceProvision | None = None
 ```
 
