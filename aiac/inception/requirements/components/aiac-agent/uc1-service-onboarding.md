@@ -77,11 +77,6 @@ flowchart TD
 
     PROVISION --> FORMAT["format_response"]
     FORMAT --> END(("END"))
-
-    style CLASSIFY fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
-    style ANALYZE_AGENT fill:#713f12,color:#fef3c7,stroke:#d97706
-    style ANALYZE_TOOL fill:#713f12,color:#fef3c7,stroke:#d97706
-    style PROVISION fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 #### Nodes
@@ -191,13 +186,6 @@ flowchart TD
     VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
-
-    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
-    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
-    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
-    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
-    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
-    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 #### State
