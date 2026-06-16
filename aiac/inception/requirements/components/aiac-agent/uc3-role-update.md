@@ -83,12 +83,12 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 #### State

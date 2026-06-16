@@ -51,16 +51,6 @@ Sequences two sub-agents and assembles the combined response:
 ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → assemble response
 ```
 
-**Success response:**
-```json
-{ "added": [...], "removed": [...], "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
-```
-
-**Abort response (validation failure):**
-```json
-{ "added": [], "removed": [], "summary": "...", "validation_errors": [...], "provisioned": null }
-```
-
 ---
 
 ## Sub-agents
@@ -71,6 +61,27 @@ ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → assemble resp
 
 ```
 START → classify_service → [analyze_agent | analyze_tool] → provision_service → format_response → END
+```
+
+#### Graph
+
+```mermaid
+flowchart TD
+    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. Lookup AgentRuntime CR K8s\n3. Populate ServiceInfo"]
+
+    CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ServiceProvision"]
+    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ServiceProvision"]
+
+    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
+    ANALYZE_TOOL --> PROVISION
+
+    PROVISION --> FORMAT["format_response"]
+    FORMAT --> END(("END"))
+
+    style CLASSIFY fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style ANALYZE_AGENT fill:#713f12,color:#fef3c7,stroke:#d97706
+    style ANALYZE_TOOL fill:#713f12,color:#fef3c7,stroke:#d97706
+    style PROVISION fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 #### Nodes
@@ -92,27 +103,6 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 - **`analyze_agent`** / **`analyze_tool`**: LLM node producing a `ServiceProvision` from `ServiceInfo`. Routing is a conditional edge on `ServiceInfo.service_type`.
 - **`provision_service`**: non-LLM node; calls `create_service_permission` and `create_service_scope` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`.
 - **`format_response`**: assembles the provision result for the orchestrator.
-
-#### Graph
-
-```mermaid
-flowchart TD
-    START(("START")) --> CLASSIFY["classify_service\n\n1. Parse service_id format\n2. Lookup AgentRuntime CR K8s\n3. Populate ServiceInfo"]
-
-    CLASSIFY -->|"service_type = agent"| ANALYZE_AGENT["analyze_agent\nLLM -> ServiceProvision"]
-    CLASSIFY -->|"service_type = tool"| ANALYZE_TOOL["analyze_tool\nLLM -> ServiceProvision"]
-
-    ANALYZE_AGENT --> PROVISION["provision_service\n\ncreate_service_permission\ncreate_service_scope\nper ServiceProvision entry"]
-    ANALYZE_TOOL --> PROVISION
-
-    PROVISION --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-
-    style CLASSIFY fill:#dbeafe
-    style ANALYZE_AGENT fill:#fef9c3
-    style ANALYZE_TOOL fill:#fef9c3
-    style PROVISION fill:#dcfce7
-```
 
 #### State: `OnboardingProvisionState`
 
@@ -202,12 +192,12 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 #### State

@@ -266,9 +266,9 @@ flowchart TD
     C4 -->|"fail"| ABORT
     C4 -->|"pass"| APPLY["proceed to apply_*"]
 
-    style ABORT fill:#fee2e2
-    style APPLY fill:#dcfce7
-    style C3 fill:#fef9c3
+    style ABORT fill:#7f1d1d,color:#fee2e2,stroke:#f87171
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
+    style C3 fill:#713f12,color:#fef3c7,stroke:#d97706
 ```
 
 1. **Existence check** — every `role_name`, `service_id`, `permission_id` in the diff exists in `pdp_snapshot`.

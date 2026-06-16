@@ -57,10 +57,10 @@ flowchart TD
     FORMAT --> END(("END"))
 
     %% State annotations
-    style CLASSIFY fill:#dbeafe
-    style ANALYZE_AGENT fill:#fef9c3
-    style ANALYZE_TOOL fill:#fef9c3
-    style PROVISION fill:#dcfce7
+    style CLASSIFY fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style ANALYZE_AGENT fill:#713f12,color:#fef3c7,stroke:#d97706
+    style ANALYZE_TOOL fill:#713f12,color:#fef3c7,stroke:#d97706
+    style PROVISION fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 **State:** `OnboardingProvisionState` — adds `client_info: ClientInfo | None` and `client_provision: ClientProvision | None` to `BaseAgentState`.
@@ -83,12 +83,12 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 **State:** `BaseAgentState` (no extensions).
@@ -115,12 +115,12 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 ### 3b. Rebuild
@@ -141,13 +141,13 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style CLEAR fill:#fee2e2
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style CLEAR fill:#7f1d1d,color:#fee2e2,stroke:#f87171
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 **Rebuild differs from Build only by the `clear_assignments` node before the fan-out.**
@@ -174,12 +174,12 @@ flowchart TD
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 
-    style FP fill:#dbeafe
-    style FDK fill:#dbeafe
-    style FKC fill:#dbeafe
-    style PROPOSE fill:#fef9c3
-    style VALIDATE fill:#fef9c3
-    style APPLY fill:#dcfce7
+    style FP fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FDK fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style FKC fill:#1e3a8a,color:#e2e8f0,stroke:#5a9fd4
+    style PROPOSE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style VALIDATE fill:#713f12,color:#fef3c7,stroke:#d97706
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
 ```
 
 ---
@@ -243,7 +243,7 @@ flowchart TD
     C4 -->|"fail"| ABORT
     C4 -->|"pass"| APPLY["proceed to apply_*"]
 
-    style ABORT fill:#fee2e2
-    style APPLY fill:#dcfce7
-    style C3 fill:#fef9c3
+    style ABORT fill:#7f1d1d,color:#fee2e2,stroke:#f87171
+    style APPLY fill:#14532d,color:#dcfce7,stroke:#4ade80
+    style C3 fill:#713f12,color:#fef3c7,stroke:#d97706
 ```
