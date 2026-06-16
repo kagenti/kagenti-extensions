@@ -249,6 +249,12 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		attribute.String("lineage.target.id", targetID),
 		attribute.String("openinference.span.kind", oiKind),
 		attribute.Bool("authbridge.proxy", true),
+		// source=sidecar lets the data-governance execution forest separate
+		// authbridge (sidecar) spans from observe/ (in-process) spans; the
+		// in-process tier self-tags source=in-process. Previously injected by
+		// the kagenti collector transform, which newer MLflow-pipeline
+		// collectors omit — so each producer self-tags now.
+		attribute.String("source", "sidecar"),
 		// trust.* attrs are the canonical keys consumed by the lineage service
 		// transformer. Set them directly so the lineage pipeline works without
 		// an OTel transform fallback for authbridge-originated spans.
