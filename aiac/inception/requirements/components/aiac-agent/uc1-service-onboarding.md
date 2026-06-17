@@ -2,7 +2,7 @@
 
 ## Depends on
 
-- [`../aiac-agent.md`](../aiac-agent.md) — NATS Consumer, Controller, Shared Module (`BaseAgentState`, `PDPSnapshot`, `ProposedDiff`, `CompositeMapping`, `ValidationVerdict`), Validate Node common checks, Configuration, Error Handling, Runtime.
+- [`../aiac-agent.md`](../aiac-agent.md) — NATS Consumer, Controller, Shared Module (`BaseAgentState`, `PDPSnapshot`, `PolicyModel`, `ValidationVerdict`), Validate Node common checks, Configuration, Error Handling, Runtime.
 
 ---
 
@@ -23,8 +23,10 @@ flowchart TD
         ORC1["Orchestrator"]
         SA1["Service Provision"]
         SA2["Service Policy"]
+        SA3["Policy Apply"]
         ORC1 --> SA1
         ORC1 --> SA2
+        ORC1 --> SA3
     end
 
     CTRL -->|"service/:id"| ORC1
@@ -45,10 +47,10 @@ flowchart TD
 
 `onboarding/orchestrator.py`
 
-Sequences two sub-agents and assembles the combined response:
+Sequences three sub-agents and assembles the combined response:
 
 ```
-ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → assemble response
+ServiceProvisionGraph.invoke() → ServicePolicyGraph.invoke() → PolicyApplyGraph.invoke() → assemble response
 ```
 
 ---
@@ -110,7 +112,7 @@ flowchart TD
 
 - **`analyze_tool`**: non-LLM node; discovers MCP tools and maps to `ServiceProvision`.
 
-  1. **Resolve `workload_name`**: call `get_service(service_id)` from `aiac.pdp.library.configuration` → `state.workload_name = client.name`. No K8s access.
+  1. **Resolve `workload_name`**: call `get_service(service_id)` from `aiac.pdp.library.configuration.api` → `state.workload_name = client.name`. No K8s access.
   2. **Locate MCP endpoint**: **TBD** — how `analyze_tool` reaches the MCP endpoint is unresolved. See issue [6.2](../../../issues/6.2-analyze-tool-lookup-strategy.md). Steps 3–4 depend on this being resolved.
   3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
   4. Produce `ServiceProvision`:
@@ -123,7 +125,7 @@ flowchart TD
 
   > **MCP path convention:** All MCP tool services in the kagenti platform must serve at `/mcp`.
 
-- **`provision_service`**: non-LLM node; calls `create_service_role(service_id, role)` and `create_service_scope(service_id, scope)` from `aiac.pdp.library.policy` for each entry in `ServiceProvision`. Reads `service_id` from state.
+- **`provision_service`**: non-LLM node; calls `create_service_role(service_id, role)` and `create_service_scope(service_id, scope)` from `aiac.pdp.library.policy.api` for each entry in `ServiceProvision`. Reads `service_id` from state.
 - **`format_response`**: assembles the provision result for the orchestrator.
 
 #### State: `OnboardingProvisionState`
@@ -175,18 +177,16 @@ class OnboardingProvisionState(BaseAgentState):
 Runs after Service Provision completes. Freshly provisioned permissions/scopes are live in Keycloak before this sub-agent starts.
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
 ```
 
-Examines all roles and determines which role → service permission/scope composite mappings to create for the newly added service, based on the access control policy and domain knowledge.
+Examines all roles and determines which role → service permission/scope mappings to create for the newly added service, based on the access control policy and domain knowledge. Produces a `PolicyModel` written to state; does not commit to the PDP Policy Service.
 
 #### Nodes
 
 - **`fetch_pdp_state`**: fetches all roles and their current composites, the new service's permissions and scopes.
-- **`propose_mappings`**: LLM node; produces `ProposedDiff` scoped to the new service only.
-- **`validate_mappings`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents).
-- **`apply_mappings`**: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy` for each entry in the validated diff.
-- **`format_response`**: assembles the policy result for the orchestrator.
+- **`propose_policy`**: LLM node; produces `PolicyModel` scoped to the new service only. Writes `policy_model` to state.
+- **`validate_policy`**: existence check (entities resolved via `aiac.pdp.library.configuration.api`) + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the new service). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents). `PolicyStatement` shape must carry sufficient information for entity resolution against the Configuration API.
 
 #### Graph
 
@@ -198,40 +198,88 @@ flowchart TD
     START --> FDK["fetch_domain_knowledge\nChromaDB: aiac-domain-knowledge"]
     START --> FKC["fetch_pdp_state\nroles + composites,\nnew service permissions/scopes"]
 
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to new service only"]
+    FP & FDK & FKC --> PROPOSE["propose_policy\nPlanner LLM -> PolicyModel\nscoped to new service only"]
 
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails <= MAX_CHANGES\n3. Auditor LLM re-confirmation\n4. Scope check new service only"]
+    PROPOSE --> VALIDATE["validate_policy\n1. Existence check (via Configuration API)\n2. Safety guard rails <= MAX_CHANGES\n3. Auditor LLM re-confirmation\n4. Scope check new service only"]
 
-    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
+    VALIDATE --> END(("END"))
 ```
 
 #### State
 
-`BaseAgentState` (no extensions required).
+`BaseAgentState` (no extensions required). Uses `policy_model: PolicyModel | None` field (replaces `proposed_diff`; defined in `BaseAgentState` — see [`../aiac-agent.md`](../aiac-agent.md)).
 
 #### Prompts (`onboarding/policy/prompts.py`)
 
-`PLANNER_SYSTEM`, `AUDITOR_SYSTEM` — scoped to single-service composite mapping context.
+`PLANNER_SYSTEM`, `AUDITOR_SYSTEM` — scoped to single-service `PolicyModel` generation context.
+
+---
+
+### Policy Apply Sub-agent
+
+`agent/shared/apply/` — shared across all policy-producing sub-agents.
+
+Receives a validated `PolicyModel` from state and commits it to the PDP Policy Service. The PDP Policy Service handles translation to the appropriate backend format (Keycloak composite mappings or Rego rules).
+
+```
+START → apply_policy → format_response → END
+```
+
+#### Graph
+
+```mermaid
+flowchart TD
+    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy.api\napply_policy(PolicyModel)"]
+    APPLY --> FORMAT["format_response"]
+    FORMAT --> END(("END"))
+```
+
+#### Nodes
+
+- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy.api`. The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings or Rego rules) and commits.
+- **`format_response`**: assembles the commit result for the orchestrator.
+
+#### State
+
+`BaseAgentState` (no extensions required). Reads `policy_model` and `realm`; writes `summary`.
+
+> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit.
 
 ---
 
 ## File Structure
 
 ```
-aiac/src/aiac/agent/onboarding/
-├── __init__.py
-├── orchestrator.py                  ← sequences provision → policy, assembles combined response
-├── provision/
-│   ├── __init__.py
-│   ├── graph.py                     ← Service Provision StateGraph
-│   ├── nodes.py                     ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
-│   └── state.py                     ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
-└── policy/
-    ├── __init__.py
-    ├── graph.py                     ← Service Policy StateGraph
-    ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
-    └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
+aiac/src/aiac/
+├── pdp/library/
+│   ├── configuration/
+│   │   ├── __init__.py
+│   │   ├── models.py                ← Subject, Role, Service, Scope
+│   │   └── api.py                   ← Configuration Service client
+│   └── policy/
+│       ├── __init__.py
+│       ├── models.py                ← PolicyModel, PolicyStatement (TBD)
+│       └── api.py                   ← Policy abstract class + apply_policy()
+└── agent/
+    ├── shared/
+    │   └── apply/
+    │       ├── __init__.py
+    │       ├── graph.py             ← PolicyApplyGraph
+    │       └── nodes.py             ← apply_policy, format_response
+    └── onboarding/
+        ├── __init__.py
+        ├── orchestrator.py          ← sequences provision → policy → apply, assembles combined response
+        ├── provision/
+        │   ├── __init__.py
+        │   ├── graph.py             ← Service Provision StateGraph
+        │   ├── nodes.py             ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
+        │   └── state.py             ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
+        └── policy/
+            ├── __init__.py
+            ├── graph.py             ← Service Policy StateGraph
+            ├── nodes.py             ← fetch_pdp_state, propose_policy, validate_policy
+            └── prompts.py           ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 ```
+
+> **Note:** `aiac/pdp/library/models.py` (flat file) is replaced by the `configuration/` and `policy/` sub-packages above. All import sites updated in the same pass.
 
