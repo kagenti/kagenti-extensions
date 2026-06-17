@@ -159,10 +159,28 @@ class Configuration:
     def map_role_to_service(self, service: Service, role: Role) -> Service: ...
 ```
 
-Read methods (`get_*`):
+Read methods (`get_subjects`, `get_scopes`):
 1. Issue `GET {AIAC_PDP_CONFIG_URL}/<endpoint>`, always appending `?realm=<self.realm>`.
 2. Raise `RuntimeError` on non-2xx HTTP status.
 3. Parse the response into the appropriate Pydantic model(s).
+
+`get_services()` — enriched read (N+1 per service):
+1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch all services.
+2. For each service, issue two additional requests to populate `Service.roles` and `Service.scopes`:
+   - `GET /services/{id}/roles?realm=<self.realm>` → `Service.roles`
+   - `GET /services/{id}/scopes?realm=<self.realm>` → `Service.scopes`
+3. Raise `RuntimeError` on any non-2xx response.
+4. Return `list[Service]` with `roles` and `scopes` populated.
+
+> **Performance note:** `get_services()` issues 2N+1 HTTP requests where N is the number of services. If this becomes a bottleneck, the service's `GET /services` endpoint should be enriched server-side instead. `Service.roles` elements are not further hydrated (their `mappedScopes` are empty); call `get_roles()` for fully hydrated role objects.
+
+`get_roles()` — enriched read (2 extra calls per role):
+1. `GET {AIAC_PDP_CONFIG_URL}/roles?realm=<self.realm>` — fetch all realm roles.
+2. For each role, issue additional requests:
+   - If `role.composite` is `True`: `GET /roles/{name}/composites?realm=<self.realm>` → `Role.childRoles`
+   - For every role: `GET /roles/{name}/scopes?realm=<self.realm>` → `Role.mappedScopes`
+3. Raise `RuntimeError` on any non-2xx response.
+4. Return `list[Role]` with `childRoles` and `mappedScopes` populated.
 
 `create_scope`:
 1. Issues `POST {AIAC_PDP_CONFIG_URL}/scopes` with body `{"name": scope_name, "description": scope_description}`, appending `?realm=<self.realm>`.

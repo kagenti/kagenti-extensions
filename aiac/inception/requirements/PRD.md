@@ -122,7 +122,7 @@ Six components across four Kubernetes Pods plus a Python library layer, all impl
 
 | # | Component | Description |
 |---|-----------|-------------|
-| 1 | **PDP Configuration Service** | REST service that exposes PDP entity data (subjects, roles, services, scopes, permissions, composite mappings) for read operations. Backed by Keycloak in both phases; the read interface is stable across phases. |
+| 1 | **PDP Configuration Service** | REST service that exposes PDP entity data (subjects, roles, services, scopes, composite mappings) for read and write operations. Read methods enrich services with assigned roles/scopes and enrich roles with child roles and mapped scopes. Backed by Keycloak in both phases; the interface is stable across phases. |
 | 2 | **PDP Policy Service** | REST service that applies policy changes to the active PDP backend. Phase 1 writes Keycloak composite role mappings (role → service permissions). Phase 2 writes LLM-generated Rego rules to OPA. Both implementations expose the same Kubernetes ClusterIP service name — switching phases is a container image swap only. |
 | 3 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
 | 4 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
@@ -253,7 +253,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
       ▼
  AIAC Agent
       │ 3. GET /services, /roles, /assignments        ──► PDP Configuration Service ──► Keycloak Admin REST
-      │ 4. GET /scopes, /permissions (target service) ──► PDP Configuration Service ──► Keycloak Admin REST
+      │ 4. GET /services/{id}/roles, /services/{id}/scopes ──► PDP Configuration Service ──► Keycloak Admin REST
       │ 5. semantic query (policy + domain knowledge) ──► ChromaDB
       │ 6. [LLM] compute minimal permission diff for affected service
       │ 7. [LLM] validate diff against retrieved policy (second pass)
@@ -371,8 +371,8 @@ extract service metadata during UC-1 service onboarding. The `aiac.pdp.library` 
 is the integration surface for other Kagenti components needing typed access to the PDP.
 
 **AIAC ↔ Keycloak (Phase 1)**
-The PDP Configuration Service proxies Keycloak Admin REST read endpoints under generic PDP entity
-names (subjects, roles, services, scopes, permissions, assignments). The PDP Policy Service writes role composite mappings (role → service permissions) to Keycloak. The Keycloak SPI listener
+The PDP Configuration Service proxies Keycloak Admin REST endpoints under generic PDP entity
+names (subjects, roles, services, scopes, assignments). Read endpoints include per-service role and scope enrichment. The PDP Policy Service writes role composite mappings (role → service permissions) to Keycloak. The Keycloak SPI listener
 publishes entity lifecycle events to NATS; it is a separate component outside the AIAC codebase.
 
 **AIAC ↔ OPA (Phase 2, planned)**
