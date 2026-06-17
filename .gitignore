@@ -73,5 +73,4 @@ kagenti-webhook/bin/
 aiac/inception/issues/
 
 # Claude Code / AI assistant files
-CLAUDE.md
 docs/agents/
