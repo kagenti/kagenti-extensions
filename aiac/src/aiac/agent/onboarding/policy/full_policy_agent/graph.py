@@ -387,7 +387,7 @@ class PolicyBuilder:
         """
         # Store realm for later use
         self.realm = realm
-        
+
         # Create LLM if not provided
         # LLM config is in the config directory relative to this file (llm.env)
         if llm is None:
@@ -419,6 +419,9 @@ class PolicyBuilder:
         for service in services:
             # service_type is a property of the service, not of individual roles.
             # Service.roles contains the privileges/permissions for this service.
+            if not service.description or not ("Demo" in service.description):
+                continue
+            print (f"Service {service.id} added: {service.description}")
             self.privileges_map[service.id] = {
                 "service_type": service.type,
                 "roles": [
@@ -503,6 +506,7 @@ class PolicyBuilder:
         return {
             "policy_structure": final_state["policy_structure"],
             "parsed_scopes": final_state["parsed_scopes"],
+            "explanation": final_state.get("explanation", ""),
             "errors": final_state["errors"],
             "success": len(final_state["errors"]) == 0,
             "retry_count": final_state.get("retry_count", 0)

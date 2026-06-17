@@ -416,6 +416,7 @@ class ServicePolicyBuilder:
             "yaml_output": final_state["yaml_output"],
             "policy_structure": final_state["policy_structure"],
             "parsed_scopes": final_state["parsed_scopes"],
+            "explanation": final_state.get("explanation", ""),
             "errors": final_state["errors"],
             "success": len(final_state["errors"]) == 0,
             "retry_count": final_state.get("retry_count", 0),
