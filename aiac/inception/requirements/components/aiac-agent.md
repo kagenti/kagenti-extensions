@@ -17,7 +17,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
-| Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
+| Service Onboarding | `service/{id}` | Service Provision → Service Policy → Policy Apply (sequential) |
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
 | Role Update | `role/{id}` | Role sub-agent |
 
@@ -38,8 +38,10 @@ flowchart TD
         ORC1["Orchestrator"]
         SA1["Service Provision"]
         SA2["Service Policy"]
+        SA3["Policy Apply"]
         ORC1 --> SA1
         ORC1 --> SA2
+        ORC1 --> SA3
     end
 
     subgraph PU["Policy Update"]
@@ -183,7 +185,7 @@ All type definitions shared across agents:
 | `policy_chunks` | `list[str]` | Policy text chunks from `aiac-policies` |
 | `domain_knowledge_chunks` | `list[str]` | Domain context chunks from `aiac-domain-knowledge` |
 | `pdp_snapshot` | `PDPSnapshot` | Scoped PDP data for this trigger |
-| `proposed_diff` | `ProposedDiff \| None` | LLM output |
+| `policy_model` | `PolicyModel \| None` | Validated policy to commit; produced by policy-proposing sub-agents |
 | `validation_errors` | `list[str]` | Errors from validate node |
 | `added` | `list[CompositeMapping]` | Executed composite additions |
 | `removed` | `list[CompositeMapping]` | Executed composite removals |
@@ -202,20 +204,11 @@ class PDPSnapshot(BaseModel):
     role_composites: dict[str, list[Permission]] = {}      # role_name → current composite permissions
 ```
 
-#### `ProposedDiff` and `CompositeMapping`
+#### `PolicyModel`
 
-```python
-class CompositeMapping(BaseModel):
-    role_name: str
-    service_id: str
-    permission_id: str
-    permission_name: str
+Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the shared Policy Apply sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.api.apply_policy(PolicyModel)`. The PDP Policy Service handles translation to the appropriate backend format (Keycloak composite mappings or Rego rules).
 
-class ProposedDiff(BaseModel):
-    add: list[CompositeMapping]
-    remove: list[CompositeMapping]
-    reasoning: str
-```
+`PolicyModel` is defined in `aiac/pdp/library/policy/models.py`. `PolicyStatement` shape is TBD — must carry sufficient information for entity existence resolution via `aiac.pdp.library.configuration.api`.
 
 #### `ValidationVerdict`
 
@@ -225,7 +218,7 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py` — see [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyModel` and `PolicyStatement` are defined in `aiac/pdp/library/policy/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
@@ -246,13 +239,13 @@ All `validate_*` / `validate_mappings` nodes perform the same four checks. Binar
 
 ```mermaid
 flowchart TD
-    IN["proposed_diff\n+ pdp_snapshot"] --> C1
+    IN["policy_model\n+ pdp_snapshot"] --> C1
 
-    C1{"1. Existence check\nEvery role_name, service_id,\npermission_id in diff exists\nin pdp_snapshot"}
+    C1{"1. Existence check\nEntities referenced by PolicyModel\nstatements resolved via\naiac.pdp.library.configuration.api"}
     C1 -->|"fail"| ABORT["ABORT\nvalidation_errors populated\nadded and removed empty"]
     C1 -->|"pass"| C2
 
-    C2{"2. Safety guard rails\ntotal changes\nadd + remove\n<= MAX_CHANGES_PER_RUN"}
+    C2{"2. Safety guard rails\ntotal statements\nin PolicyModel\n<= MAX_CHANGES_PER_RUN"}
     C2 -->|"fail"| ABORT
     C2 -->|"pass"| C3
 
@@ -265,10 +258,10 @@ flowchart TD
     C4 -->|"pass"| APPLY["proceed to apply_*"]
 ```
 
-1. **Existence check** — every `role_name`, `service_id`, `permission_id` in the diff exists in `pdp_snapshot`.
-2. **Safety guard rails** — total changes (`add` + `remove`) ≤ `MAX_CHANGES_PER_RUN`.
+1. **Existence check** — all entities referenced by `PolicyModel` statements exist; resolved via `aiac.pdp.library.configuration.api`.
+2. **Safety guard rails** — total statements in `PolicyModel` ≤ `MAX_CHANGES_PER_RUN`.
 3. **LLM re-confirmation** — second LLM call with auditor system prompt; returns `ValidationVerdict(approved, reason)`.
-4. **Scope check** — diff is bounded to entities referenced by the trigger; no over-reach on partial updates.
+4. **Scope check** — `PolicyModel` is bounded to entities referenced by the trigger; no over-reach on partial updates.
 
 ---
 
@@ -352,7 +345,7 @@ aiac/src/aiac/agent/
 │
 ├── onboarding/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← sequences provision → policy, assembles combined response
+│   ├── orchestrator.py                  ← sequences provision → policy → apply, assembles combined response
 │   ├── provision/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Service Provision StateGraph
@@ -361,7 +354,7 @@ aiac/src/aiac/agent/
 │   └── policy/
 │       ├── __init__.py
 │       ├── graph.py                     ← Service Policy StateGraph
-│       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
+│       ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 ├── policy_update/
@@ -390,7 +383,11 @@ aiac/src/aiac/agent/
 └── shared/
     ├── __init__.py
     ├── nodes.py                         ← fetch_policy, fetch_domain_knowledge
-    └── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, ProposedDiff, CompositeMapping, ValidationVerdict
+    ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, PolicyModel, ValidationVerdict
+    └── apply/
+        ├── __init__.py
+        ├── graph.py                     ← PolicyApplyGraph (shared by all policy-producing sub-agents)
+        └── nodes.py                     ← apply_policy, format_response
 ```
 
 Docker build command (run from repo root):
