@@ -34,8 +34,9 @@ import os
 import sys
 from pathlib import Path
 
-# Add current directory to path to allow importing local modules
+# Add policy dir and src/ to path to allow importing local and aiac.* modules
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parents[4]))
 
 from dotenv import load_dotenv
 
