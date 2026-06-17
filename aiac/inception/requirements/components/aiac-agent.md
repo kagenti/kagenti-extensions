@@ -46,16 +46,16 @@ flowchart TD
 
     subgraph PU["Policy Update"]
         ORC2["Orchestrator"]
-        SA3["Build"]
-        SA4["Rebuild"]
-        ORC2 --> SA3
+        SA4["Build"]
+        SA5["Rebuild"]
         ORC2 --> SA4
+        ORC2 --> SA5
     end
 
     subgraph RR["Role Update"]
         ORC3["Orchestrator"]
-        SA5["Role"]
-        ORC3 --> SA5
+        SA6["Role"]
+        ORC3 --> SA6
     end
 
     TRIGGERS --> CTRL
@@ -137,10 +137,9 @@ flowchart TD
         S3["policy_chunks: list of str"]
         S4["domain_knowledge_chunks: list of str"]
         S5["pdp_snapshot: PDPSnapshot"]
-        S6["proposed_diff: ProposedDiff or None"]
+        S6["policy_model: PolicyModel or None"]
         S7["validation_errors: list of str"]
-        S8["added / removed: list of CompositeMapping"]
-        S9["summary: str"]
+        S8["summary: str"]
     end
 
     subgraph QUERY_KEYS["ChromaDB query strings by trigger"]
@@ -198,10 +197,7 @@ class PDPSnapshot(BaseModel):
     subjects: list[Subject] = []
     roles: list[Role] = []
     services: list[Service] = []
-    service_permissions: dict[str, list[Permission]] = {}  # service_id → permissions
     service_scopes: list[Scope] = []
-    subject_assignments: dict[str, Assignments] = {}       # subject_id → assignments
-    role_composites: dict[str, list[Permission]] = {}      # role_name → current composite permissions
 ```
 
 #### `PolicyModel`
@@ -272,7 +268,7 @@ flowchart TD
 | POST | `/apply/policy/build` | Policy Update | Build |
 | POST | `/apply/policy/rebuild` | Policy Update | Rebuild |
 | POST | `/apply/role/{role_id}` | Role Update | Role |
-| POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
+| POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy → Apply |
 
 **Success response (Service Onboarding):**
 ```json
