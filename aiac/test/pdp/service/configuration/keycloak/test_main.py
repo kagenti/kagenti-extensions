@@ -100,10 +100,13 @@ class TestGetSubjectAssignments:
 class TestGetServicePermissions:
     def test_returns_json_array(self):
         admin = MagicMock()
-        admin.get_client_roles.return_value = [{"id": "cr1", "name": "view-clients"}]
-        resp = _make_client(admin).get(f"/services/svc-uuid/permissions?realm={REALM}")
+        admin.get_realm_roles_of_client_scope.return_value = [{"id": "cr1", "name": "view-clients"}]
+        resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
         assert resp.json() == [{"id": "cr1", "name": "view-clients"}]
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -135,10 +138,10 @@ class TestGetRoleScopes:
             {"id": "sc2", "name": "email"},
         ]
 
-        def _scope_roles(scope_id):
-            return [{"id": "role-id-1"}] if scope_id == "sc1" else []
+        def _all_mappings(scope_id):
+            return {"realmMappings": [{"id": "role-id-1"}]} if scope_id == "sc1" else {}
 
-        admin.get_realm_roles_of_client_scope.side_effect = _scope_roles
+        admin.get_all_roles_of_client_scope.side_effect = _all_mappings
         resp = _make_client(admin).get(f"/roles/admin/scopes?realm={REALM}")
         assert resp.status_code == 200
         body = resp.json()
@@ -149,7 +152,7 @@ class TestGetRoleScopes:
         admin = MagicMock()
         admin.get_realm_role.return_value = {"id": "r1"}
         admin.get_client_scopes.return_value = [{"id": "sc1"}, {"id": "sc2"}]
-        admin.get_realm_roles_of_client_scope.return_value = []
+        admin.get_all_roles_of_client_scope.return_value = {}
         resp = _make_client(admin).get(f"/roles/viewer/scopes?realm={REALM}")
         assert resp.status_code == 200
         assert resp.json() == []
@@ -158,11 +161,11 @@ class TestGetRoleScopes:
         admin = MagicMock()
         admin.get_realm_role.return_value = {"id": "rid", "name": "viewer"}
         admin.get_client_scopes.return_value = [{"id": "sc1", "name": "read"}]
-        admin.get_realm_roles_of_client_scope.return_value = [{"id": "rid"}]
+        admin.get_all_roles_of_client_scope.return_value = {"realmMappings": [{"id": "rid"}]}
         _make_client(admin).get(f"/roles/viewer/scopes?realm={REALM}")
         admin.get_realm_role.assert_called_once_with("viewer")
         admin.get_client_scopes.assert_called_once()
-        admin.get_realm_roles_of_client_scope.assert_called_once_with("sc1")
+        admin.get_all_roles_of_client_scope.assert_called_once_with("sc1")
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
@@ -574,8 +577,8 @@ class TestKeycloakErrorProduces502:
 
     def test_get_service_permissions(self):
         admin = MagicMock()
-        admin.get_client_roles.side_effect = _keycloak_error()
-        assert _make_client(admin).get(f"/services/s1/permissions?realm={REALM}").status_code == 502
+        admin.get_realm_roles_of_client_scope.side_effect = _keycloak_error()
+        assert _make_client(admin).get(f"/services/s1/roles?realm={REALM}").status_code == 502
 
     def test_get_role_composites(self):
         admin = MagicMock()

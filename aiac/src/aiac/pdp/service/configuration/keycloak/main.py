@@ -206,8 +206,9 @@ def list_role_scopes(role_name: str, admin: KeycloakAdmin = Depends(get_admin)):
         role_id = role["id"]
         mapped = []
         for scope in admin.get_client_scopes():
-            scope_roles = admin.get_realm_roles_of_client_scope(scope["id"])
-            if any(r["id"] == role_id for r in scope_roles):
+            all_mappings = admin.get_all_roles_of_client_scope(scope["id"])
+            realm_mappings = all_mappings.get("realmMappings", [])
+            if any(r["id"] == role_id for r in realm_mappings):
                 mapped.append(scope)
         return mapped
     except KeycloakError as e:

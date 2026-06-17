@@ -151,11 +151,17 @@ class TestGetServices:
     def test_returns_list_of_service(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         payload = [{"id": "c1", "name": "my-app", "enabled": True}]
-        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(payload)) as m:
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok([])],
+        ) as m:
             result = Configuration.for_realm(REALM).get_services()
         assert isinstance(result[0], Service)
         assert result[0].id == "c1"
-        m.assert_called_once_with(f"{BASE}/services", params={"realm": REALM})
+        assert m.call_args_list[0] == (
+            (f"{BASE}/services",),
+            {"params": {"realm": REALM}},
+        )
 
     def test_raises_on_non_2xx(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
