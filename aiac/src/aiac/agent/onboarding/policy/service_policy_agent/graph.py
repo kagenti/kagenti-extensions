@@ -28,7 +28,7 @@ from langchain_core.language_models import BaseChatModel
 from config import create_llm
 from service_policy_agent.state import ServicePolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.read_api_from_config import Configuration
+from aiac.pdp.library.configuration.api import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 
@@ -56,6 +56,7 @@ def _filter_and_extract_scopes(
     state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
+    service_type: str,
     privileges: list,
     verbose: bool,
 ) -> ServicePolicyState:
@@ -67,6 +68,7 @@ def _filter_and_extract_scopes(
         state: Current ServicePolicyState (needs 'description' and 'service_id')
         llm: LLM instance
         realm_roles: All available realm roles [{'name': str, 'description': str}]
+        service_type: Service type (e.g. 'Tool', 'Agent') — property of the service, not each privilege
         privileges: Privileges belonging to the target service [{'name': str, 'description': str}]
         verbose: Whether to print detailed output
 
@@ -95,7 +97,6 @@ def _filter_and_extract_scopes(
                 {
                     "service": service_id,
                     "privilege": privilege["name"],
-                    "service_type": privilege.get("service_type")
                 }
             )
 
@@ -171,6 +172,7 @@ def _validate_policy(
     llm: BaseChatModel,
     realm_roles: list,
     service_id: str,
+    service_type: str,
     privileges: list,
     verbose: bool,
     max_retries: int,
@@ -184,7 +186,13 @@ def _validate_policy(
     retry_count = state.get("retry_count", 0)
     policy = state["policy_structure"].get("policy", {})
     service_names = [service_id]
-    privileges_map = {service_id: privileges}
+
+    privileges_map = {
+        service_id: {
+            "service_type": service_type,
+            "roles": privileges,
+        }
+    }
 
     structural_errors = validate_policy_structure(
         policy, realm_roles, service_names, privileges_map
@@ -228,6 +236,7 @@ def create_service_policy_builder_graph(
     config: ServicePolicyBuilderConfig,
     realm_roles: list,
     service_id: str,
+    service_type: str,
     privileges: list,
 ):
     """
@@ -237,6 +246,7 @@ def create_service_policy_builder_graph(
         config: ServicePolicyBuilderConfig
         realm_roles: All realm roles [{name, description}]
         service_id: Target Keycloak service ID
+        service_type: Service type (e.g. 'Tool', 'Agent') — property of the service
         privileges: Privileges of the target service [{name, description}]
 
     Returns:
@@ -245,7 +255,7 @@ def create_service_policy_builder_graph(
 
     def filter_and_extract_node(state: ServicePolicyState) -> ServicePolicyState:
         return _filter_and_extract_scopes(
-            state, config.llm, realm_roles, privileges, config.verbose
+            state, config.llm, realm_roles, service_type, privileges, config.verbose
         )
 
     def build_policy_node(state: ServicePolicyState) -> ServicePolicyState:
@@ -256,7 +266,7 @@ def create_service_policy_builder_graph(
 
     def validate_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, service_id, privileges,
+            state, config.llm, realm_roles, service_id, service_type, privileges,
             config.verbose, config.max_retries
         )
 
@@ -304,7 +314,7 @@ class ServicePolicyBuilder:
     def __init__(
         self,
         service_id: str,
-        realm: str = "",
+        realm: str = "demo",
         config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
         verbose: bool = True,
@@ -344,18 +354,17 @@ class ServicePolicyBuilder:
         ]
 
         services = config_api.get_services()
+        self.service_type: str = "Tool"  # Default to "Tool" if not found
         self.privileges = []
         for service in services:
             if service.id != service_id:
                 continue
-            # Note: Service.roles contains the privileges/permissions for this service
-            # These are the roles/scopes that belong to this specific service
+            # Handle None case by defaulting to "Tool"
+            self.service_type = service.type or "Tool"
+            # Service.roles contains the privileges/permissions for this service.
+            # service_type is a property of the service, not of individual privileges.
             self.privileges = [
-                {
-                    "name": role.name,
-                    "description": role.description or "",
-                    "service_type": service.type
-                }
+                {"name": role.name, "description": role.description or ""}
                 for role in service.roles
             ]
             break
@@ -364,6 +373,7 @@ class ServicePolicyBuilder:
             self.config,
             self.realm_roles,
             self.service_id,
+            self.service_type,
             self.privileges,
         )
 

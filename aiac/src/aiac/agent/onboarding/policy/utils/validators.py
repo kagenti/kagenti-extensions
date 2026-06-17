@@ -13,20 +13,22 @@ def validate_policy_structure(
     policy: Dict[str, Any],
     realm_roles: List[Dict[str, str]],
     service_names: List[str],
-    privileges_map: Dict[str, List[Dict[str, str]]]
+    privileges_map: Dict[str, Dict[str, Any]]
 ) -> List[str]:
     """
     Perform structural validation on the policy.
-    
+
     Checks that all realm roles, services, and privileges exist in the
     configuration and that the policy structure is valid.
-    
+
     Args:
         policy: The policy dictionary to validate
         realm_roles: List of dicts with 'name' and 'description' for realm roles
         service_names: List of valid service names
-        privileges_map: Dict mapping service names to list of privilege dicts with 'name' and 'description'
-        
+        privileges_map: Dict mapping service IDs to their service info.
+            Each value is ``{"service_type": str, "roles": [{"name": str, "description": str}]}``.
+            service_type is a property of the service, not of individual roles.
+
     Returns:
         List of error messages (empty if validation passed)
     """
@@ -85,8 +87,7 @@ def validate_policy_structure(
                     f"Found empty privilege name for service '{service}' in realm role '{realm_role}'"
                 )
             elif service in privileges_map:
-                # Extract privilege names from the privileges map
-                privilege_names = [p['name'] for p in privileges_map[service]]
+                privilege_names = [p['name'] for p in privileges_map[service]["roles"]]
                 if privilege not in privilege_names:
                     available_privileges = (
                         ', '.join(privilege_names)

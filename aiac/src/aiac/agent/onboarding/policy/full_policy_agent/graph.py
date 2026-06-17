@@ -43,14 +43,15 @@ from langchain_core.language_models import BaseChatModel
 from config import create_llm
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.read_api_from_config import Configuration
+from aiac.pdp.library.configuration.api import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 from utils.output_generators import (
     generate_yaml_output,
     generate_realm_roles_rego,
     generate_privileges_rego,
-    generate_default_rego,
+    generate_default_inbound_rego,
+    generate_default_outbound_rego,
     generate_policy_rego,
 )
 
@@ -109,8 +110,8 @@ def _parse_and_extract_scopes(
     # realm_role_name -> list of {"service": X, "privilege": Y} dicts
     realm_role_to_privileges: dict = {}
 
-    for service_name, privileges in privileges_map.items():
-        for privilege in privileges:
+    for service_name, service_info in privileges_map.items():
+        for privilege in service_info["roles"]:
             result = mapper.map_role(
                 policy_description=state['description'],
                 service_name=service_name,
@@ -128,7 +129,6 @@ def _parse_and_extract_scopes(
                     {
                         'service': service_name,
                         'privilege': privilege['name'],
-                        'service_type': privilege.get('service_type')
                     }
                 )
 
@@ -364,7 +364,7 @@ class PolicyBuilder:
     
     def __init__(
         self,
-        realm: str = "",
+        realm: str = "demo",
         config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
         verbose: bool = True,
@@ -417,15 +417,15 @@ class PolicyBuilder:
         self.privileges_map = {}
         self.service_names = []
         for service in services:
-            # Service.roles contains the privileges/permissions for this service
-            self.privileges_map[service.id] = [
-                {
-                    "name": role.name,
-                    "description": role.description or "",
-                    "service_type": service.type
-                }
-                for role in service.roles
-            ]
+            # service_type is a property of the service, not of individual roles.
+            # Service.roles contains the privileges/permissions for this service.
+            self.privileges_map[service.id] = {
+                "service_type": service.type,
+                "roles": [
+                    {"name": role.name, "description": role.description or ""}
+                    for role in service.roles
+                ],
+            }
             self.service_names.append(service.id)
 
         # Build and compile the LangGraph state machine
@@ -608,11 +608,18 @@ class PolicyBuilder:
         # print(f"Privileges Rego saved to {privileges_path}")
         
         # Generate default.rego with deny-by-default behavior
-        default_rego_path = dir_path / "default.rego"
-        with open(default_rego_path, 'w') as f:
-            f.write(generate_default_rego())
-        print(f"Default Rego saved to {default_rego_path}")
+        default_rego_inbound_path = dir_path / "default_inbound.rego"
+        with open(default_rego_inbound_path, 'w') as f:
+            f.write(generate_default_inbound_rego())
+        print(f"Default Rego saved to {default_rego_inbound_path}")
+
+        # Generate default.rego with deny-by-default behavior
+        default_rego_outbound_path = dir_path / "default_outbound.rego"
+        with open(default_rego_outbound_path, 'w') as f:
+            f.write(generate_default_outbound_rego())
+        print(f"Default Rego saved to {default_rego_outbound_path}")
         
+
         # Generate one policy rego file per service
         # First, collect all services that appear in the policy
         policy = policy_structure.get("policy", {})
@@ -623,9 +630,21 @@ class PolicyBuilder:
                 if service:
                     services_in_policy.add(service)
         
+        # Build service_types from privileges_map — service_type is a property of
+        # the service, not of individual privileges, so it is not stored in the policy.
+        service_types = {
+            svc_id: svc_info["service_type"]
+            for svc_id, svc_info in self.privileges_map.items()
+        }
+
         # Generate a separate rego file for each service
         for service_name in services_in_policy:
-            policy_rego = generate_policy_rego(policy_structure, description, service_filter=service_name)
+            policy_rego = generate_policy_rego(
+                policy_structure, 
+                service_name, 
+                service_types,
+                description
+            )
             # Sanitize service name for filename (replace special chars with underscores)
             safe_service_name = service_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
             policy_path = dir_path / f"generated_policy_{safe_service_name}.rego"

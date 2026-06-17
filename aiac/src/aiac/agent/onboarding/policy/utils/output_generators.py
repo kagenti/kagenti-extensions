@@ -96,15 +96,16 @@ realm_roles := {
     return rego_content
 
 
-def generate_privileges_rego(privileges_map: Dict[str, list], scopes: list) -> str:
+def generate_privileges_rego(privileges_map: Dict[str, dict], scopes: list) -> str:
     """
     Generate Rego content for privileges mapping by service/client.
-    
+
     Args:
-        privileges_map: Dictionary mapping service/client IDs to their privilege lists
-                       Each privilege is a dict with 'name' and 'description'
+        privileges_map: Dict mapping service IDs to their service info.
+            Each value is ``{"service_type": str, "roles": [{"name": str, "description": str}]}``.
+            service_type is a property of the service, not of individual roles.
         scopes: List of Scope objects with 'name' and 'description'
-        
+
     Returns:
         Rego file content as string
     """
@@ -114,13 +115,13 @@ def generate_privileges_rego(privileges_map: Dict[str, list], scopes: list) -> s
 # Maps service/client IDs to their available privileges
 
 """
-    
+
     # Create a list of scope names for inclusion in privileges
     scope_names = [scope.name for scope in scopes]
-    
-    for service_id, privileges in privileges_map.items():
+
+    for service_id, service_info in privileges_map.items():
         rego_content += f'service["{service_id}"] := [\n'
-        for priv in privileges:
+        for priv in service_info["roles"]:
             priv_name = priv.get("name", "")
             priv_desc = priv.get("description", "")
             # Escape quotes in description
@@ -141,7 +142,19 @@ def generate_privileges_rego(privileges_map: Dict[str, list], scopes: list) -> s
     return rego_content
 
 
-def generate_default_rego() -> str:
+def generate_default_inbound_rego() -> str:
+    """
+    Generate Rego content for deny-by-default behavior.
+    
+    Returns:
+        Rego file content as string
+    """
+    return """package authbridge.inbound.request
+
+default allow := false
+"""
+
+def generate_default_outbound_rego() -> str:
     """
     Generate Rego content for deny-by-default behavior.
     
@@ -156,24 +169,32 @@ default allow := false
 
 def generate_policy_rego(
     policy_structure: dict,
+    service_filter: str,
+    service_types: Dict[str, str],
     description: str = "",
-    service_filter: Optional[str] = None
 ) -> str:
     """
     Generate Rego content for the access control policy.
-    
+
     Converts the policy structure (role -> privileges) into Rego allow rules.
     Each rule checks if the user has the required role and matches the service/privilege.
-    
+
     Args:
-        policy_structure: Dictionary with 'policy' key containing role-to-privileges mapping
+        policy_structure: Dictionary with 'policy' key containing role-to-privileges mapping.
+            Privilege dicts contain only 'service' and 'privilege' keys.
         description: Original policy description for comments
         service_filter: If provided, only generate rules for this specific service
-        
+        service_types: Dict mapping service IDs to their type ('Tool' or 'Agent').
+            service_type is a property of the service, not of individual privileges.
+            Used to determine the protocol field in Rego rules ('mcp' for Tool, 'a2a' for Agent).
+            Defaults to 'a2a' when a service is not present in the map.
+
     Returns:
         Rego file content as string
     """
-    rego_content = """package authbridge.outbound.request
+    package = "outbound" if service_types.get(service_filter) == "Tool" else "inbound"
+
+    rego_content = f"""package authbridge.{package}.request
 
 import data.authz.realm_roles.realm_roles
 
@@ -185,8 +206,7 @@ import data.authz.realm_roles.realm_roles
 """
     
     # Add service filter info if applicable
-    if service_filter:
-        rego_content += f"# Service: {service_filter}\n"
+    rego_content += f"# Service: {service_filter}\n"
     
     # Add original policy description as comment
     if description:
@@ -204,17 +224,15 @@ import data.authz.realm_roles.realm_roles
         for priv in privileges:
             service = priv.get("service", "")
             privilege = priv.get("privilege", "")
-            service_type = priv.get("service_type")
-            
-            # Determine protocol based on service type
-            # "msp" for Tool type, "a2a" for Agent type
-            if service_type == "Tool":
-                protocol = "mcp"
-            else:
-                protocol = "a2a"
+
+            # Determine protocol from the service-level service_types map.
+            # "mcp" for Tool type, "a2a" for Agent type (default).
+            service_type = service_types.get(service)
+            protocol = "mcp" if service_type == "Tool" else "a2a"
+            service_name = "tool" if service_type == "Tool" else "agent"
 
             # Skip if service_filter is set and this privilege is for a different service
-            if service_filter and service != service_filter:
+            if service != service_filter:
                 continue
             
             # Escape quotes in service and privilege names
@@ -223,6 +241,10 @@ import data.authz.realm_roles.realm_roles
             
             role_name_escaped = role_name.replace('"', '\\"')
             
+            rego_content += f"# User with role of **{role_name_escaped}**\n"
+            rego_content += f"# may access {service_name} with id **{service_escaped}**\n"
+            rego_content += f"# if the access token contains **{privilege_escaped}** scope\n"
+
             rego_content += f'allow if {{\n'
             rego_content += f'  "{role_name_escaped}" in object.get(realm_roles, input.identity.subject, [])\n'
             rego_content += f'  input.{protocol}.client_id == "{service_escaped}"\n'
