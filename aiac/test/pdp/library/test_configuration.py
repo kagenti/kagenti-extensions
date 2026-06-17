@@ -73,15 +73,71 @@ class TestGetRoles:
     def test_returns_list_of_role(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         payload = [{"id": "r1", "name": "admin", "composite": False}]
-        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(payload)) as m:
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(payload), _ok([])]) as m:
             result = Configuration.for_realm(REALM).get_roles()
         assert isinstance(result[0], Role)
         assert result[0].name == "admin"
-        m.assert_called_once_with(f"{BASE}/roles", params={"realm": REALM})
+        assert m.call_args_list[0][0][0] == f"{BASE}/roles"
 
     def test_raises_on_non_2xx(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_err()):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_roles()
+
+    def test_non_composite_role_populates_mapped_scopes(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        scopes = [{"id": "s1", "name": "read:data"}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _ok(scopes)]):
+            result = Configuration.for_realm(REALM).get_roles()
+        assert result[0].mappedScopes[0].name == "read:data"
+        assert result[0].childRoles == []
+
+    def test_non_composite_role_skips_composites_call(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _ok([])]) as m:
+            Configuration.for_realm(REALM).get_roles()
+        urls = [c[0][0] for c in m.call_args_list]
+        assert all("/composites" not in u for u in urls)
+
+    def test_composite_role_populates_child_roles(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "admin", "composite": True}]
+        child_roles = [{"id": "r2", "name": "viewer", "composite": False}]
+        scopes = [{"id": "s1", "name": "profile"}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _ok(child_roles), _ok(scopes)]):
+            result = Configuration.for_realm(REALM).get_roles()
+        assert result[0].childRoles[0].name == "viewer"
+
+    def test_composite_role_populates_mapped_scopes(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "admin", "composite": True}]
+        child_roles = [{"id": "r2", "name": "viewer", "composite": False}]
+        scopes = [{"id": "s1", "name": "profile"}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _ok(child_roles), _ok(scopes)]):
+            result = Configuration.for_realm(REALM).get_roles()
+        assert result[0].mappedScopes[0].name == "profile"
+
+    def test_raises_if_scopes_call_fails(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _err(502)]):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_roles()
+
+    def test_raises_if_composites_call_fails(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        roles = [{"id": "r1", "name": "admin", "composite": True}]
+        with patch("aiac.pdp.library.configuration.api.requests.get",
+                   side_effect=[_ok(roles), _err(502)]):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_roles()
 

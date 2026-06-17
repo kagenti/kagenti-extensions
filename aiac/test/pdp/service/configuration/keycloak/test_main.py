@@ -122,6 +122,62 @@ class TestGetRoleComposites:
 
 
 # ---------------------------------------------------------------------------
+# GET /roles/{role_name}/scopes
+# ---------------------------------------------------------------------------
+
+
+class TestGetRoleScopes:
+    def test_returns_scopes_mapped_to_role(self):
+        admin = MagicMock()
+        admin.get_realm_role.return_value = {"id": "role-id-1", "name": "admin"}
+        admin.get_client_scopes.return_value = [
+            {"id": "sc1", "name": "profile"},
+            {"id": "sc2", "name": "email"},
+        ]
+
+        def _scope_roles(scope_id):
+            return [{"id": "role-id-1"}] if scope_id == "sc1" else []
+
+        admin.get_realm_roles_of_client_scope.side_effect = _scope_roles
+        resp = _make_client(admin).get(f"/roles/admin/scopes?realm={REALM}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body) == 1
+        assert body[0]["name"] == "profile"
+
+    def test_filters_out_unmatched_scopes(self):
+        admin = MagicMock()
+        admin.get_realm_role.return_value = {"id": "r1"}
+        admin.get_client_scopes.return_value = [{"id": "sc1"}, {"id": "sc2"}]
+        admin.get_realm_roles_of_client_scope.return_value = []
+        resp = _make_client(admin).get(f"/roles/viewer/scopes?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_verifies_call_chain(self):
+        admin = MagicMock()
+        admin.get_realm_role.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_client_scopes.return_value = [{"id": "sc1", "name": "read"}]
+        admin.get_realm_roles_of_client_scope.return_value = [{"id": "rid"}]
+        _make_client(admin).get(f"/roles/viewer/scopes?realm={REALM}")
+        admin.get_realm_role.assert_called_once_with("viewer")
+        admin.get_client_scopes.assert_called_once()
+        admin.get_realm_roles_of_client_scope.assert_called_once_with("sc1")
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.get_realm_role.side_effect = KeycloakError(
+            error_message="not found", response_code=404
+        )
+        resp = _make_client(admin).get(f"/roles/missing/scopes?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # Realm query parameter: optional, singleton at startup
 # ---------------------------------------------------------------------------
 
@@ -525,6 +581,11 @@ class TestKeycloakErrorProduces502:
         admin = MagicMock()
         admin.get_composite_realm_roles_of_role.side_effect = _keycloak_error()
         assert _make_client(admin).get(f"/roles/admin/composites?realm={REALM}").status_code == 502
+
+    def test_get_role_scopes(self):
+        admin = MagicMock()
+        admin.get_realm_role.side_effect = _keycloak_error()
+        assert _make_client(admin).get(f"/roles/admin/scopes?realm={REALM}").status_code == 502
 
     def teardown_method(self):
         app.dependency_overrides.clear()
