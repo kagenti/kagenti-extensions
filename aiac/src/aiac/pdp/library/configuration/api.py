@@ -4,7 +4,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-from .models import Subject, Role, Service, Scope
+from aiac.pdp.library.configuration.models import Subject, Role, Service, Scope
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 

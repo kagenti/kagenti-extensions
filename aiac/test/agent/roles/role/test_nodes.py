@@ -14,7 +14,7 @@ from aiac.agent.shared.state import (
     TriggerContext,
     ValidationVerdict,
 )
-from aiac.pdp.library.models import Role, Service
+from aiac.pdp.library.configuration.models import Role, Service
 
 REALM = "kagenti"
 ROLE_ID = "role-uuid-1"

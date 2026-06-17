@@ -1,4 +1,4 @@
-from aiac.pdp.library.models import Subject, Role, Service, Scope
+from aiac.pdp.library.configuration.models import Subject, Role, Service, Scope
 
 
 class TestSubject:

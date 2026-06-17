@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from aiac.pdp.library.configuration import Configuration
-from aiac.pdp.library.models import Role, Scope, Service, Subject
+from aiac.pdp.library.configuration.api import Configuration
+from aiac.pdp.library.configuration.models import Role, Scope, Service, Subject
 
 REALM = "kagenti"
 

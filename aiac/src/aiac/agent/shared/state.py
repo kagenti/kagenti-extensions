@@ -4,7 +4,7 @@ from typing import TypedDict
 
 from pydantic import BaseModel
 
-from aiac.pdp.library.models import Role, Scope, Service, Subject
+from aiac.pdp.library.configuration.models import Role, Scope, Service, Subject
 
 
 class Permission(BaseModel):
