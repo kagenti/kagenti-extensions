@@ -102,13 +102,18 @@ Port-forward and hit the health endpoint:
 kubectl port-forward pod/pdp-configuration-keycloak-pod 7071:7071 -n aiac-system &
 curl http://localhost:7071/health
 # {"status":"ok"}
+
+# When done, kill the port-forward:
+pkill -f "port-forward.*7071"
 ```
 
-Run the full data smoke test (requires the Python dev environment):
+Run the full data smoke test using the project virtual environment:
 
 ```bash
+kubectl port-forward pod/pdp-configuration-keycloak-pod 7071:7071 -n aiac-system &
 cd aiac
-python test/pdp/library/show_keycloak_data.py
+.venv/bin/python test/pdp/library/show_keycloak_data.py
+pkill -f "port-forward.*7071"
 ```
 
 ## Redeploying after a code change
