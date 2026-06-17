@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Literal
 
 import requests
 from dotenv import load_dotenv
@@ -74,6 +75,15 @@ class Configuration:
         )
         self._check(resp)
         return Role.model_validate(resp.json())
+
+    def set_service_type(self, service_id: str, service_type: Literal["Agent", "Tool"]) -> Service:
+        resp = requests.patch(
+            f"{self._base_url()}/services/{service_id}",
+            json={"type": service_type},
+            params=self._params(),
+        )
+        self._check(resp)
+        return Service.model_validate(resp.json())
 
     def map_role_to_service(self, service: Service, role: Role) -> Service:
         resp = requests.post(

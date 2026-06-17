@@ -212,6 +212,204 @@ class TestService:
         assert not hasattr(s, "surplusField")
 
 
+class TestServiceNameResolution:
+    def test_placeholder_name_replaced_by_clientId(self):
+        s = Service.model_validate(
+            {
+                "id": "abc123",
+                "clientId": "account",
+                "name": "${client_account}",
+                "enabled": True,
+            }
+        )
+        assert s.name == "account"
+
+    def test_absent_name_resolved_from_clientId(self):
+        s = Service.model_validate(
+            {
+                "id": "abc456",
+                "clientId": "mlflow",
+                "enabled": True,
+            }
+        )
+        assert s.name == "mlflow"
+
+    def test_valid_display_name_not_replaced_by_clientId(self):
+        s = Service.model_validate(
+            {
+                "id": "abc789",
+                "clientId": "github-tool",
+                "name": "GitHub Tool",
+                "enabled": True,
+            }
+        )
+        assert s.name == "GitHub Tool"
+
+
+class TestServiceTypeResolution:
+    def test_type_agent_from_kagenti_attribute(self):
+        s = Service.model_validate(
+            {
+                "id": "c1",
+                "clientId": "some-agent",
+                "enabled": True,
+                "attributes": {"kagenti.service.type": "Agent"},
+            }
+        )
+        assert s.type == "Agent"
+
+    def test_type_tool_from_kagenti_attribute(self):
+        s = Service.model_validate(
+            {
+                "id": "c2",
+                "clientId": "github-tool",
+                "enabled": True,
+                "attributes": {"kagenti.service.type": "Tool"},
+            }
+        )
+        assert s.type == "Tool"
+
+    def test_type_agent_from_spiffe_clientId(self):
+        s = Service.model_validate(
+            {
+                "id": "c3",
+                "clientId": "spiffe://cluster.local/ns/team1/sa/git-issue-agent",
+                "enabled": True,
+            }
+        )
+        assert s.type == "Agent"
+
+    def test_explicit_type_not_overridden_by_validator(self):
+        s = Service.model_validate(
+            {
+                "id": "c4",
+                "clientId": "spiffe://cluster.local/ns/team1/sa/some-agent",
+                "enabled": True,
+                "type": "Tool",
+            }
+        )
+        assert s.type == "Tool"
+
+    def test_unknown_kagenti_attribute_value_gives_none(self):
+        s = Service.model_validate(
+            {
+                "id": "c5",
+                "clientId": "mlflow",
+                "enabled": True,
+                "attributes": {"kagenti.service.type": "Unknown"},
+            }
+        )
+        assert s.type is None
+
+
+class TestKeycloakRealWorldPayloads:
+    """Each model parsed against a realistic Keycloak API payload including extra noise fields."""
+
+    def test_subject_keycloak_user(self):
+        s = Subject.model_validate(
+            {
+                "id": "d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f90",
+                "username": "alice",
+                "email": "alice@kagenti.org",
+                "firstName": "Alice",
+                "lastName": "Kagenti",
+                "enabled": True,
+                "emailVerified": True,
+                "createdTimestamp": 1700000000,
+                "roles": [
+                    {
+                        "id": "r-admin-uuid",
+                        "name": "kagenti-admin",
+                        "composite": False,
+                        "clientRole": False,
+                    }
+                ],
+            }
+        )
+        assert s.id == "d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f90"
+        assert s.username == "alice"
+        assert s.email == "alice@kagenti.org"
+        assert s.firstName == "Alice"
+        assert s.lastName == "Kagenti"
+        assert s.enabled is True
+        assert len(s.roles) == 1
+        assert s.roles[0].name == "kagenti-admin"
+
+    def test_role_keycloak_composite_with_child_and_scope(self):
+        r = Role.model_validate(
+            {
+                "id": "r-dev-lead-uuid",
+                "name": "dev-lead",
+                "description": "Developer lead with admin and viewer permissions",
+                "composite": True,
+                "clientRole": False,
+                "containerId": "kagenti",
+                "childRoles": [
+                    {
+                        "id": "r-dev-uuid",
+                        "name": "developer",
+                        "composite": False,
+                        "clientRole": False,
+                    }
+                ],
+                "mappedScopes": [
+                    {"id": "sc-read-uuid", "name": "read"},
+                ],
+            }
+        )
+        assert r.id == "r-dev-lead-uuid"
+        assert r.name == "dev-lead"
+        assert r.description == "Developer lead with admin and viewer permissions"
+        assert r.composite is True
+        assert len(r.childRoles) == 1
+        assert r.childRoles[0].id == "r-dev-uuid"
+        assert r.childRoles[0].name == "developer"
+        assert r.childRoles[0].composite is False
+        assert len(r.mappedScopes) == 1
+        assert r.mappedScopes[0].name == "read"
+
+    def test_service_keycloak_system_client_account(self):
+        """Keycloak system 'account' client: placeholder name resolved, no kagenti type."""
+        s = Service.model_validate(
+            {
+                "id": "account-client-uuid",
+                "clientId": "account",
+                "name": "${client_account}",
+                "description": "${client_account_description}",
+                "enabled": True,
+                "protocol": "openid-connect",
+                "publicClient": False,
+                "attributes": {},
+            }
+        )
+        assert s.id == "account-client-uuid"
+        assert s.name == "account"
+        assert s.description == "${client_account_description}"
+        assert s.enabled is True
+        assert s.type is None
+        assert s.roles == []
+        assert s.scopes == []
+
+    def test_scope_keycloak_email_scope(self):
+        """Standard OpenID Connect 'email' client scope as Keycloak returns it."""
+        s = Scope.model_validate(
+            {
+                "id": "sc-email-uuid",
+                "name": "email",
+                "description": "OpenID Connect built-in scope: email",
+                "protocol": "openid-connect",
+                "attributes": {
+                    "consent.screen.text": "${emailScopeConsentText}",
+                    "display.on.consent.screen": "true",
+                    "include.in.token.scope": "true",
+                },
+            }
+        )
+        assert s.id == "sc-email-uuid"
+        assert s.name == "email"
+        assert s.description == "OpenID Connect built-in scope: email"
+
+
 class TestScope:
     def test_full_payload(self):
         s = Scope.model_validate({"id": "s1", "name": "email", "description": "Email scope"})

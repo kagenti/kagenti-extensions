@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, Query
 from keycloak import KeycloakAdmin
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
+from typing import Literal
 from starlette.responses import JSONResponse
 
 _admin: KeycloakAdmin | None = None
@@ -111,6 +112,21 @@ def create_scope(service_id: str, body: _ScopeCreate, admin: KeycloakAdmin = Dep
 @app.get("/services/{service_id}")
 def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
+        return admin.get_client(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+class _ServicePatch(BaseModel):
+    type: Literal["Agent", "Tool"]
+
+
+@app.patch("/services/{service_id}", status_code=200)
+def patch_service(service_id: str, body: _ServicePatch, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        client = admin.get_client(service_id)
+        existing_attrs = client.get("attributes") or {}
+        admin.update_client(service_id, {"attributes": {**existing_attrs, "kagenti.service.type": body.type}})
         return admin.get_client(service_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
