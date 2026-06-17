@@ -89,10 +89,18 @@ def get_subject_assignments(subject_id: str, admin: KeycloakAdmin = Depends(get_
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
-@app.get("/services/{service_id}/permissions")
-def list_service_permissions(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
+@app.get("/services/{service_id}/roles")
+def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        return admin.get_client_roles(service_id)
+        return admin.get_realm_roles_of_client_scope(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.get("/services/{service_id}/scopes")
+def list_service_scopes(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        return admin.get_client_default_client_scopes(service_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -187,6 +195,21 @@ def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin =
 def list_role_composites(role_name: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
         return admin.get_composite_realm_roles_of_role(role_name=role_name)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.get("/roles/{role_name}/scopes")
+def list_role_scopes(role_name: str, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        role = admin.get_realm_role(role_name)
+        role_id = role["id"]
+        mapped = []
+        for scope in admin.get_client_scopes():
+            scope_roles = admin.get_realm_roles_of_client_scope(scope["id"])
+            if any(r["id"] == role_id for r in scope_roles):
+                mapped.append(scope)
+        return mapped
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 

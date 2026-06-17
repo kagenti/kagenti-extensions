@@ -36,12 +36,39 @@ class Configuration:
     def get_roles(self) -> list[Role]:
         resp = requests.get(f"{self._base_url()}/roles", params=self._params())
         self._check(resp)
-        return [Role.model_validate(r) for r in resp.json()]
+        roles = []
+        for raw in resp.json():
+            role_data = dict(raw)
+            if raw.get("composite"):
+                composites_resp = requests.get(
+                    f"{self._base_url()}/roles/{raw['name']}/composites", params=self._params()
+                )
+                self._check(composites_resp)
+                role_data["childRoles"] = composites_resp.json()
+            scopes_resp = requests.get(
+                f"{self._base_url()}/roles/{raw['name']}/scopes", params=self._params()
+            )
+            self._check(scopes_resp)
+            role_data["mappedScopes"] = scopes_resp.json()
+            roles.append(Role.model_validate(role_data))
+        return roles
 
     def get_services(self) -> list[Service]:
         resp = requests.get(f"{self._base_url()}/services", params=self._params())
         self._check(resp)
-        return [Service.model_validate(s) for s in resp.json()]
+        services = []
+        for raw in resp.json():
+            service_id = raw["id"]
+            roles_resp = requests.get(
+                f"{self._base_url()}/services/{service_id}/roles", params=self._params()
+            )
+            self._check(roles_resp)
+            scopes_resp = requests.get(
+                f"{self._base_url()}/services/{service_id}/scopes", params=self._params()
+            )
+            self._check(scopes_resp)
+            services.append(Service.model_validate({**raw, "roles": roles_resp.json(), "scopes": scopes_resp.json()}))
+        return services
 
     def get_scopes(self) -> list[Scope]:
         resp = requests.get(f"{self._base_url()}/scopes", params=self._params())
