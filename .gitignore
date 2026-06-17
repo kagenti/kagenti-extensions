@@ -71,3 +71,8 @@ kagenti-webhook/bin/
 
 # AIAC working artefacts (regenerated; not source of truth)
 aiac/inception/issues/
+
+# Claude Code / AI assistant files
+CLAUDE.md
+.claude/
+docs/agents/
