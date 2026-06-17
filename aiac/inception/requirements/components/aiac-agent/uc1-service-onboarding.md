@@ -23,11 +23,13 @@ flowchart TD
         ORC1["Orchestrator"]
         SA1["Service Provision"]
         SA2["Service Policy"]
-        SA3["Policy Apply"]
         ORC1 --> SA1
         ORC1 --> SA2
-        ORC1 --> SA3
     end
+
+    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+
+    ORC1 -->|"policy_model"| APPLY
 
     CTRL -->|"service/:id"| ORC1
 ```
@@ -217,33 +219,9 @@ flowchart TD
 
 ### Policy Apply Sub-agent
 
-`agent/shared/apply/` — shared across all policy-producing sub-agents.
+`agent/shared/apply/` — see [Shared Module: `shared/apply/`](../aiac-agent.md#sharedapply) in `aiac-agent.md`.
 
-Receives a validated `PolicyModel` from state and commits it to the PDP Policy Service. The PDP Policy Service handles translation to the appropriate backend format (Keycloak composite mappings or Rego rules).
-
-```
-START → apply_policy → format_response → END
-```
-
-#### Graph
-
-```mermaid
-flowchart TD
-    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy.api\napply_policy(PolicyModel)"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-```
-
-#### Nodes
-
-- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy.api`. The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings or Rego rules) and commits.
-- **`format_response`**: assembles the commit result for the orchestrator.
-
-#### State
-
-`BaseAgentState` (no extensions required). Reads `policy_model` and `realm`; writes `summary`.
-
-> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit.
+Receives the validated `PolicyModel` produced by `validate_policy` and commits it to the PDP Policy Service. Called by the orchestrator after `ServicePolicyGraph` completes, gated on `policy_model is not None`.
 
 ---
 
@@ -261,11 +239,6 @@ aiac/src/aiac/
 │       ├── models.py                ← PolicyModel, PolicyStatement (TBD)
 │       └── api.py                   ← Policy abstract class + apply_policy()
 └── agent/
-    ├── shared/
-    │   └── apply/
-    │       ├── __init__.py
-    │       ├── graph.py             ← PolicyApplyGraph
-    │       └── nodes.py             ← apply_policy, format_response
     └── onboarding/
         ├── __init__.py
         ├── orchestrator.py          ← sequences provision → policy → apply, assembles combined response

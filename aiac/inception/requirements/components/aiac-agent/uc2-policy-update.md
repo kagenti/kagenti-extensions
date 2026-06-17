@@ -27,6 +27,10 @@ flowchart TD
         ORC2 -->|"rebuild"| SA4
     end
 
+    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+
+    ORC2 -->|"policy_model"| APPLY
+
     CTRL -->|"build / rebuild"| ORC2
 ```
 
@@ -46,9 +50,11 @@ flowchart TD
 
 `policy_update/orchestrator.py`
 
-Dispatches to one sub-agent based on trigger type:
-- `build` trigger → Build sub-agent
-- `rebuild` trigger → Rebuild sub-agent
+Dispatches to one sub-agent based on trigger type, then sequences `PolicyApplyGraph` (see [Shared Module: `shared/apply/`](../aiac-agent.md#sharedapply)):
+- `build` trigger → Build sub-agent → Policy Apply
+- `rebuild` trigger → Rebuild sub-agent → Policy Apply
+
+If the sub-agent's `validate_policy` fails (`policy_model is None`), the orchestrator returns the abort response directly without calling `PolicyApplyGraph`.
 
 The Policy Update agent compares the **current composite role mappings** (authoritative record of previously applied rules) against the **current policy in ChromaDB** and applies the delta: adding missing composite mappings and removing stale ones.
 
@@ -61,16 +67,14 @@ The Policy Update agent compares the **current composite role mappings** (author
 `policy_update/build/`
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
 ```
 
 #### Nodes
 
 - **`fetch_pdp_state`**: fetches all roles and their current composites, all services and their permissions, all scopes.
-- **`propose_diff`**: LLM node; produces `ProposedDiff` — minimal delta between ChromaDB policy and live composite state.
-- **`validate_diff`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check. See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents).
-- **`apply_diff`**: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
-- **`format_response`**: assembles the build result.
+- **`propose_policy`**: LLM node; produces `PolicyModel` — minimal delta between ChromaDB policy and live composite state. `PolicyModel` is defined in `aiac/pdp/library/policy/models.py` (see [`../aiac-agent.md`](../aiac-agent.md)).
+- **`validate_policy`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check. See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents). Writes `policy_model` to state on success; leaves it `None` on failure.
 
 #### Graph
 
@@ -82,13 +86,11 @@ flowchart TD
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
     START --> FKC["fetch_pdp_state\nall roles + composites,\nall services + permissions"]
 
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nminimal delta vs live composites"]
+    FP & FDK & FKC --> PROPOSE["propose_policy\nPlanner LLM -> PolicyModel\nminimal delta vs live composites"]
 
-    PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
+    PROPOSE --> VALIDATE["validate_policy\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
 
-    VALIDATE --> APPLY["apply_diff\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
+    VALIDATE --> END(("END"))
 ```
 
 #### State
@@ -108,15 +110,15 @@ flowchart TD
 Identical to the Build sub-agent with one addition: a `clear_composites` node prepended before the fetch fan-out.
 
 ```
-START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_diff → validate_diff → apply_diff → format_response → END
+START → clear_composites → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
 ```
 
 #### Delta from Build
 
 - **`clear_composites`**: calls `clear_all_composites(realm)` from `aiac.pdp.library.policy` before the fetch fan-out. Removes all composite mappings from all roles.
 - **`fetch_pdp_state`**: receives a `PDPSnapshot` with empty `role_composites` after the wipe.
-- **`propose_diff`**: produces an add-only diff (no removals — composites are empty).
-- All remaining nodes (`validate_diff`, `apply_diff`, `format_response`): identical contract to Build.
+- **`propose_policy`**: produces an add-only `PolicyModel` (no removals — composites are empty).
+- **`validate_policy`**: identical contract to Build.
 
 #### Graph
 
@@ -128,13 +130,11 @@ flowchart TD
     CLEAR --> FDK["fetch_domain_knowledge\nChromaDB"]
     CLEAR --> FKC["fetch_pdp_state\nempty role_composites\nafter wipe"]
 
-    FP & FDK & FKC --> PROPOSE["propose_diff\nPlanner LLM -> ProposedDiff\nadd-only: composites are empty"]
+    FP & FDK & FKC --> PROPOSE["propose_policy\nPlanner LLM -> PolicyModel\nadd-only: composites are empty"]
 
-    PROPOSE --> VALIDATE["validate_diff\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
+    PROPOSE --> VALIDATE["validate_policy\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check"]
 
-    VALIDATE --> APPLY["apply_diff\nadd_role_composites only"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
+    VALIDATE --> END(("END"))
 ```
 
 #### State
@@ -166,16 +166,16 @@ flowchart TD
 ```
 aiac/src/aiac/agent/policy_update/
 ├── __init__.py
-├── orchestrator.py                  ← dispatches to build or rebuild sub-agent
+├── orchestrator.py                  ← dispatches to build or rebuild sub-agent, then sequences PolicyApplyGraph
 ├── build/
 │   ├── __init__.py
 │   ├── graph.py                     ← Build StateGraph
-│   ├── nodes.py                     ← fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
+│   ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy
 │   └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 └── rebuild/
     ├── __init__.py
     ├── graph.py                     ← Rebuild StateGraph
-    ├── nodes.py                     ← clear_composites, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
+    ├── nodes.py                     ← clear_composites, fetch_pdp_state, propose_policy, validate_policy
     └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 ```
 

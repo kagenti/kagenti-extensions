@@ -25,6 +25,10 @@ flowchart TD
         ORC3 --> SA5
     end
 
+    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+
+    ORC3 -->|"policy_model"| APPLY
+
     CTRL -->|"role/:id"| ORC3
 ```
 
@@ -43,7 +47,11 @@ flowchart TD
 
 `roles/orchestrator.py`
 
-Dispatches to the Role sub-agent.
+Dispatches to the Role sub-agent, then sequences `PolicyApplyGraph` (see [Shared Module: `shared/apply/`](../aiac-agent.md#sharedapply)):
+
+- Role sub-agent → Policy Apply
+
+If the sub-agent's `validate_policy` fails (`policy_model is None`), the orchestrator returns the abort response directly without calling `PolicyApplyGraph`.
 
 ---
 
@@ -54,16 +62,14 @@ Dispatches to the Role sub-agent.
 `roles/role/`
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_mappings → validate_mappings → apply_mappings → format_response → END
+START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
 ```
 
 #### Nodes
 
 - **`fetch_pdp_state`**: fetches all services and their permissions, all roles, and the current composites for the affected role.
-- **`propose_mappings`**: LLM node; produces `ProposedDiff` scoped to the affected role.
-- **`validate_mappings`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected role). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents).
-- **`apply_mappings`**: calls `add_role_composites` / `remove_role_composites` from `aiac.pdp.library.policy`.
-- **`format_response`**: assembles the result.
+- **`propose_policy`**: LLM node; produces `PolicyModel` scoped to the affected role. `PolicyModel` is defined in `aiac/pdp/library/policy/models.py` (see [`../aiac-agent.md`](../aiac-agent.md)).
+- **`validate_policy`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected role). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents). Writes `policy_model` to state on success; leaves it `None` on failure.
 
 #### Graph
 
@@ -75,13 +81,11 @@ flowchart TD
     START --> FDK["fetch_domain_knowledge\nChromaDB"]
     START --> FKC["fetch_pdp_state\naffected role composites,\nall services + permissions"]
 
-    FP & FDK & FKC --> PROPOSE["propose_mappings\nPlanner LLM -> ProposedDiff\nscoped to affected role"]
+    FP & FDK & FKC --> PROPOSE["propose_policy\nPlanner LLM -> PolicyModel\nscoped to affected role"]
 
-    PROPOSE --> VALIDATE["validate_mappings\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected role only"]
+    PROPOSE --> VALIDATE["validate_policy\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected role only"]
 
-    VALIDATE --> APPLY["apply_mappings\nadd_role_composites\nremove_role_composites"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
+    VALIDATE --> END(("END"))
 ```
 
 #### State
@@ -113,11 +117,11 @@ flowchart TD
 ```
 aiac/src/aiac/agent/roles/
 ├── __init__.py
-├── orchestrator.py                  ← dispatches to role sub-agent
+├── orchestrator.py                  ← dispatches to role sub-agent, then sequences PolicyApplyGraph
 └── role/
     ├── __init__.py
     ├── graph.py                     ← Role StateGraph
-    ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
+    ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy
     └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 ```
 

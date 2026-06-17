@@ -18,8 +18,8 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
 | Service Onboarding | `service/{id}` | Service Provision → Service Policy → Policy Apply (sequential) |
-| Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Role Update | `role/{id}` | Role sub-agent |
+| Policy Update | `build`, `rebuild` | Build → Policy Apply or Rebuild → Policy Apply (alternative, then apply) |
+| Role Update | `role/{id}` | Role → Policy Apply (sequential) |
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -38,10 +38,8 @@ flowchart TD
         ORC1["Orchestrator"]
         SA1["Service Provision"]
         SA2["Service Policy"]
-        SA3["Policy Apply"]
         ORC1 --> SA1
         ORC1 --> SA2
-        ORC1 --> SA3
     end
 
     subgraph PU["Policy Update"]
@@ -57,6 +55,12 @@ flowchart TD
         SA6["Role"]
         ORC3 --> SA6
     end
+
+    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+
+    ORC1 -->|"policy_model"| APPLY
+    ORC2 -->|"policy_model"| APPLY
+    ORC3 -->|"policy_model"| APPLY
 
     TRIGGERS --> CTRL
     CTRL -->|"role/:id"| ORC3
@@ -215,6 +219,38 @@ class ValidationVerdict(BaseModel):
 ```
 
 Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyModel` and `PolicyStatement` are defined in `aiac/pdp/library/policy/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+
+---
+
+### `shared/apply/`
+
+`PolicyApplyGraph` — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Commits to the PDP Policy Service.
+
+```
+START → apply_policy → format_response → END
+```
+
+#### Graph
+
+```mermaid
+flowchart TD
+    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy.api\napply_policy(PolicyModel)"]
+    APPLY --> FORMAT["format_response"]
+    FORMAT --> END(("END"))
+```
+
+#### Nodes
+
+- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy.api`. The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings or Rego rules) and commits.
+- **`format_response`**: assembles the commit result for the orchestrator.
+
+#### State
+
+`BaseAgentState` (no extensions required). Reads `policy_model` and `realm`; writes `summary`.
+
+> **Orchestrator contract:** The calling orchestrator must gate on `policy_model is None` before invoking `PolicyApplyGraph`. If the producing sub-graph's `validate_policy` failed (leaving `policy_model` unset), the orchestrator returns the abort response directly without calling `PolicyApplyGraph`.
+
+> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit. Since `PolicyApplyGraph` is shared, this gate applies uniformly to all use cases.
 
 ---
 
