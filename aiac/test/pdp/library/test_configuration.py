@@ -163,6 +163,16 @@ class TestGetServices:
             {"params": {"realm": REALM}},
         )
 
+    def test_serviceId_populated_from_clientId(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "c1", "clientId": "mlflow", "enabled": True}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok([])],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].serviceId == "mlflow"
+
     def test_raises_on_non_2xx(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_err()):
