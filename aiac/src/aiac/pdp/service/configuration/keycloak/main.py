@@ -6,7 +6,6 @@ from fastapi import Depends, FastAPI, Query
 from keycloak import KeycloakAdmin
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
-from typing import Literal
 from starlette.responses import JSONResponse
 
 _admin: KeycloakAdmin | None = None
@@ -42,10 +41,6 @@ app = FastAPI(lifespan=_lifespan)
 class _ScopeCreate(BaseModel):
     name: str
     description: str = ""
-
-
-class _ServicePatch(BaseModel):
-    type: Literal["Agent", "Tool"]
 
 
 class _RoleCreate(BaseModel):
@@ -90,21 +85,12 @@ def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
-@app.patch("/services/{service_id}", status_code=200)
-def patch_service(service_id: str, body: _ServicePatch, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        client = admin.get_client(service_id)
-        existing_attrs = client.get("attributes") or {}
-        admin.update_client(service_id, {"attributes": {**existing_attrs, "kagenti.service.type": body.type}})
-        return admin.get_client(service_id)
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
 @app.get("/services/{service_id}/roles")
 def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        return admin.get_realm_roles_of_client_scope(service_id)
+        sa_user = admin.get_client_service_account_user(service_id)
+        user_id = sa_user["id"]
+        return admin.get_realm_roles_of_user(user_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -112,7 +98,9 @@ def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin
 @app.post("/services/{service_id}/roles/{role_id}", status_code=201)
 def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        admin.assign_realm_roles_to_client_scope(service_id, [{"id": role_id}])
+        sa_user = admin.get_client_service_account_user(service_id)
+        user_id = sa_user["id"]
+        admin.assign_realm_roles(user_id, [{"id": role_id}])
         return JSONResponse(status_code=201, content={})
     except KeycloakError as e:
         if e.response_code == 409:
