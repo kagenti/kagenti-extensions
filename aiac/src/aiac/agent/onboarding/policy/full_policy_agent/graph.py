@@ -31,6 +31,7 @@ Key Features:
     - Retry mechanism with semantic verification
 """
 
+from aiac.pdp.library.configuration.models import Service
 from typing import Dict, Any, Optional
 from pathlib import Path
 import os
@@ -121,13 +122,13 @@ def _parse_and_extract_scopes(
 
             if result.get('explanation'):
                 explanations.append(
-                    f"{service_name}/{privilege['name']}: {result['explanation']}"
+                    f"{service_id}/{privilege['name']}: {result['explanation']}"
                 )
 
             for realm_role_name in result.get('real_roles_with_access', []):
                 realm_role_to_privileges.setdefault(realm_role_name, []).append(
                     {
-                        'service': service_name,
+                        'service': service_id,
                         'privilege': privilege['name'],
                     }
                 )
@@ -197,7 +198,7 @@ def _validate_policy(
         state: PolicyState with 'policy_structure' and 'description'
         llm: LLM instance for semantic verification
         realm_roles: List of available realm roles
-        service_names: List of service names
+        service_names: List of service ids
         privileges_map: Dict mapping service names to privileges
         verbose: Whether to print detailed output
         max_retries: Maximum retry attempts
@@ -282,7 +283,7 @@ def create_policy_builder_graph(
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm roles
         privileges_map: Dict mapping service names to privileges
-        service_names: List of service names
+        service_names: List of service ids
 
     Returns:
         Compiled LangGraph workflow
@@ -358,7 +359,7 @@ class PolicyBuilder:
         config: PolicyBuilderConfig instance
         realm_roles: List of available realm role names
         privileges_map: Dict mapping service names to their available privileges
-        service_names: List of service names
+        service_names: List of service ids
         graph: Compiled LangGraph state machine
     """
     
@@ -413,7 +414,7 @@ class PolicyBuilder:
             {"name": r.name, "description": r.description or ""}
             for r in roles_models
         ]
-        services = config_api.get_services()
+        services: list[Service] = config_api.get_services()
         self.privileges_map = {}
         self.service_names = []
         for service in services:
@@ -421,15 +422,16 @@ class PolicyBuilder:
             # Service.roles contains the privileges/permissions for this service.
             if not service.description or not ("Demo" in service.description):
                 continue
-            print (f"Service {service.id} added: {service.description}")
-            self.privileges_map[service.id] = {
+            service_name = service.name or service.id 
+            print (f"Service {service_name} added: {service.description}")
+            self.privileges_map[service.name] = {
                 "service_type": service.type,
-                "roles": [
-                    {"name": role.name, "description": role.description or ""}
-                    for role in service.roles
+                "scopes": [
+                    {"name": scope.name, "description": scope.description or ""}
+                    for scope in service.scopes
                 ],
             }
-            self.service_names.append(service.id)
+            self.service_names.append(service_name)
 
         # Build and compile the LangGraph state machine
         self.graph = create_policy_builder_graph(
@@ -642,19 +644,19 @@ class PolicyBuilder:
         }
 
         # Generate a separate rego file for each service
-        for service_name in services_in_policy:
+        for service_id in services_in_policy:
             policy_rego = generate_policy_rego(
                 policy_structure, 
-                service_name, 
+                service_id, 
                 service_types,
                 description
             )
             # Sanitize service name for filename (replace special chars with underscores)
-            safe_service_name = service_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
-            policy_path = dir_path / f"generated_policy_{safe_service_name}.rego"
+            safe_service_id = service_id.replace('/', '_').replace('\\', '_').replace(' ', '_')
+            policy_path = dir_path / f"generated_policy_{safe_service_id}.rego"
             with open(policy_path, 'w') as f:
                 f.write(policy_rego)
-            print(f"Generated policy Rego for service '{service_name}' saved to {policy_path}")
+            print(f"Generated policy Rego for service '{service_id}' saved to {policy_path}")
 
 
 # ============================================================================

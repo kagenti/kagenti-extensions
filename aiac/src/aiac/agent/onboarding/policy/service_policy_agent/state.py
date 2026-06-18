@@ -16,7 +16,7 @@ class ServicePolicyState(TypedDict):
 
     Attributes:
         description: Natural language policy description
-        service_id: Keycloak service ID to scope the policy to
+        service_name: Keycloak service name to scope the policy to
         explanation: LLM explanation of the privilege mappings
         parsed_scopes: List of {role, privileges} mappings (realm-role to privileges)
         policy_structure: Structured policy dict ready for YAML conversion
@@ -27,7 +27,7 @@ class ServicePolicyState(TypedDict):
         validation_passed: Whether the last validation pass succeeded
     """
     description: str
-    service_id: str
+    service_name: str
     explanation: str
     parsed_scopes: List[Dict[str, Any]]
     policy_structure: Dict[str, Any]
