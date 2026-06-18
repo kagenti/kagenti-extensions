@@ -92,6 +92,8 @@ def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin
         user_id = sa_user["id"]
         return admin.get_realm_roles_of_user(user_id)
     except KeycloakError as e:
+        if e.response_code == 400:
+            return []
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 

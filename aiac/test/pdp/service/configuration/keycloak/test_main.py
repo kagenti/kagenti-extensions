@@ -93,17 +93,29 @@ class TestGetSubjectAssignments:
 
 
 # ---------------------------------------------------------------------------
-# GET /services/{service_id}/permissions
+# GET /services/{service_id}/roles
 # ---------------------------------------------------------------------------
 
 
-class TestGetServicePermissions:
+class TestListServiceRoles:
     def test_returns_json_array(self):
         admin = MagicMock()
-        admin.get_realm_roles_of_client_scope.return_value = [{"id": "cr1", "name": "view-clients"}]
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.get_realm_roles_of_user.return_value = [{"id": "cr1", "name": "view-clients"}]
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
         assert resp.json() == [{"id": "cr1", "name": "view-clients"}]
+        admin.get_client_service_account_user.assert_called_once_with("svc-uuid")
+        admin.get_realm_roles_of_user.assert_called_once_with("sa-user-id")
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.get_client_service_account_user.side_effect = KeycloakError(
+            error_message="not found", response_code=404
+        )
+        resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
 
     def teardown_method(self):
         app.dependency_overrides.clear()
@@ -513,15 +525,16 @@ class TestCreateRoleEndpoint:
 class TestAssignRoleToService:
     def test_returns_201_on_success(self):
         admin = MagicMock()
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
         resp = _make_client(admin).post(f"/services/svc-uuid/roles/role-id?realm={REALM}")
         assert resp.status_code == 201
-        admin.assign_realm_roles_to_client_scope.assert_called_once_with(
-            "svc-uuid", [{"id": "role-id"}]
-        )
+        admin.get_client_service_account_user.assert_called_once_with("svc-uuid")
+        admin.assign_realm_roles.assert_called_once_with("sa-user-id", [{"id": "role-id"}])
 
     def test_returns_409_when_already_assigned(self):
         admin = MagicMock()
-        admin.assign_realm_roles_to_client_scope.side_effect = KeycloakError(
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.assign_realm_roles.side_effect = KeycloakError(
             error_message="Conflict", response_code=409
         )
         resp = _make_client(admin).post(f"/services/svc-uuid/roles/role-id?realm={REALM}")
@@ -529,7 +542,8 @@ class TestAssignRoleToService:
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
-        admin.assign_realm_roles_to_client_scope.side_effect = KeycloakError(
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.assign_realm_roles.side_effect = KeycloakError(
             error_message="failure", response_code=500
         )
         resp = _make_client(admin).post(f"/services/svc-uuid/roles/role-id?realm={REALM}")
@@ -577,7 +591,7 @@ class TestKeycloakErrorProduces502:
 
     def test_get_service_permissions(self):
         admin = MagicMock()
-        admin.get_realm_roles_of_client_scope.side_effect = _keycloak_error()
+        admin.get_client_service_account_user.side_effect = _keycloak_error()
         assert _make_client(admin).get(f"/services/s1/roles?realm={REALM}").status_code == 502
 
     def test_get_role_composites(self):
