@@ -13,7 +13,6 @@ def build_single_role_system_prompt(
     realm_roles: List[Dict[str, str]],
     privilege: Dict[str, str],
     policy_description: str = "",
-    service_name: str = "",
 ) -> str:
     """
     Build a system prompt for mapping a single privilege to realm roles.
@@ -26,7 +25,6 @@ def build_single_role_system_prompt(
         realm_roles: List of dicts with 'name' and 'description' for realm roles
         privilege: Dict with 'name' and 'description' for the privilege to analyze
         policy_description: Optional natural language policy description for context
-        service_name: Name of the service that owns the privilege
 
     Returns:
         Formatted system prompt string ready for LLM consumption
@@ -265,7 +263,6 @@ Realm role mapping: developer → R&D, tech-support → technical support.
 
 def build_semantic_verification_prompt(
     policy_description: str,
-    service_name: str,
     privilege: Dict[str, str],
     realm_roles: List[Dict[str, str]],
     real_roles_with_access: List[str],
@@ -275,7 +272,6 @@ def build_semantic_verification_prompt(
 
     Args:
         policy_description: Natural language policy description
-        service_name: Name of the service that owns the privilege
         privilege: Dict with 'name' and 'description' of the privilege
         realm_roles: List of dicts with 'name' and 'description' for all realm roles
         real_roles_with_access: List of realm role names currently assigned
@@ -285,7 +281,7 @@ def build_semantic_verification_prompt(
     """
     privilege_name = privilege['name']
     privilege_desc = privilege.get('description', '')
-    privilege_info = privilege_name + (f" ({privilege_desc})" if privilege_desc else "")
+    privilege_info = privilege_name + (f": {privilege_desc}" if privilege_desc else "")
 
     realm_roles_context = "\n".join(
         f"  - {r['name']}" + (f": {r.get('description', '')}" if r.get('description') else "")
@@ -300,8 +296,7 @@ POLICY DESCRIPTION:
 {policy_description}
 
 PRIVILEGE BEING ANALYZED:
-  Service: {service_name}
-  Privilege: {privilege_info}
+  {privilege_info}
 
 CURRENT MAPPING (realm roles that have access to this privilege):
   {assigned_roles}
@@ -310,21 +305,36 @@ AVAILABLE REALM ROLES:
 {realm_roles_context}
 
 VALIDATION TASK:
-Based on the policy description, verify if granting access to privilege '{privilege_name}' \
-from service '{service_name}' to realm roles [{assigned_roles}] is correct.
+Verify whether the assigned realm roles are correct for privilege '{privilege_name}', \
+given the policy description AND the privilege's own name and description.
 
-Consider:
-- Are the correct user groups (realm roles) included?
-- Are any user groups incorrectly included or excluded?
-- Does the mapping match the access requirements stated in the policy description?
+CRITICAL RULES — read carefully before evaluating:
+
+1. DOMAIN CHECK FIRST: Determine the domain of this privilege from its name and description
+   (e.g., "GitHub repositories", "data warehouse", "UI dashboard").
+   If the policy description does NOT explicitly address this privilege's domain, the mapping
+   cannot be evaluated against the policy — accept any assignment including empty and return
+   MAPPING_CORRECT: YES.
+
+2. DO NOT RE-DERIVE THE FULL MAPPING: You are verifying an existing mapping, not computing
+   a new one. Only flag the mapping as wrong if you can point to a specific privilege
+   description + policy statement that directly contradicts what was assigned.
+
+3. EMPTY IS VALID BY DEFAULT: An empty assignment [] is acceptable unless the privilege
+   description explicitly requires certain realm roles AND the policy confirms those users
+   need access to this specific privilege.
+
+4. FOCUS ON THIS PRIVILEGE ONLY: Do not reason about what roles are required by the policy
+   in general. Only ask: "Is the mapping for THIS specific privilege consistent with its
+   description and the policy?"
 
 Respond in this EXACT format:
 MAPPING_CORRECT: YES
-EXPLANATION: Brief explanation of why the mapping is correct.
+EXPLANATION: Brief explanation citing the domain check and why the mapping is consistent.
 
 OR if incorrect:
 MAPPING_CORRECT: NO
-EXPLANATION: Specific description of what is wrong with the mapping."""
+EXPLANATION: Specific contradiction between the privilege description, the policy, and the mapping."""
 
 
 def build_single_role_retry_prompt(

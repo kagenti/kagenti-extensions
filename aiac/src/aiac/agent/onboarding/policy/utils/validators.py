@@ -87,7 +87,7 @@ def validate_policy_structure(
                     f"Found empty privilege name for service '{service}' in realm role '{realm_role}'"
                 )
             elif service in privileges_map:
-                privilege_names = [p['name'] for p in privileges_map[service]["roles"]]
+                privilege_names = [p['name'] for p in privileges_map[service]["scopes"]]
                 if privilege not in privilege_names:
                     available_privileges = (
                         ', '.join(privilege_names)

@@ -112,7 +112,7 @@ def _parse_and_extract_scopes(
     realm_role_to_privileges: dict = {}
 
     for service_name, service_info in privileges_map.items():
-        for privilege in service_info["roles"]:
+        for privilege in service_info["scopes"]:
             result = mapper.map_role(
                 policy_description=state['description'],
                 service_name=service_name,
@@ -122,13 +122,13 @@ def _parse_and_extract_scopes(
 
             if result.get('explanation'):
                 explanations.append(
-                    f"{service_id}/{privilege['name']}: {result['explanation']}"
+                    f"{service_name}/{privilege['name']}: {result['explanation']}"
                 )
 
             for realm_role_name in result.get('real_roles_with_access', []):
                 realm_role_to_privileges.setdefault(realm_role_name, []).append(
                     {
-                        'service': service_id,
+                        'service': service_name,
                         'privilege': privilege['name'],
                     }
                 )
@@ -411,8 +411,9 @@ class PolicyBuilder:
         
         roles_models = config_api.get_roles()
         self.realm_roles = [
-            {"name": r.name, "description": r.description or ""}
+            {"name": r.name, "description": r.description}
             for r in roles_models
+            if r.description
         ]
         services: list[Service] = config_api.get_services()
         self.privileges_map = {}
@@ -424,12 +425,16 @@ class PolicyBuilder:
                 continue
             service_name = service.name or service.id 
             print (f"Service {service_name} added: {service.description}")
+            described_scopes = [
+                {"name": scope.name, "description": scope.description}
+                for scope in service.scopes
+                if scope.description
+            ]
+            if not described_scopes:
+                continue
             self.privileges_map[service.name] = {
                 "service_type": service.type,
-                "scopes": [
-                    {"name": scope.name, "description": scope.description or ""}
-                    for scope in service.scopes
-                ],
+                "scopes": described_scopes,
             }
             self.service_names.append(service_name)
 

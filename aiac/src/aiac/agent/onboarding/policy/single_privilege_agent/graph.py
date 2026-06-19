@@ -168,8 +168,7 @@ def _analyze_role_mapping(
     system_prompt = build_single_role_system_prompt(
         state['realm_roles'],
         state['privilege'],
-        state.get('policy_description', ''),
-        state.get('service_name', ''),
+        state.get('policy_description', '')
     )
     
     user_prompt = (
@@ -352,7 +351,6 @@ def _verify_semantic_mapping(
 
     verification_prompt = build_semantic_verification_prompt(
         policy_description=state.get("policy_description", ""),
-        service_name=state.get("service_name", ""),
         privilege=state["privilege"],
         realm_roles=state["realm_roles"],
         real_roles_with_access=real_roles_with_access,

@@ -27,7 +27,7 @@ class SinglePrivilegeState(TypedDict):
         validation_passed: Boolean flag indicating if validation succeeded
     """
     policy_description: str
-    service_id: str
+    service_name: str
     privilege: Dict[str, str]
     realm_roles: List[Dict[str, str]]
     explanation: str
