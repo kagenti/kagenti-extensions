@@ -352,7 +352,6 @@ def _verify_semantic_mapping(
 
     verification_prompt = build_semantic_verification_prompt(
         policy_description=state.get("policy_description", ""),
-        service_name=state.get("service_name", ""),
         privilege=state["privilege"],
         realm_roles=state["realm_roles"],
         real_roles_with_access=real_roles_with_access,

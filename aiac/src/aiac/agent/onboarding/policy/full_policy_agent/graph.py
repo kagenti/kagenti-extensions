@@ -409,11 +409,13 @@ class PolicyBuilder:
         config_api = Configuration.for_realm(realm)
         
         roles_models = config_api.get_roles()
+        print (f"Got {len(roles_models)} roles")
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
             for r in roles_models
         ]
         services = config_api.get_services()
+        print (f"Got {len(services)} services")
         self.privileges_map = {}
         self.service_names = []
         for service in services:
@@ -421,15 +423,17 @@ class PolicyBuilder:
             # Service.roles contains the privileges/permissions for this service.
             if not service.description or not ("Demo" in service.description):
                 continue
-            print (f"Service {service.id} added: {service.description}")
-            self.privileges_map[service.id] = {
+            print (f"Service {service.name} added: {service.description}")
+            print (f"Service {service}")
+            self.privileges_map[service.name] = {
                 "service_type": service.type,
                 "roles": [
                     {"name": role.name, "description": role.description or ""}
                     for role in service.roles
                 ],
             }
-            self.service_names.append(service.id)
+            print (f"{service.name} , {service.name} -> {service.type} {service.roles}")
+            self.service_names.append(service.name)
 
         # Build and compile the LangGraph state machine
         self.graph = create_policy_builder_graph(
