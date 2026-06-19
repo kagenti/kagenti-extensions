@@ -13,7 +13,6 @@ def build_single_role_system_prompt(
     realm_roles: List[Dict[str, str]],
     privilege: Dict[str, str],
     policy_description: str = "",
-    service_name: str = "",
 ) -> str:
     """
     Build a system prompt for mapping a single privilege to realm roles.
@@ -26,7 +25,6 @@ def build_single_role_system_prompt(
         realm_roles: List of dicts with 'name' and 'description' for realm roles
         privilege: Dict with 'name' and 'description' for the privilege to analyze
         policy_description: Optional natural language policy description for context
-        service_name: Name of the service that owns the privilege
 
     Returns:
         Formatted system prompt string ready for LLM consumption

@@ -168,8 +168,7 @@ def _analyze_role_mapping(
     system_prompt = build_single_role_system_prompt(
         state['realm_roles'],
         state['privilege'],
-        state.get('policy_description', ''),
-        state.get('service_name', ''),
+        state.get('policy_description', '')
     )
     
     user_prompt = (

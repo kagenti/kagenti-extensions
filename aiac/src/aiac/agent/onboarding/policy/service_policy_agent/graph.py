@@ -4,7 +4,7 @@ Service Policy Agent
 
 Generates a partial access control policy that contains only the rules
 relevant for a single specified Keycloak service.  Inputs are a natural
-language policy description and a service ID; output is a YAML policy
+language policy description and a service name; output is a YAML policy
 with realm-role → service-role mappings scoped to that service.
 
 Workflow:
@@ -65,7 +65,7 @@ def _filter_and_extract_scopes(
     results into the {role to privileges} structure used by _build_policy.
 
     Args:
-        state: Current ServicePolicyState (needs 'description' and 'service_id')
+        state: Current ServicePolicyState (needs 'description' and 'service_name')
         llm: LLM instance
         realm_roles: All available realm roles [{'name': str, 'description': str}]
         service_type: Service type (e.g. 'Tool', 'Agent') — property of the service, not each privilege
@@ -75,7 +75,7 @@ def _filter_and_extract_scopes(
     Returns:
         Updated ServicePolicyState with parsed_scopes and explanation
     """
-    service_id = state["service_id"]
+    service_name = state["service_name"]
     mapper = SinglePrivilegeMapper(llm=llm, verbose=verbose)
 
     explanations: list[str] = []
@@ -84,18 +84,18 @@ def _filter_and_extract_scopes(
     for privilege in privileges:
         result = mapper.map_role(
             policy_description=state["description"],
-            service_name=service_id,
+            service_name=service_name,
             privilege=privilege,
             realm_roles=realm_roles,
         )
 
         if result.get("explanation"):
-            explanations.append(f"{service_id}/{privilege['name']}: {result['explanation']}")
+            explanations.append(f"{service_name}/{privilege['name']}: {result['explanation']}")
 
         for realm_role_name in result.get("real_roles_with_access", []):
             realm_role_to_privileges.setdefault(realm_role_name, []).append(
                 {
-                    "service": service_id,
+                    "service": service_name,
                     "privilege": privilege["name"],
                 }
             )
@@ -137,10 +137,10 @@ def _generate_yaml(state: ServicePolicyState) -> ServicePolicyState:
     Returns:
         Updated ServicePolicyState with yaml_output
     """
-    service_id = state.get("service_id", "")
+    service_name = state.get("service_name", "")
     header = (
         "# Partial Access Control Policy\n"
-        f"# Scoped to service: {service_id}\n"
+        f"# Scoped to service: {service_name}\n"
         "# Maps realm roles to the privileges they may access.\n\n"
     )
 
@@ -171,7 +171,7 @@ def _validate_policy(
     state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    service_id: str,
+    service_name: str,
     service_type: str,
     privileges: list,
     verbose: bool,
@@ -185,10 +185,10 @@ def _validate_policy(
     """
     retry_count = state.get("retry_count", 0)
     policy = state["policy_structure"].get("policy", {})
-    service_names = [service_id]
+    service_names = [service_name]
 
     privileges_map = {
-        service_id: {
+        service_name: {
             "service_type": service_type,
             "roles": privileges,
         }
@@ -235,7 +235,7 @@ def _should_retry(state: ServicePolicyState, max_retries: int) -> str:
 def create_service_policy_builder_graph(
     config: ServicePolicyBuilderConfig,
     realm_roles: list,
-    service_id: str,
+    service_name: str,
     service_type: str,
     privileges: list,
 ):
@@ -245,7 +245,7 @@ def create_service_policy_builder_graph(
     Args:
         config: ServicePolicyBuilderConfig
         realm_roles: All realm roles [{name, description}]
-        service_id: Target Keycloak service ID
+        service_name: Service name
         service_type: Service type (e.g. 'Tool', 'Agent') — property of the service
         privileges: Privileges of the target service [{name, description}]
 
@@ -266,7 +266,7 @@ def create_service_policy_builder_graph(
 
     def validate_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, service_id, service_type, privileges,
+            state, config.llm, realm_roles, service_name, service_type, privileges,
             config.verbose, config.max_retries
         )
 
@@ -300,7 +300,7 @@ class ServicePolicyBuilder:
     """
     AI-powered policy builder scoped to a single Keycloak service.
 
-    Given a natural language policy description and a service ID, produces
+    Given a natural language policy description and a service name, produces
     a YAML access control policy that contains only the realm-role →
     privilege mappings relevant to that service.
 
@@ -313,7 +313,7 @@ class ServicePolicyBuilder:
 
     def __init__(
         self,
-        service_id: str,
+        service_name: str,
         realm: str = "demo",
         config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
@@ -322,8 +322,8 @@ class ServicePolicyBuilder:
     ):
         """
         Args:
-            service_id: Keycloak service ID to scope the policy to
-            realm: Keycloak realm name (empty string uses the default realm)
+            service_name: service name to scope the policy to
+            realm: realm name
             config_path: Path to the AC config YAML; falls back to AC_CONFIG_PATH env var
             llm: LangChain LLM instance; created automatically if not provided
             verbose: Print LLM explanations and validation details
@@ -338,7 +338,7 @@ class ServicePolicyBuilder:
         if config_path is not None:
             os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
 
-        self.service_id = service_id
+        self.service_name = service_name
         self.config = ServicePolicyBuilderConfig(
             llm=llm_instance,
             verbose=verbose,
@@ -357,7 +357,7 @@ class ServicePolicyBuilder:
         self.service_type: str = "Tool"  # Default to "Tool" if not found
         self.privileges = []
         for service in services:
-            if service.id != service_id:
+            if service.id != service_name:
                 continue
             # Handle None case by defaulting to "Tool"
             self.service_type = service.type or "Tool"
@@ -372,7 +372,7 @@ class ServicePolicyBuilder:
         self.graph = create_service_policy_builder_graph(
             self.config,
             self.realm_roles,
-            self.service_id,
+            self.service_name,
             self.service_type,
             self.privileges,
         )
@@ -399,7 +399,7 @@ class ServicePolicyBuilder:
         """
         initial_state: ServicePolicyState = {
             "description": description,
-            "service_id": self.service_id,
+            "service_name": self.service_name,
             "explanation": "",
             "parsed_scopes": [],
             "policy_structure": {},

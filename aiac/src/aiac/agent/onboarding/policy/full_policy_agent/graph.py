@@ -31,6 +31,7 @@ Key Features:
     - Retry mechanism with semantic verification
 """
 
+from aiac.pdp.library.configuration.models import Service
 from typing import Dict, Any, Optional
 from pathlib import Path
 import os
@@ -111,7 +112,7 @@ def _parse_and_extract_scopes(
     realm_role_to_privileges: dict = {}
 
     for service_name, service_info in privileges_map.items():
-        for privilege in service_info["roles"]:
+        for privilege in service_info["scopes"]:
             result = mapper.map_role(
                 policy_description=state['description'],
                 service_name=service_name,
@@ -411,8 +412,9 @@ class PolicyBuilder:
         roles_models = config_api.get_roles()
         print (f"Got {len(roles_models)} roles")
         self.realm_roles = [
-            {"name": r.name, "description": r.description or ""}
+            {"name": r.name, "description": r.description}
             for r in roles_models
+            if r.description
         ]
         services = config_api.get_services()
         print (f"Got {len(services)} services")
@@ -423,17 +425,21 @@ class PolicyBuilder:
             # Service.roles contains the privileges/permissions for this service.
             if not service.description or not ("Demo" in service.description):
                 continue
-            print (f"Service {service.name} added: {service.description}")
+            service_name = service.name or service.id 
+            print (f"Service {service_name} added: {service.description}")
             print (f"Service {service}")
+            described_scopes = [
+                {"name": scope.name, "description": scope.description}
+                for scope in service.scopes
+                if scope.description
+            ]
+            if not described_scopes:
+                continue
             self.privileges_map[service.name] = {
                 "service_type": service.type,
-                "roles": [
-                    {"name": role.name, "description": role.description or ""}
-                    for role in service.roles
-                ],
+                "scopes": described_scopes,
             }
-            print (f"{service.name} , {service.name} -> {service.type} {service.roles}")
-            self.service_names.append(service.name)
+            self.service_names.append(service_name)
 
         # Build and compile the LangGraph state machine
         self.graph = create_policy_builder_graph(
@@ -646,19 +652,19 @@ class PolicyBuilder:
         }
 
         # Generate a separate rego file for each service
-        for service_name in services_in_policy:
+        for service_id in services_in_policy:
             policy_rego = generate_policy_rego(
                 policy_structure, 
-                service_name, 
+                service_id, 
                 service_types,
                 description
             )
             # Sanitize service name for filename (replace special chars with underscores)
-            safe_service_name = service_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
-            policy_path = dir_path / f"generated_policy_{safe_service_name}.rego"
+            safe_service_id = service_id.replace('/', '_').replace('\\', '_').replace(' ', '_')
+            policy_path = dir_path / f"generated_policy_{safe_service_id}.rego"
             with open(policy_path, 'w') as f:
                 f.write(policy_rego)
-            print(f"Generated policy Rego for service '{service_name}' saved to {policy_path}")
+            print(f"Generated policy Rego for service '{service_id}' saved to {policy_path}")
 
 
 # ============================================================================

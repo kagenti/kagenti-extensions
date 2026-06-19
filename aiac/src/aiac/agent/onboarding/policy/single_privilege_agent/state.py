@@ -16,7 +16,7 @@ class SinglePrivilegeState(TypedDict):
 
     Attributes:
         policy_description: Natural language policy description (context for the mapping)
-        service_name: Name of the service that owns the privilege
+        service_id: Name of the service that owns the privilege
         privilege: Dict with 'name' and 'description' of the privilege to analyze
         realm_roles: List of available realm roles with descriptions
         explanation: LLM's explanation of which real roles should have access
