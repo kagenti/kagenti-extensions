@@ -6,7 +6,6 @@ from fastapi import Depends, FastAPI, Query
 from keycloak import KeycloakAdmin
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
-from typing import Literal
 from starlette.responses import JSONResponse
 
 _admin: KeycloakAdmin | None = None
@@ -44,34 +43,15 @@ class _ScopeCreate(BaseModel):
     description: str = ""
 
 
+class _RoleCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
 @app.get("/subjects")
 def list_subjects(admin: KeycloakAdmin = Depends(get_admin)):
     try:
         return admin.get_users()
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-@app.get("/roles")
-def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        return admin.get_realm_roles()
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-@app.get("/services")
-def list_services(admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        return admin.get_clients()
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-@app.get("/scopes")
-def list_scopes(admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        return admin.get_client_scopes()
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -89,11 +69,44 @@ def get_subject_assignments(subject_id: str, admin: KeycloakAdmin = Depends(get_
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
+@app.get("/services")
+def list_services(admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        return admin.get_clients()
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.get("/services/{service_id}")
+def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        return admin.get_client(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
 @app.get("/services/{service_id}/roles")
 def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        return admin.get_realm_roles_of_client_scope(service_id)
+        sa_user = admin.get_client_service_account_user(service_id)
+        user_id = sa_user["id"]
+        return admin.get_realm_roles_of_user(user_id)
     except KeycloakError as e:
+        if e.response_code == 400:
+            return []
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.post("/services/{service_id}/roles/{role_id}", status_code=201)
+def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        sa_user = admin.get_client_service_account_user(service_id)
+        user_id = sa_user["id"]
+        admin.assign_realm_roles(user_id, [{"id": role_id}])
+        return JSONResponse(status_code=201, content={})
+    except KeycloakError as e:
+        if e.response_code == 409:
+            return JSONResponse(status_code=409, content={"error": str(e)})
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
@@ -117,47 +130,6 @@ def create_scope(service_id: str, body: _ScopeCreate, admin: KeycloakAdmin = Dep
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
-@app.get("/services/{service_id}")
-def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        return admin.get_client(service_id)
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-class _ServicePatch(BaseModel):
-    type: Literal["Agent", "Tool"]
-
-
-@app.patch("/services/{service_id}", status_code=200)
-def patch_service(service_id: str, body: _ServicePatch, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        client = admin.get_client(service_id)
-        existing_attrs = client.get("attributes") or {}
-        admin.update_client(service_id, {"attributes": {**existing_attrs, "kagenti.service.type": body.type}})
-        return admin.get_client(service_id)
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-class _RoleCreate(BaseModel):
-    name: str
-    description: str = ""
-
-
-@app.post("/scopes", status_code=201)
-def create_scope_standalone(body: _ScopeCreate, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        scope_id = admin.create_client_scope(
-            {"name": body.name, "description": body.description, "protocol": "openid-connect"}
-        )
-        return admin.get_client_scope(scope_id)
-    except KeycloakError as e:
-        if e.response_code == 409:
-            return JSONResponse(status_code=409, content={"error": str(e)})
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
 @app.post("/services/{service_id}/scopes/{scope_id}", status_code=201)
 def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
@@ -169,22 +141,19 @@ def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
+@app.get("/roles")
+def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        return admin.get_realm_roles()
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
 @app.post("/roles", status_code=201)
 def create_role(body: _RoleCreate, admin: KeycloakAdmin = Depends(get_admin)):
     try:
         admin.create_realm_role({"name": body.name, "description": body.description})
         return admin.get_realm_role(body.name)
-    except KeycloakError as e:
-        if e.response_code == 409:
-            return JSONResponse(status_code=409, content={"error": str(e)})
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
-@app.post("/services/{service_id}/roles/{role_id}", status_code=201)
-def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        admin.assign_realm_roles_to_client_scope(service_id, [{"id": role_id}])
-        return JSONResponse(status_code=201, content={})
     except KeycloakError as e:
         if e.response_code == 409:
             return JSONResponse(status_code=409, content={"error": str(e)})
@@ -212,6 +181,27 @@ def list_role_scopes(role_name: str, admin: KeycloakAdmin = Depends(get_admin)):
                 mapped.append(scope)
         return mapped
     except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.get("/scopes")
+def list_scopes(admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        return admin.get_client_scopes()
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.post("/scopes", status_code=201)
+def create_scope_standalone(body: _ScopeCreate, admin: KeycloakAdmin = Depends(get_admin)):
+    try:
+        scope_id = admin.create_client_scope(
+            {"name": body.name, "description": body.description, "protocol": "openid-connect"}
+        )
+        return admin.get_client_scope(scope_id)
+    except KeycloakError as e:
+        if e.response_code == 409:
+            return JSONResponse(status_code=409, content={"error": str(e)})
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 

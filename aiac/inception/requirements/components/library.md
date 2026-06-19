@@ -96,6 +96,7 @@ Represents a service (Keycloak: `client`).
 | Field | Type | Keycloak field | Default |
 |-------|------|----------------|---------|
 | `id` | `str` | `id` | |
+| `serviceId` | `str \| None` | `clientId` | `None` |
 | `name` | `str \| None` | `name` | |
 | `description` | `str \| None` | `description` | `None` |
 | `enabled` | `bool` | `enabled` | |

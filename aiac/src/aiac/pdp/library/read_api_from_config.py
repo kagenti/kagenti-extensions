@@ -93,11 +93,12 @@ class Configuration:
         for service in services_raw:
             if isinstance(service, dict):
                 service_id = service.get("id") or service.get("service_id") or service.get("serviceId") or ""
+                service_id_field = service.get("serviceId") or service.get("service_id") or None
                 name = service.get("name") or None
                 description = service.get("description") or None
                 enabled = service.get("enabled", True)
                 service_type = service.get("type") or None
-                
+
                 # Parse roles for this service
                 roles_raw = service.get("roles", [])
                 roles = []
@@ -108,7 +109,7 @@ class Configuration:
                     else:
                         role_name = str(role)
                         role_description = None
-                    
+
                     if role_name:
                         roles.append(
                             Role(
@@ -120,15 +121,17 @@ class Configuration:
                         )
             else:
                 service_id = str(service)
+                service_id_field = None
                 name = None
                 description = None
                 enabled = True
                 service_type = None
                 roles = []
-            
+
             result.append(
                 Service(
                     id=service_id,
+                    serviceId=service_id_field,
                     name=name,
                     description=description,
                     enabled=enabled,

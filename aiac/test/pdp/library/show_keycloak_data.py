@@ -91,6 +91,7 @@ def main() -> None:
     for svc in services:
         status = "enabled" if svc.enabled else "disabled"
         print(f"  id={svc.id}")
+        print(f"    serviceId   : {svc.serviceId or '—'}")
         print(f"    name        : {svc.name or '—'}")
         print(f"    description : {svc.description or '—'}")
         print(f"    status      : {status}")

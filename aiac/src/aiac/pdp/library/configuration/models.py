@@ -30,6 +30,7 @@ class Service(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str
+    serviceId: str | None = None
     name: str | None = None
     description: str | None = None
     enabled: bool
@@ -50,6 +51,10 @@ class Service(BaseModel):
         name = data.get("name")
         if client_id and (not name or str(name).startswith("${")):
             updates["name"] = client_id
+
+        # Surface Keycloak's human-readable clientId as serviceId (id stays the UUID).
+        if client_id and not data.get("serviceId"):
+            updates["serviceId"] = client_id
 
         # Resolve service type: explicit Keycloak attribute takes precedence,
         # then SPIFFE-format clientId implies an agent workload.

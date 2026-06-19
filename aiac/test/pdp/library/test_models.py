@@ -187,11 +187,22 @@ class TestService:
         s = Service.model_validate({"id": "c1", "enabled": True})
         assert s.scopes == []
 
+    def test_serviceId_populated_from_clientId(self):
+        s = Service.model_validate(
+            {"id": "c1", "enabled": True, "clientId": "my-app"}
+        )
+        assert s.serviceId == "my-app"
+
+    def test_serviceId_none_when_clientId_absent(self):
+        s = Service.model_validate({"id": "c1", "enabled": True})
+        assert s.serviceId is None
+
     def test_no_clientId_field(self):
         s = Service.model_validate(
             {"id": "c1", "enabled": True, "clientId": "my-app"}
         )
         assert not hasattr(s, "clientId")
+        assert s.serviceId == "my-app"
 
     def test_no_protocol_field(self):
         s = Service.model_validate(
@@ -383,6 +394,7 @@ class TestKeycloakRealWorldPayloads:
             }
         )
         assert s.id == "account-client-uuid"
+        assert s.serviceId == "account"
         assert s.name == "account"
         assert s.description == "${client_account_description}"
         assert s.enabled is True

@@ -56,6 +56,8 @@ class Configuration:
     def get_services(self) -> list[Service]:
         resp = requests.get(f"{self._base_url()}/services", params=self._params())
         self._check(resp)
+        all_scopes = {s.id: s for s in self.get_scopes()}
+        all_roles = {r.id: r for r in self.get_roles()}
         services = []
         for raw in resp.json():
             service_id = raw["id"]
@@ -67,7 +69,11 @@ class Configuration:
                 f"{self._base_url()}/services/{service_id}/scopes", params=self._params()
             )
             self._check(scopes_resp)
-            services.append(Service.model_validate({**raw, "roles": roles_resp.json(), "scopes": scopes_resp.json()}))
+            service_role_ids = {r["id"] for r in roles_resp.json()}
+            roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
+            service_scope_ids = {s["id"] for s in scopes_resp.json()}
+            scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
+            services.append(Service.model_validate({**raw, "roles": roles, "scopes": scopes}))
         return services
 
     def get_scopes(self) -> list[Scope]:

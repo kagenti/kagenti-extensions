@@ -148,12 +148,15 @@ class TestGetRoles:
 
 
 class TestGetServices:
+    # Call order: GET /services, GET /scopes (get_scopes), GET /roles (get_roles),
+    #             GET /services/{id}/roles, GET /services/{id}/scopes — per service.
+
     def test_returns_list_of_service(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         payload = [{"id": "c1", "name": "my-app", "enabled": True}]
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
-            side_effect=[_ok(payload), _ok([]), _ok([])],
+            side_effect=[_ok(payload), _ok([]), _ok([]), _ok([]), _ok([])],
         ) as m:
             result = Configuration.for_realm(REALM).get_services()
         assert isinstance(result[0], Service)
@@ -162,6 +165,42 @@ class TestGetServices:
             (f"{BASE}/services",),
             {"params": {"realm": REALM}},
         )
+
+    def test_serviceId_populated_from_clientId(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "c1", "clientId": "mlflow", "enabled": True}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok([]), _ok([]), _ok([])],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].serviceId == "mlflow"
+
+    def test_scope_descriptions_populated_from_get_scopes(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "c1", "name": "my-app", "enabled": True}]
+        all_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
+        service_scopes = [{"id": "s1", "name": "read:data"}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok(all_scopes), _ok([]), _ok([]), _ok(service_scopes)],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].scopes[0].description == "Read access"
+
+    def test_role_details_populated_from_get_roles(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "c1", "name": "my-app", "enabled": True}]
+        all_roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        role_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
+        service_roles = [{"id": "r1", "name": "viewer"}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok(all_roles), _ok(role_scopes), _ok(service_roles), _ok([])],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].roles[0].name == "viewer"
+        assert result[0].roles[0].mappedScopes[0].description == "Read access"
 
     def test_raises_on_non_2xx(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
@@ -420,7 +459,6 @@ class TestRealmParameter:
     @pytest.mark.parametrize("method,endpoint", [
         ("get_subjects", "subjects"),
         ("get_roles", "roles"),
-        ("get_services", "services"),
         ("get_scopes", "scopes"),
     ])
     def test_realm_forwarded_as_query_param(self, method, endpoint, monkeypatch):
@@ -428,6 +466,13 @@ class TestRealmParameter:
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok([])) as m:
             getattr(Configuration.for_realm(REALM), method)()
         m.assert_called_once_with(f"{BASE}/{endpoint}", params={"realm": REALM})
+
+    def test_get_services_realm_forwarded_as_query_param(self, monkeypatch):
+        from unittest.mock import call
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok([])) as m:
+            Configuration.for_realm(REALM).get_services()
+        assert call(f"{BASE}/services", params={"realm": REALM}) in m.call_args_list
 
 
 # ---------------------------------------------------------------------------
