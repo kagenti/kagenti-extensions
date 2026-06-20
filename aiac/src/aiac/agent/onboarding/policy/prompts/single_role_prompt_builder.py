@@ -172,11 +172,22 @@ TASK STEPS:
    a. PRIVILEGE VALIDITY CHECK: Determine whether the privilege being analyzed is a real
       service capability or a system/internal identity-provider construct.
       System/internal privilege indicators (ANY one is sufficient to disqualify):
-        * Name starts with "default-roles-" (Keycloak default realm composite role)
+        * Name starts with "default-roles-" (identity-provider default realm composite role)
         * Description says "Default-roles of X realm", "system role", "internal", or is absent
           and the name itself does not describe a service capability
         * The privilege is clearly an infrastructure or identity-provider artifact rather than
           a meaningful access scope (e.g., offline_access, uma_authorization)
+        * The privilege's primary function is to MODIFY TOKEN STRUCTURE or ENABLE A CLIENT
+          AUTHENTICATION MECHANISM rather than to grant access to a downstream resource.
+          Indicators of this pattern:
+          - Description says "add X to the access token" or "adds X to the token"
+            (the privilege is modifying what goes into a token, not granting resource access)
+          - Description says "scope for a client enabled for [some mechanism]"
+            (the privilege enables a client-side authentication mechanism, not resource access)
+          - Description says "adds claims", "adds X claims to", "authentication context",
+            "allowed web origins to the access token"
+          ANY of these indicate an identity-provider infrastructure scope — NOT a service
+          capability. Treat them the same as offline_access or uma_authorization.
       If ANY indicator applies → you MUST still output the required fenced blocks below
       with an empty list, then stop. Do NOT skip the JSON block. Do NOT continue to further steps.
 
@@ -191,6 +202,11 @@ TASK STEPS:
    b. PRE-FILTER REALM ROLES: Scan the full available realm roles list and identify ONLY the
       USER-FACING ROLES (those describing human principals / teams). Record this filtered set.
       All subsequent steps operate on this filtered set ONLY.
+      CRITICAL: A role whose description says "Access to X", "Access to the X interface",
+      "Access to X services", "Provides access to X", "Gateway to X", or similar
+      service-capability phrases is a TECHNICAL/CAPABILITY ROLE, NOT a human principal,
+      even if the role name might imply users (e.g., "demo-ui" → description "Access to the
+      demo UI interface" → TECHNICAL, exclude it). Do NOT include such roles as user-facing.
 1. RELEVANCE CHECK: What is the DOMAIN of this privilege (e.g., "data warehouse", "UI dashboards", "payments")?
    What is the DOMAIN of the policy subject? If they are DIFFERENT domains, return [] immediately.
    Do NOT continue to the next steps.
@@ -307,12 +323,35 @@ Realm role mapping: developer → R&D, tech-support → technical support.
 Example E — system/internal privilege (starts with "default-roles-"):
 ```explanation
 Step 0a PRIVILEGE VALIDITY CHECK: The privilege "default-roles-demo" starts with
-"default-roles-", which marks it as a Keycloak default realm composite role — a
-system/internal identity-provider construct, not a user-facing service capability.
+"default-roles-", which marks it as an identity-provider default realm composite role —
+a system/internal construct, not a user-facing service capability.
 Returning [] immediately. No further analysis is performed.
 ```
 ```json
 {{"privilege": "default-roles-demo", "real_roles_with_access": []}}
+```
+
+Example F — token-modifying scope (adds origins/claims to the token, not a service capability):
+```explanation
+Step 0a PRIVILEGE VALIDITY CHECK: The privilege "web-origins" has description
+"add allowed web origins to the access token". Its primary function is to modify
+token structure — it adds data to the token rather than granting access to any
+downstream resource or service. This is an identity-provider infrastructure scope.
+Returning [] immediately.
+```
+```json
+{{"privilege": "web-origins", "real_roles_with_access": []}}
+```
+
+Example G — client-mechanism scope (enables an authentication mechanism, not resource access):
+```explanation
+Step 0a PRIVILEGE VALIDITY CHECK: The privilege "service_account" has description
+"Specific scope for a client enabled for service accounts". Its function is to enable
+a client authentication mechanism, not to grant access to a downstream resource or
+service. This is an identity-provider infrastructure scope. Returning [] immediately.
+```
+```json
+{{"privilege": "service_account", "real_roles_with_access": []}}
 ```
 """
 
@@ -369,9 +408,14 @@ CRITICAL RULES — read carefully before evaluating:
 0. PRIVILEGE SYSTEM-ROLE CHECK (evaluated FIRST, overrides all other rules):
    Determine whether the privilege is a system/internal identity-provider construct.
    System/internal privilege indicators (ANY one is sufficient):
-     * Name starts with "default-roles-" (Keycloak default realm composite role)
+     * Name starts with "default-roles-" (identity-provider default realm composite role)
      * Description says "Default-roles of X realm", "system role", or "internal"
      * The privilege is clearly an infrastructure artifact, not a service access scope
+     * Description says "add X to the access token", "adds X to the token",
+       "adds X claims", or "add allowed ... to the access token" — the privilege modifies
+       token structure rather than granting resource access
+     * Description says "scope for a client enabled for [mechanism]" — the privilege
+       enables a client authentication mechanism, not resource access
    If ANY indicator applies:
      - The ONLY correct mapping is an empty list [].
      - If the current mapping is non-empty, respond MAPPING_CORRECT: NO and cite this rule.

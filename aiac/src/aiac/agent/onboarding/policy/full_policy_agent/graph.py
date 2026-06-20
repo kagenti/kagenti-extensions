@@ -120,12 +120,13 @@ def _parse_and_extract_scopes(
                 realm_roles=realm_roles,
             )
 
-            if result.get('explanation'):
+            roles_with_access = result.get('real_roles_with_access', [])
+            if roles_with_access and result.get('explanation'):
                 explanations.append(
                     f"{service_name}/{privilege['name']}: {result['explanation']}"
                 )
 
-            for realm_role_name in result.get('real_roles_with_access', []):
+            for realm_role_name in roles_with_access:
                 realm_role_to_privileges.setdefault(realm_role_name, []).append(
                     {
                         'service': service_name,
@@ -420,7 +421,7 @@ class PolicyBuilder:
             if not service.description or not ("Demo" in service.description):
                 continue
             service_name = service.name or service.id 
-            print (f"Service {service_name} added: {service.description}")
+            print (f"Service {service_name} added: <{service.description}> <{service.type}>")
             described_scopes = [
                 {"name": scope.name, "description": scope.description}
                 for scope in service.scopes

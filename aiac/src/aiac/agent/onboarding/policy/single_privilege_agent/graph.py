@@ -189,23 +189,20 @@ def _analyze_role_mapping(
     response = llm.invoke(messages)
     content = response.content if isinstance(response.content, str) else str(response.content)
     explanation, parsed_data = extract_explanation_and_json_single_role(content)
-    
-    # Print explanation if available
-    print_explanation_single_role(explanation, verbose=verbose)
-    
+
     # Retry once if parsing failed
     if not parsed_data:
         retry_prompt = build_single_role_retry_prompt(
             state['realm_roles'],
             state['privilege']
         )
-        
+
         retry_messages = [
             *messages,
             response,
             HumanMessage(content=retry_prompt)
         ]
-        
+
         retry_response = llm.invoke(retry_messages)
         retry_content = (
             retry_response.content
@@ -213,17 +210,14 @@ def _analyze_role_mapping(
             else str(retry_response.content)
         )
         explanation, parsed_data = extract_explanation_and_json_single_role(retry_content)
-        
-        # Print retry explanation
-        print_explanation_single_role(explanation, is_retry=True, verbose=verbose)
-        
+
         # If still failed after retry, raise exception
         if not parsed_data:
             raise ValueError(
                 f"Failed to parse valid JSON from LLM response after retry.\n"
                 f"Last response: {retry_content[:500]}..."
             )
-    
+
     # Extract real roles with access
     # Handle both dict format (new) and list format (old/mock)
     if isinstance(parsed_data, dict):
@@ -233,6 +227,11 @@ def _analyze_role_mapping(
         real_roles_with_access = parsed_data
     else:
         real_roles_with_access = []
+
+    # Only print the explanation when the privilege was actually mapped to roles.
+    # Privileges filtered out at step 0a always return [] — their explanations are noise.
+    if real_roles_with_access:
+        print_explanation_single_role(explanation, verbose=verbose)
     
     # Return updated state
     return {
@@ -366,7 +365,7 @@ def _verify_semantic_mapping(
         mapping_correct = mapping_match.group(1).upper() == 'YES' if mapping_match else False
         explanation = explanation_match.group(1).strip() if explanation_match else content
 
-        if verbose:
+        if verbose and (real_roles_with_access or not mapping_correct):
             status = 'YES' if mapping_correct else 'NO'
             print(
                 f"\nSemantic verification [{state['service_name']}/{state['privilege']['name']}]:"
