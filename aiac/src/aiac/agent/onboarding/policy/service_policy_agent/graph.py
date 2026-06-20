@@ -190,7 +190,7 @@ def _validate_policy(
     privileges_map = {
         service_name: {
             "service_type": service_type,
-            "roles": privileges,
+            "scopes": privileges,
         }
     }
 
@@ -315,7 +315,6 @@ class ServicePolicyBuilder:
         self,
         service_name: str,
         realm: str = "demo",
-        config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
         verbose: bool = True,
         max_retries: int = MAX_VALIDATION_RETRIES,
@@ -324,7 +323,6 @@ class ServicePolicyBuilder:
         Args:
             service_name: service name to scope the policy to
             realm: realm name
-            config_path: Path to the AC config YAML; falls back to AC_CONFIG_PATH env var
             llm: LangChain LLM instance; created automatically if not provided
             verbose: Print LLM explanations and validation details
             max_retries: Maximum validation retry attempts
@@ -334,9 +332,6 @@ class ServicePolicyBuilder:
             llm_instance = create_llm(env_path=llm_env_path, verbose=verbose)
         else:
             llm_instance = llm
-
-        if config_path is not None:
-            os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
 
         self.service_name = service_name
         self.config = ServicePolicyBuilderConfig(
@@ -357,7 +352,7 @@ class ServicePolicyBuilder:
         self.service_type: str = "Tool"  # Default to "Tool" if not found
         self.privileges = []
         for service in services:
-            if service.id != service_name:
+            if service.serviceId != service_name:
                 continue
             # Handle None case by defaulting to "Tool"
             self.service_type = service.type or "Tool"

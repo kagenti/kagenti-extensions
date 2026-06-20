@@ -147,7 +147,50 @@ ANALYSIS GUIDELINES:
    - Use ONLY the exact role names from the "Available Real Roles" list
    - Do not modify, abbreviate, or create new role names
 
+6. USER-FACING ROLES ONLY — FILTER BEFORE ANALYSIS:
+   The available realm roles list may contain a mix of role types. You MUST classify each role
+   before using it and ONLY include USER-FACING ROLES in real_roles_with_access.
+
+   HOW TO CLASSIFY:
+   - USER-FACING ROLE: The description characterises a GROUP OF PEOPLE or a TEAM
+     (e.g., "R&D team members", "Sales team members", "Technical support staff").
+     These represent human principals who receive access. ONLY these are eligible.
+   - TECHNICAL/CAPABILITY ROLE: The description characterises a SERVICE CAPABILITY —
+     phrases like "Access to X", "Provides access to X", "Gateway to X", "Enables X".
+     These represent service identities or token audiences, NOT human principals.
+     NEVER include them in real_roles_with_access.
+   - SYSTEM/INTERNAL ROLE: The description is a placeholder (e.g., starts with "${{"),
+     or the role is clearly an infrastructure / identity-provider internal construct.
+     NEVER include them in real_roles_with_access.
+
+   NAMING CONFLICT WARNING: A realm role may share the same name or description as the
+   privilege being analysed. Do NOT assign the privilege to such a role on that basis alone.
+   Apply the classification above; if the role is a technical/capability or system role, exclude it.
+
 TASK STEPS:
+0. PRE-ANALYSIS CHECKS (two parts — do both before any further analysis):
+   a. PRIVILEGE VALIDITY CHECK: Determine whether the privilege being analyzed is a real
+      service capability or a system/internal identity-provider construct.
+      System/internal privilege indicators (ANY one is sufficient to disqualify):
+        * Name starts with "default-roles-" (Keycloak default realm composite role)
+        * Description says "Default-roles of X realm", "system role", "internal", or is absent
+          and the name itself does not describe a service capability
+        * The privilege is clearly an infrastructure or identity-provider artifact rather than
+          a meaningful access scope (e.g., offline_access, uma_authorization)
+      If ANY indicator applies → you MUST still output the required fenced blocks below
+      with an empty list, then stop. Do NOT skip the JSON block. Do NOT continue to further steps.
+
+      Required output when any indicator applies:
+      ```explanation
+      Step 0a PRIVILEGE VALIDITY CHECK: [reason it is a system/internal privilege]. Returning [] immediately.
+      ```
+      ```json
+      {{"privilege": "[privilege-name]", "real_roles_with_access": []}}
+      ```
+      System/internal privileges must never be granted to any realm role.
+   b. PRE-FILTER REALM ROLES: Scan the full available realm roles list and identify ONLY the
+      USER-FACING ROLES (those describing human principals / teams). Record this filtered set.
+      All subsequent steps operate on this filtered set ONLY.
 1. RELEVANCE CHECK: What is the DOMAIN of this privilege (e.g., "data warehouse", "UI dashboards", "payments")?
    What is the DOMAIN of the policy subject? If they are DIFFERENT domains, return [] immediately.
    Do NOT continue to the next steps.
@@ -170,8 +213,10 @@ TASK STEPS:
 4. APPLY RULE:
    - ENABLING/GATEWAY: grant to ALL user categories that need the downstream resource
    - FINAL RESOURCE: grant only to categories with explicit access to this specific capability
-5. MAP TO REALM ROLES: For each included user category, find matching realm role(s).
-6. VERIFY: Every included user category maps to at least one realm role.
+5. MAP TO REALM ROLES: For each included user category, find matching realm role(s) from the
+   USER-FACING ROLES identified in step 0. Do NOT use technical/capability or system roles.
+6. VERIFY: Every included user category maps to at least one user-facing realm role, and no
+   technical/capability or system roles appear in the result.
 7. EXPLAIN: Brief explanation citing the domain check, classification, policy evidence, and mapping.
 8. OUTPUT JSON: List of realm role names that should have access.
 
@@ -258,6 +303,17 @@ Realm role mapping: developer → R&D, tech-support → technical support.
 ```json
 {{"privilege": "github-agent", "real_roles_with_access": ["developer", "tech-support"]}}
 ```
+
+Example E — system/internal privilege (starts with "default-roles-"):
+```explanation
+Step 0a PRIVILEGE VALIDITY CHECK: The privilege "default-roles-demo" starts with
+"default-roles-", which marks it as a Keycloak default realm composite role — a
+system/internal identity-provider construct, not a user-facing service capability.
+Returning [] immediately. No further analysis is performed.
+```
+```json
+{{"privilege": "default-roles-demo", "real_roles_with_access": []}}
+```
 """
 
 
@@ -310,6 +366,17 @@ given the policy description AND the privilege's own name and description.
 
 CRITICAL RULES — read carefully before evaluating:
 
+0. PRIVILEGE SYSTEM-ROLE CHECK (evaluated FIRST, overrides all other rules):
+   Determine whether the privilege is a system/internal identity-provider construct.
+   System/internal privilege indicators (ANY one is sufficient):
+     * Name starts with "default-roles-" (Keycloak default realm composite role)
+     * Description says "Default-roles of X realm", "system role", or "internal"
+     * The privilege is clearly an infrastructure artifact, not a service access scope
+   If ANY indicator applies:
+     - The ONLY correct mapping is an empty list [].
+     - If the current mapping is non-empty, respond MAPPING_CORRECT: NO and cite this rule.
+     - Do NOT evaluate the mapping against any other rules.
+
 1. DOMAIN CHECK FIRST: Determine the domain of this privilege from its name and description
    (e.g., "GitHub repositories", "data warehouse", "UI dashboard").
    If the policy description does NOT explicitly address this privilege's domain, the mapping
@@ -327,6 +394,12 @@ CRITICAL RULES — read carefully before evaluating:
 4. FOCUS ON THIS PRIVILEGE ONLY: Do not reason about what roles are required by the policy
    in general. Only ask: "Is the mapping for THIS specific privilege consistent with its
    description and the policy?"
+
+5. USER-FACING ROLES ONLY: Verify that every assigned role represents a human principal or
+   team (e.g., its description characterises a group of people such as "R&D team members").
+   If any assigned role is a technical/capability role (description: "Access to X",
+   "Provides access to X", "Enables X") or a system/internal role (placeholder description
+   starting with "${{"), mark MAPPING_CORRECT: NO and explain which role is invalid.
 
 Respond in this EXACT format:
 MAPPING_CORRECT: YES
@@ -356,13 +429,16 @@ def build_single_role_retry_prompt(
 
     return f"""The previous response could not be parsed as valid JSON.
 
-Please provide the mapping again using ONLY these preset names:
+You MUST output BOTH fenced code blocks below — the explanation block AND the json block.
+Do NOT skip the json block, even when the list is empty.
+
 - Available real roles: {", ".join(realm_role_names) if realm_role_names else "(none)"}
 - Privilege to analyze: {privilege_name}
 
-Remember: Return a list of real role names that should have access to the privilege.
+If the privilege is a system/internal role (e.g., name starts with "default-roles-"),
+output an empty list in the json block and stop.
 
-Return in this format:
+Return in this format (both blocks are required):
 ```explanation
 [Your brief explanation]
 ```
@@ -370,9 +446,8 @@ Return in this format:
 ```json
 {{
   "privilege": "{privilege_name}",
-  "real_roles_with_access": [
-    "exact-realm-role-name-1",
-    "exact-realm-role-name-2"
-  ]
+  "real_roles_with_access": []
 }}
-```"""
+```
+
+Replace [] with the actual role names that should have access, or leave it empty if none."""

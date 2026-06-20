@@ -25,7 +25,6 @@ The CLI generates a complete access control policy by:
 
 For programmatic usage, import PolicyBuilder directly:
     from full_policy_agent import PolicyBuilder
-    builder = PolicyBuilder(config_path=Path("config.yaml"))
     result = builder.generate_policy("policy description")
 """
 
@@ -78,9 +77,12 @@ def generate_policy_only(
     """
     Args:
         policy_file: Path to file containing natural language policy description
-        config_path: Path to Keycloak realm configuration YAML
+        config_path: Path to Keycloak realm configuration YAML (when its is used for configuration reading)
         output_file: Path where generated YAML policy will be saved
     """
+    
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
+    
     if not policy_file.exists():
         raise FileNotFoundError(f"Policy file not found: {policy_file}")
 
@@ -98,7 +100,7 @@ def generate_policy_only(
     llm = create_llm(model_name=default_model, verbose=False)
     
     # Create PolicyBuilder with the LLM instance
-    builder = PolicyBuilder(config_path=config_path, llm=llm)
+    builder = PolicyBuilder(llm=llm)
 
     print("=" * 80)
     print("Generating access rule from textual policy...")

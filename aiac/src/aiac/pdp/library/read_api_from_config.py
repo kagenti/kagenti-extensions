@@ -28,15 +28,9 @@ class Configuration:
 
     def get_subjects(self) -> list[Subject]:
         config = self._load()
-        # Try "subjects" first, fall back to "users" for backward compatibility
-        subjects_raw = config.get("subjects", [])
-        if not subjects_raw:
-            subjects_raw = config.get("users", [])
+        subjects_raw = config.get("subjects", config.get("users", []))
 
-        # Get realm roles for mapping
-        realm_roles_map = {}
-        for role in self.get_roles():
-            realm_roles_map[role.name] = role
+        realm_roles_map = {role.name: role for role in self.get_roles()}
 
         result = []
         for subject in subjects_raw:
@@ -46,14 +40,13 @@ class Configuration:
             username = subject.get("username") or subject_id
             if not subject_id or not username:
                 continue
-            
-            # Parse roles for this subject
-            roles_raw = subject.get("roles", [])
-            roles = []
-            for role_name in roles_raw:
-                if isinstance(role_name, str) and role_name in realm_roles_map:
-                    roles.append(realm_roles_map[role_name])
-            
+
+            roles = [
+                realm_roles_map[role_name]
+                for role_name in subject.get("roles", [])
+                if isinstance(role_name, str) and role_name in realm_roles_map
+            ]
+
             result.append(
                 Subject(
                     id=subject_id,
@@ -91,52 +84,64 @@ class Configuration:
         services_raw = self._load().get("services", [])
         result = []
         for service in services_raw:
-            if isinstance(service, dict):
-                service_id = service.get("id") or service.get("service_id") or service.get("serviceId") or ""
-                service_id_field = service.get("serviceId") or service.get("service_id") or None
-                name = service.get("name") or None
-                description = service.get("description") or None
-                enabled = service.get("enabled", True)
-                service_type = service.get("type") or None
-
-                # Parse roles for this service
-                roles_raw = service.get("roles", [])
-                roles = []
-                for role in roles_raw:
-                    if isinstance(role, dict):
-                        role_name = role.get("name", "")
-                        role_description = role.get("description") or None
-                    else:
-                        role_name = str(role)
-                        role_description = None
-
-                    if role_name:
-                        roles.append(
-                            Role(
-                                id=role_name,
-                                name=role_name,
-                                description=role_description,
-                                composite=False,
-                            )
-                        )
-            else:
+            if not isinstance(service, dict):
                 service_id = str(service)
-                service_id_field = None
-                name = None
-                description = None
-                enabled = True
-                service_type = None
-                roles = []
+                result.append(
+                    Service(
+                        id=service_id,
+                        serviceId=service_id,
+                        enabled=True,
+                    )
+                )
+                continue
+
+            service_id = service.get("id") or ""
+
+            roles = []
+            for role in service.get("roles", []):
+                if isinstance(role, dict):
+                    role_name = role.get("name", "")
+                    role_description = role.get("description") or None
+                else:
+                    role_name = str(role)
+                    role_description = None
+                if role_name:
+                    roles.append(
+                        Role(
+                            id=role_name,
+                            name=role_name,
+                            description=role_description,
+                            composite=False,
+                        )
+                    )
+
+            # Scopes are explicit if provided; otherwise each role maps to a scope of the same name.
+            scopes_raw = service.get("scopes")
+            if scopes_raw is not None:
+                scopes = [
+                    Scope(
+                        id=s["name"] if isinstance(s, dict) else str(s),
+                        name=s["name"] if isinstance(s, dict) else str(s),
+                        description=s.get("description") if isinstance(s, dict) else None,
+                    )
+                    for s in scopes_raw
+                ]
+            else:
+                scopes = [
+                    Scope(id=r.name, name=r.name, description=r.description)
+                    for r in roles
+                ]
 
             result.append(
                 Service(
                     id=service_id,
-                    serviceId=service_id_field,
-                    name=name,
-                    description=description,
-                    enabled=enabled,
-                    type=service_type,
+                    serviceId=service_id,
+                    name=service.get("name") or None,
+                    description=service.get("description") or None,
+                    enabled=service.get("enabled", True),
+                    type=service.get("type") or None,
                     roles=roles,
+                    scopes=scopes,
                 )
             )
         return result
@@ -144,51 +149,35 @@ class Configuration:
     def get_scopes(self) -> list[Scope]:
         config = self._load()
         scopes_raw = config.get("scopes", [])
-        result = []
-
-        # If explicit scopes section exists, use it
         if scopes_raw:
-            for scope in scopes_raw:
-                if isinstance(scope, dict):
-                    name = scope["name"]
-                    description = scope.get("description") or None
-                else:
-                    name = str(scope)
-                    description = None
-                result.append(
-                    Scope(
-                        id=name,
-                        name=name,
-                        description=description,
-                    )
+            return [
+                Scope(
+                    id=s["name"] if isinstance(s, dict) else str(s),
+                    name=s["name"] if isinstance(s, dict) else str(s),
+                    description=s.get("description") if isinstance(s, dict) else None,
                 )
-        else:
-            # If no explicit scopes, derive from service roles (each role gets its own audience scope)
-            services_raw = config.get("services", [])
-            for service in services_raw:
-                if not isinstance(service, dict):
-                    continue
-                roles = service.get("roles", service.get("permissions", []))
-                for role in roles:
-                    if isinstance(role, dict):
-                        role_name = role.get("name")
-                        if role_name:
-                            result.append(
-                                Scope(
-                                    id=role_name,
-                                    name=role_name,
-                                    description=role.get("description"),
-                                )
-                            )
+                for s in scopes_raw
+            ]
 
+        # Derive from service roles when no top-level scopes section exists.
+        seen: set[str] = set()
+        result = []
+        for service in config.get("services", []):
+            if not isinstance(service, dict):
+                continue
+            for role in service.get("roles", service.get("permissions", [])):
+                if isinstance(role, dict):
+                    role_name = role.get("name")
+                    description = role.get("description")
+                else:
+                    role_name = str(role)
+                    description = None
+                if role_name and role_name not in seen:
+                    seen.add(role_name)
+                    result.append(Scope(id=role_name, name=role_name, description=description))
         return result
 
-    def create_scope(self, service_id: str, scope_name: str, description: str) -> Scope:
-        """
-        Create a new scope for a service.
-        Note: This implementation reads from a static config file and cannot persist changes.
-        This method is provided for API compatibility but will raise an error.
-        """
+    def create_scope(self, scope_name: str, scope_description: str) -> Scope:
         raise NotImplementedError(
             "create_scope is not supported when reading from a static config file. "
             "Use the HTTP-based Configuration class instead."
@@ -210,4 +199,3 @@ def get_services(realm: str) -> list[Service]:
 
 def get_scopes(realm: str) -> list[Scope]:
     return Configuration.for_realm(realm).get_scopes()
-

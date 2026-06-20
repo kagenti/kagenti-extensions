@@ -19,13 +19,14 @@ To run the LLM-backed fixture test:
     3. Run: pytest test/test_service_policy_agent.py::test_generate_service_policy_from_fixtures -v
 """
 
+import os
 import pytest
 import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
 from service_policy_agent import ServicePolicyBuilder
-from service_policy_agent.graph import _generate_yaml, _build_policy, _filter_and_extract_scopes
+from service_policy_agent.graph import _generate_yaml, _build_policy
 from service_policy_agent.state import ServicePolicyState
 from config import create_llm
 
@@ -69,7 +70,20 @@ def llm_model_name(request):
 
 @pytest.fixture
 def llm_instance(llm_model_name):
-    """Create LLM instance from YAML config."""
+    """Create LLM instance from YAML config, skip if the endpoint is unreachable."""
+    import socket
+    from urllib.parse import urlparse
+    from config.llm_config import load_llm_config_from_yaml
+    cfg = load_llm_config_from_yaml(llm_model_name)
+    if cfg.endpoint:
+        parsed = urlparse(cfg.endpoint)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=3.0):
+                pass
+        except (socket.timeout, OSError) as exc:
+            pytest.skip(f"Model {llm_model_name} endpoint not reachable: {exc}")
     return create_llm(model_name=llm_model_name, verbose=False)
 
 
@@ -142,7 +156,7 @@ def test_generate_yaml_unit():
     """_generate_yaml renders YAML with correct header comments and structure (bypasses LLM)."""
     state: ServicePolicyState = {
         "description": "Developers get full GitHub access.",
-        "service_id": "github-tool",
+        "service_name": "github-tool",
         "explanation": "Developer realm role maps to all github-tool roles.",
         "policy_structure": {
             "policy": {
@@ -178,7 +192,7 @@ def test_build_policy_unit():
     """_build_policy assembles policy_structure correctly from parsed_scopes (bypasses LLM)."""
     state: ServicePolicyState = {
         "description": "test",
-        "service_id": "github-tool",
+        "service_name": "github-tool",
         "explanation": "",
         "parsed_scopes": [
             {
@@ -219,7 +233,7 @@ def test_build_policy_empty_scopes():
     """_build_policy produces an empty policy when no scopes matched (bypasses LLM)."""
     state: ServicePolicyState = {
         "description": "test",
-        "service_id": "kagenti",
+        "service_name": "kagenti",
         "explanation": "",
         "parsed_scopes": [],
         "policy_structure": {},
@@ -236,14 +250,15 @@ def test_build_policy_empty_scopes():
 def test_service_policy_builder_initialization(config_file, mock_llm):
     """ServicePolicyBuilder loads only roles for the specified service."""
 
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
+
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
 
-    assert builder.service_id == "github-tool"
+    assert builder.service_name == "github-tool"
     # Realm roles come from config regardless of scoping
     realm_role_names = [r["name"] for r in builder.realm_roles]
     assert "developer" in realm_role_names
@@ -257,12 +272,17 @@ def test_service_policy_builder_initialization(config_file, mock_llm):
     assert "demo-ui" not in privilege_names
     assert "github-agent" not in privilege_names
 
+    # service_type is a property of the service, not of individual privileges
+    assert hasattr(builder, "service_type")
+    assert builder.service_type != ""
+    assert all("service_type" not in p for p in builder.privileges)
+
 def test_service_policy_builder_initialization_unknown_service(config_file, mock_llm):
     """ServicePolicyBuilder with an unknown service_id yields an empty privilege list."""
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="does-not-exist",
-        config_path=config_file,
+        service_name="does-not-exist",
         llm=mock_llm,
         verbose=False,
     )
@@ -272,9 +292,10 @@ def test_service_policy_builder_initialization_unknown_service(config_file, mock
 
 def test_get_graph_returns_compiled_graph(config_file, mock_llm):
     """get_graph() returns the compiled LangGraph workflow."""
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
+
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -310,10 +331,10 @@ def test_generate_policy_returns_expected_keys(config_file, mock_llm):
         "developer", "github-tool", "github-tool-aud"
     )
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -334,10 +355,10 @@ def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
         "developer", "github-tool", "github-tool-aud"
     )
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -355,10 +376,10 @@ def test_generate_policy_scoped_to_service_only(config_file, mock_llm):
         "developer", "github-tool", "github-tool-aud"
     )
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -384,10 +405,10 @@ def test_invalid_role_triggers_validation_error(config_file, mock_llm):
 ```
 """
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -421,10 +442,10 @@ Mapping developer to demo-ui (wrong service - but service_role field is ignored)
 ```
 """
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_id="github-tool",
-        config_path=config_file,
+        service_name="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -463,9 +484,10 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
 
     # Collect all service IDs from config
     config_data = yaml.safe_load((config_file).read_text())
-    all_service_ids = [c["service_id"] for c in config_data.get("services", [])]
+    all_service_ids = [c["id"] for c in config_data.get("services", [])]
 
     failures = []
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     for policy_file in policy_files:
         policy_description = policy_file.read_text().strip()
@@ -484,8 +506,7 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
 
             try:
                 builder = ServicePolicyBuilder(
-                    service_id=service_id,
-                    config_path=config_file,
+                    service_name=service_id,
                     llm=llm_instance,
                     verbose=False,
                 )
@@ -502,10 +523,17 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
                 match, diffs = compare_policies(generated_partial, expected_partial)
 
                 if not match:
+                    explanation = result.get("explanation", "")
+                    explanation_lines = (
+                        "\n  LLM explanation:\n"
+                        + "\n".join(f"    {l}" for l in explanation.splitlines())
+                        if explanation else ""
+                    )
                     failures.append(
                         f"[{llm_model_name}] {policy_file.name} / {service_id}: "
                         "policy mismatch:\n"
                         + "\n".join(f"  - {d}" for d in diffs)
+                        + explanation_lines
                     )
 
             except Exception as exc:

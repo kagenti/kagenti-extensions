@@ -119,8 +119,8 @@ def generate_privileges_rego(privileges_map: Dict[str, dict], scopes: list) -> s
     # Create a list of scope names for inclusion in privileges
     scope_names = [scope.name for scope in scopes]
 
-    for service_id, service_info in privileges_map.items():
-        rego_content += f'service["{service_id}"] := [\n'
+    for service_name, service_info in privileges_map.items():
+        rego_content += f'service["{service_name}"] := [\n'
         for priv in service_info["roles"]:
             priv_name = priv.get("name", "")
             priv_desc = priv.get("description", "")

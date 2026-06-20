@@ -366,7 +366,6 @@ class PolicyBuilder:
     def __init__(
         self,
         realm: str = "demo",
-        config_path: Optional[Path] = None,
         llm: Optional[BaseChatModel] = None,
         verbose: bool = True,
         max_retries: int = MAX_VALIDATION_RETRIES
@@ -376,14 +375,12 @@ class PolicyBuilder:
         
         Args:
             realm: Realm name for fetching configuration data
-            config_path: Path to config YAML. If None, AC_CONFIG_PATH env var is used.
             llm: Optional LangChain LLM instance. If not provided, creates a new
                  LLM instance using create_llm()
             verbose: If True, print LLM explanations and validation details
             max_retries: Maximum validation retry attempts
                     
         Raises:
-            FileNotFoundError: If config_path doesn't exist
             yaml.YAMLError: If config file is invalid YAML
         """
         # Store realm for later use
@@ -397,9 +394,6 @@ class PolicyBuilder:
         else:
             llm_instance = llm
         
-        if config_path is not None:
-            os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_path)
-
         # Create configuration object
         self.config = PolicyBuilderConfig(
             llm=llm_instance,
@@ -427,7 +421,6 @@ class PolicyBuilder:
                 continue
             service_name = service.name or service.id 
             print (f"Service {service_name} added: {service.description}")
-            print (f"Service {service}")
             described_scopes = [
                 {"name": scope.name, "description": scope.description}
                 for scope in service.scopes
@@ -487,7 +480,6 @@ class PolicyBuilder:
                 - retry_count (int): Number of validation retries that occurred
                         
         Example:
-            >>> builder = PolicyBuilder(config_path=Path("config.yaml"))
             >>> result = builder.generate_policy("Admins have full access")
             >>> if result["success"]:
             ...     builder.save_policy("policy.yaml")
@@ -652,19 +644,19 @@ class PolicyBuilder:
         }
 
         # Generate a separate rego file for each service
-        for service_id in services_in_policy:
+        for service_name in services_in_policy:
             policy_rego = generate_policy_rego(
                 policy_structure, 
-                service_id, 
+                service_name, 
                 service_types,
                 description
             )
             # Sanitize service name for filename (replace special chars with underscores)
-            safe_service_id = service_id.replace('/', '_').replace('\\', '_').replace(' ', '_')
-            policy_path = dir_path / f"generated_policy_{safe_service_id}.rego"
+            safe_service_name = service_name.replace('/', '_').replace('\\', '_').replace(' ', '_')
+            policy_path = dir_path / f"generated_policy_{safe_service_name}.rego"
             with open(policy_path, 'w') as f:
                 f.write(policy_rego)
-            print(f"Generated policy Rego for service '{service_id}' saved to {policy_path}")
+            print(f"Generated policy Rego for service '{service_name}' saved to {policy_path}")
 
 
 # ============================================================================

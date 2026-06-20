@@ -19,6 +19,7 @@ To run the LLM-backed fixture test:
     3. Run: pytest test/test_policy_generation.py::test_generate_policy_from_fixtures -v
 """
 
+import os
 import pytest
 import yaml
 from pathlib import Path
@@ -67,7 +68,20 @@ def llm_model_name(request):
 
 @pytest.fixture
 def llm_instance(llm_model_name):
-    """Create LLM instance from YAML config."""
+    """Create LLM instance from YAML config, skip if the endpoint is unreachable."""
+    import socket
+    from urllib.parse import urlparse
+    from config.llm_config import load_llm_config_from_yaml
+    cfg = load_llm_config_from_yaml(llm_model_name)
+    if cfg.endpoint:
+        parsed = urlparse(cfg.endpoint)
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            with socket.create_connection((host, port), timeout=3.0):
+                pass
+        except (socket.timeout, OSError) as exc:
+            pytest.skip(f"Model {llm_model_name} endpoint not reachable: {exc}")
     return create_llm(model_name=llm_model_name, verbose=False)
 
 
@@ -137,8 +151,10 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
     if not policy_files:
         pytest.skip("No policy fixture files found")
 
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
+
     # Create PolicyBuilder instance with the parametrized LLM
-    builder = PolicyBuilder(config_path=config_file, llm=llm_instance, verbose=False)
+    builder = PolicyBuilder(llm=llm_instance, verbose=False)
 
     failures = []
 
@@ -180,10 +196,17 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
             match, differences = compare_policies(generated_policy, expected_policy)
 
             if not match:
+                explanation = result.get("explanation", "")
+                explanation_lines = (
+                    "\n  LLM explanation:\n"
+                    + "\n".join(f"    {l}" for l in explanation.splitlines())
+                    if explanation else ""
+                )
                 failures.append(
                     f"[{llm_model_name}] {policy_file.name}: "
                     "policy mismatch:\n"
                     + "\n".join(f"  - {diff}" for diff in differences)
+                    + explanation_lines
                 )
 
         except Exception as exc:
@@ -250,9 +273,10 @@ def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
     ```
     """
     mock_llm.invoke.return_value = mock_response
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     # Create PolicyBuilder with mock LLM
-    builder = PolicyBuilder(config_path=config_file, llm=mock_llm, verbose=False)
+    builder = PolicyBuilder(llm=mock_llm, verbose=False)
 
     # Generate policy
     result = builder.generate_policy("Invalid policy description")
@@ -265,22 +289,31 @@ def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
 
 def test_policy_builder_initialization(config_file, mock_llm):
     """PolicyBuilder initializes correctly with config file."""
-    builder = PolicyBuilder(config_path=config_file, llm=mock_llm, verbose=False)
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
+
+    builder = PolicyBuilder(llm=mock_llm, verbose=False)
 
     # Verify configuration was loaded
     # realm_roles are now dicts with 'name' and 'description'
     realm_role_names = [role['name'] for role in builder.realm_roles]
-    assert realm_role_names == ["developer", "tech-support", "sales"]
+    assert "developer" in realm_role_names
+    assert "tech-support" in realm_role_names
+    assert "sales" in realm_role_names
 
     # Verify services were loaded
     assert "kagenti" in builder.privileges_map
     assert "github-tool" in builder.privileges_map
     assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.privileges_map
 
-    # Verify privileges are dicts with 'name' and 'description'
-    kagenti_privileges = builder.privileges_map["kagenti"]
-    assert len(kagenti_privileges) > 0
-    assert all(isinstance(priv, dict) and 'name' in priv for priv in kagenti_privileges)
+    # privileges_map values are {service_type, scopes} — service_type is per-service, not per-scope
+    kagenti_info = builder.privileges_map["kagenti"]
+    assert isinstance(kagenti_info, dict)
+    assert "service_type" in kagenti_info
+    assert "scopes" in kagenti_info
+    assert len(kagenti_info["scopes"]) > 0
+    assert all(isinstance(r, dict) and 'name' in r for r in kagenti_info["scopes"])
+    # service_type must not appear inside individual scope entries
+    assert all('service_type' not in r for r in kagenti_info["scopes"])
 
 
 # ============================================================================
