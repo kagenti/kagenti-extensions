@@ -151,6 +151,7 @@ class Configuration:
     def get_subjects(self) -> list[Subject]: ...
     def get_roles(self) -> list[Role]: ...
     def get_services(self) -> list[Service]: ...
+    def get_service(self, service_id: str) -> Service: ...
     def get_scopes(self) -> list[Scope]: ...
 
     def create_scope(self, scope_name: str, scope_description: str) -> Scope: ...
@@ -165,15 +166,25 @@ Read methods (`get_subjects`, `get_scopes`):
 2. Raise `RuntimeError` on non-2xx HTTP status.
 3. Parse the response into the appropriate Pydantic model(s).
 
-`get_services()` — enriched read (N+1 per service):
-1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch all services.
-2. For each service, issue two additional requests to populate `Service.roles` and `Service.scopes`:
-   - `GET /services/{id}/roles?realm=<self.realm>` → `Service.roles`
-   - `GET /services/{id}/scopes?realm=<self.realm>` → `Service.scopes`
-3. Raise `RuntimeError` on any non-2xx response.
-4. Return `list[Service]` with `roles` and `scopes` populated.
+`get_services()` — fully-enriched read:
+1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch the base service list.
+2. Call `get_roles()` and `get_scopes()` once upfront to build `{id: Role}` and `{id: Scope}` lookup maps (includes composite roles and scope mappings).
+3. For each service, delegate to `_build_service(raw, all_roles, all_scopes)` which issues:
+   - `GET /services/{id}/roles?realm=<self.realm>` → filter `all_roles` map → `Service.roles`
+   - `GET /services/{id}/scopes?realm=<self.realm>` → filter `all_scopes` map → `Service.scopes`
+4. Raise `RuntimeError` on any non-2xx response.
+5. Return `list[Service]` with fully-enriched `roles` (including `childRoles` and `mappedScopes`) and `scopes` (including `description`).
 
-> **Performance note:** `get_services()` issues 2N+1 HTTP requests where N is the number of services. If this becomes a bottleneck, the service's `GET /services` endpoint should be enriched server-side instead. `Service.roles` elements are not further hydrated (their `mappedScopes` are empty); call `get_roles()` for fully hydrated role objects.
+> **Performance note:** `get_services()` issues 2N + 1 + (roles overhead) HTTP requests where N is the number of services. `get_roles()` is called once and its fully-enriched objects are shared across all services. If this becomes a bottleneck, enrichment should be moved server-side.
+
+`get_service(service_id)` — fetch a single service with the same full enrichment:
+1. `GET {AIAC_PDP_CONFIG_URL}/services/{service_id}?realm=<self.realm>` — fetch the single service.
+2. Call `get_roles()` and `get_scopes()` to build lookup maps (same as `get_services()`).
+3. Delegate to `_build_service(raw, all_roles, all_scopes)`.
+4. Raise `RuntimeError` on any non-2xx response.
+5. Return a single enriched `Service`.
+
+> **Note:** Callers that previously called `get_services()` and filtered by ID should be switched to `get_service(service_id)` to avoid fetching the full list.
 
 `get_roles()` — enriched read (2 extra calls per role):
 1. `GET {AIAC_PDP_CONFIG_URL}/roles?realm=<self.realm>` — fetch all realm roles.
@@ -224,8 +235,7 @@ for s in subjects:
     print(s.username, s.email)
 
 scope = cfg.create_scope(scope_name="read", scope_description="Read access")
-services = cfg.get_services()
-service = next(s for s in services if s.id == "abc123")
+service = cfg.get_service("abc123")  # preferred over get_services() + filter
 updated_service = cfg.map_scope_to_service(service, scope)
 
 role = cfg.create_role(role_name="reader", role_description="Read-only access")
