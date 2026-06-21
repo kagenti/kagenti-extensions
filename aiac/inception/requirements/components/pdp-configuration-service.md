@@ -77,7 +77,7 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 3. Returns `409 Conflict` if the role is already assigned to the service.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
-Every endpoint accepts an optional `realm` query parameter. When supplied, the request targets the named Keycloak realm instead of the service default (`KEYCLOAK_REALM`); a new `KeycloakAdmin` bound to that realm is instantiated per request. When omitted, the singleton admin initialised at startup is used.
+All endpoints use the realm configured via the `KEYCLOAK_REALM` environment variable. There is no per-request realm override.
 
 All GET endpoints return `200 OK` with a JSON array on success, except `/subjects/{subject_id}/assignments` which returns a JSON object with `realmMappings` and `serviceMappings` fields. All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Admin API call fails.
 
@@ -126,7 +126,7 @@ aiac/src/aiac/pdp/service/
 ## `main.py` behaviour notes
 
 - Instantiate the default `KeycloakAdmin` once at startup using env vars.
-- `get_admin` is a FastAPI dependency accepting `realm: str | None = Query(None)`. When `realm` is `None` it returns the startup singleton; when `realm` is set it returns a new `KeycloakAdmin` for that realm.
+- `get_admin` is a FastAPI dependency with no parameters — it returns the startup singleton.
 - Each endpoint declares `admin: KeycloakAdmin = Depends(get_admin)`.
 - Each GET endpoint calls the corresponding `python-keycloak` method and returns the result directly via `JSONResponse`.
 - `GET /services/{service_id}/roles`: call `admin.get_realm_roles_of_client_scope(service_id)` — returns realm roles assigned to the service via the client-scope mapping API (not `get_client_roles`, which returns client-specific role definitions).

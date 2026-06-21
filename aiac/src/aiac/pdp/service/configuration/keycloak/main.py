@@ -2,7 +2,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Query
+from fastapi import Depends, FastAPI
 from keycloak import KeycloakAdmin
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
@@ -11,15 +11,8 @@ from starlette.responses import JSONResponse
 _admin: KeycloakAdmin | None = None
 
 
-def get_admin(realm: str | None = Query(None)) -> KeycloakAdmin:
-    if realm is None:
-        return _admin
-    return KeycloakAdmin(
-        server_url=os.environ["KEYCLOAK_URL"],
-        realm_name=realm,
-        username=os.environ["KEYCLOAK_ADMIN_USERNAME"],
-        password=os.environ["KEYCLOAK_ADMIN_PASSWORD"],
-    )
+def get_admin() -> KeycloakAdmin:
+    return _admin
 
 
 @asynccontextmanager

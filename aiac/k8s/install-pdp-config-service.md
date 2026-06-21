@@ -133,8 +133,7 @@ kubectl apply -f aiac/k8s/pdp-configuration-keycloak-pod.yaml
 
 ## API reference
 
-All endpoints accept an optional `?realm=<realm>` query parameter. When supplied, the request
-uses a per-request `KeycloakAdmin` for that realm instead of the default startup realm.
+All endpoints use the realm configured via the `KEYCLOAK_REALM` environment variable.
 
 | Method | Path | Description |
 |--------|------|-------------|
