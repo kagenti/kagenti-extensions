@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 
-from aiac.pdp.service.configuration.keycloak.main import app, get_admin
+from aiac.pdp.service.configuration.keycloak.main import app, get_admin, _cache
 
 REALM = "kagenti"
 
@@ -193,25 +193,24 @@ class TestGetRoleScopes:
 
 
 # ---------------------------------------------------------------------------
-# Realm query parameter: optional, singleton at startup
+# Realm query parameter: required, lazy per-realm cache
 # ---------------------------------------------------------------------------
 
 
 class TestRealmQueryParam:
-    def test_no_realm_returns_200(self):
-        admin = MagicMock()
-        admin.get_users.return_value = []
-        app.dependency_overrides[get_admin] = lambda realm=None: admin
+    def test_missing_realm_returns_422(self):
+        app.dependency_overrides.clear()
         resp = TestClient(app).get("/subjects")
-        assert resp.status_code == 200
+        assert resp.status_code == 422
 
-    def test_realm_param_creates_per_realm_admin(self):
+    def test_realm_param_creates_admin_with_admin_realm(self):
+        _cache.clear()
         app.dependency_overrides.clear()
         admin_mock = MagicMock()
         admin_mock.get_users.return_value = []
         env = {
             "KEYCLOAK_URL": "http://keycloak:8080/",
-            "KEYCLOAK_REALM": "master",
+            "KEYCLOAK_ADMIN_REALM": "master",
             "KEYCLOAK_ADMIN_USERNAME": "admin",
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
@@ -220,30 +219,35 @@ class TestRealmQueryParam:
             with TestClient(app) as client:
                 resp = client.get(f"/subjects?realm={REALM}")
         assert resp.status_code == 200
-        # First call is the startup singleton; second is per-realm
-        calls = mock_cls.call_args_list
-        per_realm = [c for c in calls if c.kwargs.get("realm_name") == REALM]
-        assert len(per_realm) == 1
+        mock_cls.assert_called_once_with(
+            server_url="http://keycloak:8080/",
+            realm_name=REALM,
+            user_realm_name="master",
+            username="admin",
+            password="admin",
+        )
 
-    def test_startup_creates_singleton_with_keycloak_realm(self):
+    def test_second_request_same_realm_hits_cache(self):
+        _cache.clear()
         app.dependency_overrides.clear()
         admin_mock = MagicMock()
         admin_mock.get_users.return_value = []
         env = {
             "KEYCLOAK_URL": "http://keycloak:8080/",
-            "KEYCLOAK_REALM": "master",
+            "KEYCLOAK_ADMIN_REALM": "master",
             "KEYCLOAK_ADMIN_USERNAME": "admin",
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
              patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
             with TestClient(app) as client:
-                pass  # lifespan runs
-        startup_calls = [c for c in mock_cls.call_args_list if c.kwargs.get("realm_name") == "master"]
-        assert len(startup_calls) == 1
+                client.get(f"/subjects?realm={REALM}")
+                client.get(f"/subjects?realm={REALM}")
+        assert mock_cls.call_count == 1
 
     def teardown_method(self):
         app.dependency_overrides.clear()
+        _cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -412,13 +416,14 @@ class TestCreateScopeEndpoint:
         assert "error" in resp.json()
 
     def test_realm_override_uses_per_realm_admin(self):
+        _cache.clear()
         app.dependency_overrides.clear()
         admin_mock = MagicMock()
         admin_mock.create_client_scope.return_value = "s1"
         admin_mock.get_client_scope.return_value = {"id": "s1", "name": "x"}
         env = {
             "KEYCLOAK_URL": "http://keycloak:8080/",
-            "KEYCLOAK_REALM": "master",
+            "KEYCLOAK_ADMIN_REALM": "master",
             "KEYCLOAK_ADMIN_USERNAME": "admin",
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
