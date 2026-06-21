@@ -74,7 +74,7 @@ Represents a user (Keycloak: `user`).
 | `firstName` | `str \| None` | `firstName` | |
 | `lastName` | `str \| None` | `lastName` | |
 | `enabled` | `bool` | `enabled` | |
-| `roles` | `list[Role]` | `realmRoles` | `[]` |
+| `roles` | `list[Role]` | _(populated by `Configuration.get_subjects()` from `GET /subjects/{id}/assignments` → `realmMappings`; not present in the raw Keycloak user object)_ | `[]` |
 
 #### `Role`
 
@@ -161,10 +161,16 @@ class Configuration:
     def map_role_to_service(self, service: Service, role: Role) -> Service: ...
 ```
 
-Read methods (`get_subjects`, `get_scopes`):
-1. Issue `GET {AIAC_PDP_CONFIG_URL}/<endpoint>`, always appending `?realm=<self.realm>`.
+`get_scopes()` — simple read:
+1. Issue `GET {AIAC_PDP_CONFIG_URL}/scopes`, always appending `?realm=<self.realm>`.
 2. Raise `RuntimeError` on non-2xx HTTP status.
-3. Parse the response into the appropriate Pydantic model(s).
+3. Parse the response into `list[Scope]` and return.
+
+`get_subjects()` — enriched with per-subject realm role assignments:
+1. `GET {AIAC_PDP_CONFIG_URL}/subjects?realm=<self.realm>` — fetch the base user list. Keycloak does not include role assignments in the user representation.
+2. Call `_all_roles_map()` once to build a `{id: Role}` lookup (fully hydrated via `get_roles()`).
+3. For each subject, delegate to `_build_subject(raw, all_roles)` which issues `GET /subjects/{id}/assignments?realm=<self.realm>`, extracts `realmMappings` role IDs, filters the roles map, and returns a validated `Subject` with `roles` populated.
+4. Raise `RuntimeError` on any non-2xx HTTP status (primary or secondary calls).
 
 `get_services()` — fully-enriched read:
 1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch the base service list.
