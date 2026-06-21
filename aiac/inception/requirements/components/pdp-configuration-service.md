@@ -24,6 +24,7 @@ A FastAPI web service that proxies Keycloak Admin REST API read endpoints. Retur
 | POST | `/services/{service_id}/scopes/{scope_id}` | `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Assign existing scope as default scope to service |
 | POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
 | POST | `/services/{service_id}/roles/{role_id}` | `POST /admin/realms/{realm}/clients/{service_id}/scope-mappings/realm` | Assign existing role to service |
+| GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
 
 `GET /services/{service_id}`:
 1. Calls `admin.get_client(service_id)`.
@@ -77,7 +78,7 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 3. Returns `409 Conflict` if the role is already assigned to the service.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
-All endpoints require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent.
+All endpoints except `/health` require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent. `/health` accepts no realm parameter — it calls `_get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])` directly.
 
 All GET endpoints return `200 OK` with a JSON array on success, except `/subjects/{subject_id}/assignments` which returns a JSON object with `realmMappings` and `serviceMappings` fields. All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Admin API call fails.
 
@@ -127,7 +128,7 @@ aiac/src/aiac/pdp/service/
 
 - Maintain a `dict[str, KeycloakAdmin]` cache keyed by realm name, protected by a `threading.Lock`.
 - `get_admin(realm: str = Query(...))` is a FastAPI dependency. On each call it checks the cache; on a miss it acquires the lock, double-checks, and constructs a new `KeycloakAdmin(realm_name=realm, user_realm_name=KEYCLOAK_ADMIN_REALM, ...)`. FastAPI returns `422` automatically if `realm` is absent.
-- Each endpoint declares `admin: KeycloakAdmin = Depends(get_admin)`.
+- All endpoints except `/health` declare `admin: KeycloakAdmin = Depends(get_admin)`. `/health` calls `_get_or_create_admin` directly with `os.environ["KEYCLOAK_ADMIN_REALM"]` — no FastAPI dependency, no realm query param.
 - Each GET endpoint calls the corresponding `python-keycloak` method and returns the result directly via `JSONResponse`.
 - `GET /services/{service_id}/roles`: call `admin.get_realm_roles_of_client_scope(service_id)` — returns realm roles assigned to the service via the client-scope mapping API (not `get_client_roles`, which returns client-specific role definitions).
 - `GET /services/{service_id}/scopes`: call `admin.get_client_default_client_scopes(service_id)`.

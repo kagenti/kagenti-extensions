@@ -392,7 +392,7 @@ See Section 7.4 (Event Broker) and Section 8 (Deployment) for subject names and 
 
 ### 7.1 PDP Configuration Service
 
-FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Manages PDP configuration entities (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints require a `?realm=<realm>` query parameter; returns `422` if absent. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`. Backed by Keycloak in both Phase 1 and Phase 2.
+FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Manages PDP configuration entities (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints except `/health` require a `?realm=<realm>` query parameter; returns `422` if absent. `/health` requires no realm parameter — it uses `KEYCLOAK_ADMIN_REALM` directly. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`. Backed by Keycloak in both Phase 1 and Phase 2.
 
 **Full spec:** [components/pdp-configuration-service.md](components/pdp-configuration-service.md)
 
