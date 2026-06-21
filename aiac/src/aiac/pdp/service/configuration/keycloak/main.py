@@ -1,30 +1,39 @@
 import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Query
 from keycloak import KeycloakAdmin
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
-_admin: KeycloakAdmin | None = None
+_cache: dict[str, KeycloakAdmin] = {}
+_lock = threading.Lock()
 
 
-def get_admin() -> KeycloakAdmin:
-    return _admin
+def _get_or_create_admin(realm: str) -> KeycloakAdmin:
+    if realm not in _cache:
+        with _lock:
+            if realm not in _cache:
+                _cache[realm] = KeycloakAdmin(
+                    server_url=os.environ["KEYCLOAK_URL"],
+                    realm_name=realm,
+                    user_realm_name=os.environ["KEYCLOAK_ADMIN_REALM"],
+                    username=os.environ["KEYCLOAK_ADMIN_USERNAME"],
+                    password=os.environ["KEYCLOAK_ADMIN_PASSWORD"],
+                )
+    return _cache[realm]
+
+
+def get_admin(realm: str = Query(...)) -> KeycloakAdmin:
+    return _get_or_create_admin(realm)
 
 
 @asynccontextmanager
-async def _lifespan(application: FastAPI):
-    global _admin
+async def _lifespan(_app: FastAPI):
     load_dotenv(Path(__file__).parent / ".env")
-    _admin = KeycloakAdmin(
-        server_url=os.environ["KEYCLOAK_URL"],
-        realm_name=os.environ["KEYCLOAK_REALM"],
-        username=os.environ["KEYCLOAK_ADMIN_USERNAME"],
-        password=os.environ["KEYCLOAK_ADMIN_PASSWORD"],
-    )
     yield
 
 
