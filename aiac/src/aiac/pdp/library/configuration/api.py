@@ -53,36 +53,47 @@ class Configuration:
             roles.append(Role.model_validate(role_data))
         return roles
 
+    def _build_service(self, raw: dict, all_roles: dict[str, Role], all_scopes: dict[str, Scope]) -> Service:
+        service_id = raw["id"]
+        roles_resp = requests.get(
+            f"{self._base_url()}/services/{service_id}/roles", params=self._params()
+        )
+        self._check(roles_resp)
+        scopes_resp = requests.get(
+            f"{self._base_url()}/services/{service_id}/scopes", params=self._params()
+        )
+        self._check(scopes_resp)
+        service_role_ids = {r["id"] for r in roles_resp.json()}
+        roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
+        service_scope_ids = {s["id"] for s in scopes_resp.json()}
+        scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
+        # TEMP: infer type from description when not set by Keycloak attributes
+        desc = raw.get("description") or ""
+        inferred_type: str | None = None
+        if "Agent" in desc:
+            inferred_type = "Agent"
+        elif "Tool" in desc:
+            inferred_type = "Tool"
+        patch = {"type": inferred_type} if inferred_type and not raw.get("type") else {}
+        return Service.model_validate({**raw, "roles": roles, "scopes": scopes, **patch})
+
+    def _all_roles_map(self) -> dict[str, Role]:
+        return {r.id: r for r in self.get_roles()}
+
+    def _all_scopes_map(self) -> dict[str, Scope]:
+        return {s.id: s for s in self.get_scopes()}
+
     def get_services(self) -> list[Service]:
         resp = requests.get(f"{self._base_url()}/services", params=self._params())
         self._check(resp)
-        all_scopes = {s.id: s for s in self.get_scopes()}
-        all_roles = {r.id: r for r in self.get_roles()}
-        services = []
-        for raw in resp.json():
-            service_id = raw["id"]
-            roles_resp = requests.get(
-                f"{self._base_url()}/services/{service_id}/roles", params=self._params()
-            )
-            self._check(roles_resp)
-            scopes_resp = requests.get(
-                f"{self._base_url()}/services/{service_id}/scopes", params=self._params()
-            )
-            self._check(scopes_resp)
-            service_role_ids = {r["id"] for r in roles_resp.json()}
-            roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
-            service_scope_ids = {s["id"] for s in scopes_resp.json()}
-            scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
-            # TEMP: infer type from description when not set by Keycloak attributes
-            desc = raw.get("description") or ""
-            inferred_type: str | None = None
-            if "Agent" in desc:
-                inferred_type = "Agent"
-            elif "Tool" in desc:
-                inferred_type = "Tool"
-            patch = {"type": inferred_type} if inferred_type and not raw.get("type") else {}
-            services.append(Service.model_validate({**raw, "roles": roles, "scopes": scopes, **patch}))
-        return services
+        all_roles = self._all_roles_map()
+        all_scopes = self._all_scopes_map()
+        return [self._build_service(raw, all_roles, all_scopes) for raw in resp.json()]
+
+    def get_service(self, service_id: str) -> Service:
+        resp = requests.get(f"{self._base_url()}/services/{service_id}", params=self._params())
+        self._check(resp)
+        return self._build_service(resp.json(), self._all_roles_map(), self._all_scopes_map())
 
     def get_scopes(self) -> list[Scope]:
         resp = requests.get(f"{self._base_url()}/scopes", params=self._params())
