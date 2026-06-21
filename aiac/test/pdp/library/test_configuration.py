@@ -148,8 +148,8 @@ class TestGetRoles:
 
 
 class TestGetServices:
-    # Call order: GET /services, GET /scopes (get_scopes), GET /roles (get_roles),
-    #             GET /services/{id}/roles, GET /services/{id}/scopes — per service.
+    # Call order: GET /services, GET /roles (get_roles, + per-role secondary calls),
+    #             GET /scopes (get_scopes), GET /services/{id}/roles, GET /services/{id}/scopes — per service.
 
     def test_returns_list_of_service(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
@@ -183,7 +183,7 @@ class TestGetServices:
         service_scopes = [{"id": "s1", "name": "read:data"}]
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
-            side_effect=[_ok(payload), _ok(all_scopes), _ok([]), _ok([]), _ok(service_scopes)],
+            side_effect=[_ok(payload), _ok([]), _ok(all_scopes), _ok([]), _ok(service_scopes)],
         ):
             result = Configuration.for_realm(REALM).get_services()
         assert result[0].scopes[0].description == "Read access"
@@ -196,7 +196,7 @@ class TestGetServices:
         service_roles = [{"id": "r1", "name": "viewer"}]
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
-            side_effect=[_ok(payload), _ok([]), _ok(all_roles), _ok(role_scopes), _ok(service_roles), _ok([])],
+            side_effect=[_ok(payload), _ok(all_roles), _ok(role_scopes), _ok([]), _ok(service_roles), _ok([])],
         ):
             result = Configuration.for_realm(REALM).get_services()
         assert result[0].roles[0].name == "viewer"
@@ -207,6 +207,152 @@ class TestGetServices:
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_err()):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_services()
+
+
+# ---------------------------------------------------------------------------
+# get_service
+# ---------------------------------------------------------------------------
+# Call order: GET /services/{id}, GET /roles (+ per-role /scopes calls),
+#             GET /scopes, GET /services/{id}/roles, GET /services/{id}/scopes
+
+
+class TestGetService:
+    SERVICE_ID = "svc-001"
+
+    def test_returns_single_enriched_service(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        all_roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        role_scopes = [{"id": "s1", "name": "read:data"}]
+        all_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
+        service_roles = [{"id": "r1"}]
+        service_scopes = [{"id": "s1"}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[
+                _ok(raw),            # GET /services/svc-001
+                _ok(all_roles),      # GET /roles
+                _ok(role_scopes),    # GET /roles/viewer/scopes
+                _ok(all_scopes),     # GET /scopes
+                _ok(service_roles),  # GET /services/svc-001/roles
+                _ok(service_scopes), # GET /services/svc-001/scopes
+            ],
+        ):
+            result = Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+        assert isinstance(result, Service)
+        assert result.id == self.SERVICE_ID
+        assert result.roles[0].name == "viewer"
+        assert result.scopes[0].name == "read:data"
+
+    def test_infers_type_from_description_when_not_set(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        raw = {"id": self.SERVICE_ID, "name": "my-agent", "description": "An Agent service", "enabled": True}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[
+                _ok(raw),  # GET /services/svc-001
+                _ok([]),   # GET /roles
+                _ok([]),   # GET /scopes
+                _ok([]),   # GET /services/svc-001/roles
+                _ok([]),   # GET /services/svc-001/scopes
+            ],
+        ):
+            result = Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+        assert result.type == "Agent"
+
+    def test_raises_when_primary_fetch_returns_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_err(404)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+
+    def test_raises_when_service_roles_call_fails(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[
+                _ok(raw),  # GET /services/svc-001
+                _ok([]),   # GET /roles
+                _ok([]),   # GET /scopes
+                _err(500), # GET /services/svc-001/roles → error
+            ],
+        ):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+
+    def test_raises_when_service_scopes_call_fails(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[
+                _ok(raw),  # GET /services/svc-001
+                _ok([]),   # GET /roles
+                _ok([]),   # GET /scopes
+                _ok([]),   # GET /services/svc-001/roles → ok
+                _err(500), # GET /services/svc-001/scopes → error
+            ],
+        ):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+
+    def test_realm_forwarded_on_every_request(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[
+                _ok(raw), _ok([]), _ok([]), _ok([]), _ok([]),
+            ],
+        ) as m:
+            Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+        for c in m.call_args_list:
+            assert c[1].get("params") == {"realm": REALM}
+
+
+# ---------------------------------------------------------------------------
+# set_service_type
+# ---------------------------------------------------------------------------
+
+
+class TestSetServiceType:
+    SERVICE_ID = "svc-001"
+
+    def test_issues_patch_to_correct_url(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
+        with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
+            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
+        assert m.call_args[0][0] == f"{BASE}/services/{self.SERVICE_ID}"
+
+    def test_json_body_uses_type_key(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
+        with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
+            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
+        assert m.call_args[1].get("json") == {"type": "Agent"}
+
+    def test_returns_service_instance(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Tool"}
+        with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)):
+            result = Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
+        assert isinstance(result, Service)
+        assert result.type == "Tool"
+
+    def test_realm_forwarded_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
+            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
+        assert m.call_args[1].get("params") == {"realm": REALM}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_err()):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
 
 
 # ---------------------------------------------------------------------------
