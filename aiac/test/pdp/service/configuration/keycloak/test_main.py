@@ -255,10 +255,15 @@ class TestRealmQueryParam:
 # ---------------------------------------------------------------------------
 
 
+_HEALTH_ENV = {"KEYCLOAK_ADMIN_REALM": "master"}
+_HEALTH_TARGET = "aiac.pdp.service.configuration.keycloak.main._get_or_create_admin"
+
+
 class TestHealth:
     def test_returns_200_when_keycloak_reachable(self):
         admin = MagicMock()
-        resp = _make_client(admin).get("/health")
+        with patch(_HEALTH_TARGET, return_value=admin), patch.dict(os.environ, _HEALTH_ENV):
+            resp = TestClient(app).get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
         admin.get_server_info.assert_called_once()
@@ -268,14 +273,19 @@ class TestHealth:
         admin.get_server_info.side_effect = KeycloakError(
             error_message="connection refused", response_code=503
         )
-        resp = _make_client(admin).get("/health")
+        with patch(_HEALTH_TARGET, return_value=admin), patch.dict(os.environ, _HEALTH_ENV):
+            resp = TestClient(app).get("/health")
         assert resp.status_code == 503
         body = resp.json()
         assert body["status"] == "unavailable"
         assert "error" in body
 
-    def teardown_method(self):
-        app.dependency_overrides.clear()
+    def test_uses_admin_realm_env_var(self):
+        admin = MagicMock()
+        with patch(_HEALTH_TARGET, return_value=admin) as mock_factory, \
+             patch.dict(os.environ, {"KEYCLOAK_ADMIN_REALM": "master"}):
+            TestClient(app).get("/health")
+        mock_factory.assert_called_once_with("master")
 
 
 # ---------------------------------------------------------------------------

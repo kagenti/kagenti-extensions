@@ -208,7 +208,8 @@ def create_scope_standalone(body: _ScopeCreate, admin: KeycloakAdmin = Depends(g
 
 
 @app.get("/health")
-def health(admin: KeycloakAdmin = Depends(get_admin)):
+def health():
+    admin = _get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])
     try:
         admin.get_server_info()
         return {"status": "ok"}
