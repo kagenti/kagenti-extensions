@@ -73,7 +73,15 @@ class Configuration:
             roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
             service_scope_ids = {s["id"] for s in scopes_resp.json()}
             scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
-            services.append(Service.model_validate({**raw, "roles": roles, "scopes": scopes}))
+            # TEMP: infer type from description when not set by Keycloak attributes
+            desc = raw.get("description") or ""
+            inferred_type: str | None = None
+            if "Agent" in desc:
+                inferred_type = "Agent"
+            elif "Tool" in desc:
+                inferred_type = "Tool"
+            patch = {"type": inferred_type} if inferred_type and not raw.get("type") else {}
+            services.append(Service.model_validate({**raw, "roles": roles, "scopes": scopes, **patch}))
         return services
 
     def get_scopes(self) -> list[Scope]:
