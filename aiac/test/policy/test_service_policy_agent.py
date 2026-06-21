@@ -154,18 +154,24 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
 
 def test_generate_yaml_unit():
     """_generate_yaml renders YAML with correct header comments and structure (bypasses LLM)."""
+    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.library.configuration.models import Service
+
+    svc = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
     state: ServicePolicyState = {
         "description": "Developers get full GitHub access.",
         "service_name": "github-tool",
         "explanation": "Developer realm role maps to all github-tool roles.",
-        "policy_structure": {
-            "policy": {
+        "policy_structure": Policy(
+            name="Developers get full GitHub access.",
+            policy={
                 "developer": [
-                    {"service": "github-tool", "role": "github-tool-aud"},
-                    {"service": "github-tool", "role": "github-full-access"},
+                    Priviledge(name="github-tool-aud", services=[svc]),
+                    Priviledge(name="github-full-access", services=[svc]),
                 ]
-            }
-        },
+            },
+            explanation="Developer realm role maps to all github-tool roles.",
+        ),
         "parsed_scopes": [],
         "yaml_output": "",
         "messages": [],
@@ -181,15 +187,17 @@ def test_generate_yaml_unit():
     assert "developer:" in output
     assert "github-tool" in output
     assert "github-full-access" in output
-    # Header must mention the scoped service
-    assert "github-tool" in output
     assert "# Partial Access Control Policy" in output
     assert "# Original Policy Description:" in output
     assert "Developers get full GitHub access." in output
 
 
 def test_build_policy_unit():
-    """_build_policy assembles policy_structure correctly from parsed_scopes (bypasses LLM)."""
+    """_build_policy assembles a Policy model correctly from parsed_scopes (bypasses LLM)."""
+    from aiac.pdp.policy.models import Policy
+    from aiac.pdp.library.configuration.models import Service
+
+    svc = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
     state: ServicePolicyState = {
         "description": "test",
         "service_name": "github-tool",
@@ -198,18 +206,18 @@ def test_build_policy_unit():
             {
                 "role": "developer",
                 "privileges": [
-                    {"service": "github-tool", "privilege": "github-full-access"},
-                    {"service": "github-tool", "privilege": "github-tool-aud"},
+                    {"service": svc, "privilege": "github-full-access"},
+                    {"service": svc, "privilege": "github-tool-aud"},
                 ],
             },
             {
                 "role": "tech-support",
                 "privileges": [
-                    {"service": "github-tool", "privilege": "github-tool-aud"},
+                    {"service": svc, "privilege": "github-tool-aud"},
                 ],
             },
         ],
-        "policy_structure": {},
+        "policy_structure": None,
         "yaml_output": "",
         "messages": [],
         "errors": [],
@@ -219,24 +227,34 @@ def test_build_policy_unit():
 
     result = _build_policy(state)
 
-    policy = result["policy_structure"]["policy"]
-    assert "developer" in policy
-    assert "tech-support" in policy
-    assert {"service": "github-tool", "privilege": "github-full-access"} in policy["developer"]
-    assert {"service": "github-tool", "privilege": "github-tool-aud"} in policy["tech-support"]
-    # No other services should appear
-    all_services = {m["service"] for mappings in policy.values() for m in mappings}
+    policy = result["policy_structure"]
+    assert isinstance(policy, Policy)
+    assert "developer" in policy.policy
+    assert "tech-support" in policy.policy
+    developer_priv_names = {priv.name for priv in policy.policy["developer"]}
+    assert "github-full-access" in developer_priv_names
+    assert "github-tool-aud" in developer_priv_names
+    tech_support_priv_names = {priv.name for priv in policy.policy["tech-support"]}
+    assert "github-tool-aud" in tech_support_priv_names
+    all_services = {
+        s.serviceId
+        for privileges in policy.policy.values()
+        for priv in privileges
+        for s in priv.services
+    }
     assert all_services == {"github-tool"}
 
 
 def test_build_policy_empty_scopes():
-    """_build_policy produces an empty policy when no scopes matched (bypasses LLM)."""
+    """_build_policy produces an empty Policy when no scopes matched (bypasses LLM)."""
+    from aiac.pdp.policy.models import Policy
+
     state: ServicePolicyState = {
         "description": "test",
         "service_name": "kagenti",
         "explanation": "",
         "parsed_scopes": [],
-        "policy_structure": {},
+        "policy_structure": None,
         "yaml_output": "",
         "messages": [],
         "errors": [],
@@ -245,7 +263,9 @@ def test_build_policy_empty_scopes():
     }
 
     result = _build_policy(state)
-    assert result["policy_structure"] == {"policy": {}}
+    policy = result["policy_structure"]
+    assert isinstance(policy, Policy)
+    assert policy.policy == {}
 
 def test_service_policy_builder_initialization(config_file, mock_llm):
     """ServicePolicyBuilder loads only roles for the specified service."""
@@ -324,8 +344,9 @@ Policy grants {realm_role} access to {role_name} on {service_id}.
 """
 
 
-def test_generate_policy_returns_expected_keys(config_file, mock_llm):
-    """generate_policy result contains all documented keys."""
+def test_generate_policy_returns_policy_model(config_file, mock_llm):
+    """generate_policy returns a Policy model with name, policy, and explanation."""
+    from aiac.pdp.policy.models import Policy
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -340,16 +361,14 @@ def test_generate_policy_returns_expected_keys(config_file, mock_llm):
     )
     result = builder.generate_policy("Developers access public repos.")
 
-    assert "yaml_output" in result
-    assert "policy_structure" in result
-    assert "parsed_scopes" in result
-    assert "errors" in result
-    assert "success" in result
-    assert "retry_count" in result
+    assert isinstance(result, Policy)
+    assert result.name == "Developers access public repos."
+    assert isinstance(result.policy, dict)
+    assert isinstance(result.explanation, str)
 
 
 def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
-    """yaml_output in the result must be parseable YAML."""
+    """get_yaml_output() after generate_policy() returns parseable YAML."""
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -362,9 +381,9 @@ def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
         llm=mock_llm,
         verbose=False,
     )
-    result = builder.generate_policy("Developers get public GitHub access.")
+    builder.generate_policy("Developers get public GitHub access.")
 
-    parsed = yaml.safe_load(result["yaml_output"])
+    parsed = yaml.safe_load(builder.get_yaml_output())
     assert isinstance(parsed, dict)
     assert "policy" in parsed
 
@@ -385,11 +404,10 @@ def test_generate_policy_scoped_to_service_only(config_file, mock_llm):
     )
     result = builder.generate_policy("Developers get public GitHub access.")
 
-    policy = result["policy_structure"].get("policy", {})
-    for mappings in policy.values():
-        for mapping in mappings:
-            assert mapping["service"] == "github-tool", (
-                f"Mapping for a different service leaked in: {mapping}"
+    for privileges in result.policy.values():
+        for priv in privileges:
+            assert all(svc.serviceId == "github-tool" for svc in priv.services), (
+                f"Mapping for a different service leaked in: {priv}"
             )
 
 
@@ -412,12 +430,9 @@ def test_invalid_role_triggers_validation_error(config_file, mock_llm):
         llm=mock_llm,
         verbose=False,
     )
-    result = builder.generate_policy("Some policy description.")
 
-    assert not result["success"], "Validation should fail for an unknown realm role"
-    assert any(
-        "nonexistent-realm-role" in str(err) for err in result["errors"]
-    )
+    with pytest.raises(ValueError, match="nonexistent-realm-role"):
+        builder.generate_policy("Some policy description.")
 
 
 def test_output_scoped_even_when_llm_mentions_foreign_service_role(config_file, mock_llm):
@@ -452,9 +467,12 @@ Mapping developer to demo-ui (wrong service - but service_role field is ignored)
     result = builder.generate_policy("Developers get GitHub access.")
 
     # The mapping is structurally valid: developer → github-tool roles
-    assert result["success"], f"Unexpected errors: {result['errors']}"
-    policy = result["policy_structure"].get("policy", {})
-    all_services = {m["service"] for mappings in policy.values() for m in mappings}
+    all_services = {
+        svc.serviceId
+        for privileges in result.policy.values()
+        for priv in privileges
+        for svc in priv.services
+    }
     assert all_services == {"github-tool"}, (
         f"Foreign service leaked into output: {all_services}"
     )
@@ -510,24 +528,16 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
                     llm=llm_instance,
                     verbose=False,
                 )
-                result = builder.generate_policy(policy_description)
+                policy = builder.generate_policy(policy_description)
 
-                if not result["success"]:
-                    failures.append(
-                        f"[{llm_model_name}] {policy_file.name} / {service_id}: "
-                        f"generation failed: {result['errors']}"
-                    )
-                    continue
-
-                generated_partial = normalize_policy_yaml(result["yaml_output"])
+                generated_partial = normalize_policy_yaml(builder.get_yaml_output())
                 match, diffs = compare_policies(generated_partial, expected_partial)
 
                 if not match:
-                    explanation = result.get("explanation", "")
                     explanation_lines = (
                         "\n  LLM explanation:\n"
-                        + "\n".join(f"    {l}" for l in explanation.splitlines())
-                        if explanation else ""
+                        + "\n".join(f"    {l}" for l in policy.explanation.splitlines())
+                        if policy.explanation else ""
                     )
                     failures.append(
                         f"[{llm_model_name}] {policy_file.name} / {service_id}: "

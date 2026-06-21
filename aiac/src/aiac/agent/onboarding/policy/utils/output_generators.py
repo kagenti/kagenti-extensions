@@ -13,8 +13,11 @@ Functions:
     - generate_policy_rego: Generate Rego content for access control policy
 """
 
-from typing import Dict, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 import yaml
+
+from aiac.pdp.policy.models import Policy
 
 
 def generate_yaml_output(policy_structure: dict, description: str = "") -> str:
@@ -252,5 +255,103 @@ import data.authz.realm_roles.realm_roles
             rego_content += "}\n\n"
    
     return rego_content
+
+def save_policy(policy: Policy, filepath: str = "access_control_policy.yaml") -> None:
+    """
+    Save a Policy as YAML to a file.
+
+    Args:
+        policy: Policy model instance
+        filepath: Output file path
+    """
+    yaml_output = generate_yaml_output(
+        {
+            "policy": {
+                realm_role: [
+                    {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
+                    for priv in privileges
+                    for svc in priv.services
+                ]
+                for realm_role, privileges in policy.policy.items()
+            }
+        },
+        policy.name,
+    )
+    with open(filepath, "w") as f:
+        f.write(yaml_output)
+    print(f"Access rules saved to {filepath}")
+
+
+def save_policy_rego(
+    policy: Policy,
+    file_dir: str = "rego_policy",
+    realm: str = "demo",
+) -> None:
+    """
+    Save Rego files for realm roles, defaults, and per-service access policy.
+
+    Creates:
+    - realm_roles.rego: user → realm-role mapping
+    - default_inbound.rego / default_outbound.rego: deny-by-default rules
+    - generated_policy_<service>.rego: one allow-rule file per service in the policy
+
+    Args:
+        policy: Policy model instance
+        file_dir: Directory to save Rego files
+        realm: Keycloak realm name (used to fetch user-to-roles mapping)
+    """
+    from aiac.pdp.library.configuration.api import Configuration
+
+    dir_path = Path(file_dir)
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+    config_api = Configuration.for_realm(realm)
+    user_to_roles: dict = {}
+    for subject in config_api.get_subjects():
+        user_to_roles[subject.username] = [role.name for role in subject.roles]
+
+    realm_roles_path = dir_path / "realm_roles.rego"
+    with open(realm_roles_path, "w") as f:
+        f.write(generate_realm_roles_rego(user_to_roles))
+    print(f"Realm roles Rego saved to {realm_roles_path}")
+
+    default_inbound_path = dir_path / "default_inbound.rego"
+    with open(default_inbound_path, "w") as f:
+        f.write(generate_default_inbound_rego())
+    print(f"Default Rego saved to {default_inbound_path}")
+
+    default_outbound_path = dir_path / "default_outbound.rego"
+    with open(default_outbound_path, "w") as f:
+        f.write(generate_default_outbound_rego())
+    print(f"Default Rego saved to {default_outbound_path}")
+
+    # Deduplicate services by ID (Service is not hashable — cannot use a set)
+    unique_services: Dict[str, Any] = {}
+    for privs in policy.policy.values():
+        for priv in privs:
+            for svc in priv.services:
+                svc_id = svc.serviceId or svc.name or svc.id
+                unique_services[svc_id] = svc
+
+    service_types = {svc_id: svc.type for svc_id, svc in unique_services.items()}
+    policy_structure = {
+        "policy": {
+            realm_role: [
+                {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
+                for priv in privileges
+                for svc in priv.services
+            ]
+            for realm_role, privileges in policy.policy.items()
+        }
+    }
+
+    for svc_id in unique_services:
+        policy_rego = generate_policy_rego(policy_structure, svc_id, service_types, policy.name)
+        safe_name = svc_id.replace("/", "_").replace("\\", "_").replace(" ", "_")
+        policy_path = dir_path / f"generated_policy_{safe_name}.rego"
+        with open(policy_path, "w") as f:
+            f.write(policy_rego)
+        print(f"Generated policy Rego for service '{svc_id}' saved to {policy_path}")
+
 
 # Made with Bob

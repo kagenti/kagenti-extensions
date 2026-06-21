@@ -15,7 +15,7 @@ Workflow:
     4. validate_policy     — structural validation with retry.
 """
 
-from typing import Dict, Any, Optional
+from typing import Optional
 from pathlib import Path
 import os
 import sys
@@ -29,6 +29,8 @@ from config import create_llm
 from service_policy_agent.state import ServicePolicyState
 from config.constants import MAX_VALIDATION_RETRIES
 from aiac.pdp.library.configuration.api import Configuration
+from aiac.pdp.library.configuration.models import Service
+from aiac.pdp.policy.models import Policy, Priviledge
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 
@@ -56,7 +58,7 @@ def _filter_and_extract_scopes(
     state: ServicePolicyState,
     llm: BaseChatModel,
     realm_roles: list,
-    service_type: str,
+    service: Optional[Service],
     privileges: list,
     verbose: bool,
 ) -> ServicePolicyState:
@@ -64,11 +66,14 @@ def _filter_and_extract_scopes(
     Run SingleRoleMapper for every privilege of the target service and invert the
     results into the {role to privileges} structure used by _build_policy.
 
+    The 'service' key in each privilege dict holds the Service object (not a string)
+    so that _build_policy can construct a typed Policy directly.
+
     Args:
         state: Current ServicePolicyState (needs 'description' and 'service_name')
         llm: LLM instance
         realm_roles: All available realm roles [{'name': str, 'description': str}]
-        service_type: Service type (e.g. 'Tool', 'Agent') — property of the service, not each privilege
+        service: Service object for this scope (None if service was not found in config)
         privileges: Privileges belonging to the target service [{'name': str, 'description': str}]
         verbose: Whether to print detailed output
 
@@ -96,7 +101,7 @@ def _filter_and_extract_scopes(
         for realm_role_name in roles_with_access:
             realm_role_to_privileges.setdefault(realm_role_name, []).append(
                 {
-                    "service": service_name,
+                    "service": service,  # Service object — may be None if service not found
                     "privilege": privilege["name"],
                 }
             )
@@ -119,21 +124,40 @@ def _filter_and_extract_scopes(
 
 def _build_policy(state: ServicePolicyState) -> ServicePolicyState:
     """
-    Assemble the structured policy dict from parsed_scopes.
+    Build a typed Policy model from parsed_scopes.
+
+    Each privilege dict carries a Service object under 'service'; privileges
+    are grouped by name so each Priviledge holds a list of Service objects.
 
     Returns:
-        Updated ServicePolicyState with policy_structure
+        Updated ServicePolicyState with policy_structure set to a Policy instance
     """
-    policy: dict = {}
+    raw: dict = {}
     for entry in state["parsed_scopes"]:
-        policy[entry["role"]] = entry["privileges"]
+        role_name = entry["role"]
+        priv_to_services: dict = {}
+        for p in entry["privileges"]:
+            svc = p["service"]  # Service object stored by _filter_and_extract_scopes
+            priv_to_services.setdefault(p["privilege"], []).append(svc)
+        raw[role_name] = [
+            Priviledge(name=priv_name, services=svcs)
+            for priv_name, svcs in priv_to_services.items()
+        ]
 
-    return {**state, "policy_structure": {"policy": policy}}
+    policy = Policy(
+        name=state["description"],
+        policy=raw,
+        explanation=state.get("explanation", ""),
+    )
+    return {**state, "policy_structure": policy}
 
 
 def _generate_yaml(state: ServicePolicyState) -> ServicePolicyState:
     """
-    Render the policy structure as a YAML string with explanatory comments.
+    Render the Policy model as a YAML string with explanatory comments.
+
+    Converts policy_structure (a Policy instance) to a plain dict before
+    passing to yaml.dump so the output matches the expected YAML format.
 
     Returns:
         Updated ServicePolicyState with yaml_output
@@ -157,8 +181,23 @@ def _generate_yaml(state: ServicePolicyState) -> ServicePolicyState:
             header += f"#   {line.strip()}\n"
         header += "\n"
 
+    policy_obj: Optional[Policy] = state.get("policy_structure")
+    if policy_obj is None:
+        policy_dict: dict = {"policy": {}}
+    else:
+        policy_dict = {
+            "policy": {
+                realm_role: [
+                    {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
+                    for priv in privileges
+                    for svc in priv.services
+                ]
+                for realm_role, privileges in policy_obj.policy.items()
+            }
+        }
+
     yaml_content = yaml.dump(
-        state["policy_structure"],
+        policy_dict,
         default_flow_style=False,
         sort_keys=False,
         allow_unicode=True,
@@ -173,20 +212,35 @@ def _validate_policy(
     llm: BaseChatModel,
     realm_roles: list,
     service_name: str,
-    service_type: str,
+    service: Optional[Service],
     privileges: list,
     verbose: bool,
     max_retries: int,
 ) -> ServicePolicyState:
     """
-    Structural validation of the generated policy.
+    Structural validation of the generated Policy model.
+
+    Converts the Policy back to a raw dict for validate_policy_structure,
+    which expects {realm_role: [{"service": str, "privilege": str}]}.
 
     Returns:
         Updated ServicePolicyState with errors and validation_passed
     """
     retry_count = state.get("retry_count", 0)
-    policy = state["policy_structure"].get("policy", {})
-    service_names = [service_name]
+    policy_obj: Optional[Policy] = state.get("policy_structure")
+    service_type = (service.type or "Tool") if service else "Tool"
+
+    if policy_obj is None:
+        raw_policy: dict = {}
+    else:
+        raw_policy = {
+            realm_role: [
+                {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
+                for priv in privs
+                for svc in priv.services
+            ]
+            for realm_role, privs in policy_obj.policy.items()
+        }
 
     privileges_map = {
         service_name: {
@@ -196,7 +250,7 @@ def _validate_policy(
     }
 
     structural_errors = validate_policy_structure(
-        policy, realm_roles, service_names, privileges_map
+        raw_policy, realm_roles, [service_name], privileges_map
     )
     # An empty policy is valid for a service-scoped agent: the policy description
     # may simply not grant any permissions to this service's privileges.
@@ -237,7 +291,7 @@ def create_service_policy_builder_graph(
     config: ServicePolicyBuilderConfig,
     realm_roles: list,
     service_name: str,
-    service_type: str,
+    service: Optional[Service],
     privileges: list,
 ):
     """
@@ -247,7 +301,7 @@ def create_service_policy_builder_graph(
         config: ServicePolicyBuilderConfig
         realm_roles: All realm roles [{name, description}]
         service_name: Service name
-        service_type: Service type (e.g. 'Tool', 'Agent') — property of the service
+        service: Service object (None if the service was not found in config)
         privileges: Privileges of the target service [{name, description}]
 
     Returns:
@@ -256,7 +310,7 @@ def create_service_policy_builder_graph(
 
     def filter_and_extract_node(state: ServicePolicyState) -> ServicePolicyState:
         return _filter_and_extract_scopes(
-            state, config.llm, realm_roles, service_type, privileges, config.verbose
+            state, config.llm, realm_roles, service, privileges, config.verbose
         )
 
     def build_policy_node(state: ServicePolicyState) -> ServicePolicyState:
@@ -267,7 +321,7 @@ def create_service_policy_builder_graph(
 
     def validate_policy_node(state: ServicePolicyState) -> ServicePolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, service_name, service_type, privileges,
+            state, config.llm, realm_roles, service_name, service, privileges,
             config.verbose, config.max_retries
         )
 
@@ -342,7 +396,7 @@ class ServicePolicyBuilder:
         )
 
         config_api = Configuration.for_realm(realm)
-        
+
         roles_models = config_api.get_roles()
         self.realm_roles = [
             {"name": r.name, "description": r.description or ""}
@@ -352,11 +406,13 @@ class ServicePolicyBuilder:
         services = config_api.get_services()
         self.service_type: str = "Tool"  # Default to "Tool" if not found
         self.privileges = []
+        self._service_obj: Optional[Service] = None
         for service in services:
             if service.serviceId != service_name:
                 continue
             # Handle None case by defaulting to "Tool"
             self.service_type = service.type or "Tool"
+            self._service_obj = service
             # Service.roles contains the privileges/permissions for this service.
             # service_type is a property of the service, not of individual privileges.
             self.privileges = [
@@ -369,7 +425,7 @@ class ServicePolicyBuilder:
             self.config,
             self.realm_roles,
             self.service_name,
-            self.service_type,
+            self._service_obj,
             self.privileges,
         )
 
@@ -377,7 +433,7 @@ class ServicePolicyBuilder:
         """Return the compiled graph for visualization or inspection."""
         return self.graph
 
-    def generate_policy(self, description: str) -> Dict[str, Any]:
+    def generate_policy(self, description: str) -> Policy:
         """
         Generate a service-scoped access control policy from a natural language description.
 
@@ -385,20 +441,17 @@ class ServicePolicyBuilder:
             description: Natural language policy description
 
         Returns:
-            dict with keys:
-                yaml_output (str)       — YAML policy file content
-                policy_structure (dict) — structured policy data
-                parsed_scopes (list)    — raw realm-role → privilege mappings
-                errors (list)           — validation errors (empty on success)
-                success (bool)          — True when no validation errors
-                retry_count (int)       — number of validation retries
+            Policy model instance with the generated policy and explanation.
+
+        Raises:
+            ValueError: If validation fails after all retries.
         """
         initial_state: ServicePolicyState = {
             "description": description,
             "service_name": self.service_name,
             "explanation": "",
             "parsed_scopes": [],
-            "policy_structure": {},
+            "policy_structure": None,
             "yaml_output": "",
             "messages": [],
             "errors": [],
@@ -408,15 +461,24 @@ class ServicePolicyBuilder:
 
         final_state = self.graph.invoke(initial_state)
 
-        return {
-            "yaml_output": final_state["yaml_output"],
-            "policy_structure": final_state["policy_structure"],
-            "parsed_scopes": final_state["parsed_scopes"],
-            "explanation": final_state.get("explanation", ""),
-            "errors": final_state["errors"],
-            "success": len(final_state["errors"]) == 0,
-            "retry_count": final_state.get("retry_count", 0),
-        }
+        errors = final_state.get("errors", [])
+        if errors:
+            raise ValueError(f"Policy validation failed: {'; '.join(errors)}")
+
+        self._last_yaml_output = final_state["yaml_output"]
+
+        return final_state["policy_structure"]
+
+    def get_yaml_output(self) -> str:
+        """
+        Return the YAML output from the last generate_policy() call.
+
+        Raises:
+            ValueError: If no policy has been generated yet.
+        """
+        if not hasattr(self, "_last_yaml_output"):
+            raise ValueError("No policy available. Call generate_policy() first.")
+        return self._last_yaml_output
 
     def save_policy(self, yaml_output: str, filepath: str = "service_policy.yaml"):
         """

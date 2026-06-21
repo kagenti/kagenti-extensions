@@ -41,6 +41,7 @@ from dotenv import load_dotenv
 
 from full_policy_agent.graph import PolicyBuilder
 from config import create_llm
+from utils.output_generators import save_policy, save_policy_rego
 
 load_dotenv(dotenv_path="aiac.env", override=True)
 
@@ -108,34 +109,30 @@ def generate_policy_only(
     print(f"\nPolicy file: {policy_file}")
     print(f"\nDescription:\n{policy_text}\n")
 
-    result = builder.generate_policy(description=policy_text)
+    try:
+        policy = builder.generate_policy(description=policy_text)
+    except ValueError as exc:
+        print(f"✗ Policy generation failed: {exc}")
+        return
 
-    if result["success"]:
-        print("✓ Access rules generated successfully!\n")
-        print("Generated YAML:")
-        print("-" * 80)
-        print(builder.get_yaml_output())
-        print("-" * 80)
-        builder.save_policy(output_file)
-        
-        # Generate Rego policy files
-        print("\nGenerating Rego policy files...")
-        rego_dir = Path(output_file).parent / "rego_policy"
-        builder.save_policy_rego(str(rego_dir))
-    else:
-        print("✗ Policy generation failed with errors:")
-        for error in result["errors"]:
-            print(f"  - {error}")
+    print("✓ Access rules generated successfully!\n")
+    print("Generated YAML:")
+    print("-" * 80)
+    print(builder.get_yaml_output())
+    print("-" * 80)
+    save_policy(policy, output_file)
+
+    print("\nGenerating Rego policy files...")
+    rego_dir = Path(output_file).parent / "rego_policy"
+    save_policy_rego(policy, str(rego_dir), realm=builder.realm)
 
     print("\n" + "=" * 80)
     print("Parsed Role-to-Privilege Mappings:")
     print("=" * 80)
-    for role_mapping in result["parsed_scopes"]:
-        realm_role = role_mapping["role"]
-        privileges = role_mapping.get("privileges", [])
+    for realm_role, privileges in policy.policy.items():
         print(f"  {realm_role}:")
         for priv in privileges:
-            print(f"    - {priv['service']}: {priv['privilege']}")
+            print(f"    - {priv.name}: {', '.join(svc.serviceId or svc.name or svc.id for svc in priv.services)}")
 
 def main() -> None:
     gen_parser = argparse.ArgumentParser(

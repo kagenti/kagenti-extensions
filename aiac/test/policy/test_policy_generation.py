@@ -177,18 +177,11 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
 
         # Generate policy
         try:
-            result = builder.generate_policy(policy_description)
-
-            if not result["success"]:
-                failures.append(
-                    f"[{llm_model_name}] {policy_file.name}: "
-                    f"generation failed: {result['errors']}"
-                )
-                continue
+            policy = builder.generate_policy(policy_description)
 
             # Get YAML output from builder (generated on-demand)
             yaml_output = builder.get_yaml_output()
-            
+
             # Parse generated YAML
             generated_policy = normalize_policy_yaml(yaml_output)
 
@@ -196,11 +189,10 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
             match, differences = compare_policies(generated_policy, expected_policy)
 
             if not match:
-                explanation = result.get("explanation", "")
                 explanation_lines = (
                     "\n  LLM explanation:\n"
-                    + "\n".join(f"    {l}" for l in explanation.splitlines())
-                    if explanation else ""
+                    + "\n".join(f"    {l}" for l in policy.explanation.splitlines())
+                    if policy.explanation else ""
                 )
                 failures.append(
                     f"[{llm_model_name}] {policy_file.name}: "
@@ -226,6 +218,69 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
 # ============================================================================
 # UNIT TESTS (no LLM required)
 # ============================================================================
+
+def test_save_policy_creates_yaml_file(tmp_path):
+    """save_policy writes valid YAML to the specified path."""
+    from utils.output_generators import save_policy
+    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.library.configuration.models import Service
+
+    svc = Service(id="kagenti", serviceId="kagenti", enabled=True, type="Agent")
+    policy = Policy(
+        name="Test policy",
+        policy={"developer": [Priviledge(name="demo-ui", services=[svc])]},
+        explanation="",
+    )
+
+    output_file = tmp_path / "policy.yaml"
+    save_policy(policy, str(output_file))
+
+    assert output_file.exists()
+    content = output_file.read_text()
+    assert "policy:" in content
+    assert "developer:" in content
+    assert "kagenti" in content
+    assert "demo-ui" in content
+    assert "# Access Control Policy" in content
+    assert "Test policy" in content
+
+
+def test_save_policy_rego_creates_files(tmp_path, config_file):
+    """save_policy_rego writes realm_roles and default Rego files to the directory."""
+    from utils.output_generators import save_policy_rego
+    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.library.configuration.models import Service
+    import os
+
+    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
+
+    svc_kagenti = Service(id="kagenti", serviceId="kagenti", enabled=True, type="Agent")
+    svc_github = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
+    policy = Policy(
+        name="Test policy",
+        policy={
+            "developer": [
+                Priviledge(name="demo-ui", services=[svc_kagenti]),
+                Priviledge(name="github-full-access", services=[svc_github]),
+            ]
+        },
+        explanation="",
+    )
+
+    save_policy_rego(policy, str(tmp_path), realm="demo")
+
+    assert (tmp_path / "realm_roles.rego").exists()
+    assert (tmp_path / "default_inbound.rego").exists()
+    assert (tmp_path / "default_outbound.rego").exists()
+    # One file per service referenced in the policy
+    assert (tmp_path / "generated_policy_kagenti.rego").exists()
+    assert (tmp_path / "generated_policy_github-tool.rego").exists()
+
+    inbound_content = (tmp_path / "default_inbound.rego").read_text()
+    assert "default allow := false" in inbound_content
+    outbound_content = (tmp_path / "default_outbound.rego").read_text()
+    assert "default allow := false" in outbound_content
+
 
 def test_policy_builder_can_generate_yaml_from_structure(config_file):
     """PolicyBuilder can generate YAML from a policy structure (bypasses LLM)."""
@@ -258,7 +313,6 @@ def test_policy_builder_can_generate_yaml_from_structure(config_file):
 
 def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
     """Invalid policies are caught by validation (uses mock LLM)."""
-    # Mock LLM returns an invalid policy (unknown role)
     mock_response = Mock()
     mock_response.content = """
     ```json
@@ -275,16 +329,10 @@ def test_invalid_policy_triggers_validation_errors(config_file, mock_llm):
     mock_llm.invoke.return_value = mock_response
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
-    # Create PolicyBuilder with mock LLM
     builder = PolicyBuilder(llm=mock_llm, verbose=False)
 
-    # Generate policy
-    result = builder.generate_policy("Invalid policy description")
-
-    # Verify validation caught the error
-    assert not result["success"], "Expected validation to fail for unknown role"
-    assert len(result["errors"]) > 0
-    assert any("unknown-role" in str(err).lower() for err in result["errors"])
+    with pytest.raises(ValueError, match="unknown-role"):
+        builder.generate_policy("Invalid policy description")
 
 
 def test_policy_builder_initialization(config_file, mock_llm):

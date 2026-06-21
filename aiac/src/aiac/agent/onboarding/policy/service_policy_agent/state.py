@@ -6,8 +6,10 @@ TypedDict state structure for the LangGraph workflow that generates a
 partial access control policy scoped to a single Keycloak service.
 """
 
-from typing import TypedDict, Annotated, List, Dict, Any
+from typing import TypedDict, Annotated, List, Dict, Any, Optional
 from operator import add
+
+from aiac.pdp.policy.models import Policy
 
 
 class ServicePolicyState(TypedDict):
@@ -18,8 +20,9 @@ class ServicePolicyState(TypedDict):
         description: Natural language policy description
         service_name: Keycloak service name to scope the policy to
         explanation: LLM explanation of the privilege mappings
-        parsed_scopes: List of {role, privileges} mappings (realm-role to privileges)
-        policy_structure: Structured policy dict ready for YAML conversion
+        parsed_scopes: List of {role, privileges} mappings; each privilege dict
+            carries a 'service' key holding a Service object (not a string)
+        policy_structure: Fully constructed Policy model (set by _build_policy)
         yaml_output: Final YAML-formatted policy string
         messages: Accumulated LLM messages
         errors: Validation errors - replaced on each validation attempt
@@ -30,7 +33,7 @@ class ServicePolicyState(TypedDict):
     service_name: str
     explanation: str
     parsed_scopes: List[Dict[str, Any]]
-    policy_structure: Dict[str, Any]
+    policy_structure: Optional[Policy]
     yaml_output: str
     messages: Annotated[List, add]
     errors: List[str]
