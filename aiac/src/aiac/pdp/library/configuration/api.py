@@ -28,10 +28,21 @@ class Configuration:
         if not resp.ok:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
+    def _build_subject(self, raw: dict, all_roles: dict[str, Role]) -> Subject:
+        subject_id = raw["id"]
+        assignments_resp = requests.get(
+            f"{self._base_url()}/subjects/{subject_id}/assignments", params=self._params()
+        )
+        self._check(assignments_resp)
+        realm_role_ids = {r["id"] for r in assignments_resp.json().get("realmMappings", [])}
+        roles = [r.model_dump() for r in all_roles.values() if r.id in realm_role_ids]
+        return Subject.model_validate({**raw, "roles": roles})
+
     def get_subjects(self) -> list[Subject]:
         resp = requests.get(f"{self._base_url()}/subjects", params=self._params())
         self._check(resp)
-        return [Subject.model_validate(s) for s in resp.json()]
+        all_roles = self._all_roles_map()
+        return [self._build_subject(raw, all_roles) for raw in resp.json()]
 
     def get_roles(self) -> list[Role]:
         resp = requests.get(f"{self._base_url()}/roles", params=self._params())

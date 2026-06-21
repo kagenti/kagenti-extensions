@@ -48,20 +48,78 @@ class TestForRealm:
 
 
 class TestGetSubjects:
+    # Call order: GET /subjects, GET /roles (+ per-role /scopes), GET /subjects/{id}/assignments — per subject.
+
     def test_returns_list_of_subject(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         payload = [{"id": "u1", "username": "alice", "enabled": True}]
-        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(payload)) as m:
+        assignments = {"realmMappings": [], "serviceMappings": {}}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok(assignments)],
+        ) as m:
             result = Configuration.for_realm(REALM).get_subjects()
         assert isinstance(result[0], Subject)
         assert result[0].username == "alice"
-        m.assert_called_once_with(f"{BASE}/subjects", params={"realm": REALM})
+        assert m.call_args_list[0] == ((f"{BASE}/subjects",), {"params": {"realm": REALM}})
+
+    def test_roles_populated_from_keycloak_assignments(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        all_roles = [{"id": "r1", "name": "viewer", "composite": False}]
+        role_scopes = [{"id": "s1", "name": "read:data"}]
+        assignments = {"realmMappings": [{"id": "r1", "name": "viewer"}], "serviceMappings": {}}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok(all_roles), _ok(role_scopes), _ok(assignments)],
+        ):
+            result = Configuration.for_realm(REALM).get_subjects()
+        assert len(result[0].roles) == 1
+        assert result[0].roles[0].name == "viewer"
+
+    def test_unassigned_roles_not_included(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        all_roles = [
+            {"id": "r1", "name": "viewer", "composite": False},
+            {"id": "r2", "name": "admin", "composite": False},
+        ]
+        assignments = {"realmMappings": [{"id": "r1"}], "serviceMappings": {}}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok(all_roles), _ok([]), _ok([]), _ok(assignments)],
+        ):
+            result = Configuration.for_realm(REALM).get_subjects()
+        assert len(result[0].roles) == 1
+        assert result[0].roles[0].id == "r1"
 
     def test_raises_on_non_2xx(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_err()):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_subjects()
+
+    def test_raises_when_assignments_call_fails(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _err(502)],
+        ):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_subjects()
+
+    def test_realm_forwarded_on_all_calls(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        assignments = {"realmMappings": [], "serviceMappings": {}}
+        with patch(
+            "aiac.pdp.library.configuration.api.requests.get",
+            side_effect=[_ok(payload), _ok([]), _ok(assignments)],
+        ) as m:
+            Configuration.for_realm(REALM).get_subjects()
+        for c in m.call_args_list:
+            assert c[1].get("params") == {"realm": REALM}
 
 
 # ---------------------------------------------------------------------------
@@ -603,7 +661,6 @@ class TestMapRoleToService:
 
 class TestRealmParameter:
     @pytest.mark.parametrize("method,endpoint", [
-        ("get_subjects", "subjects"),
         ("get_roles", "roles"),
         ("get_scopes", "scopes"),
     ])
@@ -612,6 +669,13 @@ class TestRealmParameter:
         with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok([])) as m:
             getattr(Configuration.for_realm(REALM), method)()
         m.assert_called_once_with(f"{BASE}/{endpoint}", params={"realm": REALM})
+
+    def test_get_subjects_realm_forwarded_as_query_param(self, monkeypatch):
+        from unittest.mock import call
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok([])) as m:
+            Configuration.for_realm(REALM).get_subjects()
+        assert call(f"{BASE}/subjects", params={"realm": REALM}) in m.call_args_list
 
     def test_get_services_realm_forwarded_as_query_param(self, monkeypatch):
         from unittest.mock import call
