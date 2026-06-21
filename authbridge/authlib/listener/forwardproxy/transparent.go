@@ -10,6 +10,7 @@ import (
 
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/tlsbridge"
 )
 
 // HandleTransparentConn processes one outbound connection captured by an
@@ -42,6 +43,17 @@ import (
 // hard control against a hostile one — only the IP is ground truth. Hard
 // enforcement would need IP-set allowlists or SNI/cert cross-checks.
 //
+// SkipHosts is intentionally NOT consulted here. listener.skip_hosts is an
+// ops convenience for the cooperative-egress paths (forward proxy + ext_proc),
+// where bypassing the pipeline on infrastructure traffic is fine because the
+// agent is trusted to honor HTTP_PROXY anyway. The transparent path exists
+// precisely as the hard egress guard against agents that route around the
+// cooperative paths, and pctx.Host here is recovered from agent-controlled
+// SNI/Host bytes on the wire — making it self-exemptable would defeat the
+// reason this listener exists. If you find yourself wanting to add a
+// SkipHosts check here to "match the other listeners," don't — that's the
+// failure mode this comment is explicitly trying to prevent.
+//
 // HandleTransparentConn owns clientConn's lifecycle and always closes it.
 func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	defer func() { _ = clientConn.Close() }()
@@ -54,7 +66,12 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	// HTTP/TLS ports so non-HTTP protocols are not delayed by the peek. The dial
 	// target stays dst (the IP); only pctx.Host gets the recovered name.
 	host := dst
-	if shouldSniff(dst) {
+	// Sniff on the standard HTTP/TLS ports, OR on whatever ports the TLS bridge
+	// is configured to intercept — so a configured non-standard bridge port
+	// (e.g. 9443) still gets the peekable conn the bridge branch needs. The
+	// bridge's own port set is the single source of truth (no drift with
+	// shouldSniff's heuristic list).
+	if shouldSniff(dst) || (s.TLSBridge != nil && s.TLSBridge.Decision.HandlesPort(portOf(dst))) {
 		name, wrapped := sniffHost(clientConn)
 		clientConn = wrapped
 		if name != "" {
@@ -111,6 +128,32 @@ func (s *Server) HandleTransparentConn(clientConn net.Conn, dst string) {
 	enableKeepalive(upstream)
 
 	s.recordTunnelOpened(pctx)
+
+	if s.TLSBridge != nil {
+		// host is the policy authority: "<sniffed-SNI>:port" when a name was
+		// recovered, else dst ("<dial-IP>:port"). key is the SNI name or dial IP.
+		key := hostOnly(host)
+		var first []byte
+		if pc, ok := clientConn.(*peekedConn); ok {
+			first, _ = pc.Peek(5)
+		}
+		if !s.TLSBridge.Skip.Contains(key) {
+			v, reason := s.TLSBridge.Decision.Classify(key, portOf(dst), first)
+			if v == tlsbridge.Terminate {
+				_ = upstream.Close() // bridgeServe dials its own verified upstream; drop the pre-dial
+				if s.bridgeServe(clientConn, host, key) {
+					return
+				}
+				// bridgeServe fell open (upstream-verify failed) → re-dial for the tunnel.
+				if up2, derr := net.DialTimeout("tcp", dst, connectDialTimeout); derr == nil {
+					tunnel(clientConn, up2)
+					_ = up2.Close()
+				}
+				return
+			}
+			slog.Info("tls-bridge passthrough", "host", key, "reason", reason)
+		}
+	}
 	tunnel(clientConn, upstream)
 }
 

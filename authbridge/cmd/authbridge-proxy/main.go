@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -34,24 +35,27 @@ import (
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
 	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/tlsbridge"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/forwardproxy"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/reverseproxy"
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/skiphost"
 	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/transparentproxy"
 
 	// Plugins. Auth gates first, then the protocol parsers that
 	// supply session-event context for abctl.
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/a2aparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/ibac"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/inferenceparser"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/mcpparser"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/opa"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/sparc"
 	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
+	// Named (not blank) so pluginUsesSPIFFEIdentity can reference the shared
+	// SpiffeIdentity constant instead of duplicating the "spiffe" literal.
+	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
 )
 
 var logLevel = new(slog.LevelVar)
@@ -86,6 +90,51 @@ func startSignalToggle() {
 	}()
 }
 
+// spiffeProviderNeeded reports whether any configured feature actually consumes
+// the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
+// or a plugin whose identity is spiffe-based (needs the JWT-SVID source — today
+// only token-exchange, gated on identity.type=spiffe). When nothing consumes
+// it, the provider — and its blocking SPIRE Workload API dial in NewProvider —
+// is skipped, so the binary boots even on clusters without SPIRE.
+func spiffeProviderNeeded(c *config.Config) bool {
+	if c.MTLS != nil {
+		return true
+	}
+	for _, p := range c.Pipeline.Inbound.Plugins {
+		if pluginUsesSPIFFEIdentity(p) {
+			return true
+		}
+	}
+	for _, p := range c.Pipeline.Outbound.Plugins {
+		if pluginUsesSPIFFEIdentity(p) {
+			return true
+		}
+	}
+	return false
+}
+
+// pluginUsesSPIFFEIdentity reports whether a plugin's config selects the spiffe
+// identity scheme (identity.type=spiffe) — the only plugin-level consumer of
+// the Provider today (token-exchange). The `identity` block is a shared
+// convention; a new SPIFFE-consuming plugin must either follow it or extend
+// this predicate.
+func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
+	if len(p.Config) == 0 {
+		return false
+	}
+	var probe struct {
+		Identity struct {
+			Type string `json:"type"`
+		} `json:"identity"`
+	}
+	if err := json.Unmarshal(p.Config, &probe); err != nil {
+		// Unparseable here just means the plugin's own typed decode will fail
+		// later with a precise error; don't force the provider on for it.
+		return false
+	}
+	return probe.Identity.Type == tokenexchange.SpiffeIdentity
+}
+
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
@@ -111,8 +160,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("initial config load: %v", err)
 	}
+	// Build the SPIFFE Provider only when something actually consumes it —
+	// top-level mTLS (X509Source for the listeners) or a plugin whose identity
+	// is spiffe-based (JWT-SVID for token-exchange). The platform's base config
+	// ships an empty `spiffe: {}` for every agent, and NewProvider blocks until
+	// the SPIRE Workload API returns the first SVID; constructing it on mere
+	// presence of the block would hang any agent on a cluster without SPIRE —
+	// e.g. a proxy-sidecar agent that only runs the TLS bridge, which mints
+	// leaves from a cert-manager CA and never touches an SVID. Need-driven
+	// construction keeps such agents decoupled from SPIRE. See spiffeProviderNeeded.
 	var provider *spiffe.Provider
-	if bootCfg.SPIFFE != nil {
+	if bootCfg.SPIFFE != nil && spiffeProviderNeeded(bootCfg) {
 		mirrorFiles := true
 		if bootCfg.SPIFFE.MirrorFiles != nil {
 			mirrorFiles = *bootCfg.SPIFFE.MirrorFiles
@@ -126,6 +184,9 @@ func main() {
 			log.Fatalf("spiffe provider: %v", err)
 		}
 		defer provider.Close()
+	} else if bootCfg.SPIFFE != nil {
+		slog.Info("spiffe block present but unused (no mTLS, no spiffe-identity plugin) — " +
+			"skipping SPIRE provider; no Workload API connection will be attempted")
 	}
 
 	// This binary is hardcoded to proxy-sidecar. Rejecting other modes
@@ -246,6 +307,48 @@ func main() {
 		slog.Info("mTLS disabled (no mtls block in config)")
 	}
 
+	// TLS bridge: when enabled, the forward proxy terminates agent outbound
+	// TLS so the outbound pipeline sees decrypted HTTPS. Constructed
+	// here and set on fpSrv below (mirroring fpSrv.SkipHosts / fpSrv.Shared).
+	// A nil *Engine leaves today's blind-tunnel behavior intact.
+	var bridge *tlsbridge.Engine
+	if cfg.TLSBridge != nil && cfg.TLSBridge.Mode == "enabled" {
+		// CA is always the operator-mounted cert-manager Secret (tls.crt/tls.key
+		// under ca_dir). EphemeralSource exists only for in-process tests.
+		src, cerr := tlsbridge.NewFileSource(cfg.TLSBridge.CADir+"/tls.crt", cfg.TLSBridge.CADir+"/tls.key")
+		if cerr != nil {
+			log.Fatalf("tls-bridge CA init failed: %v", cerr)
+		}
+		var extra []byte
+		if cfg.TLSBridge.UpstreamCABundle != "" {
+			if extra, err = os.ReadFile(cfg.TLSBridge.UpstreamCABundle); err != nil {
+				log.Fatalf("tls-bridge upstream_ca_bundle read failed: %v", err)
+			}
+		}
+		up, uerr := tlsbridge.NewUpstreamClient(extra)
+		if uerr != nil {
+			log.Fatalf("tls-bridge upstream client failed: %v", uerr)
+		}
+		minter := tlsbridge.NewMinter(src, tlsbridge.MinterOpts{})
+		var ports map[int]bool // nil => NewDecision defaults to {443, 8443}
+		if len(cfg.TLSBridge.Ports) > 0 {
+			ports = make(map[int]bool, len(cfg.TLSBridge.Ports))
+			for _, p := range cfg.TLSBridge.Ports {
+				ports[p] = true
+			}
+		}
+		bridge = &tlsbridge.Engine{
+			Decision: tlsbridge.NewDecision(tlsbridge.DecisionOpts{
+				Ports: ports, SkipHosts: cfg.TLSBridge.PassthroughHosts,
+			}),
+			Term:     tlsbridge.NewTerminator(minter),
+			Skip:     tlsbridge.NewSkipSet(),
+			Upstream: up,
+			CAPEM:    src.CACertPEM(),
+		}
+		slog.Info("tls-bridge enabled", "ca_dir", cfg.TLSBridge.CADir)
+	}
+
 	// Proxy-sidecar: reverse proxy on the inbound path + forward proxy
 	// on the outbound path.
 	rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
@@ -256,6 +359,16 @@ func main() {
 	if err != nil {
 		log.Fatalf("creating forward proxy: %v", err)
 	}
+	// SkipHosts: outbound destinations that bypass the pipeline AND
+	// session recording entirely. See ListenerConfig.SkipHosts for the
+	// motivating case (chatty observability sidecars evicting the
+	// inbound A2A user intent from the session FIFO).
+	skipHosts, err := skiphost.New(cfg.Listener.SkipHosts)
+	if err != nil {
+		log.Fatalf("listener.skip_hosts: %v", err)
+	}
+	fpSrv.SkipHosts = skipHosts
+	fpSrv.TLSBridge = bridge
 	sharedStore := shared.New()
 	defer sharedStore.Close() // stop the TTL janitor on normal main return
 	rpSrv.Shared = sharedStore
