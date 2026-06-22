@@ -1,55 +1,36 @@
-# Component PRD: Library
+# Component PRD: IdP Library (`aiac.idp.library`)
+
+**Phase 1 name:** `aiac.pdp.library.configuration.*` — renamed in Phase 2; content is equivalent with the addition of composite role management functions.
 
 ## Location
-`aiac/src/`
+`aiac/src/aiac/idp/library/`
 
 ## Package structure
 
 ```
-aiac/src/
-└── aiac/
+aiac/src/aiac/idp/
+├── __init__.py         # empty
+└── library/
     ├── __init__.py         # empty
-    └── pdp/
+    └── configuration/
         ├── __init__.py     # empty
-        ├── library/
-        │   ├── __init__.py     # empty
-        │   ├── configuration/
-        │   │   ├── __init__.py     # empty
-        │   │   ├── models.py       # Pydantic model definitions (Subject, Role, Service, Scope)
-        │   │   └── api.py          # HTTP client → PDP Configuration Service
-        │   └── policy/
-        │       ├── __init__.py     # empty
-        │       ├── models.py       # PolicyModel, PolicyStatement
-        │       └── api.py          # HTTP client → PDP Policy Service + apply_policy()
-        └── service/
-            ├── __init__.py     # empty
-            ├── configuration/
-            │   ├── __init__.py     # empty
-            │   └── keycloak/
-            │       ├── __init__.py     # empty
-            │       ├── main.py         # FastAPI app (Keycloak read service)
-            │       ├── Dockerfile
-            │       └── requirements.txt
-            └── policy/
-                ├── __init__.py     # empty
-                └── keycloak/
-                    ├── __init__.py     # empty
-                    ├── main.py         # FastAPI app (Keycloak write service)
-                    ├── Dockerfile
-                    └── requirements.txt
-aiac/test/
-└── test_models.py              # unit tests for aiac.pdp.library.configuration.models
-aiac/pyproject.toml   # pytest config: testpaths=["test"], pythonpath=["src"]
+        ├── models.py       # Subject, Role, Service, Scope
+        └── api.py          # Configuration class — reads + writes IdP entities
 ```
 
-`aiac` is a regular package with an empty `__init__.py`. `aiac.pdp`, `aiac.pdp.library`, `aiac.pdp.library.configuration`, `aiac.pdp.library.policy`, `aiac.pdp.service`, `aiac.pdp.service.configuration`, `aiac.pdp.service.configuration.keycloak`, `aiac.pdp.service.policy`, and `aiac.pdp.service.policy.keycloak` are regular packages with empty `__init__.py` files. Callers must use explicit submodule paths.
+All `__init__.py` files are empty. Callers use explicit submodule paths:
+
+```python
+from aiac.idp.library.configuration.models import Subject, Role, Scope, Service
+from aiac.idp.library.configuration.api import Configuration
+```
 
 ---
 
-## Submodule: `aiac.pdp.library.configuration.models`
+## Submodule: `aiac.idp.library.configuration.models`
 
 ### Description
-Data structures and schema library. Contains only Pydantic `BaseModel` subclasses representing generic PDP configuration entities (subjects, roles, services, scopes). No HTTP client dependency — importable by any consumer without pulling in `requests` or `python-dotenv`. Backed by Keycloak in both phases; model shapes are derived from Keycloak JSON but named generically.
+Dependency-free Pydantic `BaseModel` subclasses representing generic IdP configuration entities (subjects, roles, services, scopes). No HTTP client dependency — importable by any consumer without pulling in `requests` or `python-dotenv`. Model shapes are derived from Keycloak JSON but named generically; stable across phases.
 
 ### Dependencies
 ```
@@ -58,9 +39,9 @@ pydantic
 
 ### Pydantic models
 
-All models use `model_config = ConfigDict(extra='ignore')` to silently discard unknown fields, ensuring stability across backend version upgrades.
+All models use `model_config = ConfigDict(extra='ignore')` to silently discard unknown fields.
 
-Model definition order in the module: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` all reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
+Model definition order: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
 
 #### `Subject`
 
@@ -117,7 +98,7 @@ Represents a service scope (Keycloak: `client scope`).
 ### Usage
 
 ```python
-from aiac.pdp.library.configuration.models import Subject, Role, Scope, Service
+from aiac.idp.library.configuration.models import Subject, Role, Scope, Service
 
 raw = tool_result["content"]   # raw JSON list
 subjects = [Subject.model_validate(s) for s in raw]
@@ -125,10 +106,12 @@ subjects = [Subject.model_validate(s) for s in raw]
 
 ---
 
-## Submodule: `aiac.pdp.library.configuration.api`
+## Submodule: `aiac.idp.library.configuration.api`
 
 ### Description
-HTTP client library that wraps the PDP Configuration Service REST API. Provides both read and write access to PDP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.pdp.library.configuration.models`.
+HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.library.configuration.models`.
+
+In Phase 2 this module also absorbs the Phase 1 PDP Policy Service functions (composite role management). All Keycloak interactions are consolidated here; the PDP Policy Service (OPA) no longer touches Keycloak directly.
 
 ### Dependencies
 ```
@@ -224,7 +207,7 @@ class Configuration:
 
 ### Configuration
 
-Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/pdp/library/configuration/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
+Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/idp/library/configuration/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
 
 | Variable | Default |
 |----------|---------|
@@ -233,7 +216,7 @@ Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/pdp/library/con
 ### Usage
 
 ```python
-from aiac.pdp.library.configuration.api import Configuration
+from aiac.idp.library.configuration.api import Configuration
 
 cfg = Configuration.for_realm("kagenti")
 subjects = cfg.get_subjects()
@@ -246,91 +229,4 @@ updated_service = cfg.map_scope_to_service(service, scope)
 
 role = cfg.create_role(role_name="reader", role_description="Read-only access")
 updated_service = cfg.map_role_to_service(updated_service, role)
-```
-
----
-
-## Submodule: `aiac.pdp.library.policy.models`
-
-### Description
-Data structures for PDP policy representation. Contains PDP-agnostic Pydantic `BaseModel` subclasses that decouple agent graph nodes from any specific policy backend. The PDP Policy Service translates these models internally (Keycloak composite mappings for Phase 1, Rego rules for Phase 2) — no translation logic lives in the agent.
-
-### Dependencies
-```
-pydantic
-```
-
-### Pydantic models
-
-#### `PolicyStatement`
-
-Represents a single policy assertion. **Shape is TBD.** Constraint: must carry sufficient information for the Policy Apply sub-agent to verify entity existence via `aiac.pdp.library.configuration.api` (roles, service IDs, and scopes in Keycloak) before committing.
-
-#### `PolicyModel`
-
-A collection of `PolicyStatement` instances representing a complete proposed policy for a service or role. Produced by the Service Policy sub-agent and consumed by the shared Policy Apply sub-agent.
-
-| Field | Type | Notes |
-|-------|------|-------|
-| `statements` | `list[PolicyStatement]` | Ordered list of policy statements |
-
-### Usage
-
-```python
-from aiac.pdp.library.policy.models import PolicyModel, PolicyStatement
-```
-
----
-
-## Submodule: `aiac.pdp.library.policy.api`
-
-### Description
-HTTP client library that wraps the PDP Policy Service REST API. Abstracts the Phase 1 (Keycloak) and Phase 2 (OPA) policy backends behind a stable function interface — callers never interact with the backend directly. The active backend is determined by `AIAC_PDP_POLICY_URL`, which points to whichever policy service pod is deployed.
-
-Handles policy operations: committing `PolicyModel` instances (both phases), composite role mappings (Phase 1), and Rego rules (Phase 2). Configuration entity operations (e.g. scope creation) belong to `aiac.pdp.library.configuration.api`.
-
-### Dependencies
-```
-requests
-pydantic
-python-dotenv
-```
-
-### Class: `Policy`
-
-Stateful client bound to a single realm. Construct via the factory method or directly.
-
-```python
-class Policy:
-    def __init__(self, realm: str) -> None: ...
-
-    @classmethod
-    def for_realm(cls, realm: str) -> "Policy": ...
-
-    def apply_policy(self, policy: PolicyModel) -> None: ...
-```
-
-`apply_policy`:
-1. Translates the PDP-agnostic `PolicyModel` into the backend-specific representation (Keycloak composite mappings or Rego rules — handled internally by the PDP Policy Service).
-2. Issues the appropriate request(s) to `{AIAC_PDP_POLICY_URL}`, appending `?realm=<self.realm>`.
-3. Raises `RuntimeError` on non-2xx HTTP status.
-
-Additional policy write methods (composite role management and permissions) are defined in the PDP Policy Service component PRD.
-
-### Configuration
-
-Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/pdp/library/policy/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
-
-| Variable | Default |
-|----------|---------|
-| `AIAC_PDP_POLICY_URL` | `http://127.0.0.1:7072` |
-
-### Usage
-
-```python
-from aiac.pdp.library.policy.api import Policy
-from aiac.pdp.library.policy.models import PolicyModel
-
-policy = Policy.for_realm("kagenti")
-policy.apply_policy(policy_model)
 ```

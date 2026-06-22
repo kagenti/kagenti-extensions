@@ -15,11 +15,15 @@ The `/apply/*` HTTP endpoints are retained as a debugging escape hatch. The **NA
 
 The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
-| Orchestrator | Trigger(s) | Sub-agents |
-|---|---|---|
-| Service Onboarding | `service/{id}` | Service Provision → Service Policy → Policy Apply (sequential) |
-| Policy Update | `build`, `rebuild` | Build → Policy Apply or Rebuild → Policy Apply (alternative, then apply) |
-| Role Update | `role/{id}` | Role → Policy Apply (sequential) |
+| Orchestrator | Trigger(s) | Sub-agents (Phase 1) | Sub-agents (Phase 2) |
+|---|---|---|---|
+| Service Onboarding | `service/{id}` | Service Provision → Service Policy → Policy Apply (sequential) | Service Provision → **Policy** → **Policy Builder** (sequential) |
+| Policy Update | `build`, `rebuild` | Build → Policy Apply or Rebuild → Policy Apply (alternative, then apply) | Build → **Policy Builder** or Rebuild → **Policy Builder** |
+| Role Update | `role/{id}` | Role → Policy Apply (sequential) | Role → **Policy Builder** |
+
+**Phase 2 new sub-agents (TBD — to be specified in a separate PRD or added to sub-agent PRDs):**
+- **Policy sub-agent** — creates an `AgentPolicyModel` delta scoped to the triggered service, including `source_roles`, `scope_targets`, and `PolicyRule` sets for inbound and outbound pipelines.
+- **Policy Builder sub-agent** — merges the delta into the whole-system `PolicyModel` and calls `aiac.pdp.library.policy.apply_policy` (or `apply_agent_policy` for single-agent updates).
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -122,6 +126,8 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
 
+> **Phase 2 TBD:** The Phase 2 Policy sub-agent and Policy Builder sub-agent need dedicated sub-PRDs. These will be added to this table once defined via `/grill-me` or `/to-prd`.
+
 ---
 
 ## Shared Module
@@ -206,9 +212,10 @@ class PDPSnapshot(BaseModel):
 
 #### `PolicyModel`
 
-Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the shared Policy Apply sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.api.apply_policy(PolicyModel)`. The PDP Policy Service handles translation to the appropriate backend format (Keycloak composite mappings or Rego rules).
+Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the shared Policy Apply sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
 
-`PolicyModel` is defined in `aiac/pdp/library/policy/models.py`. `PolicyStatement` shape is TBD — must carry sufficient information for entity existence resolution via `aiac.pdp.library.configuration.api`.
+- **Phase 1:** `PolicyModel` is defined in `aiac/pdp/library/policy/models.py` (`statements: list[PolicyStatement]`). `PolicyStatement` shape is TBD — must carry sufficient information for entity existence resolution via `aiac.idp.library.configuration.api`.
+- **Phase 2:** `PolicyModel` is defined in `aiac/pdp/library/models.py` (`agents: list[AgentPolicyModel]`). Full spec: [pdp-policy-opa-service.md](pdp-policy-opa-service.md).
 
 #### `ValidationVerdict`
 
@@ -218,7 +225,7 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyModel` and `PolicyStatement` are defined in `aiac/pdp/library/policy/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. Phase 1: `PolicyModel` and `PolicyStatement` are defined in `aiac/pdp/library/policy/models.py`. Phase 2: `PolicyModel`, `AgentPolicyModel`, and `PolicyRule` are defined in `aiac/pdp/library/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
@@ -241,7 +248,7 @@ flowchart TD
 
 #### Nodes
 
-- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy.api`. The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings or Rego rules) and commits.
+- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy` (Phase 2) or `aiac.pdp.library.policy.api` (Phase 1). The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings in Phase 1, Rego packages written to an `AuthorizationPolicy` Kubernetes CR in Phase 2).
 - **`format_response`**: assembles the commit result for the orchestrator.
 
 #### State
@@ -290,7 +297,7 @@ flowchart TD
     C4 -->|"pass"| APPLY["proceed to apply_*"]
 ```
 
-1. **Existence check** — all entities referenced by `PolicyModel` statements exist; resolved via `aiac.pdp.library.configuration.api`.
+1. **Existence check** — all entities referenced by `PolicyModel` statements exist; resolved via `aiac.idp.library.configuration.api`.
 2. **Safety guard rails** — total statements in `PolicyModel` ≤ `MAX_CHANGES_PER_RUN`.
 3. **LLM re-confirmation** — second LLM call with auditor system prompt; returns `ValidationVerdict(approved, reason)`.
 4. **Scope check** — `PolicyModel` is bounded to entities referenced by the trigger; no over-reach on partial updates.
@@ -328,8 +335,8 @@ flowchart TD
 | Variable | Default | Source |
 |---|---|---|
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) |
+| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) — used by `aiac.idp.library.configuration.api` |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) — used by `aiac.pdp.library.policy` (Phase 2) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | ConfigMap (`aiac-pdp-config`) |
 | `KEYCLOAK_REALM` | — | ConfigMap (`aiac-pdp-config`) |
 | `LLM_BASE_URL` | — | ConfigMap |
