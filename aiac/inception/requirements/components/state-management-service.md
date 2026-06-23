@@ -31,7 +31,7 @@ The PDP Policy Service retains sole ownership of the `AuthorizationPolicy` CR (R
 5. As the Policy Builder sub-agent, I want to clear all agent policies in a single call, so that a full policy rebuild can start from a clean state.
 6. As an AIAC sub-agent developer, I want a typed Python library that returns `AgentPolicyModel` and `PolicyModel` objects directly, so that I can work with structured policy data without writing Kubernetes client code.
 7. As an operator, I want to inspect current policy state using `kubectl get agentpolicies`, so that I can audit access control configuration without specialized tooling.
-8. As an operator, I want the State Management Service to be co-located in the PDP Interface Pod, so that policy-related services are deployed together and share the same Kubernetes ServiceAccount.
+8. As an operator, I want the State Management Service to be co-located in the Kagenti Interface Pod, so that policy-related services are deployed together and share the same Kubernetes ServiceAccount.
 
 ---
 
@@ -45,7 +45,7 @@ The PDP Policy Service retains sole ownership of the `AuthorizationPolicy` CR (R
 
 **ClusterIP Service:** `aiac-pdp-state-service:7074`
 
-**Deployment:** third container in the PDP Interface Pod (alongside IdP Configuration Service `:7071` and PDP Policy Service `:7072`)
+**Deployment:** third container in the Kagenti Interface Pod (alongside IdP Configuration Service `:7071` and PDP Policy Service `:7072`)
 
 **Framework:** FastAPI + uvicorn. **Base image:** `python:3.12-slim`.
 
@@ -154,6 +154,6 @@ See [library-state.md](library-state.md) for the companion library testing decis
 
 ## Further Notes
 
-- The `AgentPolicy` CRD must exist in the cluster before the State Management Service starts. The CRD manifest and RBAC (`get`, `list`, `patch`, `delete` on `agentpolicies` in the `aiac.kagenti.io` API group) should be created in the K8s manifests issue that extends the PDP Interface Pod.
+- The `AgentPolicy` CRD must exist in the cluster before the State Management Service starts. The CRD manifest and RBAC (`get`, `list`, `patch`, `delete` on `agentpolicies` in the `aiac.kagenti.io` API group) should be created in the K8s manifests issue that extends the Kagenti Interface Pod.
 - `spec` fields use snake_case (matching Pydantic's `model_dump()`) rather than Kubernetes camelCase convention. This avoids a translation layer and is consistent with the approach in the `AuthorizationPolicy` CR.
 - The `agent_id` is used as the CR `metadata.name`. Since Kubernetes resource names must be valid DNS subdomain names, `agent_id` values must be lowercase alphanumeric with hyphens only — this is already the convention for service IDs in the AIAC trigger events (`aiac.apply.service.{id}`).
