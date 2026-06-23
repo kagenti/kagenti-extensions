@@ -4,7 +4,7 @@
 > This guide deploys the PDP Configuration Service as a standalone Pod.
 > It does not reflect the production topology.
 >
-> In production both PDP services run as containers in a single PDP Interface Pod
+> In production both PDP services run as containers in a single Kagenti Interface Pod
 > defined in `pdp-interface-deployment.yaml` (issue 4.2).
 
 The PDP Configuration Service is a read-only FastAPI proxy over the Keycloak Admin REST API.
