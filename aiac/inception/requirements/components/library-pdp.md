@@ -1,6 +1,6 @@
 # Component PRD: PDP Library (`aiac.pdp.library`)
 
-**Phase 2 only.** These modules replace the Phase 1 `aiac.pdp.library.policy.*` submodules. They have no dependency on Keycloak — all IdP operations use `aiac.idp.library.configuration`.
+These modules have no dependency on Keycloak — all IdP operations use `aiac.idp.library.configuration`.
 
 ## Location
 `aiac/src/aiac/pdp/library/`
@@ -28,9 +28,7 @@ from aiac.pdp.library.policy import apply_policy, apply_agent_policy, delete_age
 ## Submodule: `aiac.pdp.library.models`
 
 ### Description
-Dependency-free Pydantic `BaseModel` subclasses for Phase 2 policy representation. Importable by any consumer without pulling in `requests` or `python-dotenv`. Consumed by the AIAC Agent's policy-producing sub-agents and the `aiac.pdp.library.policy` HTTP client.
-
-**Replaces:** `aiac.pdp.library.policy.models` (Phase 1, which held a TBD `PolicyStatement` / `PolicyModel`).
+Dependency-free Pydantic `BaseModel` subclasses for policy representation. Importable by any consumer without pulling in `requests` or `python-dotenv`. Consumed by the AIAC Agent's policy-producing sub-agents and the `aiac.pdp.library.policy` HTTP client.
 
 ### Dependencies
 ```
@@ -102,8 +100,6 @@ model = PolicyModel(agents=[agent_model])
 HTTP client module wrapping the PDP Policy Service (OPA) REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
 
 No `realm` parameter — the OPA service operates on a Kubernetes CR, not a Keycloak realm.
-
-**Replaces:** `aiac.pdp.library.policy.api` (Phase 1, which had a realm-bound `Policy` class with a single `apply_policy` method).
 
 ### Dependencies
 ```

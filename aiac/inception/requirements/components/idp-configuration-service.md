@@ -1,14 +1,10 @@
 # Component PRD: IdP Configuration Service
 
-**Phase 1 name:** PDP Configuration Service
-
 ## Location
 `aiac/src/aiac/idp/service/configuration/keycloak/`
 
-**Phase 1 location:** `aiac/src/aiac/pdp/service/configuration/keycloak/` — source package is renamed in Phase 2; the container image name and Kubernetes ClusterIP service (`aiac-pdp-config-service:7071`) are unchanged.
-
 ## Description
-A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns IdP (Keycloak) entity state in generic form for consumption by the AIAC Agent and library clients. In Phase 2 this service also absorbs the Phase 1 PDP Policy Service endpoints (composite role management), consolidating all Keycloak interactions into a single container. Stateless — no caching. Backed exclusively by Keycloak in both phases; the read interface is stable across phases.
+A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns IdP (Keycloak) entity state in generic form for consumption by the AIAC Agent and library clients. Consolidates all Keycloak interactions into a single container. Stateless — no caching. Backed exclusively by Keycloak.
 
 ## Endpoints
 
@@ -105,7 +101,7 @@ Environment variables (injected via Kubernetes Deployment manifest):
 - Base image: `python:3.12-slim`
 - Kubernetes ClusterIP Service: `aiac-pdp-config-service:7071`
 - Deployment: co-located with PDP Policy Service as a container in the **PDP Interface Pod** (`pdp-interface-deployment.yaml`)
-- Python library: `aiac.idp.library.configuration` (Phase 2) / `aiac.pdp.library.configuration` (Phase 1)
+- Python library: `aiac.idp.library.configuration`
 
 ## Dependencies (`requirements.txt`)
 

@@ -1,4 +1,4 @@
-# Component PRD: PDP Policy Service — OPA Implementation (Phase 2)
+# Component PRD: PDP Policy Service (OPA)
 
 ## Location
 `aiac/src/aiac/pdp/service/policy/opa/`
@@ -6,24 +6,9 @@
 ## Description
 A FastAPI web service that translates a **Policy Model** into OPA Rego packages and writes them to an `AuthorizationPolicy` Kubernetes Custom Resource. The OPA plugin embedded in each AuthBridge instance fetches the Rego packages relevant to its pod from this CR at startup.
 
-This is the **Phase 2** implementation of the PDP Policy Service. It is deployed as a container in the **PDP Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP. Phase transition from Phase 1 = container image swap only (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`). The service name, port, and manifest are unchanged.
+The service is deployed as a container in the **PDP Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP.
 
-The service has no dependency on Keycloak. All Keycloak operations (entity reads and composite role management from Phase 1) are handled by the **IdP Configuration Service** and its library (`aiac.idp.library.configuration`).
-
----
-
-## Namespace changes introduced in Phase 2
-
-Phase 2 introduces a clean `idp` / `pdp` namespace split across the library:
-
-| Phase 1 path | Phase 2 path | Notes |
-|---|---|---|
-| `aiac.pdp.library.configuration.models` | `aiac.idp.library.configuration.models` | Renamed; content unchanged |
-| `aiac.pdp.library.configuration.api` | `aiac.idp.library.configuration.api` | Renamed; Phase 1 policy functions merged in |
-| `aiac.pdp.library.policy.models` | `aiac.pdp.library.models` | New module; holds Phase 2 policy model types |
-| `aiac.pdp.library.policy.api` | `aiac.pdp.library.policy` | New module; Phase 2 HTTP client functions |
-| PDP Configuration Service | **IdP Configuration Service** | Renamed; absorbs Phase 1 PDP Policy Service endpoints |
-| PDP Policy Service (Keycloak) | **PDP Policy Service (OPA)** | Container image swap; same ClusterIP name and port |
+The service has no dependency on Keycloak. All Keycloak operations (entity reads) are handled by the **IdP Configuration Service** and its library (`aiac.idp.library.configuration`).
 
 ---
 

@@ -1,7 +1,5 @@
 # Component PRD: IdP Library (`aiac.idp.library`)
 
-**Phase 1 name:** `aiac.pdp.library.configuration.*` — renamed in Phase 2; content is equivalent with the addition of composite role management functions.
-
 ## Location
 `aiac/src/aiac/idp/library/`
 
@@ -30,7 +28,7 @@ from aiac.idp.library.configuration.api import Configuration
 ## Submodule: `aiac.idp.library.configuration.models`
 
 ### Description
-Dependency-free Pydantic `BaseModel` subclasses representing generic IdP configuration entities (subjects, roles, services, scopes). No HTTP client dependency — importable by any consumer without pulling in `requests` or `python-dotenv`. Model shapes are derived from Keycloak JSON but named generically; stable across phases.
+Dependency-free Pydantic `BaseModel` subclasses representing generic IdP configuration entities (subjects, roles, services, scopes). No HTTP client dependency — importable by any consumer without pulling in `requests` or `python-dotenv`. Model shapes are derived from Keycloak JSON but named generically.
 
 ### Dependencies
 ```
@@ -111,7 +109,7 @@ subjects = [Subject.model_validate(s) for s in raw]
 ### Description
 HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.library.configuration.models`.
 
-In Phase 2 this module also absorbs the Phase 1 PDP Policy Service functions (composite role management). All Keycloak interactions are consolidated here; the PDP Policy Service (OPA) no longer touches Keycloak directly.
+All Keycloak interactions are consolidated here; the PDP Policy Service (OPA) does not touch Keycloak directly.
 
 ### Dependencies
 ```

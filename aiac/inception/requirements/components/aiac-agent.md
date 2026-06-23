@@ -15,13 +15,13 @@ The `/apply/*` HTTP endpoints are retained as a debugging escape hatch. The **NA
 
 The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
 
-| Orchestrator | Trigger(s) | Sub-agents (Phase 1) | Sub-agents (Phase 2) |
-|---|---|---|---|
-| Service Onboarding | `service/{id}` | Service Provision → Service Policy → Policy Apply (sequential) | Service Provision → **Policy** → **Policy Builder** (sequential) |
-| Policy Update | `build`, `rebuild` | Build → Policy Apply or Rebuild → Policy Apply (alternative, then apply) | Build → **Policy Builder** or Rebuild → **Policy Builder** |
-| Role Update | `role/{id}` | Role → Policy Apply (sequential) | Role → **Policy Builder** |
+| Orchestrator | Trigger(s) | Sub-agents |
+|---|---|---|
+| Service Onboarding | `service/{id}` | Service Provision → **Policy** → **Policy Builder** (sequential) |
+| Policy Update | `build`, `rebuild` | Build → **Policy Builder** or Rebuild → **Policy Builder** |
+| Role Update | `role/{id}` | Role → **Policy Builder** |
 
-**Phase 2 new sub-agents (TBD — to be specified in a separate PRD or added to sub-agent PRDs):**
+**New sub-agents (TBD — to be specified in a separate PRD or added to sub-agent PRDs):**
 - **Policy sub-agent** — creates an `AgentPolicyModel` delta scoped to the triggered service, including `source_roles`, `scope_targets`, and `PolicyRule` sets for inbound and outbound pipelines.
 - **Policy Builder sub-agent** — merges the delta into the whole-system `PolicyModel` and calls `aiac.pdp.library.policy.apply_policy` (or `apply_agent_policy` for single-agent updates).
 
@@ -41,7 +41,7 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
         SA1["Service Provision"]
-        SA2["Service Policy"]
+        SA2["Policy"]
         ORC1 --> SA1
         ORC1 --> SA2
     end
@@ -60,7 +60,7 @@ flowchart TD
         ORC3 --> SA6
     end
 
-    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+    APPLY["Policy Builder\nagent/shared/apply/\n(TBD)"]
 
     ORC1 -->|"policy_model"| APPLY
     ORC2 -->|"policy_model"| APPLY
@@ -126,7 +126,7 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
 
-> **Phase 2 TBD:** The Phase 2 Policy sub-agent and Policy Builder sub-agent need dedicated sub-PRDs. These will be added to this table once defined via `/grill-me` or `/to-prd`.
+> **TBD:** The Policy sub-agent and Policy Builder sub-agent need dedicated sub-PRDs. These will be added to this table once defined via `/grill-me` or `/to-prd`.
 
 ---
 
@@ -196,8 +196,6 @@ All type definitions shared across agents:
 | `pdp_snapshot` | `PDPSnapshot` | Scoped PDP data for this trigger |
 | `policy_model` | `PolicyModel \| None` | Validated policy to commit; produced by policy-proposing sub-agents |
 | `validation_errors` | `list[str]` | Errors from validate node |
-| `added` | `list[CompositeMapping]` | Executed composite additions |
-| `removed` | `list[CompositeMapping]` | Executed composite removals |
 | `summary` | `str` | Human-readable explanation |
 
 #### `PDPSnapshot`
@@ -212,10 +210,9 @@ class PDPSnapshot(BaseModel):
 
 #### `PolicyModel`
 
-Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the shared Policy Apply sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
+Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the Policy Builder sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
 
-- **Phase 1:** `PolicyModel` is defined in `aiac/pdp/library/policy/models.py` (`statements: list[PolicyStatement]`). `PolicyStatement` shape is TBD — must carry sufficient information for entity existence resolution via `aiac.idp.library.configuration.api`.
-- **Phase 2:** `PolicyModel` is defined in `aiac/pdp/library/models.py` (`agents: list[AgentPolicyModel]`). Full spec: [pdp-policy-opa-service.md](pdp-policy-opa-service.md).
+`PolicyModel` is defined in `aiac/pdp/library/models.py` (`agents: list[AgentPolicyModel]`). Full spec: [library-pdp.md](library-pdp.md).
 
 #### `ValidationVerdict`
 
@@ -225,13 +222,13 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. Phase 1: `PolicyModel` and `PolicyStatement` are defined in `aiac/pdp/library/policy/models.py`. Phase 2: `PolicyModel`, `AgentPolicyModel`, and `PolicyRule` are defined in `aiac/pdp/library/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyModel`, `AgentPolicyModel`, and `PolicyRule` are defined in `aiac/pdp/library/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
 ### `shared/apply/`
 
-`PolicyApplyGraph` — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Commits to the PDP Policy Service.
+Policy Builder sub-agent — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Merges the delta into the whole-system `PolicyModel` and commits to the PDP Policy Service. Full spec TBD.
 
 ```
 START → apply_policy → format_response → END
@@ -241,23 +238,23 @@ START → apply_policy → format_response → END
 
 ```mermaid
 flowchart TD
-    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy.api\napply_policy(PolicyModel)"]
+    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy\napply_policy(PolicyModel)"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 ```
 
 #### Nodes
 
-- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy` (Phase 2) or `aiac.pdp.library.policy.api` (Phase 1). The PDP Policy Service translates the `PolicyModel` into the appropriate backend format (Keycloak composite mappings in Phase 1, Rego packages written to an `AuthorizationPolicy` Kubernetes CR in Phase 2).
+- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy`. The PDP Policy Service translates the `PolicyModel` into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR.
 - **`format_response`**: assembles the commit result for the orchestrator.
 
 #### State
 
 `BaseAgentState` (no extensions required). Reads `policy_model` and `realm`; writes `summary`.
 
-> **Orchestrator contract:** The calling orchestrator must gate on `policy_model is None` before invoking `PolicyApplyGraph`. If the producing sub-graph's `validate_policy` failed (leaving `policy_model` unset), the orchestrator returns the abort response directly without calling `PolicyApplyGraph`.
+> **Orchestrator contract:** The calling orchestrator must gate on `policy_model is None` before invoking `PolicyBuilderGraph`. If the producing sub-graph's `validate_policy` failed (leaving `policy_model` unset), the orchestrator returns the abort response directly without calling `PolicyBuilderGraph`.
 
-> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit. Since `PolicyApplyGraph` is shared, this gate applies uniformly to all use cases.
+> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit. Since `PolicyBuilderGraph` is shared, this gate applies uniformly to all use cases.
 
 ---
 
@@ -274,13 +271,13 @@ Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants i
 
 ## Validate Node — Common Checks (All Agents)
 
-All `validate_*` / `validate_mappings` nodes perform the same four checks. Binary abort on any failure:
+All `validate_*` nodes perform the same four checks. Binary abort on any failure:
 
 ```mermaid
 flowchart TD
     IN["policy_model\n+ pdp_snapshot"] --> C1
 
-    C1{"1. Existence check\nEntities referenced by PolicyModel\nstatements resolved via\naiac.pdp.library.configuration.api"}
+    C1{"1. Existence check\nEntities referenced by PolicyModel\nstatements resolved via\naiac.idp.library.configuration.api"}
     C1 -->|"fail"| ABORT["ABORT\nvalidation_errors populated\nadded and removed empty"]
     C1 -->|"pass"| C2
 
@@ -315,17 +312,17 @@ flowchart TD
 
 **Success response (Service Onboarding):**
 ```json
-{ "added": [...], "removed": [...], "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
+{ "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
 ```
 
 **Success response (all other agents):**
 ```json
-{ "added": [...], "removed": [...], "summary": "...", "provisioned": null }
+{ "summary": "...", "provisioned": null }
 ```
 
 **Abort response (validation failure, all agents):**
 ```json
-{ "added": [], "removed": [], "summary": "...", "validation_errors": [...], "provisioned": null }
+{ "summary": "...", "validation_errors": [...], "provisioned": null }
 ```
 
 ---
@@ -336,7 +333,7 @@ flowchart TD
 |---|---|---|
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) — used by `aiac.idp.library.configuration.api` |
-| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) — used by `aiac.pdp.library.policy` (Phase 2) |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) — used by `aiac.pdp.library.policy` |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | ConfigMap (`aiac-pdp-config`) |
 | `KEYCLOAK_REALM` | — | ConfigMap (`aiac-pdp-config`) |
 | `LLM_BASE_URL` | — | ConfigMap |
@@ -358,7 +355,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 | Upstream | HTTP status on final failure |
 |---|---|
 | ChromaDB | `503 Service Unavailable` |
-| PDP Configuration Service | `502 Bad Gateway` |
+| IdP Configuration Service | `502 Bad Gateway` |
 | PDP Policy Service | `502 Bad Gateway` |
 | Kubernetes API | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
@@ -392,7 +389,7 @@ aiac/src/aiac/agent/
 │   │   └── state.py                     ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
 │   └── policy/
 │       ├── __init__.py
-│       ├── graph.py                     ← Service Policy StateGraph
+│       ├── graph.py                     ← Policy StateGraph
 │       ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
@@ -407,7 +404,7 @@ aiac/src/aiac/agent/
 │   └── rebuild/
 │       ├── __init__.py
 │       ├── graph.py                     ← Rebuild StateGraph
-│       ├── nodes.py                     ← clear_composites, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
+│       ├── nodes.py                     ← clear_policy, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 ├── roles/
@@ -416,7 +413,7 @@ aiac/src/aiac/agent/
 │   └── role/
 │       ├── __init__.py
 │       ├── graph.py                     ← Role StateGraph
-│       ├── nodes.py                     ← fetch_pdp_state, propose_mappings, validate_mappings, apply_mappings, format_response
+│       ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy, apply_policy, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 └── shared/
@@ -425,7 +422,7 @@ aiac/src/aiac/agent/
     ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, PolicyModel, ValidationVerdict
     └── apply/
         ├── __init__.py
-        ├── graph.py                     ← PolicyApplyGraph (shared by all policy-producing sub-agents)
+        ├── graph.py                     ← PolicyBuilderGraph (shared by all policy-producing sub-agents)
         └── nodes.py                     ← apply_policy, format_response
 ```
 
