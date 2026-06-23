@@ -110,31 +110,31 @@ Seven components across four Kubernetes Pods plus a Python library layer, all im
 |---|-----------|-------------|
 | 1 | **IdP Configuration Service** | REST service that exposes IdP entity data (subjects, roles, services, scopes) for read and write operations. Read methods enrich services with assigned roles/scopes and enrich roles with child roles and mapped scopes. Backed by Keycloak. Python library: `aiac.idp.library.configuration`. |
 | 2 | **PDP Policy Service** | REST service that applies LLM-generated Rego rules to the OPA backend. Writes derived Rego packages to an `AuthorizationPolicy` Kubernetes CR. Exposed as ClusterIP service `aiac-pdp-policy-service:7072`. Python library: `aiac.pdp.library.policy`. |
-| 3 | **State Management Service** | REST service that owns `AgentPolicy` Kubernetes CRs as the authoritative structured policy store. Enables the Policy Builder sub-agent to read and diff `AgentPolicyModel` state without re-deriving it from the PDP snapshot. Co-located in the PDP Interface Pod at `:7074`. Python library: `aiac.pdp.library.state`. |
+| 3 | **State Management Service** | REST service that owns `AgentPolicy` Kubernetes CRs as the authoritative structured policy store. Enables the Policy Builder sub-agent to read and diff `AgentPolicyModel` state without re-deriving it from the PDP snapshot. Co-located in the Kagenti Interface Pod at `:7074`. Python library: `aiac.pdp.library.state`. |
 | 4 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
 | 5 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
 | 6 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
-| 7 | **Python library** | Python API library provides typed access to all three PDP Interface Pod services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
+| 7 | **Python library** | Python API library provides typed access to all three Kagenti Interface Pod services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
 
 ```
-               (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗱𝗺𝗶𝗻 𝗥𝗘𝗦𝗧 𝗔𝗣𝗜)
-                             ▲
-               ┌─────────────┴────────────┐
-               │                          │
-(𝘨𝘦𝘵 𝘳𝘰𝘭𝘦𝘴, 𝘴𝘤𝘰𝘱𝘦𝘴, 𝘢𝘨𝘦𝘯𝘵𝘴, 𝘵𝘰𝘰𝘭𝘴) (𝘴𝘦𝘵 𝘳𝘰𝘭𝘦-𝘴𝘤𝘰𝘱𝘦 𝘮𝘢𝘱𝘱𝘪𝘯𝘨𝘴)
-┌──────────────┼──────────────────────────┼────────────────┐
-│  PDP Interface Pod                      │                │
-│              │                          │                │
-│  ┌───────────┴────────────┐  ┌──────────┴─────────────┐  │
-│  │  IdP Configuration     │  │  PDP Policy Service    │  │
-│  │  Service               │  │  (OPA)                 │  │
-│  └────────────────────────┘  └────────────────────────┘  │
-│              ▲                          ▲                │
-└──────────────┼──────────────────────────┼────────────────┘
-   (𝘨𝘦𝘵 𝘳𝘰𝘭𝘦𝘴, 𝘴𝘤𝘰𝘱𝘦𝘴, 𝘴𝘦𝘳𝘷𝘪𝘤𝘦𝘴)       (𝘴𝘦𝘵 𝘢𝘤𝘤𝘦𝘴𝘴 𝘳𝘶𝘭𝘦𝘴)
-┌──────────────┼──────────────────────────┼────────────────┐  ┌──────────────────────────────────┐
-│  Agent Pod   │    ┌─────────────────────┘                │  │  Event Broker Pod                │
-│              │    │                                      │  │                                  │
+        (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)      (Kubernetes CR 𝗔𝗣𝗜)
+               ▲                     ▲
+               |                     |
+               │             ┌───────┴─────────┐
+(users, 𝘳𝘰𝘭𝘦𝘴, clients) (policy model)    (OPA bundle)
+┌──────────────┼─────────────┼─────────────────┼───────────┐
+│  Kagenti Interface Pod     │                 │           │
+│              │             │                 │           │
+│  ┌───────────┴──┐  ┌───────┴──────┐  ┌───────┴────────┐  │
+│  │  IdP Config  │  │  State Mgmt  │  │  PDP Policy    │  │
+│  │  Service     │  │  Service     │  │  Service(OPA)  │  │
+│  └──────────────┘  └──────────────┘  └────────────────┘  │
+│              ▲            ▲                ▲             │
+└──────────────┼────────────┼────────────────┼─────────────┘
+               │            │                │
+┌──────────────┼────────────┼────────────────┼─────────────┐  ┌──────────────────────────────────┐
+│  Agent Pod   │  ┌─────────┘                │             │  │  Event Broker Pod                │
+│              │  │  ┌───────────────────────┘             │  │                                  │
 │      ┌────────────────┐                                  │  │  ┌──────────────────────────┐    │
 │      │   AIAC Agent   │◄─────────────────────────────────┼──┼──│      NATS JetStream      │    │
 │      └────────────────┘         (𝘯𝘰𝘵𝘪𝘧𝘺)                  │  │  └──────────────────────────┘    │
@@ -158,7 +158,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│  PDP Interface Pod                                       │
+│  Kagenti Interface Pod                                   │
 │                                                          │
 │  ┌────────────────────────┐  ┌────────────────────────┐  │
 │  │  IdP Configuration     │  │  PDP Policy Service    │  │
@@ -322,9 +322,9 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| IdP Configuration Service (in PDP Interface Pod) | `aiac.idp.library.configuration.api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
-| PDP Policy Service — OPA (in PDP Interface Pod) | `aiac.pdp.library.policy` | Kubernetes CR (`AuthorizationPolicy`) | 204 on success |
-| State Management Service (in PDP Interface Pod) | `aiac.pdp.library.state` | Kubernetes CR (`AgentPolicy`) | `AgentPolicyModel` / `PolicyModel` on read; 204 on write |
+| IdP Configuration Service (in Kagenti Interface Pod) | `aiac.idp.library.configuration.api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
+| PDP Policy Service — OPA (in Kagenti Interface Pod) | `aiac.pdp.library.policy` | Kubernetes CR (`AuthorizationPolicy`) | 204 on success |
+| State Management Service (in Kagenti Interface Pod) | `aiac.pdp.library.state` | Kubernetes CR (`AgentPolicy`) | `AgentPolicyModel` / `PolicyModel` on read; 204 on write |
 | `aiac.idp.library.configuration.models` | `aiac.idp.library.configuration.api`, AIAC Agent | — | Pydantic model definitions for IdP entities (Subject, Role, Service, Scope) |
 | `aiac.idp.library.configuration.api` | AIAC Agent, Python scripts | IdP Configuration Service (HTTP) | Typed Pydantic instances (reads and writes IdP configuration entities) |
 | `aiac.pdp.library.models` | `aiac.pdp.library.policy`, `aiac.pdp.library.state`, AIAC Agent | — | Pydantic model definitions for OPA policy (PolicyRule, AgentPolicyModel, PolicyModel) |
@@ -337,7 +337,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 ### Key architectural decisions
 
-- **PDP services are co-located in a single PDP Interface Pod.** IdP Configuration Service, PDP Policy Service, and State Management Service run as three containers in one pod, sharing the same Kubernetes ServiceAccount. Three separate ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`, `aiac-pdp-state-service:7074`) select the same pod.
+- **PDP services are co-located in a single Kagenti Interface Pod.** IdP Configuration Service, PDP Policy Service, and State Management Service run as three containers in one pod, sharing the same Kubernetes ServiceAccount. Three separate ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`, `aiac-pdp-state-service:7074`) select the same pod.
 - **Two CRs, two owners, distinct purposes.** The `AgentPolicy` CR (one per agent, owned by the State Management Service) holds structured `AgentPolicyModel` data — the source of truth for policy state. The `AuthorizationPolicy` CR (one total, owned by the PDP Policy Service) holds derived Rego packages for OPA runtime. The two services have no dependency on each other; both are driven by the AIAC Agent via their respective libraries.
 - **Clean `idp` / `pdp` Python namespace split.** IdP-related code (Keycloak entity management) lives under `aiac.idp.*`; PDP policy code (OPA Rego) lives under `aiac.pdp.*`.
 - **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
@@ -381,7 +381,7 @@ See Section 7.4 (Event Broker) and Section 8 (Deployment) for subject names and 
 
 ### 7.1 IdP Configuration Service
 
-FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **PDP Interface Pod**. Manages IdP (Keycloak) entity data (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints except `/health` require a `?realm=<realm>` query parameter; returns `422` if absent. `/health` requires no realm parameter — it uses `KEYCLOAK_ADMIN_REALM` directly. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`.
+FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the **Kagenti Interface Pod**. Manages IdP (Keycloak) entity data (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints except `/health` require a `?realm=<realm>` query parameter; returns `422` if absent. `/health` requires no realm parameter — it uses `KEYCLOAK_ADMIN_REALM` directly. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`.
 
 **Full spec:** [components/idp-configuration-service.md](components/idp-configuration-service.md)
 
@@ -389,7 +389,7 @@ FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Service in the *
 
 ### 7.2 PDP Policy Service
 
-FastAPI service (`0.0.0.0:7072`, `aiac-pdp-policy-opa`) co-located with the IdP Configuration Service in the **PDP Interface Pod**. Writes LLM-generated Rego packages to an `AuthorizationPolicy` Kubernetes CR. Each AuthBridge OPA plugin instance fetches its Rego packages from the CR at startup.
+FastAPI service (`0.0.0.0:7072`, `aiac-pdp-policy-opa`) co-located with the IdP Configuration Service in the **Kagenti Interface Pod**. Writes LLM-generated Rego packages to an `AuthorizationPolicy` Kubernetes CR. Each AuthBridge OPA plugin instance fetches its Rego packages from the CR at startup.
 
 **Full spec:** [components/pdp-policy-opa-service.md](components/pdp-policy-opa-service.md)
 
@@ -397,7 +397,7 @@ FastAPI service (`0.0.0.0:7072`, `aiac-pdp-policy-opa`) co-located with the IdP 
 
 ### 7.3 State Management Service
 
-FastAPI service (`0.0.0.0:7074`, `aiac-pdp-state-service`) co-located with the IdP Configuration Service and PDP Policy Service in the **PDP Interface Pod**. Owns `AgentPolicy` Kubernetes CRs (one per agent) as the authoritative structured policy store. The Policy Builder sub-agent reads current `AgentPolicyModel` state for diff computation and writes updated state after each policy change, so that state survives pod restarts and is inspectable via `kubectl get agentpolicies`. The PDP Policy Service has no dependency on the State Management Service; the two CRs are written by distinct services and serve distinct purposes.
+FastAPI service (`0.0.0.0:7074`, `aiac-pdp-state-service`) co-located with the IdP Configuration Service and PDP Policy Service in the **Kagenti Interface Pod**. Owns `AgentPolicy` Kubernetes CRs (one per agent) as the authoritative structured policy store. The Policy Builder sub-agent reads current `AgentPolicyModel` state for diff computation and writes updated state after each policy change, so that state survives pod restarts and is inspectable via `kubectl get agentpolicies`. The PDP Policy Service has no dependency on the State Management Service; the two CRs are written by distinct services and serve distinct purposes.
 
 **Full spec:** [components/state-management-service.md](components/state-management-service.md)
 
@@ -482,25 +482,25 @@ Four separate manifest files:
 
 | File | Contents |
 |------|----------|
-| `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + `AgentPolicy` CRD + PDP Interface Pod Deployment (IdP Configuration Service container + PDP Policy Service container + State Management Service container) + three ClusterIP Services |
+| `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + `AgentPolicy` CRD + Kagenti Interface Pod Deployment (IdP Configuration Service container + PDP Policy Service container + State Management Service container) + three ClusterIP Services |
 | `aiac/k8s/event-broker-deployment.yaml` | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
 | `aiac/k8s/rag-statefulset.yaml` | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 | `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (aiac-init container + AIAC Agent container) + ClusterIP Service |
 
-All three containers in the PDP Interface Pod mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Service uses `KEYCLOAK_REALM` as its default operating realm. The State Management Service uses `AGENTPOLICY_NAMESPACE` from the ConfigMap to determine which namespace to read and write `AgentPolicy` CRs.
+All three containers in the Kagenti Interface Pod mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Service uses `KEYCLOAK_REALM` as its default operating realm. The State Management Service uses `AGENTPOLICY_NAMESPACE` from the ConfigMap to determine which namespace to read and write `AgentPolicy` CRs.
 
 ### Docker images
 
 Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
-# Build IdP Configuration Service (deployed as a container in the PDP Interface Pod)
+# Build IdP Configuration Service (deployed as a container in the Kagenti Interface Pod)
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
-# Build PDP Policy Service — OPA implementation (deployed as a container in the PDP Interface Pod)
+# Build PDP Policy Service — OPA implementation (deployed as a container in the Kagenti Interface Pod)
 docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-policy-opa:latest aiac/src/
 
-# Build State Management Service (deployed as a container in the PDP Interface Pod)
+# Build State Management Service (deployed as a container in the Kagenti Interface Pod)
 docker build -f aiac/src/aiac/pdp/service/state/Dockerfile -t aiac-pdp-state:latest aiac/src/
 
 # Build Agent (includes aiac-init container)
