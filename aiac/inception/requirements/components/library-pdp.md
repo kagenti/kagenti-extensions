@@ -97,7 +97,7 @@ model = PolicyModel(agents=[agent_model])
 ## Submodule: `aiac.pdp.library.policy`
 
 ### Description
-HTTP client module wrapping the PDP Policy Service (OPA) REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
+HTTP client module wrapping the PDP Policy Writer (OPA) REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
 
 No `realm` parameter — the OPA service operates on a Kubernetes CR, not a Keycloak realm.
 

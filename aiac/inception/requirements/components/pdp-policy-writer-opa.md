@@ -1,4 +1,4 @@
-# Component PRD: PDP Policy Service (OPA)
+# Component PRD: PDP Policy Writer (OPA)
 
 ## Location
 `aiac/src/aiac/pdp/service/policy/opa/`
@@ -47,7 +47,7 @@ Complete policy definition for a single agent (service). Contains two sets of `P
 
 ### `PolicyModel`
 
-A partial or full system policy model. When sent to the PDP Policy Service, contains only the agents whose policies have changed.
+A partial or full system policy model. When sent to the PDP Policy Writer, contains only the agents whose policies have changed.
 
 | Field | Type |
 |-------|------|
@@ -137,7 +137,7 @@ allow if {
 
 ## Library: `aiac.pdp.library.policy`
 
-HTTP client module wrapping the PDP Policy Service REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
+HTTP client module wrapping the PDP Policy Writer REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
 
 ```python
 def apply_policy(model: PolicyModel) -> None

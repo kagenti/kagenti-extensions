@@ -210,7 +210,7 @@ class PDPSnapshot(BaseModel):
 
 #### `PolicyModel`
 
-Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the Policy Builder sub-agent. Committed to the PDP Policy Service via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
+Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the Policy Builder sub-agent. Committed to the PDP Policy Writer via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
 
 `PolicyModel` is defined in `aiac/pdp/library/models.py` (`agents: list[AgentPolicyModel]`). Full spec: [library-pdp.md](library-pdp.md).
 
@@ -228,7 +228,7 @@ Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `S
 
 ### `shared/apply/`
 
-Policy Builder sub-agent — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Merges the delta into the whole-system `PolicyModel` and commits to the PDP Policy Service. Full spec TBD.
+Policy Builder sub-agent — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Merges the delta into the whole-system `PolicyModel` and commits to the PDP Policy Writer. Full spec TBD.
 
 ```
 START → apply_policy → format_response → END
@@ -245,7 +245,7 @@ flowchart TD
 
 #### Nodes
 
-- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy`. The PDP Policy Service translates the `PolicyModel` into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR.
+- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy`. The PDP Policy Writer translates the `PolicyModel` into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR.
 - **`format_response`**: assembles the commit result for the orchestrator.
 
 #### State
@@ -356,7 +356,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 |---|---|
 | ChromaDB | `503 Service Unavailable` |
 | IdP Configuration Service | `502 Bad Gateway` |
-| PDP Policy Service | `502 Bad Gateway` |
+| PDP Policy Writer | `502 Bad Gateway` |
 | Kubernetes API | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
 

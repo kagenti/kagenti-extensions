@@ -1,4 +1,4 @@
-# Component PRD: PDP Policy Service — Keycloak Implementation
+# Component PRD: PDP Policy Writer — Keycloak Implementation
 
 ## Location
 `aiac/src/aiac/pdp/service/policy/keycloak/`
@@ -6,7 +6,7 @@
 ## Description
 A FastAPI web service that applies RBAC policy changes to Keycloak by managing composite role mappings. Roles are made composites of service (client) permissions (roles), so that any subject (user) assigned a role automatically inherits the associated service permissions. Stateless — no caching.
 
-This is the **Phase 1** implementation of the PDP Policy Service. It is deployed as a container in the **Kagenti Interface Pod** alongside the PDP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP. Phase 2 replaces only this container image (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`) within the same pod. The service name and port remain stable so the AIAC Agent and library require no reconfiguration.
+This is the **Phase 1** implementation of the PDP Policy Writer. It is deployed as a container in the **Kagenti Interface Pod** alongside the PDP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP. Phase 2 replaces only this container image (`aiac-pdp-policy-keycloak` → `aiac-pdp-policy-opa`) within the same pod. The service name and port remain stable so the AIAC Agent and library require no reconfiguration.
 
 ## Endpoints
 

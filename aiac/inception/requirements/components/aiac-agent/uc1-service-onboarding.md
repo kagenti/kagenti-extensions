@@ -182,7 +182,7 @@ Runs after Service Provision completes. Freshly provisioned permissions/scopes a
 START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
 ```
 
-Examines all roles and determines which role → service permission/scope mappings to create for the newly added service, based on the access control policy and domain knowledge. Produces a `PolicyModel` written to state; does not commit to the PDP Policy Service.
+Examines all roles and determines which role → service permission/scope mappings to create for the newly added service, based on the access control policy and domain knowledge. Produces a `PolicyModel` written to state; does not commit to the PDP Policy Writer.
 
 #### Nodes
 
@@ -221,7 +221,7 @@ flowchart TD
 
 `agent/shared/apply/` — see [Shared Module: `shared/apply/`](../aiac-agent.md#sharedapply) in `aiac-agent.md`.
 
-Receives the validated `PolicyModel` produced by `validate_policy` and commits it to the PDP Policy Service. Called by the orchestrator after `ServicePolicyGraph` completes, gated on `policy_model is not None`.
+Receives the validated `PolicyModel` produced by `validate_policy` and commits it to the PDP Policy Writer. Called by the orchestrator after `ServicePolicyGraph` completes, gated on `policy_model is not None`.
 
 ---
 

@@ -1,6 +1,6 @@
 # Component PRD: State Library (`aiac.pdp.library.state`)
 
-Companion library for the [AIAC State Management Service](state-management-service.md). Follows the same pattern as `aiac.pdp.library.policy` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
+Companion library for the [AIAC Policy Management Service](policy-management-service.md). Follows the same pattern as `aiac.pdp.library.policy` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
 
 ## Location
 `aiac/src/aiac/pdp/library/state/`
@@ -32,7 +32,7 @@ from aiac.pdp.library.models import PolicyModel, AgentPolicyModel
 ## Submodule: `aiac.pdp.library.state.api`
 
 ### Description
-HTTP client module wrapping the [AIAC State Management Service](state-management-service.md) REST API. Exposes six module-level functions returning `PolicyModel` and `AgentPolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_PDP_STATE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on non-2xx response.
+HTTP client module wrapping the [AIAC Policy Management Service](policy-management-service.md) REST API. Exposes six module-level functions returning `PolicyModel` and `AgentPolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_PDP_STATE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on non-2xx response.
 
 ### Dependencies
 ```
@@ -101,7 +101,7 @@ delete_agent_policy("weather-agent")
 
 **Seam:** HTTP boundary — mock responses from `AIAC_PDP_STATE_URL`.
 
-**Prior art:** `3.14-unit-tests-write-api.md` (mock PDP Policy Service HTTP; cover module-level functions).
+**Prior art:** `3.14-unit-tests-write-api.md` (mock PDP Policy Writer HTTP; cover module-level functions).
 
 Key behaviors to assert:
 - `get_policy()` issues `GET /policy`; response body deserialized to `PolicyModel`.

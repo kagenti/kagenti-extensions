@@ -109,7 +109,7 @@ subjects = [Subject.model_validate(s) for s in raw]
 ### Description
 HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.library.configuration.models`.
 
-All Keycloak interactions are consolidated here; the PDP Policy Service (OPA) does not touch Keycloak directly.
+All Keycloak interactions are consolidated here; the PDP Policy Writer (OPA) does not touch Keycloak directly.
 
 ### Dependencies
 ```

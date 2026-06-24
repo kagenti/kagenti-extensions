@@ -1,8 +1,8 @@
-# Component PRD: AIAC State Management Service
+# Component PRD: AIAC Policy Management Service
 
 ## Problem Statement
 
-The AIAC Agent's Policy sub-agent and Policy Builder sub-agent produce and merge `AgentPolicyModel` objects representing the access control policy for each service. The PDP Policy Service translates these into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR — but this derived artifact cannot be reverse-engineered back into structured `AgentPolicyModel` data. Without a durable structured policy store:
+The AIAC Agent's Policy sub-agent and Policy Builder sub-agent produce and merge `AgentPolicyModel` objects representing the access control policy for each service. The PDP Policy Writer translates these into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR — but this derived artifact cannot be reverse-engineered back into structured `AgentPolicyModel` data. Without a durable structured policy store:
 
 - The Policy Builder sub-agent cannot read current policy state for diff computation — it must re-derive the full state from the PDP snapshot on every trigger.
 - Off-boarded agents leave no structured record of their removal.
@@ -10,14 +10,14 @@ The AIAC Agent's Policy sub-agent and Policy Builder sub-agent produce and merge
 
 ## Solution
 
-A dedicated **AIAC State Management Service** owns an in-memory `PolicyModel` cache backed by a SQLite database for durability. A companion library [`aiac.pdp.library.state.api`](library-state.md) exposes module-level typed functions matching the `aiac.pdp.library.policy` pattern, used by AIAC Agent sub-agents to read and write policy state without any storage-layer boilerplate.
+A dedicated **AIAC Policy Management Service** owns an in-memory `PolicyModel` cache backed by a SQLite database for durability. A companion library [`aiac.pdp.library.state.api`](library-state.md) exposes module-level typed functions matching the `aiac.pdp.library.policy` pattern, used by AIAC Agent sub-agents to read and write policy state without any storage-layer boilerplate.
 
-The PDP Policy Service retains sole ownership of the `AuthorizationPolicy` CR (Rego packages) and has no dependency on the State Management Service. The two persistence artifacts serve distinct purposes and are owned by distinct services:
+The PDP Policy Writer retains sole ownership of the `AuthorizationPolicy` CR (Rego packages) and has no dependency on the Policy Management Service. The two persistence artifacts serve distinct purposes and are owned by distinct services:
 
 | Artifact | Owner | Contents |
 |---|---|---|
-| SQLite `agent_policies` table | State Management Service | Structured `AgentPolicyModel` — source of truth (cache-first, write-through) |
-| `AuthorizationPolicy` CR (one total) | PDP Policy Service | Derived Rego packages — OPA runtime artifact |
+| SQLite `agent_policies` table | Policy Management Service | Structured `AgentPolicyModel` — source of truth (cache-first, write-through) |
+| `AuthorizationPolicy` CR (one total) | PDP Policy Writer | Derived Rego packages — OPA runtime artifact |
 
 ---
 
@@ -29,13 +29,13 @@ The PDP Policy Service retains sole ownership of the `AuthorizationPolicy` CR (R
 4. As the Policy Builder sub-agent, I want to delete a specific agent's policy on off-boarding, so that decommissioned services are removed from the structured policy store.
 5. As the Policy Builder sub-agent, I want to clear all agent policies in a single call, so that a full policy rebuild can start from a clean state.
 6. As an AIAC sub-agent developer, I want a typed Python library that returns `AgentPolicyModel` and `PolicyModel` objects directly, so that I can work with structured policy data without writing storage client code.
-7. As an operator, I want the State Management Service deployed as its own single-replica StatefulSet with a dedicated PVC, so that its storage and restart lifecycle is decoupled from the stateless policy services.
+7. As an operator, I want the Policy Management Service deployed as its own single-replica StatefulSet with a dedicated PVC, so that its storage and restart lifecycle is decoupled from the stateless policy services.
 
 ---
 
 ## Implementation Decisions
 
-### State Management Service
+### Policy Management Service
 
 **Location:** `aiac/src/aiac/pdp/service/state/`
 
@@ -43,7 +43,7 @@ The PDP Policy Service retains sole ownership of the `AuthorizationPolicy` CR (R
 
 **ClusterIP Service:** `aiac-pdp-state-service:7074`
 
-**Deployment:** dedicated single-replica `StatefulSet` `aiac-pdp-state`, with a `volumeClaimTemplate` PVC (1 Gi, `ReadWriteOnce`, cluster-default StorageClass) mounted at `/data`. Fronted by a headless Service for stable pod DNS plus the `aiac-pdp-state-service:7074` ClusterIP for clients. Not co-located with IdP Config / PDP Policy Services.
+**Deployment:** dedicated single-replica `StatefulSet` `aiac-pdp-state`, with a `volumeClaimTemplate` PVC (1 Gi, `ReadWriteOnce`, cluster-default StorageClass) mounted at `/data`. Fronted by a headless Service for stable pod DNS plus the `aiac-pdp-state-service:7074` ClusterIP for clients. Not co-located with IdP Config / PDP Policy Writers.
 
 **Framework:** FastAPI + uvicorn. **Base image:** `python:3.12-slim`.
 
@@ -126,7 +126,7 @@ docker build -f aiac/src/aiac/pdp/service/state/Dockerfile \
 
 Good tests assert external behavior at the system boundary — not internal implementation details such as private helpers or field serialization choices.
 
-### State Management Service
+### Policy Management Service
 
 **Seam:** SQLite `:memory:` database — pass an in-memory connection to the service on startup instead of opening `AGENTPOLICY_DB_PATH`. All behavioral assertions remain valid; only the storage seam changes.
 
@@ -146,9 +146,9 @@ See [library-state.md](library-state.md) for the companion library testing decis
 
 ## Out of Scope
 
-- **Triggering Rego generation:** the State Management Service writes structured data only. Triggering Rego generation in the PDP Policy Service remains the AIAC Agent's responsibility via `aiac.pdp.library.policy`.
+- **Triggering Rego generation:** the Policy Management Service writes structured data only. Triggering Rego generation in the PDP Policy Writer remains the AIAC Agent's responsibility via `aiac.pdp.library.policy`.
 - **Pagination:** `GET /policy` returns all agents without pagination. At target scale (hundreds of agents), the full result fits within one SQLite query and one HTTP response.
-- **In-cluster mTLS between AIAC Agent and State Management Service:** secured by Kubernetes network policy; no application-layer auth.
+- **In-cluster mTLS between AIAC Agent and Policy Management Service:** secured by Kubernetes network policy; no application-layer auth.
 - **Multi-writer / replica scale-out:** the current design is single-writer (single-replica StatefulSet, RWO PVC, SQLite). Future migration to a shared DB (e.g. PostgreSQL) is a backend swap; the HTTP contract is unchanged.
 
 ---
