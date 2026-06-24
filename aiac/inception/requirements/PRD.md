@@ -117,18 +117,17 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
 | 7 | **Python library** | Python API library provides typed access to the three policy services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
 
 ```
-        (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)       (Kubernetes CR 𝗔𝗣𝗜)
+        (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)       (𝗞𝘂𝗯𝗲𝗿𝗻𝗲𝘁𝗲𝘀 𝗖𝗥 𝗔𝗣𝗜)
                ▲                      ▲
-               |                      |
                │                      |
-     (users, 𝘳𝘰𝘭𝘦𝘴, clients)     (OPA bundle)
+    (𝘶𝘴𝘦𝘳𝘴, 𝘳𝘰𝘭𝘦𝘴, 𝘤𝘭𝘪𝘦𝘯𝘵𝘴)    (𝘈𝘶𝘵𝘩𝘰𝘳𝘪𝘻𝘢𝘵𝘪𝘰𝘯𝘗𝘰𝘭𝘪𝘤𝘺 𝘊𝘙)
 ┌──────────────┼──────────────────────┼───────────────────┐
 │  Kagenti Interface Pod              │                   │
 │              │                      │                   │
-│  ┌───────────┴──┐          ┌────────┴───────┐           │
-│  │  IdP Config  │          │  PDP Policy    │           │
-│  │  Service     │          │  Writer (OPA)  │           │
-│  └──────────────┘          └────────────────┘           │
+│      ┌───────┴──────┐      ┌────────┴───────┐           │
+│      │  IdP Config  │      │  PDP Policy    │           │
+│      │  Service     │      │  Writer (OPA)  │           │
+│      └──────────────┘      └────────────────┘           │
 │              ▲                      ▲                   │
 └──────────────┼──────────────────────┼───────────────────┘
                │                      │
@@ -140,7 +139,7 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
                │   │  ┌───────────────────────────────┐   │
                │   │  │  Policy Management Service    │   │
                │   │  │                               │   │
-               │   │  │  /data PVC (SQLite policy.db) │   │
+               │   │  │     (SQLite policy.db)        │   │
                │   │  └───────────────────────────────┘   │
                │   │                  ▲                   │
                │   └──────────────────┼───────────────────┘
@@ -155,7 +154,7 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
 │              │                                          │  │         │              │       │
 └──────────────┼──────────────────────────────────────────┘  └─────────┼──────────────┼───────┘
                │                                                    (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)        (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)
-┌──────────────┼───────────────────────────────────────────┐            │              │
+┌──────────────┼───────────────────────────────────────────┐           │              │
 │  Policy and  │ Domain Knowledge RAG Pod                  │      (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
 │              ▼                                           │
 │  ┌──────────────────────────┐  ┌──────────────────────┐  │
