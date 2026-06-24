@@ -117,11 +117,11 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
 | 7 | **Python library** | Python API library provides typed access to the three policy services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
 
 ```
-        (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)      (Kubernetes CR 𝗔𝗣𝗜)
-               ▲                     ▲
-               |                     |
-               │                 (OPA bundle)
-(users, 𝘳𝘰𝘭𝘦𝘴, clients)               │
+        (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)       (Kubernetes CR 𝗔𝗣𝗜)
+               ▲                      ▲
+               |                      |
+               │                      |
+     (users, 𝘳𝘰𝘭𝘦𝘴, clients)     (OPA bundle)
 ┌──────────────┼──────────────────────┼───────────────────┐
 │  Kagenti Interface Pod              │                   │
 │              │                      │                   │
@@ -132,22 +132,21 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
 │              ▲                      ▲                   │
 └──────────────┼──────────────────────┼───────────────────┘
                │                      │
-               │      ┌───────────────┘
-               │      │
+               │                      │
+               │                      │
                │   ┌──────────────────────────────────────┐
-               │   │  Policy Mgmt StatefulSet (aiac-pdp-state) │
+               │   │  Policy Management Pod               │
                │   │                                      │
-               │   │  ┌──────────────────────────────┐    │
-               │   │  │  Policy Mgmt Service :7074    │    │
-               │   │  │         │                    │    │
-               │   │  │         ▼                    │    │
-               │   │  │  /data PVC (SQLite state.db) │    │
-               │   │  └──────────────────────────────┘    │
-               │   │              ▲                       │
-               │   └──────────────┼───────────────────────┘
-               │                  │
-┌──────────────┼──────────────────┼───────────────────────┐  ┌────────────────────────────────┐
-│  Agent Pod   │  ┌───────────────┘                       │  │  Event Broker Pod              │
+               │   │  ┌───────────────────────────────┐   │
+               │   │  │  Policy Management Service    │   │
+               │   │  │                               │   │
+               │   │  │  /data PVC (SQLite policy.db) │   │
+               │   │  └───────────────────────────────┘   │
+               │   │                  ▲                   │
+               │   └──────────────────┼───────────────────┘
+               │                      │
+┌──────────────┼──────────────────────┼───────────────────┐  ┌────────────────────────────────┐
+│  Agent Pod   │  ┌───────────────────┘                   │  │  Event Broker Pod              │
 │              │  │                                       │  │                                │
 │      ┌────────────────┐                                 │  │  ┌──────────────────────────┐  │
 │      │   AIAC Agent   │◄────────────────────────────────┼──┼──│      NATS JetStream      │  │
@@ -167,92 +166,6 @@ Seven components across five Kubernetes Pods plus a Python library layer, all im
 
 All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively via
 `kubectl port-forward` (operator/developer) or NATS publish (Keycloak SPI, RAG Ingest).
-
-### Deployment topology
-
-```
-┌──────────────────────────────────────────────────────────┐
-│  Kagenti Interface Pod                                   │
-│                                                          │
-│  ┌────────────────────────┐  ┌────────────────────────┐  │
-│  │  IdP Configuration     │  │  PDP Policy Writer    │  │
-│  │  Service (FastAPI)     │  │  (FastAPI)             │  │
-│  │  :7071  ClusterIP      │  │  :7072  ClusterIP      │  │
-│  │  aiac-pdp-config-svc   │  │  aiac-pdp-policy-svc   │  │
-│  └────────────────────────┘  └────────────────────────┘  │
-│              ▲                          ▲                │
-└──────────────┼──────────────────────────┼────────────────┘
-               │                          │
-┌──────────────────────────────────────────────────────────┐
-│  Policy Mgmt StatefulSet  (aiac-pdp-state)                │
-│                                                          │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  Policy Management Service (FastAPI)                │  │
-│  │  :7074  ClusterIP  aiac-pdp-state-service          │  │
-│  │  /data  ──►  PVC (SQLite /data/state.db)           │  │
-│  └────────────────────────────────────────────────────┘  │
-│              ▲                                           │
-└──────────────┼───────────────────────────────────────────┘
-               │
-┌──────────────┼──────────────────────────┼────────────────┐
-│  Event Broker Pod                       │                │
-│              │                          │                │
-│  ┌────────────────────────┐             │                │
-│  │  NATS JetStream        │  :4222  ClusterIP            │
-│  │                        │  aiac-event-broker-service   │
-│  │  stream: aiac-events   │                              │
-│  │  subjects: aiac.apply.>│                              │
-│  │  dlq: aiac.apply.dlq   │                              │
-│  └────────────────────────┘                              │
-│              ▲                ▲                          │
-│    (publish) │                │ (publish)                │
-└──────────────┼────────────────┼──────────────────────────┘
-               │  (subscribe)   │
-┌──────────────┼───────────────────────────────────────────┐
-│  Agent Pod   │                                           │
-│              │                                           │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  aiac-init (init container)                        │  │
-│  │  python:3.12-slim + nats-py + httpx                │  │
-│  │  gates: NATS + PDP Config + PDP Policy + RAG       │  │
-│  │  creates: aiac-events JetStream stream             │  │
-│  └────────────────────────────────────────────────────┘  │
-│  ┌────────────────────────────────────────────────────┐  │
-│  │  AIAC Agent (FastAPI)  :7070  ClusterIP            │  │
-│  │  LangGraph-based                                   │  │
-│  │  + NATS consumer (asyncio background task)         │  │
-│  │    consumer: aiac-agent-consumer queue group       │  │
-│  └────────────────────────────────────────────────────┘  │
-│              │                                           │
-└──────────────┼───────────────────────────────────────────┘
-               │
-┌──────────────┼───────────────────────────────────────────┐
-│  RAG Pod (StatefulSet)                                   │
-│              ▼                                           │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  │
-│  │  ChromaDB  :8000         │  │  RAG Ingest Service  │  │
-│  │  collections:            │  │  (FastAPI) :7073     │  │
-│  │    aiac-policies         │  │                      │  │
-│  │    aiac-domain-knowledge │  │                      │  │
-│  │  PVC: 1Gi /chroma/chroma │  │                      │  │
-│  └──────────────────────────┘  └──────────────────────┘  │
-│  ClusterIP: aiac-rag-service (8000 + 7073)               │
-└──────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────┐
-│  Python library  (aiac/src/)                             │
-│                                                          │
-│  aiac.idp.library.configuration.models — Pydantic only   │
-│  aiac.idp.library.configuration.api  — HTTP client       │
-│                    (read/write) IdP Configuration Svc    │
-│                                                          │
-│  aiac.pdp.library.models  — Pydantic only                │
-│  aiac.pdp.library.policy  — HTTP client →                │
-│                    (write) PDP Policy Writer (OPA)      │
-│  aiac.pdp.library.state   — HTTP client →                │
-│                    (read/write) State Management Svc     │
-└──────────────────────────────────────────────────────────┘
-```
 
 ### Call Flows
 
