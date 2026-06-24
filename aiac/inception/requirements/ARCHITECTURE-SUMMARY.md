@@ -89,37 +89,49 @@ Manually granted entitlements are flagged as policy-agnostic and surfaced during
 
 ## AIAC Component Architecture
 
-Seven components across four Kubernetes pods plus a Python library layer, all implemented in Python 3.12:
+Seven components across five Kubernetes pods plus a Python library layer, all implemented in Python 3.12:
 
 | # | Component | Description |
 |---|-----------|-------------|
 | 1 | **IdP Configuration Service** | REST service that exposes IdP entity data (subjects, roles, services, scopes) for read and write operations. Backed by Keycloak. Python library: `aiac.idp.library.configuration`. |
 | 2 | **PDP Policy Service** | REST service that applies LLM-generated Rego rules to the OPA backend. Writes derived Rego packages to an `AuthorizationPolicy` Kubernetes CR. Exposed as ClusterIP service `aiac-pdp-policy-service:7072`. Python library: `aiac.pdp.library.policy`. |
-| 3 | **State Management Service** | REST service that owns `AgentPolicy` Kubernetes CRs as the authoritative structured policy store. Enables the AIAC Agent to read and diff `AgentPolicyModel` state without re-deriving it from the PDP snapshot. Co-located in the Kagenti Interface Pod at `:7074`. Python library: `aiac.pdp.library.state`. |
+| 3 | **State Management Service** | REST service that owns an in-memory `PolicyModel` cache backed by SQLite (`/data` PVC) as the authoritative structured policy store. Enables the AIAC Agent to read and diff `AgentPolicyModel` state without re-deriving it from the PDP snapshot. Deployed as a dedicated single-replica StatefulSet (`aiac-pdp-state`) at `:7074`. Python library: `aiac.pdp.library.state`. |
 | 4 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
 | 5 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
 | 6 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
-| 7 | **Python library** | Python API library provides typed access to all three Kagenti Interface Pod services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
+| 7 | **Python library** | Python API library provides typed access to the three policy services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
 
 ```
         (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)      (Kubernetes CR 𝗔𝗣𝗜)
                ▲                     ▲
                |                     |
-               │             ┌───────┴─────────┐
-(users, 𝘳𝘰𝘭𝘦𝘴, clients) (policy model)    (OPA bundle)
-┌──────────────┼─────────────┼─────────────────┼───────────┐
-│  Kagenti Interface Pod     │                 │           │
-│              │             │                 │           │
-│  ┌───────────┴──┐  ┌───────┴──────┐  ┌───────┴────────┐  │
-│  │  IdP Config  │  │  State Mgmt  │  │  PDP Policy    │  │
-│  │  Service     │  │  Service     │  │  Service(OPA)  │  │
-│  └──────────────┘  └──────────────┘  └────────────────┘  │
-│              ▲             ▲                 ▲           │
-└──────────────┼─────────────┼─────────────────┼───────────┘
-               │             │                 │
-┌──────────────┼─────────────┼─────────────────┼───────────┐  ┌────────────────────────────────┐
-│  Agent Pod   │  ┌──────────┘                 │           │  │  Event Broker Pod              │
-│              │  │  ┌─────────────────────────┘           │  │                                │
+               │                 (OPA bundle)
+(users, 𝘳𝘰𝘭𝘦𝘴, clients)               │
+┌──────────────┼──────────────────────┼───────────────────┐
+│  Kagenti Interface Pod              │                   │
+│              │                      │                   │
+│  ┌───────────┴──┐          ┌────────┴───────┐           │
+│  │  IdP Config  │          │  PDP Policy    │           │
+│  │  Service     │          │  Service(OPA)  │           │
+│  └──────────────┘          └────────────────┘           │
+│              ▲                      ▲                   │
+└──────────────┼──────────────────────┼───────────────────┘
+               │                      │
+               │   ┌──────────────────────────────────────────────┐
+               │   │  State Mgmt StatefulSet (aiac-pdp-state)     │
+               │   │                                              │
+               │   │  ┌────────────────────────────────────────┐  │
+               │   │  │  State Mgmt Service :7074              │  │
+               │   │  │          │                             │  │
+               │   │  │          ▼                             │  │
+               │   │  │  /data PVC  (SQLite /data/state.db)    │  │
+               │   │  └────────────────────────────────────────┘  │
+               │   │              ▲                               │
+               │   └──────────────┼───────────────────────────────┘
+               │                  │
+┌──────────────┼──────────────────┼────────────────────────┐  ┌────────────────────────────────┐
+│  Agent Pod   │  ┌───────────────┘                        │  │  Event Broker Pod              │
+│              │  │                                        │  │                                │
 │      ┌────────────────┐                                  │  │  ┌──────────────────────────┐  │
 │      │   AIAC Agent   │◄─────────────────────────────────┼──┼──│      NATS JetStream      │  │
 │      └────────────────┘         (𝘯𝘰𝘵𝘪𝘧𝘺)                  │  │  └──────────────────────────┘  │
@@ -156,9 +168,12 @@ events to NATS; it is a separate component outside the AIAC codebase.
 
 **AIAC ↔ OPA**
 The PDP Policy Service writes LLM-generated Rego rules to an `AuthorizationPolicy` Kubernetes CR.
-Each agent pod's OPA plugin fetches its Rego packages from the CR at startup. The State Management
-Service writes structured `AgentPolicyModel` data to `AgentPolicy` CRs — the source of truth for
-policy state that the AIAC Agent diffs against before writing updated Rego rules to OPA.
+Each agent pod's OPA plugin fetches its Rego packages from the CR at startup.
+
+**AIAC ↔ State Management Service**
+The State Management Service writes structured `AgentPolicyModel` data to a SQLite store
+(in-memory cache + write-through to `/data/state.db` on a dedicated PVC) — the source of truth
+for policy state that the AIAC Agent diffs against before writing updated Rego rules to OPA.
 
 **AIAC ↔ Event Broker (NATS JetStream)**
 The Agent subscribes to the event stream as a durable consumer with at-least-once delivery.
