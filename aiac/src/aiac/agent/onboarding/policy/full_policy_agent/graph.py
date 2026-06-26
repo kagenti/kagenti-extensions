@@ -123,14 +123,14 @@ def _build_policy(
         explanation = "\n\n".join(explanations) if explanations else ""
         )
 
-    return {
-        **state,
-        "policy": policy, 
-        "messages": [],
-        "errors": [],
-        "retry_count": state.get("retry_count", 0),
-        "validation_passed": True
-    }
+    return PolicyState(
+        description=state["description"],
+        policy=policy,
+        messages=[],
+        errors=[],
+        retry_count=state.get("retry_count", 0),
+        validation_passed=True,
+    )
 
 def _validate_policy(
     state: PolicyState,
