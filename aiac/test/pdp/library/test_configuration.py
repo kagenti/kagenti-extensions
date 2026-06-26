@@ -211,7 +211,7 @@ class TestGetServices:
 
     def test_returns_list_of_service(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        payload = [{"id": "c1", "name": "my-app", "enabled": True}]
+        payload = [{"id": "c1", "clientId": "my-app", "name": "my-app", "enabled": True}]
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
             side_effect=[_ok(payload), _ok([]), _ok([]), _ok([]), _ok([])],
@@ -236,7 +236,7 @@ class TestGetServices:
 
     def test_scope_descriptions_populated_from_get_scopes(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        payload = [{"id": "c1", "name": "my-app", "enabled": True}]
+        payload = [{"id": "c1", "clientId": "my-app", "name": "my-app", "enabled": True}]
         all_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
         service_scopes = [{"id": "s1", "name": "read:data"}]
         with patch(
@@ -248,7 +248,7 @@ class TestGetServices:
 
     def test_role_details_populated_from_get_roles(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        payload = [{"id": "c1", "name": "my-app", "enabled": True}]
+        payload = [{"id": "c1", "clientId": "my-app", "name": "my-app", "enabled": True}]
         all_roles = [{"id": "r1", "name": "viewer", "composite": False}]
         role_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
         service_roles = [{"id": "r1", "name": "viewer"}]
@@ -279,7 +279,7 @@ class TestGetService:
 
     def test_returns_single_enriched_service(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        raw = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True}
         all_roles = [{"id": "r1", "name": "viewer", "composite": False}]
         role_scopes = [{"id": "s1", "name": "read:data"}]
         all_scopes = [{"id": "s1", "name": "read:data", "description": "Read access"}]
@@ -304,7 +304,7 @@ class TestGetService:
 
     def test_infers_type_from_description_when_not_set(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        raw = {"id": self.SERVICE_ID, "name": "my-agent", "description": "An Agent service", "enabled": True}
+        raw = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-agent", "description": "An Agent service", "enabled": True}
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
             side_effect=[
@@ -357,7 +357,7 @@ class TestGetService:
 
     def test_realm_forwarded_on_every_request(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        raw = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        raw = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True}
         with patch(
             "aiac.pdp.library.configuration.api.requests.get",
             side_effect=[
@@ -379,21 +379,21 @@ class TestSetServiceType:
 
     def test_issues_patch_to_correct_url(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
+        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
         with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
             Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
         assert m.call_args[0][0] == f"{BASE}/services/{self.SERVICE_ID}"
 
     def test_json_body_uses_type_key(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
+        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
         with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
             Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
         assert m.call_args[1].get("json") == {"type": "Agent"}
 
     def test_returns_service_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Tool"}
+        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Tool"}
         with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)):
             result = Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
         assert isinstance(result, Service)
@@ -401,7 +401,7 @@ class TestSetServiceType:
 
     def test_realm_forwarded_as_query_param(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.patch", return_value=_ok(updated)) as m:
             Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
         assert m.call_args[1].get("params") == {"realm": REALM}
@@ -496,7 +496,7 @@ class TestCreateScope:
 
 class TestMapScopeToService:
     def _make_service(self, **kwargs):
-        defaults = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         return Service.model_validate({**defaults, **kwargs})
 
     def _make_scope(self, **kwargs):
@@ -507,7 +507,7 @@ class TestMapScopeToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         scope = self._make_scope()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True, "scopes": [{"id": "scope-id", "name": "read:data"}]}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True, "scopes": [{"id": "scope-id", "name": "read:data"}]}
         post_resp = _ok({}, 201)
         get_resp = _ok(updated)
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=post_resp), \
@@ -521,7 +521,7 @@ class TestMapScopeToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         scope = self._make_scope()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=_ok({}, 201)) as post_m, \
              patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(updated)):
             Configuration.for_realm(REALM).map_scope_to_service(service, scope)
@@ -540,7 +540,7 @@ class TestMapScopeToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         scope = self._make_scope()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=_ok({}, 201)) as post_m, \
              patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(updated)) as get_m:
             Configuration.for_realm(REALM).map_scope_to_service(service, scope)
@@ -605,7 +605,7 @@ class TestCreateRole:
 
 class TestMapRoleToService:
     def _make_service(self, **kwargs):
-        defaults = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         return Service.model_validate({**defaults, **kwargs})
 
     def _make_role(self, **kwargs):
@@ -616,7 +616,7 @@ class TestMapRoleToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         role = self._make_role()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=_ok({}, 201)), \
              patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(updated)) as get_m:
             result = Configuration.for_realm(REALM).map_role_to_service(service, role)
@@ -627,7 +627,7 @@ class TestMapRoleToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         role = self._make_role()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=_ok({}, 201)) as post_m, \
              patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(updated)):
             Configuration.for_realm(REALM).map_role_to_service(service, role)
@@ -646,7 +646,7 @@ class TestMapRoleToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         role = self._make_role()
-        updated = {"id": "svc-uuid", "name": "my-svc", "enabled": True}
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
         with patch("aiac.pdp.library.configuration.api.requests.post", return_value=_ok({}, 201)) as post_m, \
              patch("aiac.pdp.library.configuration.api.requests.get", return_value=_ok(updated)) as get_m:
             Configuration.for_realm(REALM).map_role_to_service(service, role)

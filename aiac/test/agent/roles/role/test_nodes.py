@@ -44,7 +44,7 @@ def _make_state(**overrides) -> BaseAgentState:
 
 def _make_service(sid: str, perm_names: list[str]) -> Service:
     perms = [Role(id=f"{sid}-{n}", name=n, composite=False) for n in perm_names]
-    return Service(id=sid, name=sid, enabled=True, roles=perms)
+    return Service(id=sid, serviceId=sid, name=sid, enabled=True, roles=perms)
 
 
 def _make_role(rid: str, name: str, child_names: list[str] = ()) -> Role:

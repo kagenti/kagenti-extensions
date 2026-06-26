@@ -123,6 +123,7 @@ class TestService:
         s = Service.model_validate(
             {
                 "id": "c1",
+                "clientId": "c1",
                 "name": "My Application",
                 "description": "Does things",
                 "enabled": True,
@@ -136,31 +137,32 @@ class TestService:
         assert s.type == "Agent"
 
     def test_type_tool(self):
-        s = Service.model_validate({"id": "c1", "name": "tool-svc", "enabled": True, "type": "Tool"})
+        s = Service.model_validate({"id": "c1", "clientId": "c1", "name": "tool-svc", "enabled": True, "type": "Tool"})
         assert s.type == "Tool"
 
     def test_type_none_when_absent(self):
-        s = Service.model_validate({"id": "c2", "name": "bare", "enabled": True})
+        s = Service.model_validate({"id": "c2", "clientId": "c2", "name": "bare", "enabled": True})
         assert s.type is None
 
     def test_optional_fields_absent(self):
-        s = Service.model_validate({"id": "c2", "enabled": False})
+        s = Service.model_validate({"id": "c2", "serviceId": "c2", "enabled": False})
         assert s.name is None
         assert s.description is None
         assert s.type is None
 
     def test_description_present(self):
-        s = Service.model_validate({"id": "c1", "enabled": True, "description": "a desc"})
+        s = Service.model_validate({"id": "c1", "clientId": "c1", "enabled": True, "description": "a desc"})
         assert s.description == "a desc"
 
     def test_description_absent_is_none(self):
-        s = Service.model_validate({"id": "c1", "enabled": True})
+        s = Service.model_validate({"id": "c1", "clientId": "c1", "enabled": True})
         assert s.description is None
 
     def test_roles_populated(self):
         s = Service.model_validate(
             {
                 "id": "c1",
+                "clientId": "c1",
                 "enabled": True,
                 "roles": [{"id": "r1", "name": "admin", "composite": False}],
             }
@@ -169,13 +171,14 @@ class TestService:
         assert s.roles[0].name == "admin"
 
     def test_roles_default_empty(self):
-        s = Service.model_validate({"id": "c1", "enabled": True})
+        s = Service.model_validate({"id": "c1", "clientId": "c1", "enabled": True})
         assert s.roles == []
 
     def test_scopes_populated(self):
         s = Service.model_validate(
             {
                 "id": "c1",
+                "clientId": "c1",
                 "enabled": True,
                 "scopes": [{"id": "s1", "name": "email"}],
             }
@@ -184,7 +187,7 @@ class TestService:
         assert s.scopes[0].name == "email"
 
     def test_scopes_default_empty(self):
-        s = Service.model_validate({"id": "c1", "enabled": True})
+        s = Service.model_validate({"id": "c1", "clientId": "c1", "enabled": True})
         assert s.scopes == []
 
     def test_serviceId_populated_from_clientId(self):
@@ -193,9 +196,9 @@ class TestService:
         )
         assert s.serviceId == "my-app"
 
-    def test_serviceId_none_when_clientId_absent(self):
-        s = Service.model_validate({"id": "c1", "enabled": True})
-        assert s.serviceId is None
+    def test_serviceId_provided_directly_when_clientId_absent(self):
+        s = Service.model_validate({"id": "c1", "enabled": True, "serviceId": "explicit-svc"})
+        assert s.serviceId == "explicit-svc"
 
     def test_no_clientId_field(self):
         s = Service.model_validate(
@@ -206,19 +209,19 @@ class TestService:
 
     def test_no_protocol_field(self):
         s = Service.model_validate(
-            {"id": "c1", "enabled": True, "protocol": "openid-connect"}
+            {"id": "c1", "clientId": "c1", "enabled": True, "protocol": "openid-connect"}
         )
         assert not hasattr(s, "protocol")
 
     def test_no_publicClient_field(self):
         s = Service.model_validate(
-            {"id": "c1", "enabled": True, "publicClient": False}
+            {"id": "c1", "clientId": "c1", "enabled": True, "publicClient": False}
         )
         assert not hasattr(s, "publicClient")
 
     def test_extra_fields_ignored(self):
         s = Service.model_validate(
-            {"id": "c3", "enabled": True, "surplusField": "ignored"}
+            {"id": "c3", "clientId": "c3", "enabled": True, "surplusField": "ignored"}
         )
         assert not hasattr(s, "surplusField")
 
