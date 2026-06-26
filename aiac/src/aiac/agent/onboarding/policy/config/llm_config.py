@@ -70,7 +70,7 @@ def load_llm_models_yaml(yaml_path: Optional[Path] = None) -> Dict[str, Any]:
     return config
 
 
-def load_llm_config_from_yaml(model_name: str, yaml_path: Optional[Path] = None) -> LLMConfig:
+def load_llm_config_from_yaml(model_name: Optional[str], yaml_path: Optional[Path] = None) -> LLMConfig:
     """
     Load LLM configuration for a specific model from YAML file.
     
@@ -86,7 +86,9 @@ def load_llm_config_from_yaml(model_name: str, yaml_path: Optional[Path] = None)
         ValueError: If model not found in configuration
     """
     config = load_llm_models_yaml(yaml_path)
-    
+    if not model_name:
+        model_name = config.get("default_model", "gpt-oss")
+
     if model_name not in config['models']:
         available = ', '.join(config['models'].keys())
         raise ValueError(f"Model '{model_name}' not found in configuration. Available models: {available}")
@@ -201,14 +203,10 @@ def create_llm(
         ValueError: If required configuration is missing
         FileNotFoundError: If configuration file doesn't exist
     """
-    # Load LLM configuration
-    if model_name:
-        # Load from YAML
-        llm_config = load_llm_config_from_yaml(model_name, yaml_path)
-    else:
-        # Load from .env (legacy)
-        llm_config = load_llm_config_from_env(env_path)
+    # Load LLM configuration from YAML
+    llm_config = load_llm_config_from_yaml(model_name, yaml_path)
     
+
     # Validate required fields for create_llm
     if not llm_config.endpoint:
         raise ValueError("LLM_ENDPOINT is required to create an LLM instance")

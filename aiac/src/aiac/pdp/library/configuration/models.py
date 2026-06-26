@@ -30,7 +30,7 @@ class Service(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     id: str
-    serviceId: str | None = None
+    serviceId: str
     name: str | None = None
     description: str | None = None
     enabled: bool

@@ -39,9 +39,10 @@ sys.path.insert(0, str(Path(__file__).parents[4]))
 
 from dotenv import load_dotenv
 
-from full_policy_agent.graph import PolicyBuilder
+from full_policy_agent_roles.graph import PolicyBuilder
 from config import create_llm
-from utils.output_generators import save_policy, save_policy_rego
+from aiac.pdp.policy.builders.yaml import save_policy_yaml
+from aiac.pdp.policy.builders.rego import save_policy_rego
 
 load_dotenv(dotenv_path="aiac.env", override=True)
 
@@ -120,7 +121,7 @@ def generate_policy_only(
     print("-" * 80)
     print(builder.get_yaml_output())
     print("-" * 80)
-    save_policy(policy, output_file)
+    save_policy_yaml(policy, output_file)
 
     print("\nGenerating Rego policy files...")
     rego_dir = Path(output_file).parent / "rego_policy"
@@ -129,10 +130,8 @@ def generate_policy_only(
     print("\n" + "=" * 80)
     print("Parsed Role-to-Privilege Mappings:")
     print("=" * 80)
-    for realm_role, privileges in policy.policy.items():
-        print(f"  {realm_role}:")
-        for priv in privileges:
-            print(f"    - {priv.name}: {', '.join(svc.serviceId or svc.name or svc.id for svc in priv.services)}")
+    for rule in policy.rules:
+        print(f"    - {rule.role.name}: {rule.scope.name}")
 
 def main() -> None:
     gen_parser = argparse.ArgumentParser(

@@ -1,40 +1,21 @@
 #!/usr/bin/env python3
 """
 State Definitions for Single Privilege Mapper
-
-This module defines the TypedDict state structure used by the LangGraph
-workflow for mapping a single privilege to real roles that should have access.
 """
 
-from typing import TypedDict, Annotated, List, Dict
-from operator import add
+from aiac.pdp.library.configuration.models import Role, Scope
+from base_mapper.state import BaseMappingState
 
 
-class SinglePrivilegeState(TypedDict):
+class SinglePrivilegeState(BaseMappingState):
     """
-    State dictionary for the single privilege mapping LangGraph workflow.
+    State for the single-privilege role mapping workflow.
 
-    Attributes:
-        policy_description: Natural language policy description (context for the mapping)
-        service_name: Name of the service that owns the privilege
-        privilege: Dict with 'name' and 'description' of the privilege to analyze
-        realm_roles: List of available realm roles with descriptions
-        explanation: LLM's explanation of which real roles should have access
-        real_roles_with_access: List of realm role names that should have access
-        messages: Accumulated list of LLM messages (for conversation history)
-        errors: List of validation errors (replaced on each validation attempt)
-        retry_count: Number of validation retry attempts made
-        validation_passed: Boolean flag indicating if validation succeeded
+    Extends BaseMappingState with privilege-specific fields:
+        privilege: The privilege to analyze
+        roles: List of available realm roles
+        roles_with_access: Realm roles determined to have access to the privilege
     """
-    policy_description: str
-    service_name: str
-    privilege: Dict[str, str]
-    realm_roles: List[Dict[str, str]]
-    explanation: str
-    real_roles_with_access: List[str]
-    messages: Annotated[List, add]  # Annotated with 'add' for accumulation
-    errors: List[str]  # NOT accumulated - replaced on each validation attempt
-    retry_count: int
-    validation_passed: bool  # Boolean flag for retry decision, not accumulated
-
-# Made with Bob
+    privilege: Scope
+    roles: list[Role]
+    roles_with_access: list[Role]

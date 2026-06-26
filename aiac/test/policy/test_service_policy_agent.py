@@ -25,6 +25,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
+from aiac.pdp.policy.models import Rule, ServiceObjectModel
 from service_policy_agent import ServicePolicyBuilder
 from service_policy_agent.graph import _generate_yaml, _build_policy
 from service_policy_agent.state import ServicePolicyState
@@ -154,23 +155,21 @@ def compare_policies(generated: dict, expected: dict) -> tuple[bool, list[str]]:
 
 def test_generate_yaml_unit():
     """_generate_yaml renders YAML with correct header comments and structure (bypasses LLM)."""
-    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.policy.models import PolicyObjectModel
     from aiac.pdp.library.configuration.models import Service
 
     svc = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
     state: ServicePolicyState = {
         "description": "Developers get full GitHub access.",
-        "service_name": "github-tool",
+        "service_id": "github-tool",
         "explanation": "Developer realm role maps to all github-tool roles.",
-        "policy_structure": Policy(
+
+        "policy_structure": PolicyObjectModel(
             name="Developers get full GitHub access.",
-            policy={
-                "developer": [
-                    Priviledge(name="github-tool-aud", services=[svc]),
-                    Priviledge(name="github-full-access", services=[svc]),
-                ]
-            },
-            explanation="Developer realm role maps to all github-tool roles.",
+            policy={svc.id: ServiceObjectModel(service_type="Tool", inbound_rules=[
+                Rule(role="developer", scope="github-tool-aud"),
+                Rule(role="developer", scope="github-full-access"),
+            ])}
         ),
         "parsed_scopes": [],
         "yaml_output": "",
@@ -194,13 +193,13 @@ def test_generate_yaml_unit():
 
 def test_build_policy_unit():
     """_build_policy assembles a Policy model correctly from parsed_scopes (bypasses LLM)."""
-    from aiac.pdp.policy.models import Policy
+    from aiac.pdp.policy.models import PolicyObjectModel
     from aiac.pdp.library.configuration.models import Service
 
     svc = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
     state: ServicePolicyState = {
         "description": "test",
-        "service_name": "github-tool",
+        "service_id": "github-tool",
         "explanation": "",
         "parsed_scopes": [
             {
@@ -228,30 +227,28 @@ def test_build_policy_unit():
     result = _build_policy(state)
 
     policy = result["policy_structure"]
-    assert isinstance(policy, Policy)
-    assert "developer" in policy.policy
-    assert "tech-support" in policy.policy
-    developer_priv_names = {priv.name for priv in policy.policy["developer"]}
-    assert "github-full-access" in developer_priv_names
-    assert "github-tool-aud" in developer_priv_names
-    tech_support_priv_names = {priv.name for priv in policy.policy["tech-support"]}
-    assert "github-tool-aud" in tech_support_priv_names
-    all_services = {
-        s.serviceId
-        for privileges in policy.policy.values()
-        for priv in privileges
-        for s in priv.services
-    }
-    assert all_services == {"github-tool"}
+    assert isinstance(policy, PolicyObjectModel)
+    assert "github-tool" in policy.policy
+    svc_obj = policy.policy["github-tool"]
+    assert isinstance(svc_obj, ServiceObjectModel)
+    roles = {r.role for r in svc_obj.inbound_rules}
+    assert "developer" in roles
+    assert "tech-support" in roles
+    dev_scopes = {r.scope for r in svc_obj.inbound_rules if r.role == "developer"}
+    assert "github-full-access" in dev_scopes
+    assert "github-tool-aud" in dev_scopes
+    tech_scopes = {r.scope for r in svc_obj.inbound_rules if r.role == "tech-support"}
+    assert "github-tool-aud" in tech_scopes
+    assert set(policy.policy.keys()) == {"github-tool"}
 
 
 def test_build_policy_empty_scopes():
     """_build_policy produces an empty Policy when no scopes matched (bypasses LLM)."""
-    from aiac.pdp.policy.models import Policy
+    from aiac.pdp.policy.models import PolicyObjectModel
 
     state: ServicePolicyState = {
         "description": "test",
-        "service_name": "kagenti",
+        "service_id": "kagenti",
         "explanation": "",
         "parsed_scopes": [],
         "policy_structure": None,
@@ -264,7 +261,7 @@ def test_build_policy_empty_scopes():
 
     result = _build_policy(state)
     policy = result["policy_structure"]
-    assert isinstance(policy, Policy)
+    assert isinstance(policy, PolicyObjectModel)
     assert policy.policy == {}
 
 def test_service_policy_builder_initialization(config_file, mock_llm):
@@ -273,12 +270,12 @@ def test_service_policy_builder_initialization(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
 
-    assert builder.service_name == "github-tool"
+    assert builder.service_id == "github-tool"
     # Realm roles come from config regardless of scoping
     realm_role_names = [r["name"] for r in builder.realm_roles]
     assert "developer" in realm_role_names
@@ -302,7 +299,7 @@ def test_service_policy_builder_initialization_unknown_service(config_file, mock
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="does-not-exist",
+        service_id="does-not-exist",
         llm=mock_llm,
         verbose=False,
     )
@@ -315,7 +312,7 @@ def test_get_graph_returns_compiled_graph(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -346,7 +343,7 @@ Policy grants {realm_role} access to {role_name} on {service_id}.
 
 def test_generate_policy_returns_policy_model(config_file, mock_llm):
     """generate_policy returns a Policy model with name, policy, and explanation."""
-    from aiac.pdp.policy.models import Policy
+    from aiac.pdp.policy.models import PolicyObjectModel
     mock_response = Mock()
     mock_response.content = _make_mock_llm_response(
         "developer", "github-tool", "github-tool-aud"
@@ -355,16 +352,15 @@ def test_generate_policy_returns_policy_model(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
     result = builder.generate_policy("Developers access public repos.")
 
-    assert isinstance(result, Policy)
+    assert isinstance(result, PolicyObjectModel)
     assert result.name == "Developers access public repos."
     assert isinstance(result.policy, dict)
-    assert isinstance(result.explanation, str)
 
 
 def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
@@ -377,7 +373,7 @@ def test_generate_policy_yaml_is_valid_yaml(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -398,17 +394,16 @@ def test_generate_policy_scoped_to_service_only(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
     result = builder.generate_policy("Developers get public GitHub access.")
 
-    for privileges in result.policy.values():
-        for priv in privileges:
-            assert all(svc.serviceId == "github-tool" for svc in priv.services), (
-                f"Mapping for a different service leaked in: {priv}"
-            )
+    for service_id in result.policy:
+        assert service_id == "github-tool", (
+            f"Mapping for a different service leaked in: {service_id}"
+        )
 
 
 def test_invalid_role_triggers_validation_error(config_file, mock_llm):
@@ -426,7 +421,7 @@ def test_invalid_role_triggers_validation_error(config_file, mock_llm):
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
@@ -460,19 +455,14 @@ Mapping developer to demo-ui (wrong service - but service_role field is ignored)
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
 
     builder = ServicePolicyBuilder(
-        service_name="github-tool",
+        service_id="github-tool",
         llm=mock_llm,
         verbose=False,
     )
     result = builder.generate_policy("Developers get GitHub access.")
 
     # The mapping is structurally valid: developer → github-tool roles
-    all_services = {
-        svc.serviceId
-        for privileges in result.policy.values()
-        for priv in privileges
-        for svc in priv.services
-    }
+    all_services = set(result.policy.keys())
     assert all_services == {"github-tool"}, (
         f"Foreign service leaked into output: {all_services}"
     )
@@ -524,7 +514,7 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
 
             try:
                 builder = ServicePolicyBuilder(
-                    service_name=service_id,
+                    service_id=service_id,
                     llm=llm_instance,
                     verbose=False,
                 )
@@ -534,16 +524,10 @@ def test_generate_service_policy_from_fixtures(fixtures_dir, config_file, policy
                 match, diffs = compare_policies(generated_partial, expected_partial)
 
                 if not match:
-                    explanation_lines = (
-                        "\n  LLM explanation:\n"
-                        + "\n".join(f"    {l}" for l in policy.explanation.splitlines())
-                        if policy.explanation else ""
-                    )
                     failures.append(
                         f"[{llm_model_name}] {policy_file.name} / {service_id}: "
                         "policy mismatch:\n"
                         + "\n".join(f"  - {d}" for d in diffs)
-                        + explanation_lines
                     )
 
             except Exception as exc:

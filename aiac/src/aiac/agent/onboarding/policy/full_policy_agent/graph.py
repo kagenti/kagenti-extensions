@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Policy Builder - Main Module
 
@@ -21,7 +20,6 @@ organization and maintainability:
 - prompt_builder.py: LLM prompt construction
 - parsers.py: Response parsing utilities
 - validators.py: Policy validation logic
-- output_generators.py: Output file generation utilities
 - cli.py: Command-line interface
 
 Key Features:
@@ -31,24 +29,21 @@ Key Features:
     - Retry mechanism with semantic verification
 """
 
-from aiac.pdp.library.configuration.models import Service
-from aiac.pdp.policy.models import Policy, Priviledge
-from typing import Optional, Dict, Any
-from pathlib import Path
-import os
+from aiac.pdp.library.configuration.models import Role, Service
+from aiac.pdp.policy.models import PolicyObjectModel, Rule
+from typing import Optional, Dict
 import sys
 from dataclasses import dataclass
 
 from langgraph.graph import StateGraph, END
 from langchain_core.language_models import BaseChatModel
 
-from config import create_llm
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
 from aiac.pdp.library.configuration.api import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
-from utils.output_generators import generate_yaml_output
+from aiac.pdp.policy.builders.yaml import _generate_yaml_output
 
 
 @dataclass
@@ -74,14 +69,13 @@ class PolicyBuilderConfig:
 # ============================================================================
 # These functions are pure and stateless, making them easier to test and reason about
 
-def _parse_and_extract_scopes(
+def _build_policy(
     state: PolicyState,
     llm: BaseChatModel,
-    realm_roles: list,
+    roles: list[Role],
     privileges_map: dict,
-    verbose: bool,
-    services_by_name: Dict[str, Service],
-) -> PolicyState:
+    verbose: bool
+    ) -> PolicyState:
     """
     Map each privilege to realm roles using SingleRoleMapper, then aggregate
     results into the parsed_scopes format expected by _build_policy.
@@ -104,95 +98,44 @@ def _parse_and_extract_scopes(
     Returns:
         Updated PolicyState with parsed_scopes and explanation
     """
-    mapper = SinglePrivilegeMapper(llm=llm, verbose=verbose)
 
     explanations = []
     # realm_role_name -> list of {"service": Service, "privilege": str} dicts
-    realm_role_to_privileges: dict = {}
+    policy_rules: list[Rule] = []
 
-    for service_name, service_info in privileges_map.items():
-        service_obj = services_by_name.get(service_name)
+    for _ , service_info in privileges_map.items():
         for privilege in service_info["scopes"]:
-            result = mapper.map_role(
-                policy_description=state['description'],
-                service_name=service_name,
-                privilege=privilege,
-                realm_roles=realm_roles,
+            mapper = SinglePrivilegeMapper(
+                llm=llm, 
+                verbose=verbose, 
+                roles=roles, 
+                privilege=privilege)
+
+            result = mapper.generate_policy(description=state['description'])
+
+            explanations.append(
+                f"**{privilege.name}**: {result.explanation}"
             )
 
-            roles_with_access = result.get('real_roles_with_access', [])
-            if roles_with_access and result.get('explanation'):
-                explanations.append(
-                    f"{service_name}/{privilege['name']}: {result['explanation']}"
-                )
-
-            for realm_role_name in roles_with_access:
-                realm_role_to_privileges.setdefault(realm_role_name, []).append(
-                    {
-                        'service': service_obj,
-                        'privilege': privilege['name'],
-                    }
-                )
-
-    parsed_scopes = [
-        {'role': realm_role, 'privileges': priv_list}
-        for realm_role, priv_list in realm_role_to_privileges.items()
-    ]
+            policy_rules.extend(result.rules)
+    policy = PolicyObjectModel(
+        rules=policy_rules, 
+        explanation = "\n\n".join(explanations) if explanations else ""
+        )
 
     return {
         **state,
-        "explanation": "\n\n".join(explanations) if explanations else "",
-        "parsed_scopes": parsed_scopes,
+        "policy": policy, 
         "messages": [],
         "errors": [],
         "retry_count": state.get("retry_count", 0),
         "validation_passed": True
     }
 
-
-def _build_policy(state: PolicyState) -> PolicyState:
-    """
-    Build a typed Policy model from extracted role mappings.
-
-    Reads parsed_scopes (where each privilege dict carries a Service object
-    under 'service') and produces a Policy with Priviledge objects grouped
-    by privilege name so each Priviledge holds a list of Service objects.
-
-    Args:
-        state: PolicyState with 'parsed_scopes' field
-
-    Returns:
-        Updated PolicyState with 'policy_structure' set to a Policy instance
-    """
-    raw: Dict[str, list] = {}
-    for role_info in state["parsed_scopes"]:
-        role_name = role_info.get("role", "")
-        privileges = role_info.get("privileges", [])
-        priv_to_services: Dict[str, list] = {}
-        for p in privileges:
-            svc = p["service"]  # Service object stored by _parse_and_extract_scopes
-            priv_to_services.setdefault(p["privilege"], []).append(svc)
-        raw[role_name] = [
-            Priviledge(name=priv_name, services=svcs)
-            for priv_name, svcs in priv_to_services.items()
-        ]
-
-    policy = Policy(
-        name=state["description"],
-        policy=raw,
-        explanation=state.get("explanation", ""),
-    )
-    return {**state, "policy_structure": policy}
-
-
-
 def _validate_policy(
     state: PolicyState,
-    llm: BaseChatModel,
     realm_roles: list,
-    service_names: list,
     privileges_map: dict,
-    verbose: bool,
     max_retries: int
 ) -> PolicyState:
     """
@@ -202,7 +145,7 @@ def _validate_policy(
     which expects {realm_role: [{"service": str, "privilege": str}]}.
 
     Args:
-        state: PolicyState with 'policy_structure' as a Policy instance
+        state: PolicyState with 'policy' as a Policy instance
         llm: LLM instance (reserved for future semantic verification)
         realm_roles: List of available realm roles
         service_names: List of service names
@@ -214,24 +157,11 @@ def _validate_policy(
         Updated PolicyState with errors and validation_passed fields
     """
     retry_count = state.get("retry_count", 0)
-    policy_obj: Optional[Policy] = state.get("policy_structure")
-
-    if policy_obj is None:
-        raw_policy: Dict[str, Any] = {}
-    else:
-        raw_policy = {
-            realm_role: [
-                {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
-                for priv in privileges
-                for svc in priv.services
-            ]
-            for realm_role, privileges in policy_obj.policy.items()
-        }
+    policy_obj: Optional[PolicyObjectModel] = state.get("policy")
 
     structural_errors = validate_policy_structure(
-        raw_policy,
+        policy_obj,
         realm_roles,
-        service_names,
         privileges_map
     )
 
@@ -253,7 +183,7 @@ def _validate_policy(
 
 def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
     """
-    Determine if validation should retry by going back to parse_and_extract.
+    Determine if validation should retry by going back to build_policy_node.
     
     This is a conditional edge function for the LangGraph state machine.
     
@@ -262,7 +192,7 @@ def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
         max_retries: Maximum retry attempts allowed
         
     Returns:
-        "parse_and_extract" if validation failed and retries remain,
+        "build_policy_node" if validation failed and retries remain,
         otherwise END to terminate the workflow
     """
     validation_passed = state.get("validation_passed", False)
@@ -271,13 +201,13 @@ def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
     
     # If validation failed and we haven't exceeded max retries, retry from start
     if not validation_passed and retry_count < max_retries:
-        print(f"\n⚠️  Validation failed (attempt {retry_count}/{max_retries}). Retrying from parse_and_extract...")
+        print(f"\n⚠️  Validation failed (attempt {retry_count}/{max_retries}). Retrying from build_policy_node...")
         if errors:
             print(f"\nValidation Errors (from this attempt):")
             for i, error in enumerate(errors, 1):
                 print(f"  {i}. {error}")
             print()
-        return "parse_and_extract"
+        return "build_policy"
     
     # Either validation passed or max retries exceeded
     return END
@@ -285,38 +215,30 @@ def _should_retry_validation(state: PolicyState, max_retries: int) -> str:
 
 def create_policy_builder_graph(
     config: PolicyBuilderConfig,
-    realm_roles: list,
+    roles: list[Role],
     privileges_map: dict,
-    service_names: list,
-    services_by_name: Dict[str, Service],
 ):
     """
     Create and compile the policy builder graph.
 
     Args:
         config: PolicyBuilderConfig instance
-        realm_roles: List of available realm roles
+        roles: List of available realm roles
         privileges_map: Dict mapping service names to privileges
-        service_names: List of service names
-        services_by_name: Mapping of service name → Service object (threaded into
-            _parse_and_extract_scopes so parsed_scopes carries Service objects)
 
     Returns:
         Compiled LangGraph workflow
     """
 
-    def parse_and_extract_node(state: PolicyState) -> PolicyState:
-        return _parse_and_extract_scopes(
-            state, config.llm, realm_roles, privileges_map, config.verbose, services_by_name
+    def build_policy_node(state: PolicyState) -> PolicyState:
+        return _build_policy(
+            state, config.llm, roles, privileges_map, config.verbose
         )
     
-    def build_policy_node(state: PolicyState) -> PolicyState:
-        return _build_policy(state)
-
     def validate_policy_node(state: PolicyState) -> PolicyState:
         return _validate_policy(
-            state, config.llm, realm_roles, service_names,
-            privileges_map, config.verbose, config.max_retries
+            state, roles, 
+            privileges_map, config.max_retries
         )
 
     def should_retry_node(state: PolicyState) -> str:
@@ -326,13 +248,11 @@ def create_policy_builder_graph(
     workflow = StateGraph(PolicyState)
     
     # Add nodes
-    workflow.add_node("parse_and_extract", parse_and_extract_node)
     workflow.add_node("build_policy", build_policy_node)
     workflow.add_node("validate_policy", validate_policy_node)
     
     # Define edges
-    workflow.set_entry_point("parse_and_extract")
-    workflow.add_edge("parse_and_extract", "build_policy")
+    workflow.set_entry_point("build_policy")
     workflow.add_edge("build_policy", "validate_policy")
     
     # Add conditional edge for retry logic
@@ -340,7 +260,7 @@ def create_policy_builder_graph(
         "validate_policy",
         should_retry_node,
         {
-            "parse_and_extract": "parse_and_extract",
+            "build_policy": "build_policy",
             END: END
         }
     )
@@ -362,9 +282,8 @@ class PolicyBuilder:
     policy descriptions into structured YAML access control policies.
     
     Workflow Stages:
-        1. parse_and_extract: Parse natural language and extract role mappings
-        2. build_policy: Build structured policy from mappings
-        3. validate_policy: Validate structure and semantics (with retry)
+        1. build_policy: Parse natural language and extract role mappings, and build structured policy from mappings
+        2. validate_policy: Validate structure and semantics (with retry)
     
     Attributes:
         config: PolicyBuilderConfig instance
@@ -376,8 +295,8 @@ class PolicyBuilder:
     
     def __init__(
         self,
+        llm: BaseChatModel,
         realm: str = "demo",
-        llm: Optional[BaseChatModel] = None,
         verbose: bool = True,
         max_retries: int = MAX_VALIDATION_RETRIES
     ):
@@ -397,30 +316,22 @@ class PolicyBuilder:
         # Store realm for later use
         self.realm = realm
 
-        # Create LLM if not provided
-        # LLM config is in the config directory relative to this file (llm.env)
-        if llm is None:
-            llm_env_path = Path(__file__).parent.parent / "config" / "llm.env"
-            llm_instance = create_llm(env_path=llm_env_path, verbose=verbose)
-        else:
-            llm_instance = llm
-        
         # Create configuration object
         self.config = PolicyBuilderConfig(
-            llm=llm_instance,
+            llm=llm,
             verbose=verbose,
             max_retries=max_retries
         )
 
         config_api = Configuration.for_realm(realm)
-        
-        roles_models = config_api.get_roles()
-        print (f"Got {len(roles_models)} roles")
-        self.realm_roles = [
-            {"name": r.name, "description": r.description}
-            for r in roles_models
-            if r.description
-        ]
+        subjects = config_api.get_subjects()
+        all_roles = [r for sublist in [subject.roles for subject in subjects] for r in sublist]
+        role_map: dict[str,Role] = {}
+        for r in all_roles:
+            role_map[r.name] = r
+        roles = list(role_map.values())
+        print (f"Got {len(roles)} roles")
+        self.roles = [r for r in roles if r.description]
         services = config_api.get_services()
         print (f"Got {len(services)} services")
         self.privileges_map = {}
@@ -433,10 +344,7 @@ class PolicyBuilder:
                 continue
             service_name = service.name or service.id
             print (f"Service {service_name} added: <{service.description}> <{service.type}>")
-            described_scopes = [
-                {"name": scope.name, "description": scope.description}
-                for scope in service.scopes
-                if scope.description
+            described_scopes = [ scope for scope in service.scopes if scope.description
             ]
             if not described_scopes:
                 continue
@@ -449,10 +357,8 @@ class PolicyBuilder:
 
         self.graph = create_policy_builder_graph(
             self.config,
-            self.realm_roles,
-            self.privileges_map,
-            self.service_names,
-            self.services_by_name,
+            self.roles,
+            self.privileges_map
         )
     
     # ========================================================================
@@ -475,7 +381,7 @@ class PolicyBuilder:
     # PUBLIC API METHODS
     # ========================================================================
     
-    def generate_policy(self, description: str) -> Policy:
+    def generate_policy(self, description: str) -> PolicyObjectModel:
         """
         Generate an access control policy from a natural language description.
 
@@ -495,10 +401,7 @@ class PolicyBuilder:
         """
         initial_state: PolicyState = {
             "description": description,
-            "explanation": "",
-            "parsed_scopes": [],
-            "policy_structure": None,
-            "yaml_output": "",
+            "policy": None,
             "messages": [],
             "errors": [],
             "retry_count": 0,
@@ -511,9 +414,9 @@ class PolicyBuilder:
         if errors:
             raise ValueError(f"Policy validation failed: {'; '.join(errors)}")
 
-        self._last_policy_structure: Optional[Policy] = final_state["policy_structure"]
+        self._last_policy_structure: Optional[PolicyObjectModel] = final_state["policy"]
 
-        return final_state["policy_structure"]
+        return final_state["policy"]
     
     def get_yaml_output(self) -> str:
         """
@@ -530,20 +433,7 @@ class PolicyBuilder:
         if not hasattr(self, '_last_policy_structure') or self._last_policy_structure is None:
             raise ValueError("No policy available. Generate a policy first using generate_policy().")
 
-        policy = self._last_policy_structure
-        return generate_yaml_output(
-            {
-                "policy": {
-                    realm_role: [
-                        {"service": svc.serviceId or svc.name or svc.id, "privilege": priv.name}
-                        for priv in privileges
-                        for svc in priv.services
-                    ]
-                    for realm_role, privileges in policy.policy.items()
-                }
-            },
-            policy.name,
-        )
+        return _generate_yaml_output(self._last_policy_structure)
 
 
 # ============================================================================

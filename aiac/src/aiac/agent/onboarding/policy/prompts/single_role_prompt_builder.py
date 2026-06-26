@@ -6,12 +6,14 @@ This module contains functions for building LLM prompts used to determine
 which real roles should have access to a specific privilege.
 """
 
-from typing import List, Dict, Optional
+from typing import List
+
+from aiac.pdp.library.configuration.models import Role, Scope
 
 
-def build_single_role_system_prompt(
-    realm_roles: List[Dict[str, str]],
-    privilege: Dict[str, str],
+def build_single_scope_to_roles_system_prompt(
+    roles: List[Role],
+    privilege: Scope,
     policy_description: str = "",
 ) -> str:
     """
@@ -31,9 +33,9 @@ def build_single_role_system_prompt(
     """
     # Build available realm roles list with descriptions
     available_roles_lines = []
-    for role in realm_roles:
-        role_name = role['name']
-        role_desc = role.get('description', '')
+    for role in roles:
+        role_name = role.name
+        role_desc = role.description if role.description else ''
         if role_desc:
             available_roles_lines.append(f"  - {role_name}: {role_desc}")
         else:
@@ -46,8 +48,8 @@ def build_single_role_system_prompt(
     )
 
     # Format the privilege information
-    privilege_name = privilege['name']
-    privilege_desc = privilege.get('description', '')
+    privilege_name = privilege.name
+    privilege_desc = privilege.description if privilege.description else ''
     privilege_info = privilege_name
     if privilege_desc:
         privilege_info += f": {privilege_desc}"
@@ -91,7 +93,7 @@ ANALYSIS GUIDELINES:
    An enabling service is one whose description says it provides access TO another service
    or technology. Common phrasings include: "Access to the X connector", "Provides access
    to X services", "Gateway to X", "Enables access to X", "Access to the X agent".
-   Examples: "Access to the data warehouse connector", "Provides access to GitHub services",
+   Examples: "Access to the data warehouse connector", "Provides access to the storage service",
    "Access to the payment gateway", "Access to the data pipeline".
 
    DOMAIN REQUIREMENT - AN ENABLING SERVICE MUST BE IN THE SAME DOMAIN AS THE POLICY:
@@ -110,14 +112,27 @@ ANALYSIS GUIDELINES:
    - The enabling service is a prerequisite - without it, the user cannot reach the
      downstream resource at all, regardless of how limited their access is.
 
+   AGENT SEMANTICS — ENABLING DOES NOT EQUAL FINAL RESOURCE ACCESS:
+   - The enabling service grants access to the AGENT, CONNECTOR, or GATEWAY ITSELF —
+     not to the underlying final resource directly.
+   - The final resource (e.g., a storage service, data warehouse) independently enforces its
+     own access controls, checking the user's permissions AFTER they reach it through the agent.
+   - Do NOT assume an enabling privilege grants unrestricted access to the final resource.
+     Access restrictions on the final resource are enforced by the final resource, not by
+     the enabling service.
+   - Example: "svc-agent" grants access to the external service agent tool. The external
+     service itself still checks whether the user can access restricted vs. open resources.
+     Granting "svc-agent" to a role with open-only downstream access is CORRECT — the
+     restricted resource check is enforced by the external service, not by the agent privilege.
+
    DO NOT confuse enabling services with final resource roles:
    - ENABLING: "Access to the data warehouse connector" - needed by everyone with data access
    - FINAL: "Access to public data files" - needed only by those with public access
    - FINAL: "Access to confidential data records" - needed only by those with full access
 
    DO NOT exclude user categories based on their realm role name:
-   - A "sales" realm role that needs data access still needs the data warehouse connector
-   - A "support" realm role that needs read-only access still needs the enabling service
+   - A "role-b" realm role that needs data access still needs the data warehouse connector
+   - A "role-c" realm role that needs read-only access still needs the enabling service
    - The realm role name is irrelevant - only whether the policy grants them ANY access matters
 
    EXAMPLE: Policy says "Group A gets full data warehouse access; Group B (including
@@ -138,8 +153,8 @@ ANALYSIS GUIDELINES:
    - Grant access ONLY when explicitly required by the policy or role description
    - When in doubt, do NOT grant access
    - POLICY SILENCE = NO ACCESS: If the policy description does not mention this service's
-     domain at all, return []. Do NOT infer access from the user role name
-     (e.g., "developer") or from what that user type might typically do in their job.
+     domain at all, return []. Do NOT infer access from the user role name or from what
+     that role type might typically do in their job.
      Access is determined solely by what the POLICY TEXT explicitly states.
    - Exception: enabling/gateway services are required by all users of the downstream resource.
 
@@ -149,7 +164,7 @@ ANALYSIS GUIDELINES:
 
 6. USER-FACING ROLES ONLY — FILTER BEFORE ANALYSIS:
    The available realm roles list may contain a mix of role types. You MUST classify each role
-   before using it and ONLY include USER-FACING ROLES in real_roles_with_access.
+   before using it and ONLY include USER-FACING ROLES in roles_with_access.
 
    HOW TO CLASSIFY:
    - USER-FACING ROLE: The description characterises a GROUP OF PEOPLE or a TEAM
@@ -158,10 +173,10 @@ ANALYSIS GUIDELINES:
    - TECHNICAL/CAPABILITY ROLE: The description characterises a SERVICE CAPABILITY —
      phrases like "Access to X", "Provides access to X", "Gateway to X", "Enables X".
      These represent service identities or token audiences, NOT human principals.
-     NEVER include them in real_roles_with_access.
+     NEVER include them in roles_with_access.
    - SYSTEM/INTERNAL ROLE: The description is a placeholder (e.g., starts with "${{"),
      or the role is clearly an infrastructure / identity-provider internal construct.
-     NEVER include them in real_roles_with_access.
+     NEVER include them in roles_with_access.
 
    NAMING CONFLICT WARNING: A realm role may share the same name or description as the
    privilege being analysed. Do NOT assign the privilege to such a role on that basis alone.
@@ -196,7 +211,7 @@ TASK STEPS:
       Step 0a PRIVILEGE VALIDITY CHECK: [reason it is a system/internal privilege]. Returning [] immediately.
       ```
       ```json
-      {{"privilege": "[privilege-name]", "real_roles_with_access": []}}
+      {{"privilege": "[privilege-name]", "roles_with_access": []}}
       ```
       System/internal privileges must never be granted to any realm role.
    b. PRE-FILTER REALM ROLES: Scan the full available realm roles list and identify ONLY the
@@ -215,8 +230,8 @@ TASK STEPS:
    - "Access to the monitoring dashboard UI" — domain: dashboards. Policy about data warehouse — DIFFERENT → []
    - "Access to the data warehouse connector" — domain: data warehouse. Policy about data warehouse — SAME → continue
    - "Access to confidential data records" — domain: data warehouse. Policy about data warehouse — SAME → continue
-   - "Access to the demo UI interface" — domain: web UI. Policy about GitHub repos — DIFFERENT → []
-     (Even though "developers" may use demo UIs in general, the policy says nothing about UI access → [])
+   - "Access to the demo UI interface" — domain: web UI. Policy about document storage — DIFFERENT → []
+     (Even though engineers may use demo UIs in general, the policy says nothing about UI access → [])
 2. CLASSIFY this privilege: is it a FINAL resource privilege or an ENABLING/GATEWAY service?
    - ENABLING/GATEWAY: description says "access to [some service/agent/pipeline/gateway]",
      "provides access to [some service/technology]", "gateway to [...]", or similar phrasing
@@ -245,7 +260,7 @@ need access, how they map to realm roles]
 ```json
 {{
   "privilege": "{privilege_name}",
-  "real_roles_with_access": [
+  "roles_with_access": [
     "exact-realm-role-name-1",
     "exact-realm-role-name-2"
   ]
@@ -259,23 +274,23 @@ Example A — domain mismatch, not relevant to policy subject:
 Step 1 RELEVANCE CHECK: privilege domain is "monitoring dashboard UI". Policy domain is
 "data warehouse access". These are DIFFERENT domains — dashboard UI is unrelated to data
 warehouse access. Returning [] immediately without further analysis.
-Note: Even if "developers" or "analysts" typically use dashboard UIs, the policy is silent
+Note: Even if engineers or analysts typically use dashboard UIs, the policy is silent
 about UI access. POLICY SILENCE = NO ACCESS.
 ```
 ```json
-{{"privilege": "monitoring-dashboard", "real_roles_with_access": []}}
+{{"privilege": "monitoring-dashboard", "roles_with_access": []}}
 ```
 
-Example A2 — domain mismatch: UI privilege, GitHub policy:
+Example A2 — domain mismatch: UI privilege, document storage policy:
 ```explanation
-Step 1 RELEVANCE CHECK: privilege domain is "demo UI interface". Policy domain is
-"GitHub repository access". These are DIFFERENT domains. The policy mentions only GitHub
-repositories; it says nothing about any UI or web interface. POLICY SILENCE = NO ACCESS.
-Returning [] immediately. (The fact that "developers" may use demo UIs is irrelevant —
-access is determined by the policy text, not by job function assumptions.)
+Step 1 RELEVANCE CHECK: privilege domain is "analytics dashboard UI". Policy domain is
+"document storage access". These are DIFFERENT domains. The policy mentions only document
+storage; it says nothing about any UI or dashboard. POLICY SILENCE = NO ACCESS.
+Returning [] immediately. (The fact that certain roles may use dashboards in general is
+irrelevant — access is determined by the policy text, not by job function assumptions.)
 ```
 ```json
-{{"privilege": "demo-ui", "real_roles_with_access": []}}
+{{"privilege": "analytics-dashboard", "roles_with_access": []}}
 ```
 
 Example B — enabling/gateway service (ALL users who need the downstream resource):
@@ -289,7 +304,7 @@ enabling service. Access level does NOT matter for enabling services.
 Realm role mapping: role-a → Group A, role-b → Group B.
 ```
 ```json
-{{"privilege": "warehouse-connector", "real_roles_with_access": ["role-a", "role-b"]}}
+{{"privilege": "warehouse-connector", "roles_with_access": ["role-a", "role-b"]}}
 ```
 
 Example C — restricted privilege, limited access:
@@ -302,22 +317,22 @@ public data only. Only Group A has explicit access to restricted data.
 Realm role mapping: role-a → Group A.
 ```
 ```json
-{{"privilege": "restricted-data-access", "real_roles_with_access": ["role-a"]}}
+{{"privilege": "restricted-data-access", "roles_with_access": ["role-a"]}}
 ```
 
 Example D — enabling/gateway service using "Provides access to" phrasing:
 ```explanation
-Step 1 RELEVANCE CHECK: privilege domain is "GitHub services". Policy domain is
-"GitHub repository access". SAME domain (GitHub) — continue.
-Step 2 CLASSIFY: ENABLING SERVICE — "Provides access to GitHub services" positions this
-as a prerequisite gateway; without it, no user can reach GitHub repositories at all.
-Policy identifies two user categories: R&D (→ developer) gets full access; technical
-support (→ tech-support) gets read-only access. Both need ANY level of GitHub access,
+Step 1 RELEVANCE CHECK: privilege domain is "document storage services". Policy domain is
+"document storage access". SAME domain — continue.
+Step 2 CLASSIFY: ENABLING SERVICE — "Provides access to document storage services" positions
+this as a prerequisite gateway; without it, no user can reach document storage at all.
+Policy identifies two user categories: Group A (→ role-a) gets full access; Group B
+(→ role-b) gets read-only access. Both need ANY level of document storage access,
 so BOTH need this enabling service. Access level does NOT matter for enabling services.
-Realm role mapping: developer → R&D, tech-support → technical support.
+Realm role mapping: role-a → Group A, role-b → Group B.
 ```
 ```json
-{{"privilege": "github-agent", "real_roles_with_access": ["developer", "tech-support"]}}
+{{"privilege": "storage-agent", "roles_with_access": ["role-a", "role-b"]}}
 ```
 
 Example E — system/internal privilege (starts with "default-roles-"):
@@ -328,7 +343,7 @@ a system/internal construct, not a user-facing service capability.
 Returning [] immediately. No further analysis is performed.
 ```
 ```json
-{{"privilege": "default-roles-demo", "real_roles_with_access": []}}
+{{"privilege": "default-roles-demo", "roles_with_access": []}}
 ```
 
 Example F — token-modifying scope (adds origins/claims to the token, not a service capability):
@@ -340,7 +355,7 @@ downstream resource or service. This is an identity-provider infrastructure scop
 Returning [] immediately.
 ```
 ```json
-{{"privilege": "web-origins", "real_roles_with_access": []}}
+{{"privilege": "web-origins", "roles_with_access": []}}
 ```
 
 Example G — client-mechanism scope (enables an authentication mechanism, not resource access):
@@ -351,16 +366,16 @@ a client authentication mechanism, not to grant access to a downstream resource 
 service. This is an identity-provider infrastructure scope. Returning [] immediately.
 ```
 ```json
-{{"privilege": "service_account", "real_roles_with_access": []}}
+{{"privilege": "service_account", "roles_with_access": []}}
 ```
 """
 
 
-def build_semantic_verification_prompt(
+def build_single_scope_to_roles_verification_prompt(
     policy_description: str,
-    privilege: Dict[str, str],
-    realm_roles: List[Dict[str, str]],
-    real_roles_with_access: List[str],
+    privilege: Scope,
+    realm_roles: List[Role],
+    roles_with_access: List[Role],
 ) -> str:
     """
     Build a prompt to semantically verify a single privilege mapping.
@@ -369,21 +384,21 @@ def build_semantic_verification_prompt(
         policy_description: Natural language policy description
         privilege: Dict with 'name' and 'description' of the privilege
         realm_roles: List of dicts with 'name' and 'description' for all realm roles
-        real_roles_with_access: List of realm role names currently assigned
+        roles_with_access: List of realm role names currently assigned
 
     Returns:
         Formatted verification prompt string ready for LLM consumption
     """
-    privilege_name = privilege['name']
-    privilege_desc = privilege.get('description', '')
+    privilege_name = privilege.name
+    privilege_desc = privilege.description if privilege.description else ''
     privilege_info = privilege_name + (f": {privilege_desc}" if privilege_desc else "")
 
     realm_roles_context = "\n".join(
-        f"  - {r['name']}" + (f": {r.get('description', '')}" if r.get('description') else "")
+        f"  - {r.name}" + (f": {r.description if r.description else ''}" if r.description else "")
         for r in realm_roles
     )
 
-    assigned_roles = ", ".join(real_roles_with_access) if real_roles_with_access else "(none)"
+    assigned_roles = ", ".join([role.name for role in roles_with_access]) if roles_with_access else "(none)"
 
     return f"""You are a policy validator. Verify that the following privilege mapping is correct.
 
@@ -422,7 +437,7 @@ CRITICAL RULES — read carefully before evaluating:
      - Do NOT evaluate the mapping against any other rules.
 
 1. DOMAIN CHECK FIRST: Determine the domain of this privilege from its name and description
-   (e.g., "GitHub repositories", "data warehouse", "UI dashboard").
+   (e.g., "document storage", "data warehouse", "UI dashboard").
    If the policy description does NOT explicitly address this privilege's domain, the mapping
    cannot be evaluated against the policy — accept any assignment including empty and return
    MAPPING_CORRECT: YES.
@@ -439,7 +454,24 @@ CRITICAL RULES — read carefully before evaluating:
    in general. Only ask: "Is the mapping for THIS specific privilege consistent with its
    description and the policy?"
 
-5. USER-FACING ROLES ONLY: Verify that every assigned role represents a human principal or
+5. ENABLING/GATEWAY PRIVILEGE — AGENT SEMANTICS (applies before access-level checks):
+   If this privilege is an enabling/gateway service (description says "Provides access to X",
+   "Gateway to X", "Access to X agent/service/connector"):
+   - The assignment grants access to the AGENT/GATEWAY ITSELF — NOT to the final resource.
+   - The final resource (e.g., a storage service, data warehouse) independently enforces
+     its own access controls, checking the user's permissions after they reach it through the agent.
+   - Do NOT flag the assignment as incorrect by reasoning that it would "grant access" to
+     restricted downstream capabilities (e.g., private repositories, confidential records).
+   - The ONLY valid check for an enabling privilege is: does each assigned role need ANY
+     level of access to the downstream resource (per the policy)?
+   - Access-level restrictions (public-only, read-only, limited) are enforced by the
+     downstream resource, not by the gateway privilege. Do NOT apply least-privilege
+     reasoning about the final resource when evaluating an enabling service assignment.
+   - Example: policy says role-b gets open-resource-only access. Assigning
+     "svc-agent" (enabling service) to role-b is CORRECT — the downstream service enforces
+     the open-resource restriction. The enabling privilege just allows them to reach the agent.
+
+6. USER-FACING ROLES ONLY: Verify that every assigned role represents a human principal or
    team (e.g., its description characterises a group of people such as "R&D team members").
    If any assigned role is a technical/capability role (description: "Access to X",
    "Provides access to X", "Enables X") or a system/internal role (placeholder description
@@ -454,9 +486,9 @@ MAPPING_CORRECT: NO
 EXPLANATION: Specific contradiction between the privilege description, the policy, and the mapping."""
 
 
-def build_single_role_retry_prompt(
-    realm_roles: List[Dict[str, str]],
-    privilege: Dict[str, str]
+def build_single_scope_to_roles_retry_prompt(
+    realm_roles: List[Role],
+    privilege: Scope
 ) -> str:
     """
     Build a retry prompt when initial JSON parsing fails for single privilege analysis.
@@ -468,8 +500,8 @@ def build_single_role_retry_prompt(
     Returns:
         Formatted retry prompt string with role reminders and format example
     """
-    realm_role_names = [role['name'] for role in realm_roles]
-    privilege_name = privilege['name']
+    realm_role_names = [role.name for role in realm_roles]
+    privilege_name = privilege.name
 
     return f"""The previous response could not be parsed as valid JSON.
 
@@ -490,7 +522,7 @@ Return in this format (both blocks are required):
 ```json
 {{
   "privilege": "{privilege_name}",
-  "real_roles_with_access": []
+  "roles_with_access": []
 }}
 ```
 

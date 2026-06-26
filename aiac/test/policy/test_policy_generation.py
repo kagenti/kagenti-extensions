@@ -25,6 +25,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
+from aiac.pdp.policy.models import PolicyObjectModel, Rule, ServiceObjectModel
 from full_policy_agent import PolicyBuilder
 from config import create_llm
 
@@ -189,16 +190,10 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
             match, differences = compare_policies(generated_policy, expected_policy)
 
             if not match:
-                explanation_lines = (
-                    "\n  LLM explanation:\n"
-                    + "\n".join(f"    {l}" for l in policy.explanation.splitlines())
-                    if policy.explanation else ""
-                )
                 failures.append(
                     f"[{llm_model_name}] {policy_file.name}: "
                     "policy mismatch:\n"
                     + "\n".join(f"  - {diff}" for diff in differences)
-                    + explanation_lines
                 )
 
         except Exception as exc:
@@ -221,19 +216,19 @@ def test_generate_policy_from_fixtures(fixtures_dir, config_file, policy_files, 
 
 def test_save_policy_creates_yaml_file(tmp_path):
     """save_policy writes valid YAML to the specified path."""
-    from utils.output_generators import save_policy
-    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.policy.builders.yaml import save_policy_yaml
+    from aiac.pdp.policy.models import PolicyObjectModel
     from aiac.pdp.library.configuration.models import Service
 
-    svc = Service(id="kagenti", serviceId="kagenti", enabled=True, type="Agent")
-    policy = Policy(
-        name="Test policy",
-        policy={"developer": [Priviledge(name="demo-ui", services=[svc])]},
-        explanation="",
-    )
+    svc = Service(id="kagenti", name = "kagenti", serviceId="kagenti", enabled=True, type="Agent")
+    # policy={"developer": [Priviledge(name="demo-ui", services=[svc])]}
 
+    policy = PolicyObjectModel(
+        name="Test policy",
+        policy={svc.id: ServiceObjectModel(service_type="Agent",inbound_rules=[Rule(role="developer", scope="demo-ui")])})
+                        
     output_file = tmp_path / "policy.yaml"
-    save_policy(policy, str(output_file))
+    save_policy_yaml(policy, str(output_file))
 
     assert output_file.exists()
     content = output_file.read_text()
@@ -247,8 +242,8 @@ def test_save_policy_creates_yaml_file(tmp_path):
 
 def test_save_policy_rego_creates_files(tmp_path, config_file):
     """save_policy_rego writes realm_roles and default Rego files to the directory."""
-    from utils.output_generators import save_policy_rego
-    from aiac.pdp.policy.models import Policy, Priviledge
+    from aiac.pdp.policy.builders.rego import save_policy_rego
+    from aiac.pdp.policy.models import PolicyObjectModel
     from aiac.pdp.library.configuration.models import Service
     import os
 
@@ -256,16 +251,10 @@ def test_save_policy_rego_creates_files(tmp_path, config_file):
 
     svc_kagenti = Service(id="kagenti", serviceId="kagenti", enabled=True, type="Agent")
     svc_github = Service(id="github-tool", serviceId="github-tool", enabled=True, type="Tool")
-    policy = Policy(
+    policy = PolicyObjectModel(
         name="Test policy",
-        policy={
-            "developer": [
-                Priviledge(name="demo-ui", services=[svc_kagenti]),
-                Priviledge(name="github-full-access", services=[svc_github]),
-            ]
-        },
-        explanation="",
-    )
+        policy={svc_kagenti.id: ServiceObjectModel(service_type="Agent", inbound_rules=[Rule(role="developer", scope="demo-ui")]),
+                svc_github.id: ServiceObjectModel(service_type="Tool", inbound_rules=[Rule(role="developer", scope="github-full-access")])})
 
     save_policy_rego(policy, str(tmp_path), realm="demo")
 
@@ -284,7 +273,7 @@ def test_save_policy_rego_creates_files(tmp_path, config_file):
 
 def test_policy_builder_can_generate_yaml_from_structure(config_file):
     """PolicyBuilder can generate YAML from a policy structure (bypasses LLM)."""
-    from utils.output_generators import generate_yaml_output
+    from aiac.pdp.policy.builders.yaml import _generate_yaml_output
 
     # Create a valid policy structure
     policy_structure = {
@@ -296,10 +285,14 @@ def test_policy_builder_can_generate_yaml_from_structure(config_file):
         }
     }
     
-    description = "Test policy description"
+    policy = PolicyObjectModel(
+        name="Test policy description",
+        policy={"kagenti": ServiceObjectModel(service_type="Agent", inbound_rules=[Rule(role="developer", scope="demo-ui")]),
+                "github-tool": ServiceObjectModel(service_type="Tool", inbound_rules=[Rule(role="developer", scope="github-full-access")])})
+
 
     # Generate YAML
-    yaml_output = generate_yaml_output(policy_structure, description)
+    yaml_output = _generate_yaml_output(policy)
 
     # Verify YAML contains expected content
     assert "policy:" in yaml_output

@@ -1,18 +1,13 @@
-#!/usr/bin/env python3
 """
-Single Privilege Mapper Package
+Single Privilege Mapper
 
-This package provides functionality for mapping individual privileges
-to real roles (realm roles) that should have access to them.
+Maps a single privilege to the realm roles that should have access to it.
 """
 
-from .graph import SinglePrivilegeMapper, SinglePrivilegeMapperConfig
+from .graph import SinglePrivilegeMapper
 from .state import SinglePrivilegeState
 
 __all__ = [
-    'SinglePrivilegeMapper',
-    'SinglePrivilegeMapperConfig',
-    'SinglePrivilegeState',
+    "SinglePrivilegeMapper",
+    "SinglePrivilegeState",
 ]
-
-# Made with Bob

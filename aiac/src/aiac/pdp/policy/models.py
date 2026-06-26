@@ -1,16 +1,13 @@
+from typing import Literal
 from pydantic import BaseModel, ConfigDict
+from aiac.pdp.library.configuration.models import Role, Scope
 
-from aiac.pdp.library.configuration.models import Service
-
-class Priviledge(BaseModel):
+class Rule(BaseModel):
     model_config  = ConfigDict(extra="ignore")
+    role: Role
+    scope: Scope
 
-    name: str
-    services: list[Service]
-
-class Policy(BaseModel):
+class PolicyObjectModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
-
-    name: str
-    policy: dict[str, list[Priviledge]]
-    explanation: str = ""
+    rules: list[Rule]
+    explanation: str
