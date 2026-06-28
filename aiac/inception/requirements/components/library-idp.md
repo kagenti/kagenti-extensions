@@ -1,31 +1,28 @@
-# Component PRD: IdP Library (`aiac.idp.library`)
+# Component PRD: IdP Configuration Library (`aiac.idp.configuration`)
 
 ## Location
-`aiac/src/aiac/idp/library/`
+`aiac/src/aiac/idp/configuration/`
 
 ## Package structure
 
 ```
 aiac/src/aiac/idp/
-├── __init__.py         # empty
-└── library/
-    ├── __init__.py         # empty
-    └── configuration/
-        ├── __init__.py     # empty
-        ├── models.py       # Subject, Role, Service, Scope
-        └── api.py          # Configuration class — reads + writes IdP entities
+└── configuration/
+    ├── __init__.py     # empty
+    ├── models.py       # Subject, Role, Service, Scope
+    └── api.py          # Configuration class — reads + writes IdP entities
 ```
 
 All `__init__.py` files are empty. Callers use explicit submodule paths:
 
 ```python
-from aiac.idp.library.configuration.models import Subject, Role, Scope, Service
-from aiac.idp.library.configuration.api import Configuration
+from aiac.idp.configuration.models import Subject, Role, Scope, Service
+from aiac.idp.configuration.api import Configuration
 ```
 
 ---
 
-## Submodule: `aiac.idp.library.configuration.models`
+## Submodule: `aiac.idp.configuration.models`
 
 ### Description
 Dependency-free Pydantic `BaseModel` subclasses representing generic IdP configuration entities (subjects, roles, services, scopes). No HTTP client dependency — importable by any consumer without pulling in `requests` or `python-dotenv`. Model shapes are derived from Keycloak JSON but named generically.
@@ -40,6 +37,15 @@ pydantic
 All models use `model_config = ConfigDict(extra='ignore')` to silently discard unknown fields.
 
 Model definition order: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
+
+`Service`, `Role`, and `Scope` implement custom `__hash__` and `__eq__` based on their `id` field only:
+
+```python
+__hash__ = lambda self: hash(self.id)
+__eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
+```
+
+`frozen=True` is **not** used — these models have list fields that must remain mutable. The `id`-only hash enables their use as dict keys in `AgentPolicyModel.source_roles` and `AgentPolicyModel.scope_targets`.
 
 #### `Subject`
 
@@ -66,7 +72,6 @@ Represents a role (Keycloak: realm role).
 | `description` | `str \| None` | `description` | |
 | `composite` | `bool` | `composite` | |
 | `childRoles` | `list[Role]` | `composites.realm` | `[]` |
-| `mappedScopes` | `list[Scope]` | _(client scopes mapped to role)_ | `[]` |
 
 #### `Service`
 
@@ -96,7 +101,7 @@ Represents a service scope (Keycloak: `client scope`).
 ### Usage
 
 ```python
-from aiac.idp.library.configuration.models import Subject, Role, Scope, Service
+from aiac.idp.configuration.models import Subject, Role, Scope, Service
 
 raw = tool_result["content"]   # raw JSON list
 subjects = [Subject.model_validate(s) for s in raw]
@@ -104,10 +109,10 @@ subjects = [Subject.model_validate(s) for s in raw]
 
 ---
 
-## Submodule: `aiac.idp.library.configuration.api`
+## Submodule: `aiac.idp.configuration.api`
 
 ### Description
-HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.library.configuration.models`.
+HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.configuration.models`.
 
 All Keycloak interactions are consolidated here; the PDP Policy Writer (OPA) does not touch Keycloak directly.
 
@@ -135,6 +140,9 @@ class Configuration:
     def get_service(self, service_id: str) -> Service: ...
     def get_scopes(self) -> list[Scope]: ...
 
+    def get_services_by_role(self, role: Role) -> list[Service]: ...
+    def get_services_by_scope(self, scope: Scope) -> list[Service]: ...
+
     def create_scope(self, scope_name: str, scope_description: str) -> Scope: ...
     def map_scope_to_service(self, service: Service, scope: Scope) -> Service: ...
 
@@ -155,12 +163,12 @@ class Configuration:
 
 `get_services()` — fully-enriched read:
 1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch the base service list.
-2. Call `get_roles()` and `get_scopes()` once upfront to build `{id: Role}` and `{id: Scope}` lookup maps (includes composite roles and scope mappings).
+2. Call `get_roles()` and `get_scopes()` once upfront to build `{id: Role}` and `{id: Scope}` lookup maps.
 3. For each service, delegate to `_build_service(raw, all_roles, all_scopes)` which issues:
    - `GET /services/{id}/roles?realm=<self.realm>` → filter `all_roles` map → `Service.roles`
    - `GET /services/{id}/scopes?realm=<self.realm>` → filter `all_scopes` map → `Service.scopes`
 4. Raise `RuntimeError` on any non-2xx response.
-5. Return `list[Service]` with fully-enriched `roles` (including `childRoles` and `mappedScopes`) and `scopes` (including `description`).
+5. Return `list[Service]` with fully-enriched `roles` (including `childRoles`) and `scopes` (including `description`).
 
 > **Performance note:** `get_services()` issues 2N + 1 + (roles overhead) HTTP requests where N is the number of services. `get_roles()` is called once and its fully-enriched objects are shared across all services. If this becomes a bottleneck, enrichment should be moved server-side.
 
@@ -173,13 +181,21 @@ class Configuration:
 
 > **Note:** Callers that previously called `get_services()` and filtered by ID should be switched to `get_service(service_id)` to avoid fetching the full list.
 
-`get_roles()` — enriched read (2 extra calls per role):
+`get_roles()` — enriched read:
 1. `GET {AIAC_PDP_CONFIG_URL}/roles?realm=<self.realm>` — fetch all realm roles.
-2. For each role, issue additional requests:
-   - If `role.composite` is `True`: `GET /roles/{name}/composites?realm=<self.realm>` → `Role.childRoles`
-   - For every role: `GET /roles/{name}/scopes?realm=<self.realm>` → `Role.mappedScopes`
+2. For each role, if `role.composite` is `True`: `GET /roles/{name}/composites?realm=<self.realm>` → `Role.childRoles`
 3. Raise `RuntimeError` on any non-2xx response.
-4. Return `list[Role]` with `childRoles` and `mappedScopes` populated.
+4. Return `list[Role]` with `childRoles` populated.
+
+`get_services_by_role(role: Role) -> list[Service]`:
+1. `GET {AIAC_PDP_CONFIG_URL}/services?role_id={role.id}&realm=<self.realm>`
+2. Returns all services that have this role mapped to them.
+3. Raises `RuntimeError` on non-2xx. Returns an empty list when no service owns the role (realm-level role).
+
+`get_services_by_scope(scope: Scope) -> list[Service]`:
+1. `GET {AIAC_PDP_CONFIG_URL}/services?scope_id={scope.id}&realm=<self.realm>`
+2. Returns all services that expose this scope.
+3. Raises `RuntimeError` on non-2xx. Returns an empty list when no service exposes the scope.
 
 `create_scope`:
 1. Issues `POST {AIAC_PDP_CONFIG_URL}/scopes` with body `{"name": scope_name, "description": scope_description}`, appending `?realm=<self.realm>`.
@@ -205,16 +221,18 @@ class Configuration:
 
 ### Configuration
 
-Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/idp/library/configuration/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
+Read from a `.env` file co-located with `api.py` (`aiac/src/aiac/idp/configuration/.env`) via `python-dotenv`. Falls back to the default if the file is absent or the key is not set.
 
 | Variable | Default |
 |----------|---------|
 | `AIAC_PDP_CONFIG_URL` | `http://127.0.0.1:7071` |
 
+> **TBD:** whether `AIAC_PDP_CONFIG_URL` should be renamed to `AIAC_IDP_CONFIG_URL`. Not yet decided — keep `AIAC_PDP_CONFIG_URL` until this is resolved.
+
 ### Usage
 
 ```python
-from aiac.idp.library.configuration.api import Configuration
+from aiac.idp.configuration.api import Configuration
 
 cfg = Configuration.for_realm("kagenti")
 subjects = cfg.get_subjects()
@@ -227,4 +245,8 @@ updated_service = cfg.map_scope_to_service(service, scope)
 
 role = cfg.create_role(role_name="reader", role_description="Read-only access")
 updated_service = cfg.map_role_to_service(updated_service, role)
+
+# PCE usage — resolve services owning a given role or scope
+services_with_role = cfg.get_services_by_role(role)
+services_with_scope = cfg.get_services_by_scope(scope)
 ```

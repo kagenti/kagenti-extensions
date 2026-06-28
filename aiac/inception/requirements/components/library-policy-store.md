@@ -1,17 +1,15 @@
-# Component PRD: State Library (`aiac.pdp.library.state`)
+# Component PRD: Policy Store Library (`aiac.policy.store.library`)
 
-Companion library for the [AIAC Policy Management Service](policy-management-service.md). Follows the same pattern as `aiac.pdp.library.policy` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
+Companion library for the [AIAC Policy Store](policy-store.md). Follows the same pattern as `aiac.pdp.policy.library` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
 
 ## Location
-`aiac/src/aiac/pdp/library/state/`
+`aiac/src/aiac/policy/store/library/`
 
 ## Package structure
 
 ```
-aiac/src/aiac/pdp/library/
-├── models.py
-├── policy.py
-└── state/
+aiac/src/aiac/policy/store/
+└── library/
     ├── __init__.py     # empty
     └── api.py          # six module-level functions
 ```
@@ -19,20 +17,20 @@ aiac/src/aiac/pdp/library/
 All `__init__.py` files are empty. Callers use explicit submodule paths:
 
 ```python
-from aiac.pdp.library.state.api import (
+from aiac.policy.store.library.api import (
     get_policy, get_agent_policy,
     apply_policy, apply_agent_policy,
     delete_agent_policy, delete_policy,
 )
-from aiac.pdp.library.models import PolicyModel, AgentPolicyModel
+from aiac.policy.model.models import PolicyModel, AgentPolicyModel
 ```
 
 ---
 
-## Submodule: `aiac.pdp.library.state.api`
+## Submodule: `aiac.policy.store.library.api`
 
 ### Description
-HTTP client module wrapping the [AIAC Policy Management Service](policy-management-service.md) REST API. Exposes six module-level functions returning `PolicyModel` and `AgentPolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_PDP_STATE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on non-2xx response.
+HTTP client module wrapping the [AIAC Policy Store](policy-store.md) REST API. Exposes six module-level functions returning `PolicyModel` and `AgentPolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on non-2xx response.
 
 ### Dependencies
 ```
@@ -65,23 +63,23 @@ def delete_policy() -> None
 
 ### Configuration
 
-Read from `AIAC_PDP_STATE_URL` environment variable (or `.env` file co-located with `api.py`). Falls back to the default if absent.
+Read from `AIAC_POLICY_STORE_URL` environment variable (or `.env` file co-located with `api.py`). Falls back to the default if absent.
 
 | Variable | Default |
 |----------|---------|
-| `AIAC_PDP_STATE_URL` | `http://127.0.0.1:7074` |
+| `AIAC_POLICY_STORE_URL` | `http://127.0.0.1:7074` |
 
 ### Usage
 
 ```python
-from aiac.pdp.library.state.api import (
+from aiac.policy.store.library.api import (
     get_policy, get_agent_policy,
     apply_policy, apply_agent_policy,
     delete_agent_policy, delete_policy,
 )
-from aiac.pdp.library.models import PolicyModel, AgentPolicyModel
+from aiac.policy.model.models import PolicyModel, AgentPolicyModel
 
-# Read current state for diff
+# Read current state for additive merge
 current = get_agent_policy("weather-agent")
 
 # Write updated state
@@ -99,7 +97,7 @@ delete_agent_policy("weather-agent")
 
 ## Testing Decisions
 
-**Seam:** HTTP boundary — mock responses from `AIAC_PDP_STATE_URL`.
+**Seam:** HTTP boundary — mock responses from `AIAC_POLICY_STORE_URL`.
 
 **Prior art:** `3.14-unit-tests-write-api.md` (mock PDP Policy Writer HTTP; cover module-level functions).
 
@@ -111,4 +109,4 @@ Key behaviors to assert:
 - `delete_agent_policy(id)` issues `DELETE /policy/agents/{id}`.
 - `delete_policy()` issues `DELETE /policy`.
 - Any non-2xx response raises `RuntimeError`.
-- `AIAC_PDP_STATE_URL` is read from env; falls back to `http://127.0.0.1:7074`.
+- `AIAC_POLICY_STORE_URL` is read from env; falls back to `http://127.0.0.1:7074`.
