@@ -1,4 +1,3 @@
-from typing import Literal
 from pydantic import BaseModel, ConfigDict
 from aiac.pdp.library.configuration.models import Role, Scope
 

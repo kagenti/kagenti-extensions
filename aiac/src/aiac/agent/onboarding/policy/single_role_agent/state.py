@@ -9,7 +9,7 @@ from base_mapper.state import BaseMappingState
 
 class SingleRoleState(BaseMappingState):
     """
-    State for the single-role scope mapping workflow.
+    State for the single-role to privileges mapping workflow.
 
     Extends BaseMappingState with role-specific fields:
         role: The realm role to analyze

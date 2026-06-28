@@ -6,8 +6,8 @@ Uses a LangGraph workflow that analyzes, validates, and semantically verifies
 the mapping before returning a PolicyObjectModel.
 
 Workflow:
-    1. analyze_role_mapping  — LLM determines which realm roles get access.
-    2. validate_role_mapping — structural validation with retry.
+    1. analyze_priviledge_roles  — LLM determines which roles get access.
+    2. validate_priviledge_roles — structural validation with retry.
     3. verify_semantic_mapping — LLM cross-checks the assignment against the policy.
 """
 
@@ -15,6 +15,7 @@ import sys
 from typing import Any
 
 from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
@@ -33,9 +34,9 @@ from base_mapper import (
 )
 from config.constants import MAX_VALIDATION_RETRIES
 from prompts.single_role_prompt_builder import (
-    build_single_scope_to_roles_system_prompt,
-    build_single_scope_to_roles_retry_prompt,
-    build_single_scope_to_roles_verification_prompt,
+    build_single_privilege_to_roles_system_prompt,
+    build_single_privilege_to_roles_retry_prompt,
+    build_single_privilege_to_roles_verification_prompt,
 )
 
 
@@ -43,29 +44,36 @@ from prompts.single_role_prompt_builder import (
 # PURE NODE FUNCTIONS
 # ============================================================================
 
-def _analyze_scope_roles(
+def _analyze_priviledge_roles(
     state: SinglePrivilegeState,
     llm: BaseChatModel,
     verbose: bool,
 ) -> dict[str, Any]:
     """
-    Analyze which realm roles should have access to the privilege.
+    Analyze which roles should have access to the privilege.
 
     First node in the workflow. Sends the privilege, available realm roles,
     and policy context to the LLM for semantic analysis.
     """
-    system_prompt = build_single_scope_to_roles_system_prompt(
-        state["roles"],
+    system_prompt = build_single_privilege_to_roles_system_prompt(
         state["privilege"],
+        state["roles"],
         state.get("policy_description", ""),
     )
 
     user_prompt = (
-        f"Analyze which real roles should have access to the privilege "
-        f"'{state['privilege'].name}'."
+        f"Analyze which roles should have access to the privilege '{state['privilege'].name}'."
     )
     if state.get("policy_description"):
         user_prompt += f"\n\nPolicy Context:\n{state['policy_description']}"
+
+    prior_errors = state.get("errors", [])
+    if prior_errors:
+        user_prompt += (
+            "\n\nPREVIOUS ATTEMPT FEEDBACK — your last mapping was rejected. "
+            "Read the feedback carefully and correct the mapping:\n"
+            + "\n".join(f"  - {e}" for e in prior_errors)
+        )
 
     messages = [
         SystemMessage(content=system_prompt),
@@ -79,9 +87,9 @@ def _analyze_scope_roles(
     explanation, parsed_data = extract_explanation_and_json(content)
 
     if not parsed_data:
-        retry_prompt = build_single_scope_to_roles_retry_prompt(
-            state["roles"],
+        retry_prompt = build_single_privilege_to_roles_retry_prompt(
             state["privilege"],
+            state["roles"],
         )
         retry_messages = [*messages, response, HumanMessage(content=retry_prompt)]
         retry_response = llm.invoke(retry_messages)
@@ -124,7 +132,7 @@ def create_single_privilege_mapper_graph(config: MapperConfig):
     """Build and compile the single privilege mapper graph."""
 
     def analyze_role_mapping_node(state: SinglePrivilegeState) -> dict[str, Any]:
-        return _analyze_scope_roles(state, config.llm, config.verbose)
+        return _analyze_priviledge_roles(state, config.llm, config.verbose)
 
     def validate_role_mapping_node(state: SinglePrivilegeState) -> dict[str, Any]:
         return validate_mapping_items(
@@ -141,10 +149,10 @@ def create_single_privilege_mapper_graph(config: MapperConfig):
             verbose=config.verbose,
             max_retries=config.max_retries,
             subject_name=state["privilege"].name,
-            verification_prompt=build_single_scope_to_roles_verification_prompt(
+            verification_prompt=build_single_privilege_to_roles_verification_prompt(
                 policy_description=state.get("policy_description", ""),
                 privilege=state["privilege"],
-                realm_roles=state["roles"],
+                roles=state["roles"],
                 roles_with_access=state.get("roles_with_access", []),
             ),
             mapped_items=state.get("roles_with_access", []),
@@ -204,14 +212,14 @@ def create_single_privilege_mapper_graph(config: MapperConfig):
 
 class SinglePrivilegeMapper(BaseSingleMapper):
     """
-    AI-powered mapper for determining which realm roles should have access to a
+    AI-powered mapper for determining which roles should have access to a
     single privilege.
-
+s
     Given a natural language policy description and a privilege, produces a
     PolicyObjectModel with the realm-role → privilege mapping for that privilege.
 
     Workflow:
-        1. analyze_role_mapping  — LLM determines which realm roles get access
+        1. analyze_role_mapping  — LLM determines which roles get access
         2. validate_role_mapping — structural validation with retry
         3. verify_semantic_mapping — LLM cross-checks the assignment
     """
@@ -228,7 +236,7 @@ class SinglePrivilegeMapper(BaseSingleMapper):
         self.roles: list[Role] = roles
         super().__init__(llm=llm, verbose=verbose, max_retries=max_retries)
 
-    def _create_graph(self, config: MapperConfig):
+    def _create_graph(self, config: MapperConfig) -> CompiledStateGraph[SinglePrivilegeState, None, SinglePrivilegeState, SinglePrivilegeState]:
         return create_single_privilege_mapper_graph(config)
 
     def _run(self, policy_description: str) -> dict[str, Any]:
@@ -261,13 +269,12 @@ class SinglePrivilegeMapper(BaseSingleMapper):
 
     def map_roles(self, policy_description: str) -> dict[str, Any]:
         """
-        Determine which realm roles should have access to the privilege.
+        Determine which roles should have access to the privilege.
 
         Returns a dict with roles_with_access, explanation, errors, success,
         and retry_count.
         """
         return self._run(policy_description=policy_description)
-
 
 if __name__ == "__main__":
     print("Use SinglePrivilegeMapper programmatically or via the CLI.")

@@ -11,9 +11,9 @@ from typing import List
 from aiac.pdp.library.configuration.models import Role, Scope
 
 
-def build_single_scope_to_roles_system_prompt(
-    roles: List[Role],
+def build_single_privilege_to_roles_system_prompt(
     privilege: Scope,
+    roles: List[Role],
     policy_description: str = "",
 ) -> str:
     """
@@ -24,7 +24,7 @@ def build_single_scope_to_roles_system_prompt(
     privilege based on semantic analysis of role descriptions and policy context.
 
     Args:
-        realm_roles: List of dicts with 'name' and 'description' for realm roles
+        roles: List of dicts with 'name' and 'description' for realm roles
         privilege: Dict with 'name' and 'description' for the privilege to analyze
         policy_description: Optional natural language policy description for context
 
@@ -168,7 +168,7 @@ ANALYSIS GUIDELINES:
 
    HOW TO CLASSIFY:
    - USER-FACING ROLE: The description characterises a GROUP OF PEOPLE or a TEAM
-     (e.g., "R&D team members", "Sales team members", "Technical support staff").
+     (e.g., "engineering team members", "operations staff", "customer support team").
      These represent human principals who receive access. ONLY these are eligible.
    - TECHNICAL/CAPABILITY ROLE: The description characterises a SERVICE CAPABILITY —
      phrases like "Access to X", "Provides access to X", "Gateway to X", "Enables X".
@@ -191,17 +191,17 @@ TASK STEPS:
         * Description says "Default-roles of X realm", "system role", "internal", or is absent
           and the name itself does not describe a service capability
         * The privilege is clearly an infrastructure or identity-provider artifact rather than
-          a meaningful access scope (e.g., offline_access, uma_authorization)
+          a meaningful access privilege (e.g., offline_access, uma_authorization)
         * The privilege's primary function is to MODIFY TOKEN STRUCTURE or ENABLE A CLIENT
           AUTHENTICATION MECHANISM rather than to grant access to a downstream resource.
           Indicators of this pattern:
           - Description says "add X to the access token" or "adds X to the token"
             (the privilege is modifying what goes into a token, not granting resource access)
-          - Description says "scope for a client enabled for [some mechanism]"
+          - Description says "scope/privilege for a client enabled for [some mechanism]"
             (the privilege enables a client-side authentication mechanism, not resource access)
           - Description says "adds claims", "adds X claims to", "authentication context",
             "allowed web origins to the access token"
-          ANY of these indicate an identity-provider infrastructure scope — NOT a service
+          ANY of these indicate an identity-provider infrastructure privilege — NOT a service
           capability. Treat them the same as offline_access or uma_authorization.
       If ANY indicator applies → you MUST still output the required fenced blocks below
       with an empty list, then stop. Do NOT skip the JSON block. Do NOT continue to further steps.
@@ -220,13 +220,13 @@ TASK STEPS:
       CRITICAL: A role whose description says "Access to X", "Access to the X interface",
       "Access to X services", "Provides access to X", "Gateway to X", or similar
       service-capability phrases is a TECHNICAL/CAPABILITY ROLE, NOT a human principal,
-      even if the role name might imply users (e.g., "demo-ui" → description "Access to the
-      demo UI interface" → TECHNICAL, exclude it). Do NOT include such roles as user-facing.
+      even if the role name might imply users (e.g., "portal-ui" → description "Access to the
+      portal UI interface" → TECHNICAL, exclude it). Do NOT include such roles as user-facing.
 1. RELEVANCE CHECK: What is the DOMAIN of this privilege (e.g., "data warehouse", "UI dashboards", "payments")?
    What is the DOMAIN of the policy subject? If they are DIFFERENT domains, return [] immediately.
    Do NOT continue to the next steps.
    IMPORTANT: The policy must explicitly mention the privilege's domain. Do NOT reason from
-   the user role name (e.g., "developers use demo UIs too") — that is forbidden here.
+   the user role name (e.g., "some roles use UI tools too") — that is forbidden here.
    - "Access to the monitoring dashboard UI" — domain: dashboards. Policy about data warehouse — DIFFERENT → []
    - "Access to the data warehouse connector" — domain: data warehouse. Policy about data warehouse — SAME → continue
    - "Access to confidential data records" — domain: data warehouse. Policy about data warehouse — SAME → continue
@@ -237,9 +237,14 @@ TASK STEPS:
      "provides access to [some service/technology]", "gateway to [...]", or similar phrasing
      that positions this role as a PREREQUISITE to reach the downstream resource —
      AND the service is in the same domain as the policy
-   - FINAL RESOURCE: description says "access to [data/repos/files/records]"
+   - FINAL RESOURCE: description says "access to [data/repos/files/records]", especially
+     with an access-level qualifier ("public", "private", "read-only", "full")
    NOTE: A privilege named "X-agent" or "X-gateway" with a description like
    "Provides access to X services" IS an enabling service, NOT a final resource.
+   DOMAIN MATCHING — SAME BRAND = SAME DOMAIN: Extract the PRIMARY BRAND/PRODUCT NAME
+   from this privilege's description and from the policy. "Provides access to [Brand]
+   services" and "access to [Brand] repositories" share the same primary brand → SAME
+   domain. Do NOT treat "[Brand] services" and "[Brand] repositories" as different domains.
 3. IDENTIFY USER CATEGORIES: List all user categories mentioned in the policy.
 4. APPLY RULE:
    - ENABLING/GATEWAY: grant to ALL user categories that need the downstream resource
@@ -351,19 +356,19 @@ Example F — token-modifying scope (adds origins/claims to the token, not a ser
 Step 0a PRIVILEGE VALIDITY CHECK: The privilege "web-origins" has description
 "add allowed web origins to the access token". Its primary function is to modify
 token structure — it adds data to the token rather than granting access to any
-downstream resource or service. This is an identity-provider infrastructure scope.
+downstream resource or service. This is an identity-provider infrastructure privilege.
 Returning [] immediately.
 ```
 ```json
 {{"privilege": "web-origins", "roles_with_access": []}}
 ```
 
-Example G — client-mechanism scope (enables an authentication mechanism, not resource access):
+Example G — client-mechanism privilege (enables an authentication mechanism, not resource access):
 ```explanation
 Step 0a PRIVILEGE VALIDITY CHECK: The privilege "service_account" has description
-"Specific scope for a client enabled for service accounts". Its function is to enable
+"Specific privilege for a client enabled for service accounts". Its function is to enable
 a client authentication mechanism, not to grant access to a downstream resource or
-service. This is an identity-provider infrastructure scope. Returning [] immediately.
+service. This is an identity-provider infrastructure privilege. Returning [] immediately.
 ```
 ```json
 {{"privilege": "service_account", "roles_with_access": []}}
@@ -371,10 +376,10 @@ service. This is an identity-provider infrastructure scope. Returning [] immedia
 """
 
 
-def build_single_scope_to_roles_verification_prompt(
+def build_single_privilege_to_roles_verification_prompt(
     policy_description: str,
     privilege: Scope,
-    realm_roles: List[Role],
+    roles: List[Role],
     roles_with_access: List[Role],
 ) -> str:
     """
@@ -383,7 +388,7 @@ def build_single_scope_to_roles_verification_prompt(
     Args:
         policy_description: Natural language policy description
         privilege: Dict with 'name' and 'description' of the privilege
-        realm_roles: List of dicts with 'name' and 'description' for all realm roles
+        roles: List of dicts with 'name' and 'description' for all realm roles
         roles_with_access: List of realm role names currently assigned
 
     Returns:
@@ -393,9 +398,9 @@ def build_single_scope_to_roles_verification_prompt(
     privilege_desc = privilege.description if privilege.description else ''
     privilege_info = privilege_name + (f": {privilege_desc}" if privilege_desc else "")
 
-    realm_roles_context = "\n".join(
+    role_context = "\n".join(
         f"  - {r.name}" + (f": {r.description if r.description else ''}" if r.description else "")
-        for r in realm_roles
+        for r in roles
     )
 
     assigned_roles = ", ".join([role.name for role in roles_with_access]) if roles_with_access else "(none)"
@@ -412,7 +417,7 @@ CURRENT MAPPING (realm roles that have access to this privilege):
   {assigned_roles}
 
 AVAILABLE REALM ROLES:
-{realm_roles_context}
+{role_context}
 
 VALIDATION TASK:
 Verify whether the assigned realm roles are correct for privilege '{privilege_name}', \
@@ -425,11 +430,11 @@ CRITICAL RULES — read carefully before evaluating:
    System/internal privilege indicators (ANY one is sufficient):
      * Name starts with "default-roles-" (identity-provider default realm composite role)
      * Description says "Default-roles of X realm", "system role", or "internal"
-     * The privilege is clearly an infrastructure artifact, not a service access scope
+     * The privilege is clearly an infrastructure artifact, not a service access privilege
      * Description says "add X to the access token", "adds X to the token",
        "adds X claims", or "add allowed ... to the access token" — the privilege modifies
        token structure rather than granting resource access
-     * Description says "scope for a client enabled for [mechanism]" — the privilege
+     * Description says "scope/privilege for a client enabled for [mechanism]" — the privilege
        enables a client authentication mechanism, not resource access
    If ANY indicator applies:
      - The ONLY correct mapping is an empty list [].
@@ -453,10 +458,29 @@ CRITICAL RULES — read carefully before evaluating:
 4. FOCUS ON THIS PRIVILEGE ONLY: Do not reason about what roles are required by the policy
    in general. Only ask: "Is the mapping for THIS specific privilege consistent with its
    description and the policy?"
+   CROSS-PRIVILEGE REASONING IS FORBIDDEN: Never flag the mapping as incorrect because
+   an assigned role is also missing OTHER privileges. Whether a role should additionally
+   receive OTHER privileges from OTHER mappings is entirely out of scope here. The sole
+   question is: for each role listed in the current mapping, is it correct that they have
+   THIS specific privilege? If a role is entitled to BOTH a limited-access and a full-access
+   privilege, assigning the limited-access privilege to that role is CORRECT — the missing
+   full-access privilege is handled by a separate mapping and must not affect this verdict.
 
 5. ENABLING/GATEWAY PRIVILEGE — AGENT SEMANTICS (applies before access-level checks):
-   If this privilege is an enabling/gateway service (description says "Provides access to X",
-   "Gateway to X", "Access to X agent/service/connector"):
+   CLASSIFICATION DISTINCTION — "Provides access to" alone is NOT sufficient to classify
+   a privilege as enabling. You MUST determine what X describes:
+   - ENABLING: X is a SERVICE, AGENT, CONNECTOR, PLATFORM, or GATEWAY — the prerequisite
+     "door" that users must pass through to reach the downstream resource.
+     Examples: "access to [domain] services", "[domain] connector", "[domain] gateway"
+   - FINAL RESOURCE: X is specific DATA, FILES, RECORDS, or REPOSITORIES, especially with
+     access-level qualifiers ("private", "public", "confidential", "read-only", "full").
+     Examples: "access to private [resource type]", "access to public [resource type]"
+
+   If the privilege is a FINAL RESOURCE, do NOT apply enabling-service logic. Instead,
+   apply access-level differentiation: only roles explicitly granted access to this specific
+   resource type (per the policy) need it.
+
+   If this privilege IS an enabling/gateway service (X describes a service/agent/connector):
    - The assignment grants access to the AGENT/GATEWAY ITSELF — NOT to the final resource.
    - The final resource (e.g., a storage service, data warehouse) independently enforces
      its own access controls, checking the user's permissions after they reach it through the agent.
@@ -464,6 +488,33 @@ CRITICAL RULES — read carefully before evaluating:
      restricted downstream capabilities (e.g., private repositories, confidential records).
    - The ONLY valid check for an enabling privilege is: does each assigned role need ANY
      level of access to the downstream resource (per the policy)?
+   - DOWNSTREAM RESOURCE IDENTIFICATION — BRAND/PRODUCT DOMAIN MATCHING:
+     The "downstream resource" is identified by the PRIMARY BRAND/PRODUCT NAME in the
+     enabling privilege's description. Two items are in the same domain when they share the
+     same primary brand/product name, regardless of whether one mentions "services" and the
+     other mentions "repositories", "records", "data", or "files":
+       * "Provides access to [Brand] services" → primary brand: "[Brand]"
+       * "Provides access to public [Brand] repositories" → primary brand: "[Brand]"
+       * "Access to the [Brand] agent" → primary brand: "[Brand]"
+     These all belong to the "[Brand]" domain. Therefore: if the policy grants a role ANY
+     access to a "[Brand]" resource (e.g., "[Brand] repositories", "[Brand] records"), that
+     role DOES need access to the "[Brand] services" enabling gateway — even if the policy
+     only mentions "[Brand] repositories" and never names the enabling service.
+     FORBIDDEN: Do NOT treat "[Brand] services" and "[Brand] repositories" as different
+     domains. They share the same primary brand name — policy silence about the service name
+     is NOT a reason to exclude the enabling gateway from the mapping.
+   - POLICY CATEGORY MATCHING: When checking whether a role needs ANY access, match by
+     the role's DESCRIPTION against the policy's user categories — do NOT require the
+     exact role name to appear in the policy text. Broad policy categories are INCLUSIVE:
+     * Broad categories like "Other personnel" or "Other [group]" cover every role whose
+       description fits the semantic meaning of that group — not just roles whose exact
+       name appears in the policy text.
+     * NEVER say a role lacks authorisation solely because its exact name is absent from
+       the policy. Use the role's description to determine which policy category it fits.
+     * Example: policy says "Other personnel can access X". A role whose description
+       identifies a non-primary staff group IS other personnel → assignment is CORRECT.
+     * Example: policy says "Other [category] members can access X". A role whose
+       description identifies it as a member of that category → CORRECT.
    - Access-level restrictions (public-only, read-only, limited) are enforced by the
      downstream resource, not by the gateway privilege. Do NOT apply least-privilege
      reasoning about the final resource when evaluating an enabling service assignment.
@@ -472,10 +523,18 @@ CRITICAL RULES — read carefully before evaluating:
      the open-resource restriction. The enabling privilege just allows them to reach the agent.
 
 6. USER-FACING ROLES ONLY: Verify that every assigned role represents a human principal or
-   team (e.g., its description characterises a group of people such as "R&D team members").
+   team (e.g., its description characterises a group of people such as "engineering team members").
    If any assigned role is a technical/capability role (description: "Access to X",
    "Provides access to X", "Enables X") or a system/internal role (placeholder description
    starting with "${{"), mark MAPPING_CORRECT: NO and explain which role is invalid.
+
+7. CLOSED-WORLD ASSUMPTION — ONLY REASON ABOUT LISTED ROLES:
+   The AVAILABLE REALM ROLES list is the complete and authoritative set of roles in the
+   system. Do NOT speculate about roles that might exist but are not listed. Do NOT flag
+   a mapping as incomplete because unlisted roles might hypothetically belong to a policy
+   category. If all roles from the available list that match a policy category are
+   correctly assigned, the mapping is COMPLETE and CORRECT — regardless of what roles
+   could theoretically exist outside the list.
 
 Respond in this EXACT format:
 MAPPING_CORRECT: YES
@@ -486,21 +545,21 @@ MAPPING_CORRECT: NO
 EXPLANATION: Specific contradiction between the privilege description, the policy, and the mapping."""
 
 
-def build_single_scope_to_roles_retry_prompt(
-    realm_roles: List[Role],
-    privilege: Scope
+def build_single_privilege_to_roles_retry_prompt(
+    privilege: Scope,
+    roles: List[Role]
 ) -> str:
     """
     Build a retry prompt when initial JSON parsing fails for single privilege analysis.
 
     Args:
-        realm_roles: List of dicts with 'name' and 'description' for realm roles
+        roles: List of dicts with 'name' and 'description' for realm roles
         privilege: Dict with 'name' and 'description' for the privilege
 
     Returns:
         Formatted retry prompt string with role reminders and format example
     """
-    realm_role_names = [role.name for role in realm_roles]
+    role_names = [role.name for role in roles]
     privilege_name = privilege.name
 
     return f"""The previous response could not be parsed as valid JSON.
@@ -508,7 +567,7 @@ def build_single_scope_to_roles_retry_prompt(
 You MUST output BOTH fenced code blocks below — the explanation block AND the json block.
 Do NOT skip the json block, even when the list is empty.
 
-- Available real roles: {", ".join(realm_role_names) if realm_role_names else "(none)"}
+- Available real roles: {", ".join(role_names) if role_names else "(none)"}
 - Privilege to analyze: {privilege_name}
 
 If the privilege is a system/internal role (e.g., name starts with "default-roles-"),

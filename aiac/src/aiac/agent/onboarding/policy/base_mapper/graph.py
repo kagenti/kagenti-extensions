@@ -226,12 +226,13 @@ def verify_semantic_mapping(
             response.content if isinstance(response.content, str) else str(response.content)
         )
 
-        mapping_match = re.search(r"MAPPING_CORRECT:\s*(YES|NO)", content, re.IGNORECASE)
+        mapping_matches = re.findall(r"MAPPING_CORRECT:\s*(YES|NO)", content, re.IGNORECASE)
         explanation_match = re.search(
             r"EXPLANATION:\s*(.+?)$", content, re.DOTALL | re.IGNORECASE
         )
 
-        mapping_correct = mapping_match.group(1).upper() == "YES" if mapping_match else False
+        # Use the last occurrence so self-correcting LLM responses resolve to their final answer
+        mapping_correct = mapping_matches[-1].upper() == "YES" if mapping_matches else False
         explanation = explanation_match.group(1).strip() if explanation_match else content
 
         if verbose and (mapped_items or not mapping_correct):
