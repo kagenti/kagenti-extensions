@@ -205,40 +205,14 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 ```
 aiac/src/aiac/agent/
 ├── controller/
-│   ├── __init__.py
-│   └── routes.py                        ← FastAPI app + four route handlers
-│
-├── onboarding/
-│   ├── __init__.py
-│   ├── orchestrator.py                  ← runs provision; returns tuple[list[Role], list[Scope]] to Controller
-│   ├── provision/
-│   │   ├── __init__.py
-│   │   ├── graph.py                     ← Service Provision StateGraph
-│   │   ├── nodes.py                     ← classify_service, analyze_agent, analyze_tool, provision_service, format_response
-│   │   └── state.py                     ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision, OnboardingProvisionState
-│
-├── policy_update/
-│   ├── __init__.py
-│   ├── build/
-│   │   ├── __init__.py
-│   │   ├── graph.py                     ← Build StateGraph
-│   │   ├── nodes.py                     ← fetch_pdp_state, propose_roles_scopes, format_response
-│   │   └── prompts.py                   ← PLANNER_SYSTEM
-│   └── rebuild/
-│       ├── __init__.py
-│       ├── graph.py                     ← Rebuild StateGraph
-│       ├── nodes.py                     ← fetch_pdp_state, propose_roles_scopes, format_response
-│       └── prompts.py                   ← PLANNER_SYSTEM
-│
-├── roles/
-│   ├── __init__.py
-│   └── role/
-│       ├── __init__.py
-│       ├── graph.py                     ← Role StateGraph
-│       ├── nodes.py                     ← fetch_pdp_state, propose_roles_scopes, format_response
-│       └── prompts.py                   ← PLANNER_SYSTEM
-│
-└── shared/                              ← TBD — structure pending Policy Rules Builder grill
+├── uc/
+│   ├── onboarding/
+│   │   └── provision/
+│   ├── policy_update/
+│   │   ├── build/
+│   │   └── rebuild/
+│   └── role_update/
+└── policy_rules_builder/
 ```
 
 Docker build command (run from repo root):
