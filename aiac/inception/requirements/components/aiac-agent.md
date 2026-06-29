@@ -17,13 +17,11 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
-| Service Onboarding | `service/{id}` | Service Provision → **Policy** → **Policy Builder** (sequential) |
-| Policy Update | `build`, `rebuild` | Build → **Policy Builder** or Rebuild → **Policy Builder** |
-| Role Update | `role/{id}` | Role → **Policy Builder** |
+| Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
+| Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
+| Role Update | `role/{id}` | Role sub-agent |
 
-**New sub-agents (TBD — to be specified in a separate PRD or added to sub-agent PRDs):**
-- **Policy sub-agent** — creates an `AgentPolicyModel` delta scoped to the triggered service, including `source_roles`, `scope_targets`, and `PolicyRule` sets for inbound and outbound pipelines.
-- **Policy Builder sub-agent** — merges the delta into the whole-system `PolicyModel` and calls `aiac.pdp.library.policy.apply_policy` (or `apply_agent_policy` for single-agent updates).
+Each producing sub-agent emits a `list[PolicyRule]` (inbound + outbound rules) scoped to the trigger. A **shared apply node** (`agent/shared/apply/`) calls `compute_and_apply(rules)` from `aiac.policy.computation`; the PCE owns all Policy Store ↔ PDP Policy Writer coordination. Sub-agents never call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -60,11 +58,11 @@ flowchart TD
         ORC3 --> SA6
     end
 
-    APPLY["Policy Builder\nagent/shared/apply/\n(TBD)"]
+    APPLY["Apply (shared)\nagent/shared/apply/\ncompute_and_apply(rules)"]
 
-    ORC1 -->|"policy_model"| APPLY
-    ORC2 -->|"policy_model"| APPLY
-    ORC3 -->|"policy_model"| APPLY
+    ORC1 -->|"rules"| APPLY
+    ORC2 -->|"rules"| APPLY
+    ORC3 -->|"rules"| APPLY
 
     TRIGGERS --> CTRL
     CTRL -->|"role/:id"| ORC3
@@ -126,7 +124,7 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
 
-> **TBD:** The Policy sub-agent and Policy Builder sub-agent need dedicated sub-PRDs. These will be added to this table once defined via `/grill-me` or `/to-prd`.
+> **Note:** The shared apply node (`shared/apply/`) calls `compute_and_apply(rules)` from `aiac.policy.computation`. Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md) — no separate sub-PRD is required for the apply node.
 
 ---
 
@@ -147,7 +145,7 @@ flowchart TD
         S3["policy_chunks: list of str"]
         S4["domain_knowledge_chunks: list of str"]
         S5["pdp_snapshot: PDPSnapshot"]
-        S6["policy_model: PolicyModel or None"]
+        S6["rules: list[PolicyRule]"]
         S7["validation_errors: list of str"]
         S8["summary: str"]
     end
@@ -194,7 +192,7 @@ All type definitions shared across agents:
 | `policy_chunks` | `list[str]` | Policy text chunks from `aiac-policies` |
 | `domain_knowledge_chunks` | `list[str]` | Domain context chunks from `aiac-domain-knowledge` |
 | `pdp_snapshot` | `PDPSnapshot` | Scoped PDP data for this trigger |
-| `policy_model` | `PolicyModel \| None` | Validated policy to commit; produced by policy-proposing sub-agents |
+| `rules` | `list[PolicyRule]` | Policy rules to apply; produced by policy-proposing sub-agents, consumed by the shared apply node |
 | `validation_errors` | `list[str]` | Errors from validate node |
 | `summary` | `str` | Human-readable explanation |
 
@@ -208,11 +206,9 @@ class PDPSnapshot(BaseModel):
     service_scopes: list[Scope] = []
 ```
 
-#### `PolicyModel`
+#### `rules: list[PolicyRule]`
 
-Produced by `propose_policy` / `validate_policy` nodes in all policy-proposing sub-agents; consumed by the Policy Builder sub-agent. Committed to the PDP Policy Writer via `aiac.pdp.library.policy.apply_policy(PolicyModel)`.
-
-`PolicyModel` is defined in `aiac/pdp/library/models.py` (`agents: list[AgentPolicyModel]`). Full spec: [library-pdp.md](library-pdp.md).
+Produced by `propose_*` / `validate_*` nodes in all policy-proposing sub-agents; consumed by the shared apply node via `compute_and_apply(rules)`. `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` are defined in `aiac.policy.model`. Full specs: [policy-model.md](policy-model.md) · [library-pdp-policy.md](library-pdp-policy.md).
 
 #### `ValidationVerdict`
 
@@ -222,39 +218,39 @@ class ValidationVerdict(BaseModel):
     reason: str
 ```
 
-Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyModel`, `AgentPolicyModel`, and `PolicyRule` are defined in `aiac/pdp/library/models.py`. See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
+Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `ServiceProvision`, `OnboardingProvisionState`) are defined in `onboarding/provision/state.py`. `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` are defined in `aiac.policy.model` — see [policy-model.md](policy-model.md). See [UC1: Service Onboarding](aiac-agent/uc1-service-onboarding.md).
 
 ---
 
 ### `shared/apply/`
 
-Policy Builder sub-agent — shared by all policy-producing sub-agents (Service Onboarding, Policy Update, Role Update). Called by each orchestrator after the producing sub-graph completes with a validated `PolicyModel` in state. Merges the delta into the whole-system `PolicyModel` and commits to the PDP Policy Writer. Full spec TBD.
+Shared apply node — called by each orchestrator after the producing sub-graph completes with a non-empty `rules` list in state. Delegates all Policy Store ↔ PDP Policy Writer coordination to the Policy Computation Engine (PCE). Full spec: [policy-computation-engine.md](policy-computation-engine.md).
 
 ```
-START → apply_policy → format_response → END
+START → apply_rules → format_response → END
 ```
 
 #### Graph
 
 ```mermaid
 flowchart TD
-    START(("START")) --> APPLY["apply_policy\naiac.pdp.library.policy\napply_policy(PolicyModel)"]
+    START(("START")) --> APPLY["apply_rules\naiac.policy.computation\ncompute_and_apply(rules)"]
     APPLY --> FORMAT["format_response"]
     FORMAT --> END(("END"))
 ```
 
 #### Nodes
 
-- **`apply_policy`**: calls `apply_policy(model: PolicyModel)` from `aiac.pdp.library.policy`. The PDP Policy Writer translates the `PolicyModel` into Rego packages and writes them to an `AuthorizationPolicy` Kubernetes CR.
+- **`apply_rules`**: calls `compute_and_apply(rules: list[PolicyRule])` from `aiac.policy.computation`. The PCE resolves owning services via the IdP Configuration Service, additively merges the rules into `AgentPolicyModel` objects in the Policy Store, then pushes the updated `PolicyModel` to the PDP Policy Writer (which writes derived Rego packages to the `AuthorizationPolicy` Kubernetes CR). PCE logs all exceptions and does not propagate them, so `apply_rules` always proceeds to `format_response`.
 - **`format_response`**: assembles the commit result for the orchestrator.
 
 #### State
 
-`BaseAgentState` (no extensions required). Reads `policy_model` and `realm`; writes `summary`.
+`BaseAgentState` (no extensions required). Reads `rules` and `realm`; writes `summary`.
 
-> **Orchestrator contract:** The calling orchestrator must gate on `policy_model is None` before invoking `PolicyBuilderGraph`. If the producing sub-graph's `validate_policy` failed (leaving `policy_model` unset), the orchestrator returns the abort response directly without calling `PolicyBuilderGraph`.
+> **Orchestrator contract:** The calling orchestrator must gate on an empty `rules` list before invoking `SharedApplyGraph`. If the producing sub-graph's `validate_*` node produced no rules, the orchestrator returns the abort response directly without calling `SharedApplyGraph`.
 
-> **Future extension:** This sub-agent is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_policy` and `format_response` would pause execution pending human approval of the `PolicyModel` before commit. Since `PolicyBuilderGraph` is shared, this gate applies uniformly to all use cases.
+> **Future extension:** This apply node is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_rules` and `format_response` would pause execution pending human approval of the `rules` list before commit. Since `SharedApplyGraph` is shared, this gate applies uniformly to all use cases.
 
 ---
 
@@ -277,7 +273,7 @@ All `validate_*` nodes perform the same four checks. Binary abort on any failure
 flowchart TD
     IN["policy_model\n+ pdp_snapshot"] --> C1
 
-    C1{"1. Existence check\nEntities referenced by PolicyModel\nstatements resolved via\naiac.idp.library.configuration.api"}
+    C1{"1. Existence check\nEntities referenced by rules\nstatements resolved via\naiac.idp.configuration.api"}
     C1 -->|"fail"| ABORT["ABORT\nvalidation_errors populated\nadded and removed empty"]
     C1 -->|"pass"| C2
 
@@ -294,7 +290,7 @@ flowchart TD
     C4 -->|"pass"| APPLY["proceed to apply_*"]
 ```
 
-1. **Existence check** — all entities referenced by `PolicyModel` statements exist; resolved via `aiac.idp.library.configuration.api`.
+1. **Existence check** — all entities referenced by `rules` statements exist; resolved via `aiac.idp.configuration.api`.
 2. **Safety guard rails** — total statements in `PolicyModel` ≤ `MAX_CHANGES_PER_RUN`.
 3. **LLM re-confirmation** — second LLM call with auditor system prompt; returns `ValidationVerdict(approved, reason)`.
 4. **Scope check** — `PolicyModel` is bounded to entities referenced by the trigger; no over-reach on partial updates.
@@ -332,8 +328,9 @@ flowchart TD
 | Variable | Default | Source |
 |---|---|---|
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | ConfigMap (`aiac-pdp-config`) |
-| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) — used by `aiac.idp.library.configuration.api` |
-| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) — used by `aiac.pdp.library.policy` |
+| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | ConfigMap (`aiac-pdp-config`) — used by `aiac.idp.configuration.api` (in-process via PCE) |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | ConfigMap (`aiac-pdp-config`) — used by `aiac.pdp.policy.library` (in-process via PCE) |
+| `AIAC_POLICY_STORE_URL` | `http://aiac-policy-store-service:7074` | ConfigMap (`aiac-pdp-config`) — used by `aiac.policy.store.library` (in-process via PCE) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | ConfigMap (`aiac-pdp-config`) |
 | `KEYCLOAK_REALM` | — | ConfigMap (`aiac-pdp-config`) |
 | `LLM_BASE_URL` | — | ConfigMap |
@@ -399,12 +396,12 @@ aiac/src/aiac/agent/
 │   ├── build/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Build StateGraph
-│   │   ├── nodes.py                     ← fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
+│   │   ├── nodes.py                     ← fetch_pdp_state, propose_diff, validate_diff, format_response
 │   │   └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │   └── rebuild/
 │       ├── __init__.py
 │       ├── graph.py                     ← Rebuild StateGraph
-│       ├── nodes.py                     ← clear_policy, fetch_pdp_state, propose_diff, validate_diff, apply_diff, format_response
+│       ├── nodes.py                     ← clear_policy, fetch_pdp_state, propose_diff, validate_diff, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 ├── roles/
@@ -413,17 +410,17 @@ aiac/src/aiac/agent/
 │   └── role/
 │       ├── __init__.py
 │       ├── graph.py                     ← Role StateGraph
-│       ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy, apply_policy, format_response
+│       ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy, format_response
 │       └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
 │
 └── shared/
     ├── __init__.py
     ├── nodes.py                         ← fetch_policy, fetch_domain_knowledge
-    ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, PolicyModel, ValidationVerdict
+    ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, ValidationVerdict (PolicyRule imported from aiac.policy.model)
     └── apply/
         ├── __init__.py
-        ├── graph.py                     ← PolicyBuilderGraph (shared by all policy-producing sub-agents)
-        └── nodes.py                     ← apply_policy, format_response
+        ├── graph.py                     ← SharedApplyGraph (shared by all policy-producing sub-agents)
+        └── nodes.py                     ← apply_rules, format_response
 ```
 
 Docker build command (run from repo root):
