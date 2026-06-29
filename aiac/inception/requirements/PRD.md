@@ -117,6 +117,8 @@ Eight components across five Kubernetes Pods plus a Python library layer, all im
 | 7 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
 | 8 | **Python library** | Python API library provides typed access to IdP and policy services via `aiac.idp.configuration`, `aiac.policy.model`, `aiac.policy.store.library`, `aiac.pdp.policy.library`, and `aiac.policy.computation` modules backed by generic Pydantic models. |
 
+### High-level architecture
+
 ```
         (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)       (𝗞𝘂𝗯𝗲𝗿𝗻𝗲𝘁𝗲𝘀 𝗖𝗥 𝗔𝗣𝗜)
                ▲                      ▲
@@ -146,22 +148,22 @@ Eight components across five Kubernetes Pods plus a Python library layer, all im
                │   └──────────────────┼───────────────────┘
                │                      │
 ┌──────────────┼──────────────────────┼───────────────────┐  ┌────────────────────────────────┐
-│  Agent Pod   │  ┌───────────────────┘                   │  │  Event Broker Pod              │
-│              │  │                                       │  │                                │
-│      ┌────────────────┐                                 │  │  ┌──────────────────────────┐  │
-│      │   AIAC Agent   │◄────────────────────────────────┼──┼──│      NATS JetStream      │  │
-│      └────────────────┘         (𝘯𝘰𝘵𝘪𝘧𝘺)                 │  │  └──────────────────────────┘  │
-│              │                                          │  │         ▲              ▲       │
-│              │                                          │  │         │              │       │
-└──────────────┼──────────────────────────────────────────┘  └─────────┼──────────────┼───────┘
-               │                                                    (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)        (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)
-┌──────────────┼───────────────────────────────────────────┐           │              │
-│  Policy and  │ Domain Knowledge RAG Pod                  │      (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
-│              ▼                                           │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  │
-│  │  ChromaDB (vector store) │  │  RAG Ingest Service  │  │
-│  └──────────────────────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+│  Agent Pod   └───────────────────┐  │                   │  │  Event Broker Pod              │
+│                                  │  │                   │  │                                │
+│  ┌──────────────────────┐   ┌────────────────┐          │  │  ┌──────────────────────────┐  │
+│  │ Policy Compute Engn  │◄──│   AIAC Agent   │◄─────────┼──┼──│      NATS JetStream      │  │
+│  └──────────────────────┘   └────────────────┘  (𝘯𝘰𝘵𝘪𝘧𝘺) │  │  └──────────────────────────┘  │
+│                                     │                   │  │         ▲              ▲       │
+│                                     │                   │  │         │              │       │
+└─────────────────────────────────────┼───────────────────┘  └─────────┼──────────────┼───────┘
+                                      │                            (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)        (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)
+┌─────────────────────────────────────┼───────────────────┐            │              │
+│  Policy / Domain Knowledge RAG Pod  │                   │       (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
+│                                     ▼                   │
+│  ┌─────────────────────┐   ┌─────────────────────────┐  │
+│  │ RAG Ingest Service  │──►│ ChromaDB (vector store) │  │  
+│  └─────────────────────┘   └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
 
 All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively via

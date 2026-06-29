@@ -89,17 +89,18 @@ Manually granted entitlements are flagged as policy-agnostic and surfaced during
 
 ## AIAC Component Architecture
 
-Seven components across five Kubernetes pods plus a Python library layer, all implemented in Python 3.12:
+Eight components across five Kubernetes Pods plus a Python library layer, all implemented in Python 3.12. External dependencies: Keycloak Admin API, an LLM API, and an embedding API. The Keycloak SPI listener is defined in a separate PRD.
 
 | # | Component | Description |
 |---|-----------|-------------|
-| 1 | **IdP Configuration Service** | REST service that exposes IdP entity data (subjects, roles, services, scopes) for read and write operations. Backed by Keycloak. Python library: `aiac.idp.library.configuration`. |
-| 2 | **PDP Policy Writer** | REST service that applies LLM-generated Rego rules to the OPA backend. Writes derived Rego packages to an `AuthorizationPolicy` Kubernetes CR. Exposed as ClusterIP service `aiac-pdp-policy-service:7072`. Python library: `aiac.pdp.library.policy`. |
-| 3 | **Policy Management Service** | REST service that owns an in-memory `PolicyModel` cache backed by SQLite (`/data` PVC) as the authoritative structured policy store. Enables the AIAC Agent to read and diff `AgentPolicyModel` state without re-deriving it from the PDP snapshot. Deployed as a dedicated single-replica StatefulSet (`aiac-pdp-state`) at `:7074`. Python library: `aiac.pdp.library.state`. |
-| 4 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
-| 5 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
-| 6 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
-| 7 | **Python library** | Python API library provides typed access to the three policy services via `configuration`, `policy`, and `state` modules backed by generic Pydantic models. |
+| 1 | **IdP Configuration Service** | REST service that exposes IdP entity data (subjects, roles, services, scopes) for read and write operations. Read methods enrich services with assigned roles/scopes and enrich roles with child roles. Backed by Keycloak. Python library: `aiac.idp.configuration`. |
+| 2 | **PDP Policy Writer** | REST service that applies LLM-generated Rego rules to the OPA backend. Writes derived Rego packages to an `AuthorizationPolicy` Kubernetes CR. Exposed as ClusterIP service `aiac-pdp-policy-service:7072`. Python library: `aiac.pdp.policy.library`. |
+| 3 | **Policy Store** | REST service that owns an in-memory `PolicyModel` cache backed by SQLite as the authoritative structured policy store. Enables the Policy Computation Engine to read current `AgentPolicyModel` state for additive merging. Deployed as a dedicated single-replica StatefulSet (`aiac-policy-store`) at `:7074`. Python library: `aiac.policy.store.library`. |
+| 4 | **Policy Computation Engine** | Pure Python library module (`aiac.policy.computation`). No service, no Kubernetes deployment. Receives `list[PolicyRule]` from AIAC Agent sub-agents, queries IdP to resolve owning services, additively merges rules into `AgentPolicyModel` objects in the Policy Store, and pushes the updated `PolicyModel` to the PDP Policy Writer. Single entry point: `compute_and_apply(rules)`. |
+| 5 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
+| 6 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
+| 7 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
+| 8 | **Python library** | Python API library provides typed access to IdP and policy services via `aiac.idp.configuration`, `aiac.policy.model`, `aiac.policy.store.library`, `aiac.pdp.policy.library`, and `aiac.policy.computation` modules backed by generic Pydantic models. |
 
 ```
         (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗔𝗣𝗜)       (𝗞𝘂𝗯𝗲𝗿𝗻𝗲𝘁𝗲𝘀 𝗖𝗥 𝗔𝗣𝗜)
@@ -119,10 +120,10 @@ Seven components across five Kubernetes pods plus a Python library layer, all im
                │                      │
                │                      │
                │   ┌──────────────────────────────────────┐
-               │   │  Policy Management Pod               │
+               │   │  Policy Store Pod                    │
                │   │                                      │
                │   │  ┌───────────────────────────────┐   │
-               │   │  │  Policy Management Service    │   │
+               │   │  │  Policy Store Service         │   │
                │   │  │                               │   │
                │   │  │     (SQLite policy.db)        │   │
                │   │  └───────────────────────────────┘   │
@@ -130,22 +131,22 @@ Seven components across five Kubernetes pods plus a Python library layer, all im
                │   └──────────────────┼───────────────────┘
                │                      │
 ┌──────────────┼──────────────────────┼───────────────────┐  ┌────────────────────────────────┐
-│  Agent Pod   │  ┌───────────────────┘                   │  │  Event Broker Pod              │
-│              │  │                                       │  │                                │
-│      ┌────────────────┐                                 │  │  ┌──────────────────────────┐  │
-│      │   AIAC Agent   │◄────────────────────────────────┼──┼──│      NATS JetStream      │  │
-│      └────────────────┘         (𝘯𝘰𝘵𝘪𝘧𝘺)                 │  │  └──────────────────────────┘  │
-│              │                                          │  │         ▲              ▲       │
-│              │                                          │  │         │              │       │
-└──────────────┼──────────────────────────────────────────┘  └─────────┼──────────────┼───────┘
-               │                                                    (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)        (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)
-┌──────────────┼───────────────────────────────────────────┐           │              │
-│  Policy and  │ Domain Knowledge RAG Pod                  │      (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
-│              ▼                                           │
-│  ┌──────────────────────────┐  ┌──────────────────────┐  │
-│  │  ChromaDB (vector store) │  │  RAG Ingest Service  │  │
-│  └──────────────────────────┘  └──────────────────────┘  │
-└──────────────────────────────────────────────────────────┘
+│  Agent Pod   └───────────────────┐  │                   │  │  Event Broker Pod              │
+│                                  │  │                   │  │                                │
+│  ┌──────────────────────┐   ┌────────────────┐          │  │  ┌──────────────────────────┐  │
+│  │ Policy Compute Engn  │◄──│   AIAC Agent   │◄─────────┼──┼──│      NATS JetStream      │  │
+│  └──────────────────────┘   └────────────────┘  (𝘯𝘰𝘵𝘪𝘧𝘺) │  │  └──────────────────────────┘  │
+│                                     │                   │  │         ▲              ▲       │
+│                                     │                   │  │         │              │       │
+└─────────────────────────────────────┼───────────────────┘  └─────────┼──────────────┼───────┘
+                                      │                            (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)        (𝘱𝘶𝘣𝘭𝘪𝘴𝘩)
+┌─────────────────────────────────────┼───────────────────┐            │              │
+│  Policy / Domain Knowledge RAG Pod  │                   │       (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
+│                                     ▼                   │
+│  ┌─────────────────────┐   ┌─────────────────────────┐  │
+│  │ RAG Ingest Service  │──►│ ChromaDB (vector store) │  │
+│  └─────────────────────┘   └─────────────────────────┘  │
+└─────────────────────────────────────────────────────────┘
 ```
 
 All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively via
@@ -267,12 +268,3 @@ Unacknowledged messages survive pod restarts; failed messages are routed to a de
 ```
 
 ---
-
-## Short-Term Objectives
-
-| # | Objective | Detail |
-|---|-----------|--------|
-| 1 | **Kagenti integration (UC-1 implementation)** | Plug AIAC into Kagenti and define its lifecycle |
-| 2 | **Improve AIAC decision reasoning** | Take into account richer context: User Role description, Agent card, Tool description, Policy digest |
-| 3 | **Rego / OPA integration (initially with Keycloak)** | OPA as the PDP; outcome: Rego access rules |
-| 4 | **GitHub demo reimplementation with Rego / OPA** | End-to-end demo using OPA as the Policy Decision Point |
