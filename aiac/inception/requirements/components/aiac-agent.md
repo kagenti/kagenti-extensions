@@ -13,13 +13,13 @@ The Agent subscribes to the Event Broker as a durable competing consumer (`aiac-
 
 The `/apply/*` HTTP endpoints are retained as a debugging escape hatch. The **NATS consumer is a thin adapter layer** that receives events from the Event Broker and calls the same internal `/apply/*` handler functions — there is no duplicated business logic.
 
-The service is structured as a **Controller** (FastAPI routes) that dispatches to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents:
+The service is structured as a **Controller** (FastAPI routes) that dispatches to the **Service Onboarding Orchestrator** (UC1) or directly to the Policy Update and Role Update sub-agents (UC2, UC3). Each sub-agent emits a `tuple[list[Role], list[Scope]]` scoped to the trigger. The Controller passes this tuple to the **shared Policy Rules Builder** (`agent/shared/policy_rules_builder/`), which emits a `list[PolicyRule]`, and then calls `compute_and_apply(rules)` directly via the PCE.
 
-| Orchestrator | Trigger(s) | Sub-agents |
-|---|---|---|
-| Service Onboarding | `service/{id}` | Service Provision → Service Policy (sequential) |
-| Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
-| Role Update | `role/{id}` | Role sub-agent |
+| Use Case | Dispatch | Sub-agents | Sub-agent output |
+|---|---|---|---|
+| Service Onboarding (UC1) | via Orchestrator | Service Provision → Service Policy (sequential) | `tuple[list[Role], list[Scope]]` (new service roles + scopes) |
+| Policy Update (UC2) | Controller → sub-agent directly | Build sub-agent or Rebuild sub-agent (alternative) | `tuple[list[Role], list[Scope]]` (all roles + scopes) |
+| Role Update (UC3) | Controller → sub-agent directly | Role sub-agent | `tuple[list[Role], list[Scope]]` (specific role + all scopes) |
 
 Each producing sub-agent emits a `tuple[list[Role], list[Scope]]` scoped to the trigger. The Controller passes this tuple to a **shared Policy Rules Builder sub-agent** (`agent/shared/policy_rules_builder/`), which uses the natural-language policy to emit a `list[PolicyRule]` scoped to the trigger. The Controller then calls `compute_and_apply(rules)` from `aiac.policy.computation` directly — no shared apply node exists. The PCE owns all Policy Store ↔ PDP Policy Writer coordination. Neither sub-agents nor the Policy Rules Builder call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
 
@@ -78,9 +78,9 @@ A thin adapter started as an **asyncio background task** in the FastAPI `lifespa
 
 | Subject pattern | Internal handler |
 |---|---|
-| `aiac.apply.service.{id}` | Service Onboarding Orchestrator |
-| `aiac.apply.role.{id}` | Role Update Orchestrator |
-| `aiac.apply.policy.build` | Policy Update Orchestrator (Build) |
+| `aiac.apply.service.{id}` | Service Onboarding Orchestrator (UC1) |
+| `aiac.apply.role.{id}` | Role Update sub-agent (UC3, via Controller) |
+| `aiac.apply.policy.build` | Policy Update Build sub-agent (UC2, via Controller) |
 
 ### Ack contract
 
@@ -102,19 +102,22 @@ The consumer and the FastAPI HTTP server share the same process. If the Agent po
 
 ## Controller
 
-The Controller is a thin FastAPI routes layer (`controller/routes.py`). Its sole responsibilities are:
+The Controller is a FastAPI routes layer (`controller/routes.py`). Its responsibilities are:
 
 - Parse the trigger type and entity ID from the request path.
-- Dispatch to the appropriate orchestrator.
-- Return the orchestrator's response to the caller.
+- Dispatch to the Service Onboarding Orchestrator (UC1) or directly to the Policy Update / Role Update sub-agents (UC2, UC3).
+- Receive the `tuple[list[Role], list[Scope]]` returned by the Orchestrator or sub-agent.
+- Pass the tuple to the **shared Policy Rules Builder** and receive `list[PolicyRule]`.
+- Call `compute_and_apply(rules)` from `aiac.policy.computation` (PCE).
+- Return the final response to the caller.
 
-No business logic, retry handling, or state assembly lives in the Controller.
+No per-use-case business logic, retry handling, or state assembly lives in the Controller. The Policy Rules Builder and PCE calls are shared steps driven uniformly by the Controller across all use cases.
 
 ---
 
 ## Use Cases
 
-Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
+Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 
 | Use Case | Sub-PRD | Trigger(s) |
 |---|---|---|
@@ -122,7 +125,7 @@ Each orchestrator and its sub-agents are specified in a dedicated sub-PRD:
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
 
-> **Note:** The shared apply node (`shared/apply/`) calls `compute_and_apply(rules)` from `aiac.policy.computation`. Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md) — no separate sub-PRD is required for the apply node.
+> **Note:** After the Orchestrator or sub-agent returns a `tuple[list[Role], list[Scope]]`, the Controller calls the **shared Policy Rules Builder** to produce `list[PolicyRule]`, then calls `compute_and_apply(rules)` from `aiac.policy.computation` (PCE). Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md). The Policy Rules Builder is specified in the [Shared Module](#shared-module) section of this document.
 
 ---
 
@@ -132,19 +135,17 @@ Lives at `aiac/src/aiac/agent/shared/`.
 
 ```mermaid
 flowchart TD
-    subgraph SHARED["shared - used by all policy-applying sub-agents"]
+    subgraph SHARED["shared/nodes.py — used by all sub-agents and the Policy Rules Builder"]
         FP["fetch_policy\nQuery: aiac-policies collection\nReturns: policy_chunks\nFails: 503 after UPSTREAM_MAX_RETRIES"]
         FDK["fetch_domain_knowledge\nQuery: aiac-domain-knowledge collection\nReturns: domain_knowledge_chunks\nFails: non-fatal"]
     end
 
-    subgraph STATE["BaseAgentState"]
+    subgraph STATE["BaseAgentState (sub-agent fields)"]
         S1["trigger: TriggerContext"]
         S2["realm: str"]
         S3["policy_chunks: list of str"]
         S4["domain_knowledge_chunks: list of str"]
         S5["pdp_snapshot: PDPSnapshot"]
-        S6["rules: list[PolicyRule]"]
-        S7["validation_errors: list of str"]
         S8["summary: str"]
     end
 
@@ -161,7 +162,7 @@ flowchart TD
 
 ### `shared/nodes.py`
 
-Two node functions shared by all policy-applying sub-agents:
+Two node functions used by all sub-agents and the Policy Rules Builder:
 
 - `fetch_policy`: queries `aiac-policies` ChromaDB collection; stores results in `BaseAgentState.policy_chunks`. Returns `503` when ChromaDB is unavailable after `UPSTREAM_MAX_RETRIES` retries.
 - `fetch_domain_knowledge`: queries `aiac-domain-knowledge` ChromaDB collection; stores results in `BaseAgentState.domain_knowledge_chunks`. Returns `[]` when collection is empty — non-fatal.
@@ -190,9 +191,9 @@ All type definitions shared across agents:
 | `policy_chunks` | `list[str]` | Policy text chunks from `aiac-policies` |
 | `domain_knowledge_chunks` | `list[str]` | Domain context chunks from `aiac-domain-knowledge` |
 | `pdp_snapshot` | `PDPSnapshot` | Scoped PDP data for this trigger |
-| `rules` | `list[PolicyRule]` | Policy rules to apply; produced by policy-proposing sub-agents, consumed by the shared apply node |
-| `validation_errors` | `list[str]` | Errors from validate node |
 | `summary` | `str` | Human-readable explanation |
+
+> **Note:** `rules: list[PolicyRule]` and `validation_errors: list[str]` are produced and consumed within the Policy Rules Builder. Whether they remain in `BaseAgentState` or move to a dedicated PRB state is pending the PRB design grill.
 
 #### `PDPSnapshot`
 
@@ -203,10 +204,6 @@ class PDPSnapshot(BaseModel):
     services: list[Service] = []
     service_scopes: list[Scope] = []
 ```
-
-#### `rules: list[PolicyRule]`
-
-Produced by `propose_*` / `validate_*` nodes in all policy-proposing sub-agents; consumed by the shared apply node via `compute_and_apply(rules)`. `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` are defined in `aiac.policy.model`. Full specs: [policy-model.md](policy-model.md) · [library-pdp-policy.md](library-pdp-policy.md).
 
 #### `ValidationVerdict`
 
@@ -220,52 +217,17 @@ Service Onboarding types (`ServiceType`, `RoleDefinition`, `ScopeDefinition`, `S
 
 ---
 
-### `shared/apply/`
+### `policy_rules_builder/` (shared)
 
-Shared apply node — called by each orchestrator after the producing sub-graph completes with a non-empty `rules` list in state. Delegates all Policy Store ↔ PDP Policy Writer coordination to the Policy Computation Engine (PCE). Full spec: [policy-computation-engine.md](policy-computation-engine.md).
+The **Policy Rules Builder** receives `tuple[list[Role], list[Scope]]` from the producing sub-agent (or UC1 Orchestrator) and the natural-language policy, and emits `list[PolicyRule]` scoped to the trigger. It does **not** call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly; only the PCE does.
 
-```
-START → apply_rules → format_response → END
-```
+> **Detailed design TBD — pending dedicated grill.** Open questions: Is the Policy Rules Builder a LangGraph `StateGraph` or a simpler callable? Does it use a single LLM call or a `propose_*` + `validate_*` node pattern? What context does it receive beyond the tuple — policy chunks, domain knowledge chunks, PDP snapshot? Does it need a `realm` parameter? Does it read current Policy Store state to avoid duplicates, or does the PCE handle dedup?
 
-#### Graph
+#### Validate Node — Common Checks (pending PRB grill)
 
-```mermaid
-flowchart TD
-    START(("START")) --> APPLY["apply_rules\naiac.policy.computation\ncompute_and_apply(rules)"]
-    APPLY --> FORMAT["format_response"]
-    FORMAT --> END(("END"))
-```
+> **Note:** The exact placement of validation (inside the Policy Rules Builder vs. a separate Controller step) is pending the PRB design grill. The four checks below are confirmed requirements.
 
-#### Nodes
-
-- **`apply_rules`**: calls `compute_and_apply(rules: list[PolicyRule])` from `aiac.policy.computation`. The PCE resolves owning services via the IdP Configuration Service, additively merges the rules into `AgentPolicyModel` objects in the Policy Store, then pushes the updated `PolicyModel` to the PDP Policy Writer (which writes derived Rego packages to the `AuthorizationPolicy` Kubernetes CR). PCE logs all exceptions and does not propagate them, so `apply_rules` always proceeds to `format_response`.
-- **`format_response`**: assembles the commit result for the orchestrator.
-
-#### State
-
-`BaseAgentState` (no extensions required). Reads `rules` and `realm`; writes `summary`.
-
-> **Orchestrator contract:** The calling orchestrator must gate on an empty `rules` list before invoking `SharedApplyGraph`. If the producing sub-graph's `validate_*` node produced no rules, the orchestrator returns the abort response directly without calling `SharedApplyGraph`.
-
-> **Future extension:** This apply node is the natural insertion point for a human-in-the-loop review gate. A LangGraph `interrupt()` between `apply_rules` and `format_response` would pause execution pending human approval of the `rules` list before commit. Since `SharedApplyGraph` is shared, this gate applies uniformly to all use cases.
-
----
-
-## LLM Integration
-
-All `propose_*` and `validate_*` nodes use `langchain-openai` (`ChatOpenAI`) via `llm.with_structured_output()`. Target endpoint must support tool calling.
-
-Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants in its `prompts.py`:
-
-- **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped PDP snapshot summary.
-- **Auditor prompt**: system message — auditor role for the specific agent's scope; user message — proposed diff + policy chunks + domain knowledge chunks.
-
----
-
-## Validate Node — Common Checks (All Agents)
-
-All `validate_*` nodes perform the same four checks. Binary abort on any failure:
+The validation step performs four checks. Binary abort on any failure:
 
 ```mermaid
 flowchart TD
@@ -285,13 +247,26 @@ flowchart TD
 
     C4{"4. Scope check\nDiff bounded to entities\nreferenced by trigger\nno over-reach"}
     C4 -->|"fail"| ABORT
-    C4 -->|"pass"| APPLY["proceed to apply_*"]
+    C4 -->|"pass"| EMIT["emit list[PolicyRule] to Controller"]
 ```
 
 1. **Existence check** — all entities referenced by `rules` statements exist; resolved via `aiac.idp.configuration.api`.
 2. **Safety guard rails** — total statements in `PolicyModel` ≤ `MAX_CHANGES_PER_RUN`.
 3. **LLM re-confirmation** — second LLM call with auditor system prompt; returns `ValidationVerdict(approved, reason)`.
 4. **Scope check** — `PolicyModel` is bounded to entities referenced by the trigger; no over-reach on partial updates.
+
+---
+
+## LLM Integration
+
+All `propose_*` and `validate_*` nodes use `langchain-openai` (`ChatOpenAI`) via `llm.with_structured_output()`. Target endpoint must support tool calling.
+
+Each sub-agent defines its own `PLANNER_SYSTEM` and `AUDITOR_SYSTEM` constants in its `prompts.py`:
+
+- **Planner prompt**: system message (stable, cacheable) — role definition + `AIAC_AC_MODEL` framing scoped to the agent's context; user message (per-request) — trigger description + policy chunks + domain knowledge section + scoped PDP snapshot summary.
+- **Auditor prompt**: system message — auditor role for the specific agent's scope; user message — proposed diff + policy chunks + domain knowledge chunks.
+
+The Policy Rules Builder's LLM usage pattern (prompts and node structure) is TBD — pending the PRB design grill.
 
 ---
 
@@ -302,7 +277,7 @@ flowchart TD
 | POST | `/apply/policy/build` | Policy Update | Build |
 | POST | `/apply/policy/rebuild` | Policy Update | Rebuild |
 | POST | `/apply/role/{role_id}` | Role Update | Role |
-| POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy → Apply |
+| POST | `/apply/service/{service_id}` | Service Onboarding | Provision → Policy |
 
 **Success response (Service Onboarding):**
 ```json
@@ -376,7 +351,7 @@ aiac/src/aiac/agent/
 │
 ├── onboarding/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← sequences provision → policy → apply, assembles combined response
+│   ├── orchestrator.py                  ← sequences provision → policy; returns tuple[list[Role], list[Scope]] to Controller
 │   ├── provision/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Service Provision StateGraph
@@ -390,7 +365,6 @@ aiac/src/aiac/agent/
 │
 ├── policy_update/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← dispatches to build or rebuild sub-agent
 │   ├── build/
 │   │   ├── __init__.py
 │   │   ├── graph.py                     ← Build StateGraph
@@ -404,7 +378,6 @@ aiac/src/aiac/agent/
 │
 ├── roles/
 │   ├── __init__.py
-│   ├── orchestrator.py                  ← dispatches to role sub-agent
 │   └── role/
 │       ├── __init__.py
 │       ├── graph.py                     ← Role StateGraph
@@ -414,11 +387,12 @@ aiac/src/aiac/agent/
 └── shared/
     ├── __init__.py
     ├── nodes.py                         ← fetch_policy, fetch_domain_knowledge
-    ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, ValidationVerdict (PolicyRule imported from aiac.policy.model)
-    └── apply/
+    ├── state.py                         ← BaseAgentState, TriggerContext, PDPSnapshot, ValidationVerdict (PolicyRule imported from aiac.policy.model; exact rules/tuple field placement pending PRB grill)
+    └── policy_rules_builder/            ← TBD — design pending dedicated grill
         ├── __init__.py
-        ├── graph.py                     ← SharedApplyGraph (shared by all policy-producing sub-agents)
-        └── nodes.py                     ← apply_rules, format_response
+        ├── graph.py                     ← PolicyRulesBuilderGraph (TBD)
+        ├── nodes.py                     ← TBD
+        └── prompts.py                   ← TBD
 ```
 
 Docker build command (run from repo root):
