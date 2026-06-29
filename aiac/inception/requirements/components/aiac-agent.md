@@ -21,7 +21,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 | Policy Update | `build`, `rebuild` | Build sub-agent or Rebuild sub-agent (alternative) |
 | Role Update | `role/{id}` | Role sub-agent |
 
-Each producing sub-agent emits a `list[PolicyRule]` (inbound + outbound rules) scoped to the trigger. A **shared apply node** (`agent/shared/apply/`) calls `compute_and_apply(rules)` from `aiac.policy.computation`; the PCE owns all Policy Store ↔ PDP Policy Writer coordination. Sub-agents never call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
+Each producing sub-agent emits a `tuple[list[Role], list[Scope]]` scoped to the trigger. The Controller passes this tuple to a **shared Policy Rules Builder sub-agent** (`agent/shared/policy_rules_builder/`), which uses the natural-language policy to emit a `list[PolicyRule]` scoped to the trigger. The Controller then calls `compute_and_apply(rules)` from `aiac.policy.computation` directly — no shared apply node exists. The PCE owns all Policy Store ↔ PDP Policy Writer coordination. Neither sub-agents nor the Policy Rules Builder call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -39,35 +39,33 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
         SA1["Service Provision"]
-        SA2["Policy"]
         ORC1 --> SA1
-        ORC1 --> SA2
     end
 
     subgraph PU["Policy Update"]
-        ORC2["Orchestrator"]
         SA4["Build"]
         SA5["Rebuild"]
-        ORC2 --> SA4
-        ORC2 --> SA5
     end
 
     subgraph RR["Role Update"]
-        ORC3["Orchestrator"]
         SA6["Role"]
-        ORC3 --> SA6
     end
 
-    APPLY["Apply (shared)\nagent/shared/apply/\ncompute_and_apply(rules)"]
+    PRB["Policy Rules Builder (shared)\nagent/shared/policy_rules_builder/"]
+    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(rules)"]
 
-    ORC1 -->|"rules"| APPLY
-    ORC2 -->|"rules"| APPLY
-    ORC3 -->|"rules"| APPLY
-
-    TRIGGERS --> CTRL
-    CTRL -->|"role/:id"| ORC3
-    CTRL -->|"build / rebuild"| ORC2
     CTRL -->|"service/:id"| ORC1
+    CTRL -->|"build"| SA4
+    CTRL -->|"rebuild"| SA5
+    CTRL -->|"role/:id"| SA6
+
+    ORC1 -->|"tuple"| PRB
+    SA4 -->|"tuple"| PRB
+    SA5 -->|"tuple"| PRB
+    SA6 -->|"tuple"| PRB
+
+    PRB -->|"rules"| CTRL
+    CTRL -->|"rules"| PCE
 ```
 
 ---
