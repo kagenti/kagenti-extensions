@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from aiac.pdp.policy.models import PolicyObjectModel
-from aiac.pdp.library.configuration.models import Role, Scope
+from aiac.idp.configuration.models import Role, Scope
 from base_mapper.state import BaseMappingState
 from single_privilege_agent import SinglePrivilegeMapper, SinglePrivilegeState
 from base_mapper import (

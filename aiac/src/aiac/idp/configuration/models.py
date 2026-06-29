@@ -23,7 +23,6 @@ class Role(BaseModel):
     description: str | None = None
     composite: bool
     childRoles: list["Role"] = []
-    mappedScopes: list["Scope"] = []
 
 
 class Service(BaseModel):

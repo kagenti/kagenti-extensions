@@ -138,7 +138,7 @@ def save_policy_rego(
         file_dir: Directory to save Rego files
         realm: Keycloak realm name (used to fetch user-to-roles mapping)
     """
-    from aiac.pdp.library.configuration.api import Configuration
+    from aiac.idp.configuration.api import Configuration
 
     dir_path = Path(file_dir)
     dir_path.mkdir(parents=True, exist_ok=True)

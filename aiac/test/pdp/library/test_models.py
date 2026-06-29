@@ -1,4 +1,4 @@
-from aiac.pdp.library.configuration.models import Subject, Role, Service, Scope
+from aiac.idp.configuration.models import Subject, Role, Service, Scope
 
 
 class TestSubject:
@@ -84,7 +84,11 @@ class TestRole:
         r = Role.model_validate({"id": "r1", "name": "admin", "composite": False})
         assert r.childRoles == []
 
-    def test_mapped_scopes_populated(self):
+    def test_mappedScopes_field_does_not_exist(self):
+        r = Role.model_validate({"id": "r1", "name": "admin", "composite": False})
+        assert not hasattr(r, "mappedScopes")
+
+    def test_mappedScopes_payload_ignored_silently(self):
         r = Role.model_validate(
             {
                 "id": "r1",
@@ -93,12 +97,7 @@ class TestRole:
                 "mappedScopes": [{"id": "s1", "name": "email"}],
             }
         )
-        assert len(r.mappedScopes) == 1
-        assert r.mappedScopes[0].name == "email"
-
-    def test_mapped_scopes_default_empty(self):
-        r = Role.model_validate({"id": "r1", "name": "admin", "composite": False})
-        assert r.mappedScopes == []
+        assert not hasattr(r, "mappedScopes")
 
     def test_no_clientRole_field(self):
         r = Role.model_validate(
@@ -379,8 +378,7 @@ class TestKeycloakRealWorldPayloads:
         assert r.childRoles[0].id == "r-dev-uuid"
         assert r.childRoles[0].name == "developer"
         assert r.childRoles[0].composite is False
-        assert len(r.mappedScopes) == 1
-        assert r.mappedScopes[0].name == "read"
+        assert not hasattr(r, "mappedScopes")
 
     def test_service_keycloak_system_client_account(self):
         """Keycloak system 'account' client: placeholder name resolved, no kagenti type."""

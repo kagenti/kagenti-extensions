@@ -11,7 +11,7 @@ from aiac.agent.shared.state import (
     ProposedDiff,
     ValidationVerdict,
 )
-from aiac.pdp.library.configuration.api import Configuration
+from aiac.idp.configuration.api import Configuration
 from aiac.pdp.library.policy.api import Policy
 
 _MAX_CHANGES_DEFAULT = 50

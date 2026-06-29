@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 
-from aiac.pdp.service.configuration.keycloak.main import app, get_admin, _cache
+from aiac.idp.service.configuration.keycloak.main import app, get_admin, _cache
 
 REALM = "kagenti"
 
@@ -215,7 +215,7 @@ class TestRealmQueryParam:
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
-             patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
+             patch("aiac.idp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
             with TestClient(app) as client:
                 resp = client.get(f"/subjects?realm={REALM}")
         assert resp.status_code == 200
@@ -239,7 +239,7 @@ class TestRealmQueryParam:
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
-             patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
+             patch("aiac.idp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock) as mock_cls:
             with TestClient(app) as client:
                 client.get(f"/subjects?realm={REALM}")
                 client.get(f"/subjects?realm={REALM}")
@@ -256,7 +256,7 @@ class TestRealmQueryParam:
 
 
 _HEALTH_ENV = {"KEYCLOAK_ADMIN_REALM": "master"}
-_HEALTH_TARGET = "aiac.pdp.service.configuration.keycloak.main._get_or_create_admin"
+_HEALTH_TARGET = "aiac.idp.service.configuration.keycloak.main._get_or_create_admin"
 
 
 class TestHealth:
@@ -438,7 +438,7 @@ class TestCreateScopeEndpoint:
             "KEYCLOAK_ADMIN_PASSWORD": "admin",
         }
         with patch.dict(os.environ, env), \
-             patch("aiac.pdp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock):
+             patch("aiac.idp.service.configuration.keycloak.main.KeycloakAdmin", return_value=admin_mock):
             with TestClient(app) as client:
                 resp = client.post("/scopes?realm=other", json={"name": "x", "description": ""})
         assert resp.status_code == 201

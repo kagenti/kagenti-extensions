@@ -5,7 +5,7 @@ from typing import Literal
 import requests
 from dotenv import load_dotenv
 
-from aiac.pdp.library.configuration.models import Subject, Role, Service, Scope
+from aiac.idp.configuration.models import Subject, Role, Service, Scope
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -56,11 +56,6 @@ class Configuration:
                 )
                 self._check(composites_resp)
                 role_data["childRoles"] = composites_resp.json()
-            scopes_resp = requests.get(
-                f"{self._base_url()}/roles/{raw['name']}/scopes", params=self._params()
-            )
-            self._check(scopes_resp)
-            role_data["mappedScopes"] = scopes_resp.json()
             roles.append(Role.model_validate(role_data))
         return roles
 
@@ -105,6 +100,22 @@ class Configuration:
         resp = requests.get(f"{self._base_url()}/services/{service_id}", params=self._params())
         self._check(resp)
         return self._build_service(resp.json(), self._all_roles_map(), self._all_scopes_map())
+
+    def get_services_by_role(self, role: Role) -> list[Service]:
+        resp = requests.get(
+            f"{self._base_url()}/services",
+            params={"role_id": role.id, "realm": self.realm},
+        )
+        self._check(resp)
+        return [Service.model_validate(s) for s in resp.json()]
+
+    def get_services_by_scope(self, scope: Scope) -> list[Service]:
+        resp = requests.get(
+            f"{self._base_url()}/services",
+            params={"scope_id": scope.id, "realm": self.realm},
+        )
+        self._check(resp)
+        return [Service.model_validate(s) for s in resp.json()]
 
     def get_scopes(self) -> list[Scope]:
         resp = requests.get(f"{self._base_url()}/scopes", params=self._params())

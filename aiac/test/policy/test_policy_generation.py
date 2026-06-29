@@ -19,7 +19,7 @@ from pathlib import Path
 from unittest.mock import Mock
 
 from aiac.pdp.policy.models import PolicyObjectModel, Rule
-from aiac.pdp.library.configuration.models import Role, Scope
+from aiac.idp.configuration.models import Role, Scope
 from full_policy_agent import PolicyBuilder
 from config import create_llm
 
@@ -190,7 +190,7 @@ def test_save_policy_rego_creates_files(tmp_path, config_file, monkeypatch):
     from aiac.pdp.library.read_api_from_config import Configuration as FileConfiguration
 
     os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
-    monkeypatch.setattr("aiac.pdp.library.configuration.api.Configuration", FileConfiguration)
+    monkeypatch.setattr("aiac.idp.configuration.api.Configuration", FileConfiguration)
 
     policy = _make_policy([
         _make_rule("developer", "demo-ui", "kagenti"),

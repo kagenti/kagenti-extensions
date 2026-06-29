@@ -11,8 +11,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
-from aiac.pdp.library.configuration.api import Configuration
-from aiac.pdp.library.configuration.models import Role, Scope, Service, Subject
+from aiac.idp.configuration.api import Configuration
+from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
 REALM = "kagenti"
 
@@ -28,9 +28,6 @@ def _fmt_roles(roles: list[Role], indent: int = 4) -> str:
         if r.childRoles:
             for cr in r.childRoles:
                 lines.append(f"{pad}  child: {cr.name} (id={cr.id})")
-        if r.mappedScopes:
-            for ms in r.mappedScopes:
-                lines.append(f"{pad}  scope: {ms.name} (id={ms.id})")
     return "\n".join(lines)
 
 
@@ -77,12 +74,6 @@ def main() -> None:
                 print(f"      {cr.name} (id={cr.id})")
         else:
             print("    childRoles  : —")
-        if r.mappedScopes:
-            print("    mappedScopes:")
-            for ms in r.mappedScopes:
-                print(f"      {ms.name} (id={ms.id})  desc={ms.description or '—'}")
-        else:
-            print("    mappedScopes: —")
     print(f"Total: {len(roles)} role(s)\n")
 
     # --- Services (clients) ---
