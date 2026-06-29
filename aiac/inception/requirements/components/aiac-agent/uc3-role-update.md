@@ -1,12 +1,17 @@
-# UC3: Role Update
+# Component Sub-PRD: UC3 — Role Update
 
-## Depends on
+> **Depends on:** [`../aiac-agent.md`](../aiac-agent.md) — NATS Consumer, Controller, Shared Module, Configuration, Error Handling, Runtime.
 
-- [`../aiac-agent.md`](../aiac-agent.md) — NATS Consumer, Controller, Shared Module, Validate Node common checks, Configuration, Error Handling, Runtime.
+## Triggers
 
----
+| Source | Subject / Path |
+|---|---|
+| Event Broker (NATS) | `aiac.apply.role.{id}` (originated by Keycloak SPI role created/updated) |
+| HTTP (debug) | `POST /apply/role/{role_id}` |
 
 ## Architecture
+
+Single path, no create/update branch. The sub-agent is **deterministic** (non-LLM).
 
 ```mermaid
 flowchart TD
@@ -20,113 +25,51 @@ flowchart TD
     TRIGGERS --> CTRL
 
     subgraph RR["Role Update"]
-        ORC3["Orchestrator"]
-        SA5["Role"]
-        ORC3 --> SA5
+        SA["Role sub-agent\ndeterministic"]
     end
 
-    APPLY["Policy Apply\nagent/shared/apply/\nPolicyApplyGraph"]
+    PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
+    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
 
-    ORC3 -->|"policy_model"| APPLY
-
-    CTRL -->|"role/:id"| ORC3
+    CTRL -->|"role/:id"| SA
+    SA -->|"list[tuple]"| CTRL
+    CTRL -->|"per tuple"| PRB
+    PRB -->|"rules"| CTRL
+    CTRL -->|"merged rules"| PCE
 ```
 
----
+## Sub-agent: Role sub-agent
 
-## Trigger(s)
+**Nature:** deterministic, non-LLM. Pure IdP reader.
 
-| Source | Subject / Path |
-|---|---|
-| Event Broker (NATS) | `aiac.apply.role.{id}` (originated by Keycloak SPI role created/updated) |
-| HTTP (debug) | `POST /apply/role/{role_id}` |
+**Steps:**
+1. Read the triggering role (`role_id`) from `aiac.idp.configuration.api`.
+2. Read **all scopes** from `aiac.idp.configuration.api`.
+3. Return `[( [role], all_scopes )]` — a one-element `list[tuple]`.
 
----
+**Output:** `list[tuple[list[Role], list[Scope]]]` — one element.
 
-## Orchestrator
+## Controller behaviour (for this UC)
 
-`roles/orchestrator.py`
+1. Receives `[(role, all_scopes)]` from the sub-agent.
+2. Calls the PRB once with `(role, all_scopes)` → `list[PolicyRule]` (only the relevant scope mappings for that role). See [`policy-rules-builder.md`](policy-rules-builder.md).
+3. Calls `compute_and_apply(rules)` from `aiac.policy.computation`.
+   - The PCE unconditionally deletes the role's stale rules before applying the new ones. See [`../policy-computation-engine.md`](../policy-computation-engine.md).
+4. Returns bare HTTP status; writes summary + debug to log.
 
-Dispatches to the Role sub-agent, then sequences `PolicyApplyGraph` (see [Shared Module: `shared/apply/`](../aiac-agent.md#sharedapply)):
-
-- Role sub-agent → Policy Apply
-
-If the sub-agent's `validate_policy` fails (`policy_model is None`), the orchestrator returns the abort response directly without calling `PolicyApplyGraph`.
-
----
-
-## Sub-agents
-
-### Role Sub-agent
-
-`roles/role/`
+## File structure
 
 ```
-START → [fetch_policy ‖ fetch_domain_knowledge ‖ fetch_pdp_state] → propose_policy → validate_policy → END
-```
-
-#### Nodes
-
-- **`fetch_pdp_state`**: fetches all services and their permissions, all roles, and the current composites for the affected role.
-- **`propose_policy`**: LLM node; produces `PolicyModel` scoped to the affected role. `PolicyModel` is defined in `aiac/pdp/library/policy/models.py` (see [`../aiac-agent.md`](../aiac-agent.md)).
-- **`validate_policy`**: existence check + safety guard rails + auditor LLM re-confirmation + scope check (bounded to the affected role). See [Validate Node common checks](../aiac-agent.md#validate-node--common-checks-all-agents). Writes `policy_model` to state on success; leaves it `None` on failure.
-
-#### Graph
-
-```mermaid
-flowchart TD
-    START(("START"))
-
-    START --> FP["fetch_policy\nChromaDB"]
-    START --> FDK["fetch_domain_knowledge\nChromaDB"]
-    START --> FKC["fetch_pdp_state\naffected role composites,\nall services + permissions"]
-
-    FP & FDK & FKC --> PROPOSE["propose_policy\nPlanner LLM -> PolicyModel\nscoped to affected role"]
-
-    PROPOSE --> VALIDATE["validate_policy\n1. Existence check\n2. Safety guard rails\n3. Auditor LLM\n4. Scope check\n   affected role only"]
-
-    VALIDATE --> END(("END"))
-```
-
-#### State
-
-`BaseAgentState` (no extensions required).
-
-#### Prompts (`roles/role/prompts.py`)
-
-`PLANNER_SYSTEM`, `AUDITOR_SYSTEM`.
-
----
-
-## Response
-
-**Success:**
-```json
-{ "added": [...], "removed": [...], "summary": "...", "provisioned": null }
-```
-
-**Abort (validation failure):**
-```json
-{ "added": [], "removed": [], "summary": "...", "validation_errors": [...], "provisioned": null }
-```
-
----
-
-## File Structure
-
-```
-aiac/src/aiac/agent/roles/
-├── __init__.py
-├── orchestrator.py                  ← dispatches to role sub-agent, then sequences PolicyApplyGraph
-└── role/
+aiac/src/aiac/agent/uc/
+└── role_update/
     ├── __init__.py
-    ├── graph.py                     ← Role StateGraph
-    ├── nodes.py                     ← fetch_pdp_state, propose_policy, validate_policy
-    └── prompts.py                   ← PLANNER_SYSTEM, AUDITOR_SYSTEM
+    ├── graph.py      ← Role sub-agent StateGraph (deterministic)
+    ├── nodes.py      ← fetch_role, fetch_all_scopes, package_tuple
+    └── state.py      ← RoleUpdateState
 ```
 
----
+## Out of scope
 
-## Open Questions
-
-_None currently._
+- PRB internals — see [`policy-rules-builder.md`](policy-rules-builder.md).
+- PCE stale-rule deletion mechanics — see [`../policy-computation-engine.md`](../policy-computation-engine.md).
+- Response body shape — no response bodies; handlers return bare HTTP status codes. Summary + debug go to the log.
