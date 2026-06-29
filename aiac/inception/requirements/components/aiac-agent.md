@@ -17,7 +17,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 
 | Use Case | Dispatch | Sub-agents | Sub-agent output |
 |---|---|---|---|
-| Service Onboarding (UC1) | via Orchestrator | Service Provision + Service Policy Update | `list[tuple[list[Role], list[Scope]]]` |
+| Service Onboarding (UC1) | via Orchestrator | Service Provision + Service Policy | `list[tuple[list[Role], list[Scope]]]` |
 | Policy Update (UC2) | Controller → sub-agent directly | Build or Rebuild (TBD) | `list[tuple[list[Role], list[Scope]]]` |
 | Role Update (UC3) | Controller → sub-agent directly | Role sub-agent | `list[tuple[list[Role], list[Scope]]]` (one-element list) |
 
@@ -39,7 +39,7 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
         SA1["Service Provision"]
-        SA2["Service Policy Update"]
+        SA2["Service Policy"]
         ORC1 --> SA1
         ORC1 --> SA2
     end
@@ -125,7 +125,7 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 
 | Use Case | Sub-PRD | Trigger(s) | Notes |
 |---|---|---|---|
-| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` | Orchestrator sequences: Service Provision → Service Policy Update (deterministic) |
+| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` | Orchestrator sequences: Service Provision → Service Policy (deterministic) |
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` | |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` | |
 

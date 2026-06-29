@@ -14,7 +14,7 @@
 UC1 is the only use case with an Orchestrator, because it is a two-stage pipeline:
 
 1. **Service Provision** (LLM-based): classify the new service, derive its roles + scopes, write them into the IdP.
-2. **Service Policy Update** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), package into `list[tuple]`, return to the Orchestrator.
+2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), package into `list[tuple]`, return to the Orchestrator.
 
 The Orchestrator returns only the `list[tuple]` to the Controller. The Controller runs the PRB → PCE pipeline; the PCE owns all rule reconciliation.
 
@@ -32,7 +32,7 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC["Orchestrator"]
         SA_PROV["Service Provision\n(LLM)"]
-        SA_POL["Service Policy Update\n(deterministic)"]
+        SA_POL["Service Policy\n(deterministic)"]
         ORC --> SA_PROV
         ORC --> SA_POL
     end
@@ -156,7 +156,7 @@ class ServiceProvision(BaseModel):
 
 ---
 
-## Sub-agent: Service Policy Update
+## Sub-agent: Service Policy
 
 `onboarding/service_policy/`
 
