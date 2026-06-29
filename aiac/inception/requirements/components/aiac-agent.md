@@ -13,15 +13,15 @@ The Agent subscribes to the Event Broker as a durable competing consumer (`aiac-
 
 The `/apply/*` HTTP endpoints are retained as a debugging escape hatch. The **NATS consumer is a thin adapter layer** that receives events from the Event Broker and calls the same internal `/apply/*` handler functions — there is no duplicated business logic.
 
-The service is structured as a **Controller** (FastAPI routes) that dispatches to the **Service Onboarding Orchestrator** (UC1) or directly to the Policy Update and Role Update sub-agents (UC2, UC3). Each sub-agent emits a `tuple[list[Role], list[Scope]]` scoped to the trigger. The Controller passes this tuple to the **shared Policy Rules Builder** (`agent/shared/policy_rules_builder/`), which emits a `list[PolicyRule]`, and then calls `compute_and_apply(rules)` directly via the PCE.
+The service is structured as a **Controller** (FastAPI routes) that dispatches to the **Service Onboarding Orchestrator** (UC1) or directly to the Policy Update and Role Update sub-agents (UC2, UC3). Each sub-agent returns a `list[tuple[list[Role], list[Scope]]]` scoped to the trigger. The Controller receives this list; for each tuple it calls the **shared Policy Rules Builder** (`agent/policy_rules_builder/`) to produce `list[PolicyRule]`, concatenates all results into a single `list[PolicyRule]`, then makes a single `compute_and_apply(merged_rules)` call via the PCE.
 
 | Use Case | Dispatch | Sub-agents | Sub-agent output |
 |---|---|---|---|
-| Service Onboarding (UC1) | via Orchestrator | Service Provision | `tuple[list[Role], list[Scope]]` (new service roles + scopes) |
-| Policy Update (UC2) | Controller → sub-agent directly | Build sub-agent or Rebuild sub-agent (alternative) | `tuple[list[Role], list[Scope]]` (all roles + scopes) |
-| Role Update (UC3) | Controller → sub-agent directly | Role sub-agent | `tuple[list[Role], list[Scope]]` (specific role + all scopes) |
+| Service Onboarding (UC1) | via Orchestrator | Service Provision + Service Policy Update | `list[tuple[list[Role], list[Scope]]]` |
+| Policy Update (UC2) | Controller → sub-agent directly | Build or Rebuild (TBD) | `list[tuple[list[Role], list[Scope]]]` |
+| Role Update (UC3) | Controller → sub-agent directly | Role sub-agent | `list[tuple[list[Role], list[Scope]]]` (one-element list) |
 
-Each producing sub-agent emits a `tuple[list[Role], list[Scope]]` scoped to the trigger. The Controller passes this tuple to a **shared Policy Rules Builder sub-agent** (`agent/shared/policy_rules_builder/`), which uses the natural-language policy to emit a `list[PolicyRule]` scoped to the trigger. The Controller then calls `compute_and_apply(rules)` from `aiac.policy.computation` directly — no shared apply node exists. The PCE owns all Policy Store ↔ PDP Policy Writer coordination. Neither sub-agents nor the Policy Rules Builder call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
+Each producing sub-agent returns a `list[tuple[list[Role], list[Scope]]]` scoped to the trigger. The Controller calls the **shared Policy Rules Builder** (`agent/policy_rules_builder/`) once per tuple in the list to produce `list[PolicyRule]`, concatenates all results into a single merged list, then calls `compute_and_apply(merged_rules)` from `aiac.policy.computation` (PCE) once — no shared apply node exists. The PCE owns all Policy Store ↔ PDP Policy Writer coordination. Neither sub-agents nor the Policy Rules Builder call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly.
 
 All components are **logically separated modules within a single pod and process** — no inter-service network calls between orchestrators and sub-agents.
 
@@ -39,7 +39,9 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
         SA1["Service Provision"]
+        SA2["Service Policy Update"]
         ORC1 --> SA1
+        ORC1 --> SA2
     end
 
     subgraph PU["Policy Update"]
@@ -51,7 +53,7 @@ flowchart TD
         SA6["Role"]
     end
 
-    PRB["Policy Rules Builder (shared)\nagent/shared/policy_rules_builder/"]
+    PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
     PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(rules)"]
 
     CTRL -->|"service/:id"| ORC1
@@ -59,13 +61,14 @@ flowchart TD
     CTRL -->|"rebuild"| SA5
     CTRL -->|"role/:id"| SA6
 
-    ORC1 -->|"tuple"| PRB
-    SA4 -->|"tuple"| PRB
-    SA5 -->|"tuple"| PRB
-    SA6 -->|"tuple"| PRB
+    ORC1 -->|"list[tuple]"| CTRL
+    SA4  -->|"list[tuple]"| CTRL
+    SA5  -->|"list[tuple]"| CTRL
+    SA6  -->|"list[tuple]"| CTRL
 
-    PRB -->|"rules"| CTRL
-    CTRL -->|"rules"| PCE
+    CTRL -->|"per tuple"| PRB
+    PRB  -->|"rules"| CTRL
+    CTRL -->|"merged rules"| PCE
 ```
 
 ---
@@ -106,12 +109,13 @@ The Controller is a FastAPI routes layer (`controller/routes.py`). Its responsib
 
 - Parse the trigger type and entity ID from the request path.
 - Dispatch to the Service Onboarding Orchestrator (UC1) or directly to the Policy Update / Role Update sub-agents (UC2, UC3).
-- Receive the `tuple[list[Role], list[Scope]]` returned by the Orchestrator or sub-agent.
-- Pass the tuple to the **shared Policy Rules Builder** and receive `list[PolicyRule]`.
-- Call `compute_and_apply(rules)` from `aiac.policy.computation` (PCE).
-- Return the final response to the caller.
+- Receive the `list[tuple[list[Role], list[Scope]]]` returned by the Orchestrator or sub-agent.
+- For each tuple in the list, call the **shared Policy Rules Builder** and collect `list[PolicyRule]`.
+- Concatenate all `list[PolicyRule]` results into a single list.
+- Call `compute_and_apply(merged_rules)` from `aiac.policy.computation` (PCE) once.
+- Return a bare HTTP status code to the caller; write summary and debug info to the log.
 
-No per-use-case business logic, retry handling, or state assembly lives in the Controller. The Policy Rules Builder and PCE calls are shared steps driven uniformly by the Controller across all use cases.
+No per-use-case business logic, retry handling, or state assembly lives in the Controller. The PRB and PCE calls are shared steps driven uniformly by the Controller across all use cases.
 
 ---
 
@@ -119,13 +123,13 @@ No per-use-case business logic, retry handling, or state assembly lives in the C
 
 Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 
-| Use Case | Sub-PRD | Trigger(s) |
-|---|---|---|
-| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` |
-| Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` |
-| Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` |
+| Use Case | Sub-PRD | Trigger(s) | Notes |
+|---|---|---|---|
+| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` | Orchestrator sequences: Service Provision → Service Policy Update (deterministic) |
+| Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` | |
+| Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` | |
 
-> **Note:** After the Orchestrator or sub-agent returns a `tuple[list[Role], list[Scope]]`, the Controller calls the **shared Policy Rules Builder** to produce `list[PolicyRule]`, then calls `compute_and_apply(rules)` from `aiac.policy.computation` (PCE). Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md). The Policy Rules Builder is specified in [aiac-agent/policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
+> **Note:** After the Orchestrator or sub-agent returns a `list[tuple[list[Role], list[Scope]]]`, the Controller calls the **shared Policy Rules Builder** once per tuple to produce `list[PolicyRule]`, concatenates the results, then calls `compute_and_apply(merged_rules)` from `aiac.policy.computation` (PCE). Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md). The Policy Rules Builder is specified in [aiac-agent/policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
 
 ---
 
@@ -138,20 +142,7 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 | POST | `/apply/role/{role_id}` | Role Update | Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision |
 
-**Success response (Service Onboarding):**
-```json
-{ "summary": "...", "provisioned": { "roles": [...], "scopes": [...] } }
-```
-
-**Success response (all other agents):**
-```json
-{ "summary": "...", "provisioned": null }
-```
-
-**Abort response (validation failure, all agents):**
-```json
-{ "summary": "...", "validation_errors": [...], "provisioned": null }
-```
+All endpoints return bare HTTP status codes: `200 OK` on success, and the status codes from the Error Handling table on upstream failure. No JSON body is returned. Summary, applied-rule details, and debug information are written to the service log. Validation failures surface as an error status and log entry; detailed reporting is specified in [policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
 
 ---
 
@@ -189,6 +180,8 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 | Kubernetes API | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
 
+Upstream failures propagate as bare HTTP error responses (see table above); no JSON body is returned. All failure details are logged.
+
 ---
 
 ## Runtime
@@ -207,12 +200,14 @@ aiac/src/aiac/agent/
 ├── controller/
 ├── uc/
 │   ├── onboarding/
-│   │   └── provision/
+│   │   ├── orchestrator.py          ← sequences provision → service_policy, returns list[tuple]
+│   │   ├── provision/               ← LLM sub-agent: classify, analyze, write to IdP
+│   │   └── service_policy/          ← deterministic: read IdP, package list[tuple]
 │   ├── policy_update/
-│   │   ├── build/
-│   │   └── rebuild/
-│   └── role_update/
-└── policy_rules_builder/
+│   │   ├── build/                   ← TBD
+│   │   └── rebuild/                 ← TBD
+│   └── role_update/                 ← deterministic: read role + all scopes, return [(role, all_scopes)]
+└── policy_rules_builder/            ← shared; called only by Controller
 ```
 
 Docker build command (run from repo root):
