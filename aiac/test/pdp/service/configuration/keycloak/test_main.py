@@ -117,6 +117,50 @@ class TestListServiceRoles:
         assert resp.status_code == 502
         assert "error" in resp.json()
 
+    def test_returns_empty_list_when_client_has_no_service_account(self):
+        admin = MagicMock()
+        admin.get_client_service_account_user.side_effect = KeycloakError(
+            error_message="Client does not have a service account", response_code=400
+        )
+        resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# GET /services/{service_id}/scopes
+# ---------------------------------------------------------------------------
+
+
+class TestListServiceScopes:
+    def test_returns_json_array(self):
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.return_value = [
+            {"id": "sc1", "name": "profile"},
+            {"id": "sc2", "name": "email"},
+        ]
+        resp = _make_client(admin).get(f"/services/svc-uuid/scopes?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json() == [{"id": "sc1", "name": "profile"}, {"id": "sc2", "name": "email"}]
+
+    def test_verifies_get_client_default_client_scopes_called(self):
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.return_value = []
+        _make_client(admin).get(f"/services/svc-uuid/scopes?realm={REALM}")
+        admin.get_client_default_client_scopes.assert_called_once_with("svc-uuid")
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.side_effect = KeycloakError(
+            error_message="not found", response_code=404
+        )
+        resp = _make_client(admin).get(f"/services/svc-uuid/scopes?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
     def teardown_method(self):
         app.dependency_overrides.clear()
 
@@ -608,6 +652,11 @@ class TestKeycloakErrorProduces502:
         admin = MagicMock()
         admin.get_client_service_account_user.side_effect = _keycloak_error()
         assert _make_client(admin).get(f"/services/s1/roles?realm={REALM}").status_code == 502
+
+    def test_get_service_scopes(self):
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.side_effect = _keycloak_error()
+        assert _make_client(admin).get(f"/services/s1/scopes?realm={REALM}").status_code == 502
 
     def test_get_role_composites(self):
         admin = MagicMock()
