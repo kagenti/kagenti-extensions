@@ -20,7 +20,7 @@ from unittest.mock import Mock
 
 from aiac.pdp.policy.models import PolicyObjectModel, Rule
 from aiac.idp.configuration.models import Role, Scope
-from full_policy_agent import PolicyBuilder
+from aiac.agent.onboarding.policy.full_policy_agent import PolicyBuilder
 from config import create_llm
 
 
@@ -128,9 +128,9 @@ def compare_policies(
     expected_roles = set(expected.keys())
 
     for role in expected_roles - generated_roles:
-        differences.append(f"Missing realm role: '{role}'")
+        differences.append(f"Missing role: '{role}'")
     for role in generated_roles - expected_roles:
-        differences.append(f"Unexpected extra realm role: '{role}'")
+        differences.append(f"Unexpected extra role: '{role}'")
 
     for role in expected_roles & generated_roles:
         gen_set = generated[role]
@@ -185,7 +185,7 @@ def test_save_policy_includes_description_comment(tmp_path):
 
 
 def test_save_policy_rego_creates_files(tmp_path, config_file, monkeypatch):
-    """save_policy_rego writes realm_roles and default Rego files, plus per-service files."""
+    """save_policy_rego writes roles and default Rego files, plus per-service files."""
     from aiac.pdp.policy.builders.rego import save_policy_rego
     from aiac.pdp.library.read_api_from_config import Configuration as FileConfiguration
 
@@ -199,7 +199,7 @@ def test_save_policy_rego_creates_files(tmp_path, config_file, monkeypatch):
 
     save_policy_rego(policy, str(tmp_path), realm="demo")
 
-    assert (tmp_path / "realm_roles.rego").exists()
+    assert (tmp_path / "roles.rego").exists()
     assert (tmp_path / "default_inbound.rego").exists()
     assert (tmp_path / "default_outbound.rego").exists()
     assert (tmp_path / "generated_policy_Dummy.rego").exists()
