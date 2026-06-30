@@ -722,6 +722,103 @@ class TestGetServicesByRole:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Subject hashability (8.15)
+# ---------------------------------------------------------------------------
+
+
+class TestSubjectHashability:
+    def _make_subject(self, id_, **kwargs):
+        defaults = {"id": id_, "username": f"user-{id_}", "enabled": True}
+        return Subject.model_validate({**defaults, **kwargs})
+
+    def test_equal_ids_are_equal(self):
+        assert self._make_subject("u1") == self._make_subject("u1")
+
+    def test_equal_ids_have_same_hash(self):
+        assert hash(self._make_subject("u1")) == hash(self._make_subject("u1"))
+
+    def test_different_ids_are_not_equal(self):
+        assert self._make_subject("u1") != self._make_subject("u2")
+
+    def test_subject_vs_role_same_id_not_equal(self):
+        s = self._make_subject("x1")
+        r = Role.model_validate({"id": "x1", "name": "viewer", "composite": False})
+        assert s != r
+
+    def test_subject_vs_service_same_id_not_equal(self):
+        s = self._make_subject("x1")
+        svc = Service.model_validate({"id": "x1", "clientId": "my-app", "name": "my-app", "enabled": True})
+        assert s != svc
+
+    def test_subject_usable_as_dict_key(self):
+        s = self._make_subject("u1")
+        d = {s: "value"}
+        assert d[s] == "value"
+
+
+# ---------------------------------------------------------------------------
+# get_subjects_by_role (8.15)
+# ---------------------------------------------------------------------------
+
+
+class TestGetSubjectsByRole:
+    def _make_role(self, **kwargs):
+        defaults = {"id": "role-uuid", "name": "viewer", "composite": False}
+        return Role.model_validate({**defaults, **kwargs})
+
+    def test_returns_list_of_subject(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            result = Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert isinstance(result[0], Subject)
+        assert result[0].id == "u1"
+
+    def test_issues_get_with_role_id_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role(id="my-role-id")
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
+            Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert m.call_args[0][0] == f"{BASE}/subjects"
+        assert m.call_args[1]["params"] == {"role_id": "my-role-id", "realm": REALM}
+
+    def test_returns_empty_list_when_no_subjects(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])):
+            result = Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert result == []
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_err(500)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).get_subjects_by_role(role)
+
+    def test_realm_forwarded_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
+            Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert m.call_args[1]["params"]["realm"] == REALM
+
+    def test_no_secondary_enrichment_calls(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        payload = [{"id": "u1", "username": "alice", "enabled": True}]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)) as m:
+            Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert m.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# get_services_by_scope (unchanged)
+# ---------------------------------------------------------------------------
+
+
 class TestGetServicesByScope:
     def _make_scope(self, **kwargs):
         defaults = {"id": "scope-uuid", "name": "read:data"}

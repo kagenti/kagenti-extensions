@@ -614,6 +614,100 @@ class TestAssignRoleToService:
 
 
 # ---------------------------------------------------------------------------
+# GET /subjects?role_id= (filtered variant, 2.14)
+# ---------------------------------------------------------------------------
+
+
+class TestGetSubjectsByRole:
+    def test_returns_enriched_subjects_for_role(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_realm_role_members.return_value = [
+            {"id": "u1", "username": "alice"},
+            {"id": "u2", "username": "bob"},
+        ]
+        admin.get_all_roles_of_user.side_effect = [
+            {"realmMappings": [{"id": "rid", "name": "viewer"}], "clientMappings": {}},
+            {"realmMappings": [{"id": "rid", "name": "viewer"}], "clientMappings": {}},
+        ]
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2
+        admin.get_realm_role_by_id.assert_called_once_with("rid")
+        admin.get_realm_role_members.assert_called_once_with("viewer")
+        assert admin.get_all_roles_of_user.call_count == 2
+
+    def test_returns_empty_list_when_no_members(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_realm_role_members.return_value = []
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 200
+        assert resp.json() == []
+        admin.get_all_roles_of_user.assert_not_called()
+
+    def test_returns_502_on_keycloak_error_in_get_role(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.side_effect = KeycloakError(
+            error_message="not found", response_code=404
+        )
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def test_returns_502_on_keycloak_error_in_get_members(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_realm_role_members.side_effect = KeycloakError(
+            error_message="error", response_code=500
+        )
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def test_returns_502_on_keycloak_error_during_enrichment(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_realm_role_members.return_value = [{"id": "u1", "username": "alice"}]
+        admin.get_all_roles_of_user.side_effect = KeycloakError(
+            error_message="error", response_code=500
+        )
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def test_enrichment_shape_includes_realm_mappings(self):
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "viewer"}
+        admin.get_realm_role_members.return_value = [{"id": "u1", "username": "alice"}]
+        admin.get_all_roles_of_user.return_value = {
+            "realmMappings": [{"id": "rid", "name": "viewer"}],
+            "clientMappings": {"account": {"mappings": []}},
+        }
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}&role_id=rid")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "realmMappings" in body[0]
+        assert body[0]["realmMappings"] == [{"id": "rid", "name": "viewer"}]
+
+    def test_missing_realm_returns_422(self):
+        app.dependency_overrides.clear()
+        resp = TestClient(app).get("/subjects?role_id=rid")
+        assert resp.status_code == 422
+
+    def test_unfiltered_still_works(self):
+        admin = MagicMock()
+        admin.get_users.return_value = [{"id": "u1", "username": "alice"}]
+        resp = _make_client(admin).get(f"/subjects?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json() == [{"id": "u1", "username": "alice"}]
+        admin.get_users.assert_called_once()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # KeycloakError → 502 on all endpoints
 # ---------------------------------------------------------------------------
 
