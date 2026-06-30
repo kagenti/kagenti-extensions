@@ -47,7 +47,7 @@ The PDP Policy Writer retains sole ownership of the `AuthorizationPolicy` CR (Re
 
 **Framework:** FastAPI + uvicorn. **Base image:** `python:3.12-slim`.
 
-**Storage backend:** SQLite via `sqlite3` stdlib (zero extra dependency — `sqlite3` ships with the Python standard library). Database file: `AGENTPOLICY_DB_PATH` (default `/data/state.db`).
+**Storage backend:** SQLite via `sqlite3` stdlib (zero extra dependency — `sqlite3` ships with the Python standard library). Database file: `AGENTPOLICY_DB_PATH` (default `/data/policy_model.db`).
 
 **Schema:**
 
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS agent_policies (
 
 | Variable | Source | Default |
 |---|---|---|
-| `AGENTPOLICY_DB_PATH` | ConfigMap (`aiac-policy-store-config`) | `/data/state.db` |
+| `AGENTPOLICY_DB_PATH` | ConfigMap (`aiac-policy-store-config`) | `/data/policy_model.db` |
 
 **Dependencies:** `fastapi`, `uvicorn[standard]`, `pydantic`. `sqlite3` is stdlib (no new dependency).
 
