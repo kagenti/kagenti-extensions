@@ -51,8 +51,25 @@ class _RoleCreate(BaseModel):
 
 
 @app.get("/subjects")
-def list_subjects(admin: KeycloakAdmin = Depends(get_admin)):
+def list_subjects(
+    realm: str = Query(...),
+    role_id: str | None = Query(default=None),
+    admin: KeycloakAdmin = Depends(get_admin),
+):
     try:
+        if role_id is not None:
+            role = admin.get_realm_role_by_id(role_id)
+            role_name = role["name"]
+            users = admin.get_realm_role_members(role_name)
+            result = []
+            for user in users:
+                raw = admin.get_all_roles_of_user(user["id"])
+                result.append({
+                    **user,
+                    "realmMappings": raw.get("realmMappings", []),
+                    "serviceMappings": raw.get("clientMappings", {}),
+                })
+            return result
         return admin.get_users()
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})

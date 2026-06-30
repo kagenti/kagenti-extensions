@@ -108,6 +108,14 @@ class Configuration:
         self._check(resp)
         return [Service.model_validate(s) for s in resp.json()]
 
+    def get_subjects_by_role(self, role: Role) -> list[Subject]:
+        resp = requests.get(
+            f"{self._base_url()}/subjects",
+            params={"role_id": role.id, "realm": self.realm},
+        )
+        self._check(resp)
+        return [Subject.model_validate(s) for s in resp.json()]
+
     def get_services_by_scope(self, scope: Scope) -> list[Service]:
         resp = requests.get(
             f"{self._base_url()}/services",

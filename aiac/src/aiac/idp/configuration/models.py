@@ -14,6 +14,9 @@ class Subject(BaseModel):
     enabled: bool
     roles: list["Role"] = []
 
+    __hash__ = lambda self: hash(self.id)
+    __eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
+
 
 class Role(BaseModel):
     model_config = ConfigDict(extra="ignore")
