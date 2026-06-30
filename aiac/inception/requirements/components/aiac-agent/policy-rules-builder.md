@@ -2,7 +2,7 @@
 
 ## Description
 
-The **Policy Rules Builder** (PRB) is a shared module at `agent/policy_rules_builder/`. It exposes two module-level functions that the Controller calls based on the trigger type. Each function internally runs a LangGraph `StateGraph`; the Controller is decoupled from LangGraph mechanics. The PRB fetches its own RAG context from ChromaDB (both collections) and emits `list[PolicyRule]` scoped to the input. It does **not** call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly; only the PCE does.
+The **Policy Rules Builder** (PRB) is a shared module at `agent/policy_rules_builder/`. It exposes two module-level functions that producing sub-agents call directly. Each function internally runs a LangGraph `StateGraph`; callers are decoupled from LangGraph mechanics. The PRB fetches its own RAG context from ChromaDB (both collections) and emits `list[PolicyRule]` scoped to the input. It does **not** call `aiac.pdp.policy.library` or `aiac.policy.store.library` directly; only the PCE does.
 
 ---
 
@@ -37,11 +37,11 @@ Used as one of the calls for UC1 (Service Onboarding). See the Controller sub-PR
 
 ## Use-case dispatch
 
-| Use Case | Function(s) called |
-|---|---|
-| UC1 — Service Onboarding | Both `build_role_rules` and `build_scope_rules` (details in Controller sub-PRD) |
-| UC2 — Policy Update (Build/Rebuild) | TBD |
-| UC3 — Role Update | `build_role_rules(role, scopes)` |
+| Use Case | Caller | Function(s) called |
+|---|---|---|
+| UC1 — Service Onboarding | Service Policy sub-agent | `build_scope_rules(other_roles, scope)` per agent/tool scope + `build_role_rules(role, other_scopes)` per agent role (agent path only) |
+| UC2 — Policy Update (Build) | Build sub-agent | TBD |
+| UC3 — Role Update | Role sub-agent | `build_role_rules(role, all_scopes)` — one call |
 
 ---
 

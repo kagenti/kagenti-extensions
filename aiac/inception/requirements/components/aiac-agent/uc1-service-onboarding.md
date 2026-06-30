@@ -16,7 +16,7 @@ UC1 is the only use case with an Orchestrator, because it is a two-stage pipelin
 1. **Service Provision** (LLM-based): classify the new service, derive its roles + scopes, write them into the IdP.
 2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), package into `list[tuple]`, return to the Orchestrator.
 
-The Orchestrator returns only the `list[tuple]` to the Controller. The Controller runs the PRB → PCE pipeline; the PCE owns all rule reconciliation.
+The Orchestrator returns `list[PolicyRule]` to the Controller. The Controller calls the PCE; the PCE owns all rule reconciliation.
 
 ```mermaid
 flowchart TD
@@ -41,9 +41,8 @@ flowchart TD
     PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
 
     CTRL -->|"service/:id"| ORC
-    ORC -->|"list[tuple]"| CTRL
-    CTRL -->|"per tuple"| PRB
-    PRB -->|"rules"| CTRL
+    SA_POL -->|"calls"| PRB
+    ORC -->|"list[PolicyRule]"| CTRL
     CTRL -->|"merged rules"| PCE
 ```
 
@@ -53,8 +52,8 @@ flowchart TD
 
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
-2. Call `ServicePolicyUpdate.run(service_provision, service_type)` → get back `list[tuple]`.
-3. Return the `list[tuple]` to the Controller.
+2. Call `ServicePolicyUpdate.run(service_provision, service_type)` → get back `list[PolicyRule]`.
+3. Return the `list[PolicyRule]` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
 
@@ -160,33 +159,25 @@ class ServiceProvision(BaseModel):
 
 `onboarding/service_policy/`
 
-**Nature:** deterministic, non-LLM module. Pure IdP reader + tuple packager.
+**Nature:** deterministic IdP reader + PRB invoker.
 
-**Purpose:** given the just-provisioned service's own roles + scopes (from Provision output), read the full IdP universe **excluding the new service's own entities**, and package the `list[tuple]` that the Controller will run through the PRB.
+**Purpose:** given the just-provisioned service's own roles + scopes (from Provision output), read the full IdP universe **excluding the new service's own entities**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
 
-The two exclusion types prevent self-mapping and keep each tuple's semantic intent crisp:
-- `(all_roles, agent_scopes)` = *who else may call my skills*
-- `(agent_roles, all_scopes)` = *what else may I call*
+The two call directions prevent self-mapping and keep each PRB call's semantic intent crisp:
+- `build_scope_rules(other_roles, agent_scope)` = *who else may call this skill*
+- `build_role_rules(agent_role, other_scopes)` = *what else may this role call* (agent path only)
 
 ### Steps
 
 1. Receive `service_provision: ServiceProvision` + `service_type: ServiceType` from the Orchestrator.
 2. Read **all roles** from `aiac.idp.configuration.api`, **excluding** the new service's own roles (i.e. exclude `role.name in {r.name for r in service_provision.roles}`).
 3. Read **all scopes** from `aiac.idp.configuration.api`, **excluding** the new service's own scopes (i.e. exclude `scope.name in {s.name for s in service_provision.scopes}`).
-4. Package and return:
-   - **`service_type = tool`:**
-     ```
-     [(other_roles, tool_scopes)]
-     ```
-     where `tool_scopes = [Scope(s) for s in service_provision.scopes]`.
-   - **`service_type = agent`:**
-     ```
-     [(other_roles, agent_scopes),
-      (agent_roles, other_scopes)]
-     ```
-     where `agent_scopes = [Scope(s) for s in service_provision.scopes]` and `agent_roles = [Role(r) for r in service_provision.roles]`.
+4. Call PRB and merge:
+   - **`service_type = tool`:** call `build_scope_rules(other_roles, scope)` for each scope in `service_provision.scopes`. Merge results into a single `list[PolicyRule]`.
+   - **`service_type = agent`:** call `build_scope_rules(other_roles, scope)` for each scope in `service_provision.scopes`; call `build_role_rules(role, other_scopes)` for each role in `service_provision.roles`. Merge all results into a single `list[PolicyRule]`.
+5. Return merged `list[PolicyRule]` to the Orchestrator.
 
-**Note on "all relevant scopes":** relevance (which of `other_scopes` maps to `agent_roles`) is determined by the PRB, not here. This module always passes the full excluded-self scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
+**Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full excluded-self scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
 
 ## File structure
 
@@ -202,7 +193,7 @@ aiac/src/aiac/agent/uc/
     │   └── types.py      ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision
     └── service_policy/
         ├── __init__.py
-        └── runner.py     ← ServicePolicyUpdate.run(service_provision, service_type)
+        └── runner.py     ← ServicePolicyUpdate.run(service_provision, service_type) → list[PolicyRule]
 ```
 
 ## Out of scope
