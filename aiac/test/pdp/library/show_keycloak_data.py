@@ -108,6 +108,22 @@ def main() -> None:
         print(f"    description : {sc.description or '—'}")
     print(f"Total: {len(scopes)} scope(s)\n")
 
+    # --- Services by Role (PCE queries) ---
+    print("=== Services by Role ===")
+    for r in roles:
+        svcs_for_role: list[Service] = cfg.get_services_by_role(r)
+        names = ", ".join(s.serviceId for s in svcs_for_role) if svcs_for_role else "—"
+        print(f"  {r.name}: {names}")
+    print()
+
+    # --- Services by Scope (PCE queries) ---
+    print("=== Services by Scope ===")
+    for sc in scopes:
+        svcs_for_scope: list[Service] = cfg.get_services_by_scope(sc)
+        names = ", ".join(s.serviceId for s in svcs_for_scope) if svcs_for_scope else "—"
+        print(f"  {sc.name}: {names}")
+    print()
+
 
 if __name__ == "__main__":
     main()

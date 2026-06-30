@@ -31,10 +31,10 @@ flowchart TD
     PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
     PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
 
+    SA -->|"calls"| PRB
+
     CTRL -->|"role/:id"| SA
-    SA -->|"list[tuple]"| CTRL
-    CTRL -->|"per tuple"| PRB
-    PRB -->|"rules"| CTRL
+    SA -->|"list[PolicyRule]"| CTRL
     CTRL -->|"merged rules"| PCE
 ```
 
@@ -45,17 +45,17 @@ flowchart TD
 **Steps:**
 1. Read the triggering role (`role_id`) from `aiac.idp.configuration.api`.
 2. Read **all scopes** from `aiac.idp.configuration.api`.
-3. Return `[( [role], all_scopes )]` — a one-element `list[tuple]`.
+3. Call `build_role_rules(role, all_scopes)` on the PRB.
+4. Return the resulting `list[PolicyRule]`.
 
-**Output:** `list[tuple[list[Role], list[Scope]]]` — one element.
+**Output:** `list[PolicyRule]`.
 
 ## Controller behaviour (for this UC)
 
-1. Receives `[(role, all_scopes)]` from the sub-agent.
-2. Calls the PRB once with `(role, all_scopes)` → `list[PolicyRule]` (only the relevant scope mappings for that role). See [`policy-rules-builder.md`](policy-rules-builder.md).
-3. Calls `compute_and_apply(rules)` from `aiac.policy.computation`.
+1. Receives `list[PolicyRule]` from the Role sub-agent (PRB already called and merged internally).
+2. Calls `compute_and_apply(rules)` from `aiac.policy.computation`.
    - The PCE unconditionally deletes the role's stale rules before applying the new ones. See [`../policy-computation-engine.md`](../policy-computation-engine.md).
-4. Returns bare HTTP status; writes summary + debug to log.
+3. Returns bare HTTP status; writes summary + debug to log.
 
 ## File structure
 

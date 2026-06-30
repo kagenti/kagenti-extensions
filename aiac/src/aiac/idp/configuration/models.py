@@ -24,6 +24,9 @@ class Role(BaseModel):
     composite: bool
     childRoles: list["Role"] = []
 
+    __hash__ = lambda self: hash(self.id)
+    __eq__ = lambda self, other: isinstance(other, Role) and self.id == other.id
+
 
 class Service(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -36,6 +39,9 @@ class Service(BaseModel):
     type: Literal["Agent", "Tool"] | None = None
     roles: list["Role"] = []
     scopes: list["Scope"] = []
+
+    __hash__ = lambda self: hash(self.id)
+    __eq__ = lambda self, other: isinstance(other, Service) and self.id == other.id
 
     @model_validator(mode="before")
     @classmethod
@@ -74,6 +80,9 @@ class Scope(BaseModel):
     id: str
     name: str
     description: str | None = None
+
+    __hash__ = lambda self: hash(self.id)
+    __eq__ = lambda self, other: isinstance(other, Scope) and self.id == other.id
 
 
 Subject.model_rebuild()

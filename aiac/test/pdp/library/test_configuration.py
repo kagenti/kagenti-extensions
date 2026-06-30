@@ -367,47 +367,13 @@ class TestGetService:
 
 
 # ---------------------------------------------------------------------------
-# set_service_type
+# set_service_type — removed
 # ---------------------------------------------------------------------------
 
 
-class TestSetServiceType:
-    SERVICE_ID = "svc-001"
-
-    def test_issues_patch_to_correct_url(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
-        with patch("aiac.idp.configuration.api.requests.patch", return_value=_ok(updated)) as m:
-            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
-        assert m.call_args[0][0] == f"{BASE}/services/{self.SERVICE_ID}"
-
-    def test_json_body_uses_type_key(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Agent"}
-        with patch("aiac.idp.configuration.api.requests.patch", return_value=_ok(updated)) as m:
-            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
-        assert m.call_args[1].get("json") == {"type": "Agent"}
-
-    def test_returns_service_instance(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True, "type": "Tool"}
-        with patch("aiac.idp.configuration.api.requests.patch", return_value=_ok(updated)):
-            result = Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
-        assert isinstance(result, Service)
-        assert result.type == "Tool"
-
-    def test_realm_forwarded_as_query_param(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        updated = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True}
-        with patch("aiac.idp.configuration.api.requests.patch", return_value=_ok(updated)) as m:
-            Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Tool")
-        assert m.call_args[1].get("params") == {"realm": REALM}
-
-    def test_raises_on_non_2xx(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        with patch("aiac.idp.configuration.api.requests.patch", return_value=_err()):
-            with pytest.raises(RuntimeError):
-                Configuration.for_realm(REALM).set_service_type(self.SERVICE_ID, "Agent")
+class TestSetServiceTypeRemoved:
+    def test_set_service_type_does_not_exist(self):
+        assert not hasattr(Configuration(REALM), "set_service_type")
 
 
 # ---------------------------------------------------------------------------

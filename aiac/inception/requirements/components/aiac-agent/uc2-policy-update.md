@@ -33,20 +33,22 @@ flowchart TD
     PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
     PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
 
+    SA_REBUILD -->|"delegates"| SA_BUILD
+    SA_BUILD -->|"calls"| PRB
+
     CTRL -->|"build"| SA_BUILD
     CTRL -->|"rebuild"| SA_REBUILD
-    SA_BUILD -->|"list[tuple]"| CTRL
-    SA_REBUILD -->|"list[tuple]"| CTRL
-    CTRL -->|"per tuple"| PRB
-    PRB -->|"rules"| CTRL
+    SA_BUILD -->|"list[PolicyRule]"| CTRL
+    SA_REBUILD -->|"list[PolicyRule]"| CTRL
     CTRL -->|"merged rules"| PCE
 ```
 
 ## What is known
 
 - **Two sub-agents:** Build (responds to `aiac.apply.policy.build` + `POST /apply/policy/build`) and Rebuild (responds to `POST /apply/policy/rebuild` only).
-- Both return `list[tuple[list[Role], list[Scope]]]` to the Controller.
-- The Controller runs the PRB per tuple → merge → single `compute_and_apply`. This is the same uniform pipeline as all other UCs.
+- Build calls the PRB directly, merges the results, and returns `list[PolicyRule]` to the Controller.
+- Rebuild delegates to Build and returns Build's `list[PolicyRule]` to the Controller.
+- The Controller calls `compute_and_apply(merged_rules)` via the PCE — the same pattern as all other UCs.
 - Internal behavior (how Build/Rebuild sub-agents derive their tuple content, what IdP data they read, whether any LLM node is involved) is **deferred** — to be resolved in a dedicated grill session.
 
 ## Out of scope (this stub)
