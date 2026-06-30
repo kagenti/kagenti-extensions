@@ -51,7 +51,7 @@ aiac/src/aiac/policy/
 | Dependency | Purpose |
 |------------|---------|
 | `pydantic` | `BaseModel`, `ConfigDict` |
-| `aiac.idp.configuration.models` | Typed `Role`, `Scope`, `Service` |
+| `aiac.idp.configuration.models` | Typed `Role`, `Scope`, `Service`, `Subject` |
 
 No HTTP client dependency. No `requests`, no `python-dotenv`.
 
@@ -78,6 +78,7 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 | `agent_roles` | `list[Role]` | Realm roles assigned to this agent |
 | `agent_scopes` | `list[Scope]` | Scopes this agent exposes |
 | `source_roles` | `dict[Service, list[Role]]` | Inbound: source service → roles granted |
+| `subject_roles` | `dict[Subject, list[Role]]` | Inbound: subject (user) → roles held on behalf of which this agent acts |
 | `scope_targets` | `dict[Scope, list[Service]]` | Outbound: scope → target services permitted |
 | `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(caller_role, requested_scope)` tuples |
 | `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, requested_scope)` tuples |
@@ -96,10 +97,10 @@ A partial or full system policy model. When sent to `POST /policy` on the Policy
 
 ### Hashability of `Service`, `Role`, `Scope`
 
-`Service`, `Role`, and `Scope` (defined in `aiac.idp.configuration.models`) are used as dict keys in `AgentPolicyModel.source_roles` and `AgentPolicyModel.scope_targets`. They implement custom `__hash__` and `__eq__` based on their `id` field only:
+`Service`, `Role`, `Scope`, and `Subject` (defined in `aiac.idp.configuration.models`) are used as dict keys in `AgentPolicyModel.source_roles`, `AgentPolicyModel.subject_roles`, and `AgentPolicyModel.scope_targets`. They implement custom `__hash__` and `__eq__` based on their `id` field only:
 
 ```python
-# On Service, Role, Scope in aiac.idp.configuration.models:
+# On Service, Role, Scope, Subject in aiac.idp.configuration.models:
 __hash__ = lambda self: hash(self.id)
 __eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
 ```
@@ -110,10 +111,11 @@ __eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.
 
 ```python
 from aiac.policy.model.models import PolicyRule, AgentPolicyModel, PolicyModel
-from aiac.idp.configuration.models import Role, Scope, Service
+from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
 role = Role(id="r1", name="weather-reader", composite=False)
 scope = Scope(id="s1", name="read")
+subject = Subject(id="u1", username="alice", enabled=True)
 
 rule = PolicyRule(role=role, scope=scope)
 agent_model = AgentPolicyModel(
@@ -121,6 +123,7 @@ agent_model = AgentPolicyModel(
     agent_roles=[role],
     agent_scopes=[scope],
     source_roles={},
+    subject_roles={subject: [role]},
     scope_targets={},
     inbound_rules=[rule],
     outbound_rules=[],
@@ -140,8 +143,8 @@ model = PolicyModel(agents=[agent_model])
 
 Key behaviors to assert:
 - `PolicyRule` accepts typed `Role` and `Scope` objects; rejects plain `str` where `Role`/`Scope` is expected.
-- `AgentPolicyModel` with `Service` and `Scope` keys in `source_roles` and `scope_targets` is serializable and deserializable via `model_dump()` / `model_validate()`.
-- Two `Role` / `Scope` / `Service` instances with the same `id` are equal and hash-equal (usable as dict keys without collision).
+- `AgentPolicyModel` with `Service`, `Subject`, and `Scope` keys in `source_roles`, `subject_roles`, and `scope_targets` is serializable and deserializable via `model_dump()` / `model_validate()`.
+- Two `Role` / `Scope` / `Service` / `Subject` instances with the same `id` are equal and hash-equal (usable as dict keys without collision).
 - Two instances with different `id` values are not equal.
 - `ConfigDict(extra='ignore')` causes unknown fields to be silently discarded on `model_validate()`.
 
@@ -157,5 +160,5 @@ Key behaviors to assert:
 
 ## Further Notes
 
-- The `id`-only hash is intentional: two `Role` objects representing the same Keycloak role but fetched at different times (with potentially different `mappedScopes` or `childRoles`) must be treated as equal for dict key lookup.
+- The `id`-only hash is intentional: two `Role` / `Subject` / `Service` / `Scope` objects representing the same Keycloak entity but fetched at different times (with potentially different enrichment fields) must be treated as equal for dict key lookup.
 - `aiac/src/aiac/agent/policy/api.py` imports `PolicyRule` from `aiac.policy.model`. The `role_to_scopes` / `roles_to_scope` helpers in that file remain in place and are used by AIAC Agent sub-UC agents directly; they are not consumed by the PCE.

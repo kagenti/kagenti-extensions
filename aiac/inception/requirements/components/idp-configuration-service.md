@@ -10,7 +10,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 
 | Method | Path | Keycloak Admin API call | Description |
 |--------|------|------------------------|-------------|
-| GET | `/subjects` | `GET /admin/realms/{realm}/users` | All subjects (users) in realm |
+| GET | `/subjects` | `GET /admin/realms/{realm}/users` | All subjects (users) in realm; filtered to subjects with a specific role when `role_id` query param is provided |
 | GET | `/roles` | `GET /admin/realms/{realm}/roles` | All realm-level roles |
 | GET | `/subjects/{subject_id}/assignments` | `GET /admin/realms/{realm}/users/{subject_id}/role-mappings` | Realm and service permission assignments for a subject |
 | GET | `/services` | `GET /admin/realms/{realm}/clients` | All services (clients) |
@@ -25,6 +25,14 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
 | POST | `/services/{service_id}/roles/{role_id}` | `admin.get_client_service_account_user(service_id)` → `admin.assign_realm_roles(user_id, ...)` | Assign existing realm role to service account |
 | GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
+
+`GET /subjects?role_id={role_id}` (filtered variant):
+1. Calls `admin.get_realm_role_by_id(role_id)` to resolve the role name from its ID.
+2. Calls `admin.get_realm_role_members(role_name)` (`GET /admin/realms/{realm}/roles/{role-name}/users`) to retrieve users directly assigned to the role.
+3. For each returned user, enriches with realm role assignments by calling `GET /subjects/{id}/assignments?realm=<realm>` (same enrichment as the unfiltered `GET /subjects` endpoint).
+4. Returns `200 OK` with a JSON array of enriched user objects.
+5. Returns `[]` (empty array) when no subject holds the role directly.
+6. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 `GET /services/{service_id}`:
 1. Calls `admin.get_client(service_id)`.

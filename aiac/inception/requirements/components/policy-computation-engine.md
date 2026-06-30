@@ -66,15 +66,22 @@ def compute_and_apply(rules: list[PolicyRule]) -> None
 
 Given `rules: list[PolicyRule]`, the engine executes these steps:
 
-1. **Scope → inbound services:** for each rule's `scope`, call `Configuration.get_services_by_scope(rule.scope) -> list[Service]`. Add the rule to `inbound_rules` of each returned service's `AgentPolicyModel`.
+1. **Composite role flattening:** for each rule's `role`, recursively collect the role and all descendant roles from `role.childRoles` into a flat set of leaf roles. All subsequent role-based queries operate on this flattened set. A non-composite role yields a set containing only itself.
 
-2. **Role → outbound services:** for each rule's `role`, call `Configuration.get_services_by_role(rule.role) -> list[Service]`. Add the rule to `outbound_rules` of each returned service's `AgentPolicyModel`.
+2. **Scope → inbound services:** for each rule's `scope`, call `Configuration.get_services_by_scope(rule.scope) -> list[Service]`. Add the rule to `inbound_rules` of each returned service's `AgentPolicyModel`.
 
-3. **Realm-level roles (no owning service):** if `get_services_by_role(rule.role)` returns an empty list, the role is realm-level. No outbound assignment is made for that rule.
+3. **Role → outbound services + `source_roles`:** for each flattened role R, call `Configuration.get_services_by_role(R) -> list[Service]`. For each returned service S:
+   - Add the rule to `outbound_rules` of S's `AgentPolicyModel`.
+   - Append R to `source_roles[S]` (creating the entry if absent).
 
-4. **Additive merge:** for each affected service/agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`. Append new rules that are not already present (de-duplicate by value). Write the updated model back via `apply_agent_policy(agent_id, model)`.
+4. **Role → subjects + `subject_roles`:** for each flattened role R, call `Configuration.get_subjects_by_role(R) -> list[Subject]`. For each returned subject S:
+   - Append R to `subject_roles[S]` (creating the entry if absent).
 
-5. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
+5. **Realm-level roles (no owning service):** if `get_services_by_role(R)` returns an empty list for a flattened role R, the role is realm-level. No outbound assignment or `source_roles` entry is made for that role. `subject_roles` entries are still recorded if `get_subjects_by_role(R)` returns subjects.
+
+6. **Additive merge:** for each affected service/agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`. Append new rules and map entries that are not already present (de-duplicate rules by value; de-duplicate `source_roles` and `subject_roles` list entries by `id`). Write the updated model back via `apply_agent_policy(agent_id, model)`.
+
+7. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
 
 ### Merge Semantics
 
@@ -85,7 +92,7 @@ Rules are appended additively — existing `inbound_rules` and `outbound_rules` 
 | Module | Purpose |
 |--------|---------|
 | `aiac.policy.model` | `PolicyRule`, `AgentPolicyModel`, `PolicyModel` |
-| `aiac.idp.configuration.library` | `Configuration` — `get_services_by_role`, `get_services_by_scope` |
+| `aiac.idp.configuration.library` | `Configuration` — `get_services_by_role`, `get_services_by_scope`, `get_subjects_by_role` |
 | `aiac.policy.store.library` | `get_agent_policy`, `apply_agent_policy` |
 | `aiac.pdp.policy.library` | `apply_policy` — push updated `PolicyModel` to OPA |
 
@@ -109,16 +116,18 @@ The PCE is **not** called by:
 Good tests assert external behavior — what the engine does to the Policy Store and PDP Policy Writer — not internal merge logic directly.
 
 **Seam:** mock all four downstream dependencies at their module-level import boundary:
-- `aiac.idp.configuration.library` — mock `Configuration.get_services_by_role` and `Configuration.get_services_by_scope`
+- `aiac.idp.configuration.library` — mock `Configuration.get_services_by_role`, `Configuration.get_services_by_scope`, and `Configuration.get_subjects_by_role`
 - `aiac.policy.store.library` — mock `get_agent_policy`, `apply_agent_policy`
 - `aiac.pdp.policy.library` — mock `apply_policy`
 
 Key behaviors to assert:
 - Rules with a resolvable scope result in `apply_agent_policy` calls for each service returned by `get_services_by_scope`.
-- Rules with a resolvable role result in `apply_agent_policy` calls for each service returned by `get_services_by_role`.
-- Realm-level roles (empty service list) do not produce `apply_agent_policy` calls.
-- Existing rules in the fetched `AgentPolicyModel` are preserved after merge.
-- Duplicate rules (same role + scope already present) are not appended twice.
+- Rules with a resolvable role result in `apply_agent_policy` calls for each service returned by `get_services_by_role`; `source_roles` on the written model contains that service → role mapping.
+- `get_subjects_by_role` is called for each flattened role; `subject_roles` on the written model contains each returned subject → role mapping.
+- A composite role is flattened: `get_services_by_role` and `get_subjects_by_role` are called for each child role, not the composite role itself.
+- Realm-level roles (empty service list from `get_services_by_role`) do not produce `outbound_rules` or `source_roles` entries; `subject_roles` entries are still recorded for any subjects returned by `get_subjects_by_role`.
+- Existing rules and map entries in the fetched `AgentPolicyModel` are preserved after merge.
+- Duplicate rules (same role + scope already present) are not appended twice; duplicate `source_roles` / `subject_roles` list entries (same `id`) are not appended twice.
 - `apply_policy` is called exactly once after all `apply_agent_policy` writes complete.
 - An exception from any dependency is logged and does not propagate to the caller.
 

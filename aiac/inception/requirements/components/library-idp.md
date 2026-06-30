@@ -38,14 +38,14 @@ All models use `model_config = ConfigDict(extra='ignore')` to silently discard u
 
 Model definition order: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
 
-`Service`, `Role`, and `Scope` implement custom `__hash__` and `__eq__` based on their `id` field only:
+`Service`, `Role`, `Scope`, and `Subject` implement custom `__hash__` and `__eq__` based on their `id` field only:
 
 ```python
 __hash__ = lambda self: hash(self.id)
 __eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
 ```
 
-`frozen=True` is **not** used — these models have list fields that must remain mutable. The `id`-only hash enables their use as dict keys in `AgentPolicyModel.source_roles` and `AgentPolicyModel.scope_targets`.
+`frozen=True` is **not** used — these models have list fields that must remain mutable. The `id`-only hash enables their use as dict keys in `AgentPolicyModel.source_roles`, `AgentPolicyModel.subject_roles`, and `AgentPolicyModel.scope_targets`.
 
 #### `Subject`
 
@@ -142,6 +142,7 @@ class Configuration:
 
     def get_services_by_role(self, role: Role) -> list[Service]: ...
     def get_services_by_scope(self, scope: Scope) -> list[Service]: ...
+    def get_subjects_by_role(self, role: Role) -> list[Subject]: ...
 
     def create_scope(self, scope_name: str, scope_description: str) -> Scope: ...
     def map_scope_to_service(self, service: Service, scope: Scope) -> Service: ...
@@ -196,6 +197,13 @@ class Configuration:
 1. `GET {AIAC_PDP_CONFIG_URL}/services?scope_id={scope.id}&realm=<self.realm>`
 2. Returns all services that expose this scope.
 3. Raises `RuntimeError` on non-2xx. Returns an empty list when no service exposes the scope.
+
+`get_subjects_by_role(role: Role) -> list[Subject]`:
+1. `GET {AIAC_PDP_CONFIG_URL}/subjects?role_id={role.id}&realm=<self.realm>`
+2. Returns all subjects (users) that have this role directly assigned, enriched with their full realm role assignments (same enrichment as `get_subjects()`).
+3. Raises `RuntimeError` on non-2xx. Returns an empty list when no subject holds the role.
+
+> **Note:** This method returns only subjects with a **direct** assignment of the given role. Composite role traversal (resolving `childRoles` and querying each) is the caller's responsibility — see PCE algorithm in `aiac.policy.computation`.
 
 `create_scope`:
 1. Issues `POST {AIAC_PDP_CONFIG_URL}/scopes` with body `{"name": scope_name, "description": scope_description}`, appending `?realm=<self.realm>`.
