@@ -16,14 +16,14 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | GET | `/services` | `GET /admin/realms/{realm}/clients` | All services (clients) |
 | GET | `/services/{service_id}` | `GET /admin/realms/{realm}/clients/{service_id}` | Single service by ID |
 | GET | `/scopes` | `GET /admin/realms/{realm}/client-scopes` | All scopes |
-| GET | `/services/{service_id}/roles` | `admin.get_realm_roles_of_client_scope(service_id)` | Realm roles assigned to a service via scope mappings |
+| GET | `/services/{service_id}/roles` | `admin.get_client_service_account_user(service_id)` → `admin.get_realm_roles_of_user(user_id)` | Realm roles assigned to a service's account |
 | GET | `/services/{service_id}/scopes` | `admin.get_client_default_client_scopes(service_id)` | Default client scopes assigned to a service |
 | GET | `/roles/{role_name}/composites` | `GET /admin/realms/{realm}/roles/{role-name}/composites` | Current composite permissions assigned to a role |
 | GET | `/roles/{role_name}/scopes` | _(iterates all realm client scopes; filters to those with role mapped)_ | Scopes that have this realm role mapped |
 | POST | `/scopes` | `POST /admin/realms/{realm}/client-scopes` | Create realm-level scope |
 | POST | `/services/{service_id}/scopes/{scope_id}` | `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Assign existing scope as default scope to service |
 | POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
-| POST | `/services/{service_id}/roles/{role_id}` | `POST /admin/realms/{realm}/clients/{service_id}/scope-mappings/realm` | Assign existing role to service |
+| POST | `/services/{service_id}/roles/{role_id}` | `admin.get_client_service_account_user(service_id)` → `admin.assign_realm_roles(user_id, ...)` | Assign existing realm role to service account |
 | GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
 
 `GET /services/{service_id}`:
@@ -52,11 +52,12 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 `GET /services/{service_id}/roles`:
-1. Calls `admin.get_realm_roles_of_client_scope(service_id)` to return the realm roles assigned to the service via scope mappings.
-2. Returns `200 OK` with a JSON array of realm role objects.
-3. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
-
-> **Note:** This endpoint returns *realm roles* assigned through the client-scope mapping API (consistent with how `POST /services/{service_id}/roles/{role_id}` assigns them via `assign_realm_roles_to_client_scope`). It does **not** use `get_client_roles`, which returns client-specific role definitions rather than realm role assignments.
+1. Calls `admin.get_client_service_account_user(service_id)` to get the service account user.
+2. Extracts `user["id"]` from the result.
+3. Calls `admin.get_realm_roles_of_user(user_id)` to return the realm roles assigned to the service account.
+4. Returns `200 OK` with a JSON array of realm role objects.
+5. Returns `[]` (empty array) if `KeycloakError` has `response_code == 400` (service has no service account — not an error).
+6. Returns `502 Bad Gateway` with `{"error": ...}` on other `KeycloakError`.
 
 `GET /services/{service_id}/scopes`:
 1. Calls `admin.get_client_default_client_scopes(service_id)` to return the realm-level client scopes assigned as defaults to the service.
@@ -66,17 +67,19 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 `GET /roles/{role_name}/scopes`:
 1. Calls `admin.get_realm_role(role_name)` to resolve the role's ID.
 2. Iterates all realm client scopes via `admin.get_client_scopes()`.
-3. For each scope, calls `admin.get_realm_roles_of_client_scope(scope["id"])` and includes the scope if the role's ID appears in the result.
+3. For each scope, calls `admin.get_all_roles_of_client_scope(scope["id"])` and includes the scope if the role's ID appears in the `realmMappings` list of the result.
 4. Returns `200 OK` with a JSON array of client scope objects that have this realm role mapped.
 5. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 > **Performance note:** This is an O(scopes) endpoint — one Keycloak call per realm client scope. Suitable for infrequent enrichment calls; not intended for high-throughput polling.
 
 `POST /services/{service_id}/roles/{role_id}`:
-1. Calls `admin.assign_realm_roles_to_client_scope(service_id, [{"id": role_id}])` to assign the role to the service's scope mappings.
-2. Returns `201 Created` on success.
-3. Returns `409 Conflict` if the role is already assigned to the service.
-4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+1. Calls `admin.get_client_service_account_user(service_id)` to get the service account user.
+2. Extracts `user["id"]` from the result.
+3. Calls `admin.assign_realm_roles(user_id, [{"id": role_id}])` to assign the realm role to the service account.
+4. Returns `201 Created` on success.
+5. Returns `409 Conflict` if the role is already assigned.
+6. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 All endpoints except `/health` require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent. `/health` accepts no realm parameter — it calls `_get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])` directly.
 
@@ -137,8 +140,9 @@ docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
 - `get_admin(realm: str = Query(...))` is a FastAPI dependency. On each call it checks the cache; on a miss it acquires the lock, double-checks, and constructs a new `KeycloakAdmin(realm_name=realm, user_realm_name=KEYCLOAK_ADMIN_REALM, ...)`. FastAPI returns `422` automatically if `realm` is absent.
 - All endpoints except `/health` declare `admin: KeycloakAdmin = Depends(get_admin)`. `/health` calls `_get_or_create_admin` directly with `os.environ["KEYCLOAK_ADMIN_REALM"]` — no FastAPI dependency, no realm query param.
 - Each GET endpoint calls the corresponding `python-keycloak` method and returns the result directly via `JSONResponse`.
-- `GET /services/{service_id}/roles`: call `admin.get_realm_roles_of_client_scope(service_id)` — returns realm roles assigned to the service via the client-scope mapping API (not `get_client_roles`, which returns client-specific role definitions).
+- `GET /services/{service_id}/roles`: call `admin.get_client_service_account_user(service_id)` → extract `user["id"]` → call `admin.get_realm_roles_of_user(user_id)`. Returns `[]` if `KeycloakError.response_code == 400` (service has no service account); `502` on other `KeycloakError`.
 - `GET /services/{service_id}/scopes`: call `admin.get_client_default_client_scopes(service_id)`.
 - `GET /roles/{role_name}/composites`: call `admin.get_composite_realm_roles_of_role(role_name=role_name)`.
-- `GET /roles/{role_name}/scopes`: resolve role ID via `admin.get_realm_role(role_name)`, then iterate `admin.get_client_scopes()` and filter to scopes where the role ID appears in `admin.get_realm_roles_of_client_scope(scope["id"])`.
+- `GET /roles/{role_name}/scopes`: resolve role ID via `admin.get_realm_role(role_name)`, then iterate `admin.get_client_scopes()` and for each scope call `admin.get_all_roles_of_client_scope(scope["id"])`; extract `realmMappings` from the result and include the scope if the role ID appears in that list.
+- `POST /services/{service_id}/roles/{role_id}`: call `admin.get_client_service_account_user(service_id)` → extract `user["id"]` → call `admin.assign_realm_roles(user_id, [{"id": role_id}])`.
 - On `KeycloakError`, return HTTP 502 with `{"error": str(e)}`.
