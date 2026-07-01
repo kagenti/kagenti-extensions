@@ -11,12 +11,12 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from starlette.responses import JSONResponse, Response
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel
 from aiac.pdp.service.policy.opa.rego import (
     generate_inbound_rego,
     generate_outbound_rego,
     slugify,
 )
+from aiac.policy.model.models import AgentPolicyModel, PolicyModel
 
 
 def get_output_dir() -> Path:
