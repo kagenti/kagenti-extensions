@@ -12,20 +12,22 @@ The service has no dependency on Keycloak. All Keycloak operations (entity reads
 
 ---
 
-## Pydantic models (`aiac.pdp.library.models`)
+## Pydantic models (`aiac.policy.model.models`)
 
-Dependency-free (only `pydantic`). Importable by any consumer without pulling in HTTP client dependencies.
+The Policy Writer deserializes the **canonical** `PolicyModel` / `AgentPolicyModel` / `PolicyRule` defined in [policy-model.md](policy-model.md) and imported from `aiac.policy.model.models`. This service does **not** define its own copies; the tables below summarize the fields the Rego generator consumes. (The former `aiac.pdp.library.models` module is deprecated — see policy-model.md "Replaces".)
 
 All models use `model_config = ConfigDict(extra='ignore')`.
 
 ### `PolicyRule`
 
-A single access rule: a `(role, scope)` tuple. Used in both inbound and outbound rule sets.
+A single access rule pairing a typed role with a typed scope. Used in both inbound and outbound rule sets.
 
 | Field | Type |
 |-------|------|
-| `role` | `str` |
-| `scope` | `str` |
+| `role` | `Role` |
+| `scope` | `Scope` |
+
+`Role` and `Scope` are the typed models from `aiac.idp.configuration.models`. The Rego generator emits their `.name` as the string literal OPA matches against.
 
 ### `AgentPolicyModel`
 
@@ -34,16 +36,19 @@ Complete policy definition for a single agent (service). Contains two sets of `P
 | Field | Type | Description |
 |-------|------|-------------|
 | `agent_id` | `str` | Service ID from the AIAC trigger event (`aiac.apply.service.{id}`) |
-| `agent_roles` | `list[str]` | Realm roles assigned to this agent |
-| `agent_scopes` | `list[str]` | Scopes this agent exposes |
-| `source_roles` | `dict[str, list[str]]` | Maps inbound source service ID → list of realm roles |
-| `scope_targets` | `dict[str, list[str]]` | Maps outbound scope → list of permitted target service IDs |
+| `agent_roles` | `list[Role]` | Realm roles assigned to this agent |
+| `agent_scopes` | `list[Scope]` | Scopes this agent exposes |
+| `source_roles` | `dict[str, list[Role]]` | Inbound: source service **id** → roles granted |
+| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (user) **id** → roles held on behalf of which this agent acts |
+| `target_scopes` | `dict[str, list[Scope]]` | Outbound: target service **id** → scopes this agent may request on it |
 | `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(caller_role, requested_scope)` tuples |
 | `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, requested_scope)` tuples |
 
 **Inbound rule semantics:** a caller with realm role `role` is permitted to invoke this agent requesting scope `scope`.
 
 **Outbound rule semantics:** this agent acting as realm role `role` is permitted to request scope `scope` on a target service.
+
+**Note on `target_scopes` direction:** the map is keyed by **target service id → allowed scopes** (the inverse of the former `scope_targets`, which was `scope → targets`). The outbound Rego generator inverts it back to a scope → target-ids table for OPA evaluation (see below).
 
 ### `PolicyModel`
 
@@ -56,7 +61,7 @@ A partial or full system policy model. When sent to the PDP Policy Writer, conta
 ### Usage
 
 ```python
-from aiac.pdp.library.models import PolicyModel, AgentPolicyModel, PolicyRule
+from aiac.policy.model.models import PolicyModel, AgentPolicyModel, PolicyRule
 ```
 
 ---
@@ -97,7 +102,7 @@ Evaluated by the AuthBridge OPA plugin in the **inbound pipeline**. Input docume
 package authz.{agent_slug}.inbound
 
 source_roles := {
-    "{source_id}": ["{role}", ...],
+    "{source_id}": ["{role.name}", ...],
     ...
 }
 
@@ -105,8 +110,8 @@ default allow := false
 
 allow if {
     some role in source_roles[input.source]
-    role == "{rule.role}"
-    input.scope == "{rule.scope}"
+    role == "{rule.role.name}"
+    input.scope == "{rule.scope.name}"
 }
 # ... one allow block per inbound PolicyRule
 ```
@@ -118,17 +123,19 @@ Evaluated by the AuthBridge OPA plugin in the **outbound pipeline**. Input docum
 ```rego
 package authz.{agent_slug}.outbound
 
+# scope_targets is derived by inverting the model's target_scopes
+# (target id → scopes) into scope name → target ids for OPA evaluation.
 scope_targets := {
-    "{scope}": ["{target_id}", ...],
+    "{scope.name}": ["{target_id}", ...],
     ...
 }
 
 default allow := false
 
 allow if {
-    input.role == "{rule.role}"
-    input.scope == "{rule.scope}"
-    input.target in scope_targets["{rule.scope}"]
+    input.role == "{rule.role.name}"
+    input.scope == "{rule.scope.name}"
+    input.target in scope_targets["{rule.scope.name}"]
 }
 # ... one allow block per outbound PolicyRule
 ```
@@ -165,7 +172,7 @@ python-dotenv
 
 ```python
 from aiac.pdp.library.policy import apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
-from aiac.pdp.library.models import PolicyModel, AgentPolicyModel, PolicyRule
+from aiac.policy.model.models import PolicyModel, AgentPolicyModel, PolicyRule
 
 apply_agent_policy("weather-agent", agent_model)
 delete_policy()
@@ -228,8 +235,8 @@ aiac/src/aiac/pdp/
 ├── __init__.py
 └── library/
     ├── __init__.py
-    ├── models.py       # PolicyRule, AgentPolicyModel, PolicyModel
     └── policy.py       # apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
+                        # (models now imported from aiac.policy.model.models)
 ```
 
 Build command:
@@ -246,7 +253,7 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
 - Instantiate a `kubernetes.client.CustomObjectsApi` for all CR operations.
 - `_slugify(agent_id: str) -> str`: replace hyphens with underscores, lowercase — produces a valid Rego package name segment.
 - `_generate_inbound_rego(model: AgentPolicyModel) -> str`: render the inbound Rego package string from the model's `source_roles` map and `inbound_rules`.
-- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string from the model's `scope_targets` map and `outbound_rules`.
+- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string from the model's `target_scopes` map and `outbound_rules`, inverting `target_scopes` (target id → scopes) into the scope name → target ids table OPA evaluates against.
 - `_upsert_agent(agent_id: str, inbound_rego: str, outbound_rego: str)`: patch the `AuthorizationPolicy` CR to upsert the two packages for `agent_id`. Schema TBD.
 - `_delete_agent(agent_id: str)`: patch the CR to remove all packages for `agent_id`.
 - `_delete_all()`: patch the CR to remove all packages.

@@ -519,7 +519,7 @@ Tests live in `aiac/test/`.
 | PDP Policy Writer (OPA) endpoints | Kubernetes CR write (`AuthorizationPolicy`) | 204 on success, 502 on CR write error |
 | Policy Store endpoints | SQLite `:memory:` database | Correct read/write/delete; 404 on missing agent; 502 on SQLite write error; 503 on SQLite open/query failure at `/health` |
 | `aiac.policy.store.library` functions | Policy Store HTTP endpoints | Correct method + path per function; returns typed model on read; `RuntimeError` on non-2xx; default URL fallback |
-| `aiac.policy.model` | No mock needed | `extra='ignore'` drops unknown fields; `Role`/`Scope`/`Service` hash/eq on `id`; `model_validate` round-trips correctly |
+| `aiac.policy.model` | No mock needed | `extra='ignore'` drops unknown fields; relationship maps keyed by string `id` round-trip through `model_dump(mode="json")` / `model_validate` with typed `Role` / `Scope` values preserved |
 | `aiac.idp.configuration.api` functions | IdP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback; `get_services_by_role` and `get_services_by_scope` issue correct query params |
 | `aiac.pdp.policy.library` functions | PDP Policy Writer HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
 | `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged, not propagated |
