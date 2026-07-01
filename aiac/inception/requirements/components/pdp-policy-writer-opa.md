@@ -38,17 +38,17 @@ Complete policy definition for a single agent (service). Contains two sets of `P
 | `agent_id` | `str` | Service ID from the AIAC trigger event (`aiac.apply.service.{id}`) |
 | `agent_roles` | `list[Role]` | Realm roles assigned to this agent |
 | `agent_scopes` | `list[Scope]` | Scopes this agent exposes |
-| `source_roles` | `dict[str, list[Role]]` | Inbound: source service **id** → roles granted |
-| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (user) **id** → roles held on behalf of which this agent acts |
+| `source_roles` | `dict[str, list[Role]]` | Inbound: source (calling service) **id** → roles held. **Optional** gate input — an absent source passes. |
+| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (end-user) **id** → roles held. **Mandatory** gate input. |
 | `target_scopes` | `dict[str, list[Scope]]` | Outbound: target service **id** → scopes this agent may request on it |
-| `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(caller_role, requested_scope)` tuples |
-| `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, requested_scope)` tuples |
+| `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(subject_role, agent_scope)` tuples |
+| `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, target_scope)` tuples |
 
-**Inbound rule semantics:** a caller with realm role `role` is permitted to invoke this agent requesting scope `scope`.
+**Inbound rule semantics:** a subject holding realm role `role` is permitted to invoke this agent for the agent scope `scope`. Grouped by role, these rules become the `role_scopes` map (role → agent scopes) that the inbound package evaluates.
 
-**Outbound rule semantics:** this agent acting as realm role `role` is permitted to request scope `scope` on a target service.
+**Outbound rule semantics:** this agent acting as realm role `role` is permitted to request the target scope `scope`. Grouped by role, these rules become the `agent_role_scopes` map (agent role → target scopes) that the outbound package evaluates.
 
-**Note on `target_scopes` direction:** the map is keyed by **target service id → allowed scopes** (the inverse of the former `scope_targets`, which was `scope → targets`). The outbound Rego generator inverts it back to a scope → target-ids table for OPA evaluation (see below).
+**Note on `target_scopes` direction:** the map is keyed by **target service id → allowed scopes** (the inverse of the former `scope_targets`, which was `scope → targets`). The outbound Rego generator emits this map **verbatim** and evaluates `target_scopes[input.target]` directly — there is no inversion (see below).
 
 ### `PolicyModel`
 
@@ -94,51 +94,82 @@ No `?realm=` parameter — the service operates on a Kubernetes CR, not a Keyclo
 
 For each `AgentPolicyModel`, the service generates **two Rego packages**: one for the inbound pipeline and one for the outbound pipeline. The `agent_id` is slugified for use in the package name (hyphens → underscores, lowercase).
 
+**Input is identifiers only.** Both packages receive an input document of **IDs**, never roles or scopes: inbound input is `{subject, source}`, outbound input is `{subject, target}` (`subject` is the end-user id, `source` the calling service id, `target` the called service id). Every role/scope mapping is therefore **embedded in the package itself**, and the `allow` logic resolves IDs → roles → scopes internally. Because no per-request scope is supplied, the decision is **coarse**: a principal passes when it has access to **at least one** relevant scope.
+
+The generator embeds these symbols, derived from the `AgentPolicyModel`:
+
+| Rego symbol | Source | Shape |
+|-------------|--------|-------|
+| `subject_roles` | `model.subject_roles` | subject id → `[role.name, …]` |
+| `source_roles` | `model.source_roles` | source id → `[role.name, …]` |
+| `agent_scopes` | `model.agent_scopes` | `[scope.name, …]` |
+| `agent_roles` | `model.agent_roles` | `[role.name, …]` |
+| `role_scopes` | grouped `model.inbound_rules` | role.name → `[scope.name, …]` (agent scopes granted per subject role) |
+| `agent_role_scopes` | grouped `model.outbound_rules` | role.name → `[scope.name, …]` (tool scopes per agent role) |
+| `target_scopes` | `model.target_scopes` | target id → `[scope.name, …]` |
+
 ### Inbound package: `authz.{agent_slug}.inbound`
 
-Evaluated by the AuthBridge OPA plugin in the **inbound pipeline**. Input document: `{subject: str, source: str, scope: str}` where `subject` is the end-user ID, `source` is the calling service ID, and `scope` is the requested scope.
+Evaluated by the AuthBridge OPA plugin in the **inbound pipeline** — "who may call this agent". Input document: `{subject, source}` (IDs). **`subject` is mandatory; `source` is optional** (an absent source passes). A principal passes when it holds a role that grants at least one of the agent's own scopes (`agent_scopes`).
 
 ```rego
 package authz.{agent_slug}.inbound
 
-source_roles := {
-    "{source_id}": ["{role.name}", ...],
-    ...
+agent_scopes := ["{scope.name}", ...]                # from agent_scopes
+
+subject_roles := { "{subject_id}": ["{role.name}", ...], ... }
+source_roles  := { "{source_id}":  ["{role.name}", ...], ... }
+
+role_scopes := { "{role.name}": ["{scope.name}", ...], ... }   # from inbound_rules
+
+subject_ok if {
+    some role in subject_roles[input.subject]
+    some scope in role_scopes[role]
+    scope in agent_scopes
+}
+source_ok if { not input.source }                    # optional: absent source passes
+source_ok if {
+    some role in source_roles[input.source]
+    some scope in role_scopes[role]
+    scope in agent_scopes
 }
 
 default allow := false
-
-allow if {
-    some role in source_roles[input.source]
-    role == "{rule.role.name}"
-    input.scope == "{rule.scope.name}"
-}
-# ... one allow block per inbound PolicyRule
+allow if { subject_ok; source_ok }
 ```
 
 ### Outbound package: `authz.{agent_slug}.outbound`
 
-Evaluated by the AuthBridge OPA plugin in the **outbound pipeline**. Input document: `{subject: str, target: str, role: str, scope: str}` where `subject` is the end-user ID, `target` is the called service ID, `role` is this agent's own realm role, and `scope` is the requested scope.
+Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target}` (IDs). The gate requires **both** the subject and the agent to pass: the subject must hold a role granting at least one agent scope, **and** the agent (via its own `agent_roles`) must be permitted at least one scope that the `target` accepts. `target_scopes` is consumed **directly** (target id → scopes) — it is not inverted.
 
 ```rego
 package authz.{agent_slug}.outbound
 
-# scope_targets is derived by inverting the model's target_scopes
-# (target id → scopes) into scope name → target ids for OPA evaluation.
-scope_targets := {
-    "{scope.name}": ["{target_id}", ...],
-    ...
+agent_roles  := ["{role.name}", ...]                 # from agent_roles
+agent_scopes := ["{scope.name}", ...]                # from agent_scopes
+
+subject_roles := { "{subject_id}": ["{role.name}", ...], ... }
+
+role_scopes       := { "{role.name}": ["{scope.name}", ...], ... }   # from inbound_rules
+agent_role_scopes := { "{role.name}": ["{scope.name}", ...], ... }   # from outbound_rules
+target_scopes     := { "{target_id}": ["{scope.name}", ...], ... }   # from target_scopes
+
+subject_ok if {
+    some role in subject_roles[input.subject]
+    some scope in role_scopes[role]
+    scope in agent_scopes
+}
+target_ok if {
+    some role in agent_roles
+    some scope in agent_role_scopes[role]
+    scope in target_scopes[input.target]
 }
 
 default allow := false
-
-allow if {
-    input.role == "{rule.role.name}"
-    input.scope == "{rule.scope.name}"
-    input.target in scope_targets["{rule.scope.name}"]
-}
-# ... one allow block per outbound PolicyRule
+allow if { subject_ok; target_ok }
 ```
+
+A worked example (agent `github-agent`, users `developer`/`tester`, tool `github-tool`) is maintained alongside the tests.
 
 ---
 
@@ -252,8 +283,8 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
 - Load Kubernetes in-cluster config at startup via `kubernetes.config.load_incluster_config()`; fall back to `kubernetes.config.load_kube_config()` for local development.
 - Instantiate a `kubernetes.client.CustomObjectsApi` for all CR operations.
 - `_slugify(agent_id: str) -> str`: replace hyphens with underscores, lowercase — produces a valid Rego package name segment.
-- `_generate_inbound_rego(model: AgentPolicyModel) -> str`: render the inbound Rego package string from the model's `source_roles` map and `inbound_rules`.
-- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string from the model's `target_scopes` map and `outbound_rules`, inverting `target_scopes` (target id → scopes) into the scope name → target ids table OPA evaluates against.
+- `_generate_inbound_rego(model: AgentPolicyModel) -> str`: render the inbound Rego package string. Embeds `agent_scopes`, `subject_roles`, `source_roles`, and a `role_scopes` map (grouping `inbound_rules` by role → agent scope names); emits `subject_ok` (mandatory) and `source_ok` (optional — an absent `input.source` passes); `allow if { subject_ok; source_ok }`.
+- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string. Embeds `agent_roles`, `agent_scopes`, `subject_roles`, `role_scopes` (from `inbound_rules`), `agent_role_scopes` (from `outbound_rules`), and `target_scopes` (consumed directly, target id → scopes — **no inversion**); emits `subject_ok` and `target_ok`; `allow if { subject_ok; target_ok }`.
 - `_upsert_agent(agent_id: str, inbound_rego: str, outbound_rego: str)`: patch the `AuthorizationPolicy` CR to upsert the two packages for `agent_id`. Schema TBD.
 - `_delete_agent(agent_id: str)`: patch the CR to remove all packages for `agent_id`.
 - `_delete_all()`: patch the CR to remove all packages.

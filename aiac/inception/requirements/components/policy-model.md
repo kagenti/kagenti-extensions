@@ -83,15 +83,15 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 | `agent_id` | `str` | Service ID from the AIAC trigger event (`aiac.apply.service.{id}`) |
 | `agent_roles` | `list[Role]` | Realm roles assigned to this agent |
 | `agent_scopes` | `list[Scope]` | Scopes this agent exposes |
-| `source_roles` | `dict[str, list[Role]]` | Inbound: source service **id** → roles granted |
-| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (user) **id** → roles held on behalf of which this agent acts |
+| `source_roles` | `dict[str, list[Role]]` | Inbound: source (calling service) **id** → roles held. **Optional** gate input — an absent source passes. |
+| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (end-user) **id** → roles held. **Mandatory** gate input. |
 | `target_scopes` | `dict[str, list[Scope]]` | Outbound: target service **id** → scopes this agent may request on it |
-| `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(caller_role, requested_scope)` tuples |
-| `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, requested_scope)` tuples |
+| `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(subject_role, agent_scope)` tuples |
+| `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, target_scope)` tuples |
 
-**Inbound rule semantics:** a caller holding realm role `role` is permitted to invoke this agent requesting scope `scope`.
+**Inbound rule semantics:** a subject holding realm role `role` is permitted to invoke this agent for the agent scope `scope`. The PDP Policy Writer consumes `inbound_rules` as a role → agent-scope map; its inbound gate is keyed on the subject id (mandatory), with the calling source id optional.
 
-**Outbound rule semantics:** this agent acting as realm role `role` is permitted to request scope `scope` on a target service.
+**Outbound rule semantics:** this agent acting as realm role `role` is permitted to request the target scope `scope`. The PDP Policy Writer consumes `outbound_rules` as an agent-role → target-scope map; its outbound gate requires both the subject and the agent to be authorized.
 
 #### `PolicyModel`
 

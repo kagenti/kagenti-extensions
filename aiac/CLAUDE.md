@@ -25,6 +25,10 @@ For current issue list, `ls` the subdirectories under `inception/issues/`.
 
 When working on an issue would benefit from inspecting the relevant source code, use the AskUserQuestion tool to ask before doing so — present "Yes" and "No" as clickable options. If the user picks Yes, inspect the codebase normally. If No, work from the issue description and existing context only.
 
+## Handoffs
+
+Per-task handoff documents live under `inception/handoffs/` — one markdown file per task, numeric-prefixed (e.g. `01-update-issues.md`, `02-update-source-and-tests.md`). When asked to generate a handoff, write it here (not a scratch/temp path). Each handoff must be self-contained — background, task, exact files, and acceptance criteria — so a fresh session can execute it without the originating conversation.
+
 ## Source code
 
 `src/aiac/` — Python package root (`__init__.py` is empty).
