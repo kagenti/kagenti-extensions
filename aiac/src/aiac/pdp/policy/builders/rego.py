@@ -9,7 +9,8 @@ Public API:
 from pathlib import Path
 from typing import Any, Dict
 
-from aiac.pdp.policy.models import PolicyObjectModel, Rule
+from aiac.idp.configuration.api import Configuration
+from aiac.policy.model.models import PolicyRule
 
 __all__ = ["save_policy_rego"]
 
@@ -78,7 +79,7 @@ default allow := false
 
 
 def _generate_policy_rego_inbound(
-    rules: list[Rule],
+    rules: list[PolicyRule],
     service: str,
     description: str =""
 ) -> str:
@@ -120,7 +121,7 @@ import data.authz.realm_roles.realm_roles
 
 
 def save_policy_rego(
-    policy: PolicyObjectModel,
+    rules: list[PolicyRule],
     file_dir: str = "rego_policy",
     realm: str = "demo",
     policy_only: bool = False
@@ -138,7 +139,6 @@ def save_policy_rego(
         file_dir: Directory to save Rego files
         realm: Keycloak realm name (used to fetch user-to-roles mapping)
     """
-    from aiac.idp.configuration.api import Configuration
 
     dir_path = Path(file_dir)
     dir_path.mkdir(parents=True, exist_ok=True)
@@ -186,7 +186,7 @@ def save_policy_rego(
     # }
 
     service_id = "Dummy"
-    policy_rego = _generate_policy_rego_inbound(policy.rules, service_id)
+    policy_rego = _generate_policy_rego_inbound(rules, service_id)
     safe_name = service_id.replace("/", "_").replace("\\", "_").replace(" ", "_")
     policy_path = dir_path / f"generated_policy_{safe_name}.rego"
     with open(policy_path, "w") as f:

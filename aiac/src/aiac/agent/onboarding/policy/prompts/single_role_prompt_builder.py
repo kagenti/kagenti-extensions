@@ -8,8 +8,7 @@ which real roles should have access to a specific privilege.
 
 from typing import List
 
-from aiac.pdp.library.configuration.models import Role, Scope
-
+from aiac.idp.configuration.models import Role, Scope
 
 def build_single_privilege_to_roles_system_prompt(
     privilege: Scope,

@@ -30,7 +30,6 @@ Key Features:
 """
 
 from aiac.idp.configuration.models import Role, Service
-from aiac.pdp.policy.models import PolicyObjectModel, Rule
 from typing import Optional, Dict
 import sys
 from dataclasses import dataclass
@@ -38,12 +37,12 @@ from dataclasses import dataclass
 from langgraph.graph import StateGraph, END
 from langchain_core.language_models import BaseChatModel
 
+from aiac.policy.model.models import PolicyRule
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
 from aiac.idp.configuration.api import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
-from aiac.pdp.policy.builders.yaml import _generate_yaml_output
 
 
 @dataclass
@@ -101,7 +100,7 @@ def _build_policy(
 
     explanations = []
     # realm_role_name -> list of {"service": Service, "privilege": str} dicts
-    policy_rules: list[Rule] = []
+    policy_rules: list[PolicyRule] = []
 
     for _ , service_info in privileges_map.items():
         for privilege in service_info["scopes"]:
@@ -111,18 +110,17 @@ def _build_policy(
                 roles=roles, 
                 privilege=privilege)
 
-            result = mapper.generate_policy(description=state['description'])
+            rules, explanation = mapper.generate_policy(description=state['description'])
 
             explanations.append(
-                f"**{privilege.name}**: {result.explanation}"
+                f"**{privilege.name}**: {explanation}"
             )
 
-            policy_rules.extend(result.rules)
-    policy = PolicyObjectModel(
-        rules=policy_rules, 
-        explanation = "\n\n".join(explanations) if explanations else ""
-        )
-
+            policy_rules.extend(rules)
+    
+    explanation = "\n\n".join(explanations) if explanations else ""
+    policy = policy_rules
+    
     return PolicyState(
         description=state["description"],
         policy=policy,
@@ -157,10 +155,10 @@ def _validate_policy(
         Updated PolicyState with errors and validation_passed fields
     """
     retry_count = state.get("retry_count", 0)
-    policy_obj: Optional[PolicyObjectModel] = state.get("policy")
+    policy: Optional[list[PolicyRule]] = state.get("policy")
 
     structural_errors = validate_policy_structure(
-        policy_obj,
+        policy,
         realm_roles,
         privileges_map
     )
@@ -381,7 +379,7 @@ class PolicyBuilder:
     # PUBLIC API METHODS
     # ========================================================================
     
-    def generate_policy(self, description: str) -> PolicyObjectModel:
+    def generate_policy(self, description: str):
         """
         Generate an access control policy from a natural language description.
 
@@ -414,27 +412,10 @@ class PolicyBuilder:
         if errors:
             raise ValueError(f"Policy validation failed: {'; '.join(errors)}")
 
-        self._last_policy_structure: Optional[PolicyObjectModel] = final_state["policy"]
+        self._last_policy_structure: Optional[list[PolicyRule]] = final_state["policy"]
 
         return final_state["policy"]
-    
-    def get_yaml_output(self) -> str:
-        """
-        Generate YAML output from the stored Policy model.
-
-        Must be called after generate_policy().
-
-        Returns:
-            Complete YAML policy file content with comments
-
-        Raises:
-            ValueError: If no policy has been generated yet
-        """
-        if not hasattr(self, '_last_policy_structure') or self._last_policy_structure is None:
-            raise ValueError("No policy available. Generate a policy first using generate_policy().")
-
-        return _generate_yaml_output(self._last_policy_structure)
-
+   
 
 # ============================================================================
 # BACKWARD COMPATIBILITY

@@ -19,7 +19,7 @@ from langchain_core.messages import HumanMessage
 from langgraph.graph import END
 from langgraph.graph.state import CompiledStateGraph
 
-from aiac.pdp.policy.models import PolicyObjectModel, Rule
+from aiac.policy.model.models import PolicyRule
 from base_mapper.state import BaseMappingState
 from config.constants import MAX_VALIDATION_RETRIES
 
@@ -332,11 +332,11 @@ class BaseSingleMapper(ABC):
         ...
 
     @abstractmethod
-    def _build_rules(self, result: dict[str, Any]) -> list[Rule]:
+    def _build_rules(self, result: dict[str, Any]) -> list[PolicyRule]:
         """Convert the workflow result into a list of Rule objects."""
         ...
 
-    def generate_policy(self, description: str) -> PolicyObjectModel:
+    def generate_policy(self, description: str):
         """
         Generate an access control policy from a natural language description.
 
@@ -354,4 +354,4 @@ class BaseSingleMapper(ABC):
         if errors:
             raise ValueError(f"Policy validation failed: {'; '.join(errors)}")
         rules = self._build_rules(result)
-        return PolicyObjectModel(rules=rules, explanation=result.get("explanation", ""))
+        return [rules, result.get("explanation", "")]

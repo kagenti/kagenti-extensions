@@ -87,7 +87,7 @@ def load_llm_config_from_yaml(model_name: Optional[str], yaml_path: Optional[Pat
     """
     config = load_llm_models_yaml(yaml_path)
     if not model_name:
-        model_name = config.get("default_model", "gpt-oss")
+        model_name = config.get("default_model", "gpt-5-mini")
 
     if model_name not in config['models']:
         available = ', '.join(config['models'].keys())

@@ -108,7 +108,7 @@ def policy_files(fixtures_dir):
     return sorted((fixtures_dir / "policies").glob("*.txt"))
 
 
-@pytest.fixture(params=["claude-haiku", "gpt-nano", "gemini", "gpt-oss"])
+@pytest.fixture(params=["claude-haiku", "gpt-nano", "gemini", "gpt-5-mini"])
 def llm_model_name(request):
     return request.param
 
@@ -451,10 +451,10 @@ def test_generate_policy_maps_privilege_to_role(developer_role, sample_scopes):
     """generate_policy() produces a Rule mapping the role to the granted privilege."""
     mock = _make_mock_llm("developer", ["github-tool-aud"])
     mapper = SingleRoleMapper(role=developer_role, privileges=sample_scopes, llm=mock, verbose=False)
-    result = mapper.generate_policy("Developers get GitHub access.")
+    rules, explanation = mapper.generate_policy("Developers get GitHub access.")
     assert any(
         r.role.name == "developer" and r.scope.name == "github-tool-aud"
-        for r in result.rules
+        for r in rules
     )
 
 

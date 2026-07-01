@@ -17,7 +17,8 @@ class Subject(BaseModel):
     def __hash__(self) -> int:
         return hash(self.id)
 
-    __eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Subject) and self.id == other.id
 
 
 class Role(BaseModel):
@@ -32,7 +33,8 @@ class Role(BaseModel):
     def __hash__(self) -> int:
         return hash(self.id)
 
-    __eq__ = lambda self, other: isinstance(other, Role) and self.id == other.id
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Role) and self.id == other.id
 
 
 class Service(BaseModel):
@@ -50,7 +52,8 @@ class Service(BaseModel):
     def __hash__(self) -> int:
         return hash(self.id)
 
-    __eq__ = lambda self, other: isinstance(other, Service) and self.id == other.id
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Service) and self.id == other.id
 
     @model_validator(mode="before")
     @classmethod
@@ -93,7 +96,8 @@ class Scope(BaseModel):
     def __hash__(self) -> int:
         return hash(self.id)
 
-    __eq__ = lambda self, other: isinstance(other, Scope) and self.id == other.id
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Scope) and self.id == other.id
 
 
 Subject.model_rebuild()

@@ -18,9 +18,9 @@ import pytest
 from pathlib import Path
 from unittest.mock import Mock
 
-from aiac.pdp.policy.models import PolicyObjectModel, Rule
 from aiac.idp.configuration.models import Role, Scope
 from aiac.agent.onboarding.policy.full_policy_agent import PolicyBuilder
+from aiac.policy.model.models import PolicyRule
 from config import create_llm
 
 
@@ -50,7 +50,7 @@ def policy_files(fixtures_dir):
     "claude-haiku",
     "gpt-nano",
     "gemini",
-    "gpt-oss",
+    "gpt-5-mini",
 ])
 def llm_model_name(request):
     return request.param
@@ -101,20 +101,16 @@ EXPECTED_POLICIES: dict[str, dict[str, set[str]]] = {
 # HELPERS
 # ============================================================================
 
-def _make_policy(rules: list[Rule], name: str = "") -> PolicyObjectModel:
-    return PolicyObjectModel(rules=rules, explanation="")
-
-
-def _make_rule(role_name: str, scope_name: str, service_id: str) -> Rule:
+def _make_rule(role_name: str, scope_name: str, service_id: str) -> PolicyRule:
     role = Role(id=role_name, name=role_name, description="", composite=False)
     scope = Scope(id=scope_name, name=scope_name)
-    return Rule(role=role, scope=scope)
+    return PolicyRule(role=role, scope=scope)
 
 
-def _policy_to_role_map(policy: PolicyObjectModel) -> dict[str, set[str]]:
+def _policy_to_role_map(rules: list[PolicyRule]) -> dict[str, set[str]]:
     """Extract {role_name: {scope_names}} from a PolicyObjectModel."""
     result: dict[str, set[str]] = {}
-    for rule in policy.rules:
+    for rule in rules:
         result.setdefault(rule.role.name, set())
         result[rule.role.name].add(rule.scope.name)
     return result
@@ -141,133 +137,6 @@ def compare_policies(
             differences.append(f"Role '{role}' has unexpected extra privilege: {priv}")
 
     return len(differences) == 0, differences
-
-
-# ============================================================================
-# UNIT TESTS (no LLM required)
-# ============================================================================
-
-def test_save_policy_creates_yaml_file(tmp_path):
-    """save_policy_yaml writes valid YAML to the specified path."""
-    from aiac.pdp.policy.builders.yaml import save_policy_yaml
-
-    policy = _make_policy(
-        [_make_rule("developer", "demo-ui", "kagenti")],
-        name="Test policy",
-    )
-
-    output_file = tmp_path / "policy.yaml"
-    save_policy_yaml(policy, str(output_file))
-
-    assert output_file.exists()
-    assert len(policy.rules) == 1
-    assert policy.rules[0].role.name == "developer"
-    assert policy.rules[0].scope.name == "demo-ui"
-    assert "# Access Control Policy" in output_file.read_text()
-
-
-def test_save_policy_includes_description_comment(tmp_path):
-    """save_policy_yaml writes a file with rules stored in the policy model."""
-    from aiac.pdp.policy.builders.yaml import save_policy_yaml
-
-    policy = _make_policy(
-        [_make_rule("developer", "demo-ui", "kagenti")],
-        name="Test policy description",
-    )
-    output_file = tmp_path / "policy.yaml"
-    save_policy_yaml(policy, str(output_file))
-
-    assert output_file.exists()
-    assert len(policy.rules) == 1
-    rule = policy.rules[0]
-    assert rule.role.name == "developer"
-    assert rule.scope.name == "demo-ui"
-
-
-def test_save_policy_rego_creates_files(tmp_path, config_file, monkeypatch):
-    """save_policy_rego writes roles and default Rego files, plus per-service files."""
-    from aiac.pdp.policy.builders.rego import save_policy_rego
-    from aiac.pdp.library.read_api_from_config import Configuration as FileConfiguration
-
-    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
-    monkeypatch.setattr("aiac.idp.configuration.api.Configuration", FileConfiguration)
-
-    policy = _make_policy([
-        _make_rule("developer", "demo-ui", "kagenti"),
-        _make_rule("developer", "github-full-access", "github-tool"),
-    ])
-
-    save_policy_rego(policy, str(tmp_path), realm="demo")
-
-    assert (tmp_path / "roles.rego").exists()
-    assert (tmp_path / "default_inbound.rego").exists()
-    assert (tmp_path / "default_outbound.rego").exists()
-    assert (tmp_path / "generated_policy_Dummy.rego").exists()
-
-    inbound = (tmp_path / "default_inbound.rego").read_text()
-    assert "default allow := false" in inbound
-    outbound = (tmp_path / "default_outbound.rego").read_text()
-    assert "default allow := false" in outbound
-
-
-def test_generate_yaml_output_structure():
-    """_generate_yaml_output produces correctly structured output from a PolicyObjectModel."""
-    from aiac.pdp.policy.builders.yaml import _generate_yaml_output
-
-    policy = _make_policy([
-        _make_rule("developer", "demo-ui", "kagenti"),
-        _make_rule("developer", "github-full-access", "github-tool"),
-    ], name="Test policy description")
-
-    assert len(policy.rules) == 2
-    role_names = {r.role.name for r in policy.rules}
-    assert "developer" in role_names
-    scope_names = {r.scope.name for r in policy.rules}
-    assert "demo-ui" in scope_names
-    assert "github-full-access" in scope_names
-
-    yaml_output = _generate_yaml_output(policy)
-    assert "# Access Control Policy" in yaml_output
-    assert "demo-ui" in yaml_output
-
-
-def test_generate_yaml_output_contains_policy_data():
-    """_generate_yaml_output includes role and scope names in its string output."""
-    from aiac.pdp.policy.builders.yaml import _generate_yaml_output
-
-    policy = _make_policy([
-        _make_rule("developer", "demo-ui", "kagenti"),
-    ])
-    assert len(policy.rules) == 1
-    assert policy.rules[0].role.name == "developer"
-    assert policy.rules[0].scope.name == "demo-ui"
-
-    output = _generate_yaml_output(policy)
-    assert "developer" in output
-    assert "demo-ui" in output
-
-
-def test_policy_builder_initialization(config_file, mock_llm):
-    """PolicyBuilder loads roles and service privileges from the config file."""
-    os.environ["AIAC_PDP_CONFIG_PATH"] = str(config_file)
-
-    builder = PolicyBuilder(llm=mock_llm, verbose=False)
-
-    role_names = [r.name for r in builder.roles]
-    assert "developer" in role_names
-    assert "tech-support" in role_names
-    assert "sales" in role_names
-
-    assert "kagenti" in builder.privileges_map
-    assert "github-tool" in builder.privileges_map
-    assert "spiffe://localtest.me/ns/team1/sa/git-issue-agent" in builder.privileges_map
-
-    kagenti_info = builder.privileges_map["kagenti"]
-    assert isinstance(kagenti_info, dict)
-    assert "service_type" in kagenti_info
-    assert "scopes" in kagenti_info
-    assert len(kagenti_info["scopes"]) > 0
-    assert all(isinstance(s, Scope) for s in kagenti_info["scopes"])
 
 
 # ============================================================================

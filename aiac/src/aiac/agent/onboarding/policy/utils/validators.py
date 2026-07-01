@@ -9,11 +9,11 @@ structural validation and semantic verification using LLM.
 from typing import Dict, List, Any, Optional
 
 from aiac.idp.configuration.models import Role
-from aiac.pdp.policy.models import PolicyObjectModel
+from aiac.policy.model.models import PolicyRule
 
 
 def validate_policy_structure(
-    _policy: Optional[PolicyObjectModel],
+    _policy: Optional[list[PolicyRule]],
     _roles: List[Role],
     _privileges_map: Dict[str, Dict[str, Any]]
 ) -> List[str]:

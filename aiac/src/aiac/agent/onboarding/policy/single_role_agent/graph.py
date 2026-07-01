@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
 from aiac.idp.configuration.models import Role, Scope
-from aiac.pdp.policy.models import Rule
+from aiac.policy.model.models import PolicyRule
 from .state import SingleRoleState
 from base_mapper import (
     BaseSingleMapper,
@@ -284,8 +284,8 @@ class SingleRoleMapper(BaseSingleMapper):
             "retry_count": final_state.get("retry_count", 0),
         }
 
-    def _build_rules(self, result: dict[str, Any]) -> list[Rule]:
-        return [Rule(role=self.role, scope=priv) for priv in result.get("granted_privileges", [])]
+    def _build_rules(self, result: dict[str, Any]) -> list[PolicyRule]:
+        return [PolicyRule(role=self.role, scope=priv) for priv in result.get("granted_privileges", [])]
 
     def map_privileges(self, policy_description: str) -> dict[str, Any]:
         """

@@ -19,8 +19,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
-from aiac.policy.model.models import Role, Scope
-from aiac.pdp.policy.models import Rule
+from aiac.policy.model.models import PolicyRule, Role, Scope
 from .state import SinglePrivilegeState
 from base_mapper import (
     BaseSingleMapper,
@@ -264,8 +263,8 @@ s
             "retry_count": final_state.get("retry_count", 0),
         }
 
-    def _build_rules(self, result: dict[str, Any]) -> list[Rule]:
-        return [Rule(role=role, scope=self.privilege) for role in result.get("roles_with_access", [])]
+    def _build_rules(self, result: dict[str, Any]) -> list[PolicyRule]:
+        return [PolicyRule(role=role, scope=self.privilege) for role in result.get("roles_with_access", [])]
 
     def map_roles(self, policy_description: str) -> dict[str, Any]:
         """

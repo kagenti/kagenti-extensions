@@ -9,8 +9,7 @@ workflow for role-centric policy generation.
 from typing import TypedDict, Annotated, List, Optional
 from operator import add
 
-from aiac.pdp.policy.models import PolicyObjectModel
-
+from aiac.policy.model.models import PolicyRule
 
 class PolicyState(TypedDict):
     """
@@ -25,7 +24,7 @@ class PolicyState(TypedDict):
         validation_passed: Boolean flag indicating if validation succeeded
     """
     description: str
-    policy: Optional[PolicyObjectModel]
+    policy: Optional[list[PolicyRule]]
     messages: Annotated[List, add]  # Annotated with 'add' for accumulation
     errors: List[str]               # NOT accumulated - replaced on each validation attempt
     retry_count: int

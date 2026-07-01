@@ -39,9 +39,8 @@ sys.path.insert(0, str(Path(__file__).parents[4]))
 
 from dotenv import load_dotenv
 
-from full_policy_agent_roles.graph import PolicyBuilder
+from full_policy_agent.graph import PolicyBuilder
 from config import create_llm
-from aiac.pdp.policy.builders.yaml import save_policy_yaml
 from aiac.pdp.policy.builders.rego import save_policy_rego
 
 load_dotenv(dotenv_path="aiac.env", override=True)
@@ -96,7 +95,7 @@ def generate_policy_only(
     llm_models_path = Path(__file__).parent / "config" / "llm_conf.yaml"
     with open(llm_models_path) as f:
         llm_config = yaml.safe_load(f)
-    default_model = llm_config.get("default_model", "gpt-oss")
+    default_model = llm_config.get("default_model", "gpt-5-mini")
     
     # Create LLM instance from llm_models.yaml using default model
     llm = create_llm(model_name=default_model, verbose=False)
@@ -117,11 +116,6 @@ def generate_policy_only(
         return
 
     print("✓ Access rules generated successfully!\n")
-    print("Generated YAML:")
-    print("-" * 80)
-    print(builder.get_yaml_output())
-    print("-" * 80)
-    save_policy_yaml(policy, output_file)
 
     print("\nGenerating Rego policy files...")
     rego_dir = Path(output_file).parent / "rego_policy"
@@ -130,7 +124,7 @@ def generate_policy_only(
     print("\n" + "=" * 80)
     print("Parsed Role-to-Privilege Mappings:")
     print("=" * 80)
-    for rule in policy.rules:
+    for rule in policy:
         print(f"    - {rule.role.name}: {rule.scope.name}")
 
 def main() -> None:
