@@ -1,3 +1,14 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+# Apply excludes even to paths passed explicitly (e.g. by pre-commit / CI).
+force-exclude = true
+# Frozen, generated policy subtree — never linted or auto-fixed.
+extend-exclude = ["src/aiac/agent/onboarding/policy"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
 [tool.pytest.ini_options]
 testpaths = ["test"]
 pythonpath = ["src", "src/aiac/agent/onboarding/policy"]

@@ -15,24 +15,24 @@ To run ONLY integration tests:
 """
 
 import os
-from typing import Any
-import pytest
-import yaml
 from pathlib import Path
+from typing import Any
 from unittest.mock import Mock
 
-from aiac.idp.configuration.models import Role, Scope
-from aiac.agent.onboarding.policy.single_privilege_agent import SinglePrivilegeMapper, SinglePrivilegeState
+import pytest
+import yaml
 from base_mapper import (
     extract_explanation_and_json,
-    validate_mapping_items,
-    should_route_after_structural_validation,
     should_retry_after_semantic,
+    should_route_after_structural_validation,
+    validate_mapping_items,
 )
+from config import create_llm
 from config.constants import MAX_VALIDATION_RETRIES
 from langgraph.graph import END
-from config import create_llm
 
+from aiac.agent.onboarding.policy.single_privilege_agent import SinglePrivilegeMapper, SinglePrivilegeState
+from aiac.idp.configuration.models import Role, Scope
 
 pytestmark = pytest.mark.integration
 
@@ -115,6 +115,7 @@ def llm_model_name(request):
 def llm_instance(llm_model_name):
     import socket
     from urllib.parse import urlparse
+
     from config.llm_config import load_llm_config_from_yaml
     cfg = load_llm_config_from_yaml(llm_model_name)
     if cfg.endpoint:

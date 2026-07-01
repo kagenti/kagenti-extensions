@@ -3,15 +3,15 @@
 from pathlib import Path
 
 import pytest
-
 from config.llm_config import (
     DEFAULT_MAX_RETRIES,
     DEFAULT_MAX_TOKENS,
     DEFAULT_TEMPERATURE,
     DEFAULT_TIMEOUT,
+)
+from config.llm_config import (
     load_llm_config_from_env as load_llm_config,
 )
-
 
 _LLM_VARS = (
     "LLM_MODEL",

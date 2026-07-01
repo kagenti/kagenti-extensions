@@ -1,11 +1,10 @@
 """Unit tests for aiac.agent.roles.role.nodes (issue 4.10)."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from aiac.agent.shared.state import (
-    Assignments,
     BaseAgentState,
     CompositeMapping,
     PDPSnapshot,
@@ -117,8 +116,9 @@ class TestFetchPdpState:
         assert any(p.name == "read" for p in snapshot.role_composites[ROLE_NAME])
 
     def test_configuration_unavailable_raises_502(self):
-        from aiac.agent.roles.role.nodes import fetch_pdp_state
         from fastapi import HTTPException
+
+        from aiac.agent.roles.role.nodes import fetch_pdp_state
 
         state = _make_state()
         with patch("aiac.agent.roles.role.nodes.Configuration") as MockCfg:
@@ -174,8 +174,9 @@ class TestProposeMappings:
         assert result["proposed_diff"].add[0].role_name == ROLE_NAME
 
     def test_llm_unavailable_raises_504(self):
-        from aiac.agent.roles.role.nodes import propose_mappings
         from fastapi import HTTPException
+
+        from aiac.agent.roles.role.nodes import propose_mappings
 
         snapshot = self._make_snapshot()
         state = _make_state(pdp_snapshot=snapshot)
@@ -303,7 +304,10 @@ class TestValidateMappingsSafety:
 
         result = validate_mappings(state)
 
-        assert any("safety" in e.lower() or "max" in e.lower() or "changes" in e.lower() for e in result["validation_errors"])
+        assert any(
+            "safety" in e.lower() or "max" in e.lower() or "changes" in e.lower()
+            for e in result["validation_errors"]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -442,8 +446,9 @@ class TestApplyMappings:
         policy_instance.remove_role_composites.assert_not_called()
 
     def test_pdp_unavailable_raises_502(self):
-        from aiac.agent.roles.role.nodes import apply_mappings
         from fastapi import HTTPException
+
+        from aiac.agent.roles.role.nodes import apply_mappings
 
         mapping = CompositeMapping(
             role_name=ROLE_NAME, service_id="svc-1", permission_id="p1", permission_name="read"

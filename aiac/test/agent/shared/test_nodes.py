@@ -1,6 +1,5 @@
 """Unit tests for aiac.agent.shared.nodes (issue 4.1)."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -111,8 +110,9 @@ class TestFetchPolicy:
         assert "service access control rules" in str(call_kwargs)
 
     def test_chroma_unavailable_raises_503(self):
-        from aiac.agent.shared.nodes import fetch_policy
         from fastapi import HTTPException
+
+        from aiac.agent.shared.nodes import fetch_policy
 
         state = _make_state()
         mock_chroma = _make_chroma_module_unavailable()
@@ -135,7 +135,11 @@ class TestFetchPolicy:
 
         collection = mock_chroma.HttpClient.return_value.get_collection.return_value
         call_kwargs = collection.query.call_args
-        assert "5" in str(call_kwargs) or call_kwargs.kwargs.get("n_results") == 5 or call_kwargs[1].get("n_results") == 5
+        assert (
+            "5" in str(call_kwargs)
+            or call_kwargs.kwargs.get("n_results") == 5
+            or call_kwargs[1].get("n_results") == 5
+        )
 
     def test_queries_aiac_policies_collection(self):
         from aiac.agent.shared.nodes import fetch_policy
@@ -180,8 +184,9 @@ class TestFetchDomainKnowledge:
 
     def test_chroma_unavailable_raises_503(self):
         """ChromaDB being down is fatal for domain knowledge too — raises 503."""
-        from aiac.agent.shared.nodes import fetch_domain_knowledge
         from fastapi import HTTPException
+
+        from aiac.agent.shared.nodes import fetch_domain_knowledge
 
         state = _make_state()
         mock_chroma = _make_chroma_module_unavailable()
@@ -216,4 +221,8 @@ class TestFetchDomainKnowledge:
 
         collection = mock_chroma.HttpClient.return_value.get_collection.return_value
         call_kwargs = collection.query.call_args
-        assert "3" in str(call_kwargs) or call_kwargs.kwargs.get("n_results") == 3 or call_kwargs[1].get("n_results") == 3
+        assert (
+            "3" in str(call_kwargs)
+            or call_kwargs.kwargs.get("n_results") == 3
+            or call_kwargs[1].get("n_results") == 3
+        )

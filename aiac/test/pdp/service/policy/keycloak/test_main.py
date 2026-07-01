@@ -1,9 +1,7 @@
 """Unit tests for aiac/pdp/service/policy/keycloak/main.py FastAPI application."""
 
-import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
-import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 

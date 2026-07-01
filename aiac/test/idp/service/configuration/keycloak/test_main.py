@@ -3,11 +3,10 @@
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
 from fastapi.testclient import TestClient
 from keycloak.exceptions import KeycloakError
 
-from aiac.idp.service.configuration.keycloak.main import app, get_admin, _cache
+from aiac.idp.service.configuration.keycloak.main import _cache, app, get_admin
 
 REALM = "kagenti"
 

@@ -1,4 +1,4 @@
-from aiac.idp.configuration.models import Subject, Role, Service, Scope
+from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
 
 class TestSubject:

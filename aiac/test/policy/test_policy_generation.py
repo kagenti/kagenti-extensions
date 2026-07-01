@@ -14,15 +14,15 @@ To run ONLY integration tests:
 """
 
 import os
-import pytest
 from pathlib import Path
 from unittest.mock import Mock
 
-from aiac.idp.configuration.models import Role, Scope
-from aiac.agent.onboarding.policy.full_policy_agent import PolicyBuilder
-from aiac.policy.model.models import PolicyRule
+import pytest
 from config import create_llm
 
+from aiac.agent.onboarding.policy.full_policy_agent import PolicyBuilder
+from aiac.idp.configuration.models import Role, Scope
+from aiac.policy.model.models import PolicyRule
 
 pytestmark = pytest.mark.integration
 
@@ -60,6 +60,7 @@ def llm_model_name(request):
 def llm_instance(llm_model_name):
     import socket
     from urllib.parse import urlparse
+
     from config.llm_config import load_llm_config_from_yaml
     cfg = load_llm_config_from_yaml(llm_model_name)
     if cfg.endpoint:

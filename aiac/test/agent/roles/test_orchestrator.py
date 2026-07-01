@@ -1,11 +1,11 @@
 """Unit tests for aiac.agent.roles.orchestrator (issue 4.11)."""
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException
 
-from aiac.agent.shared.state import BaseAgentState, TriggerContext
+from aiac.agent.shared.state import BaseAgentState
 
 REALM = "kagenti"
 ROLE_ID = "role-uuid-1"

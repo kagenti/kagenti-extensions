@@ -1,10 +1,11 @@
 """Unit tests for aiac.idp.configuration."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from aiac.idp.configuration.models import Subject, Role, Service, Scope
+import pytest
+
 from aiac.idp.configuration.api import Configuration
+from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7071"
@@ -301,7 +302,13 @@ class TestGetService:
 
     def test_infers_type_from_description_when_not_set(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        raw = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-agent", "description": "An Agent service", "enabled": True}
+        raw = {
+            "id": self.SERVICE_ID,
+            "clientId": self.SERVICE_ID,
+            "name": "my-agent",
+            "description": "An Agent service",
+            "enabled": True,
+        }
         with patch(
             "aiac.idp.configuration.api.requests.get",
             side_effect=[
@@ -407,7 +414,7 @@ class TestCreateScope:
     def test_returns_scope_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         created = {"id": "sc1", "name": "read:data", "description": "Read access"}
-        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(created, 201)) as m:
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(created, 201)):
             result = Configuration.for_realm(REALM).create_scope(
                 scope_name="read:data", scope_description="Read access"
             )
@@ -470,7 +477,13 @@ class TestMapScopeToService:
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         service = self._make_service()
         scope = self._make_scope()
-        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True, "scopes": [{"id": "scope-id", "name": "read:data"}]}
+        updated = {
+            "id": "svc-uuid",
+            "clientId": "svc-uuid",
+            "name": "my-svc",
+            "enabled": True,
+            "scopes": [{"id": "scope-id", "name": "read:data"}],
+        }
         post_resp = _ok({}, 201)
         get_resp = _ok(updated)
         with patch("aiac.idp.configuration.api.requests.post", return_value=post_resp), \
@@ -520,7 +533,7 @@ class TestCreateRole:
     def test_returns_role_instance(self, monkeypatch):
         monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
         created = {"id": "r1", "name": "reader", "description": "Read-only", "composite": False}
-        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(created, 201)) as m:
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(created, 201)):
             result = Configuration.for_realm(REALM).create_role("reader", "Read-only")
         assert isinstance(result, Role)
         assert result.name == "reader"

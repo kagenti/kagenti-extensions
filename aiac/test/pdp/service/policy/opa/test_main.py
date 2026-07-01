@@ -2,8 +2,9 @@
 
 from pathlib import Path
 
-from aiac.pdp.service.policy.opa.main import app, get_output_dir
 from fastapi.testclient import TestClient
+
+from aiac.pdp.service.policy.opa.main import app, get_output_dir
 
 
 def _make_client(out_dir: Path) -> TestClient:

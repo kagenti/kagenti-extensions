@@ -1,14 +1,12 @@
 """Unit tests for aiac.agent.controller.routes (issue 4.1)."""
 
 import warnings
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import patch
 
 # Suppress starlette httpx deprecation warning
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="starlette")
 
-from fastapi.testclient import TestClient
+from fastapi.testclient import TestClient  # noqa: E402  (must follow warning filter above)
 
 
 def _make_role_result(role_id: str = "r1") -> dict:

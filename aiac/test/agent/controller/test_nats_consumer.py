@@ -3,8 +3,6 @@
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 
 def _make_msg(subject: str, data: bytes = b"{}") -> MagicMock:
     msg = MagicMock()

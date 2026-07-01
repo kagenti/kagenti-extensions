@@ -1,12 +1,12 @@
 """Unit tests for aiac.pdp.service.policy.opa.rego."""
 
 from aiac.idp.configuration.models import Role, Scope
-from aiac.policy.model.models import AgentPolicyModel, PolicyRule
 from aiac.pdp.service.policy.opa.rego import (
     generate_inbound_rego,
     generate_outbound_rego,
     slugify,
 )
+from aiac.policy.model.models import AgentPolicyModel, PolicyRule
 
 
 def _role(name: str = "reader") -> Role:

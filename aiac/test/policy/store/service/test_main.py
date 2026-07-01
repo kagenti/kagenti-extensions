@@ -11,7 +11,6 @@ from aiac.idp.configuration.models import Role, Scope, Service, Subject
 from aiac.policy.model.models import AgentPolicyModel, PolicyModel, PolicyRule
 from aiac.policy.store.service.main import app, get_db
 
-
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
 # ---------------------------------------------------------------------------

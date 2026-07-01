@@ -1,10 +1,11 @@
 """Unit tests for aiac.pdp.library.policy."""
 
-import pytest
 from unittest.mock import MagicMock, patch
 
-from aiac.pdp.library.policy.models import PolicyModel, PolicyStatement
+import pytest
+
 from aiac.pdp.library.policy.api import Policy
+from aiac.pdp.library.policy.models import PolicyModel, PolicyStatement
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7072"
