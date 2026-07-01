@@ -5,7 +5,6 @@ from langchain_openai import ChatOpenAI
 
 from aiac.agent.shared.state import (
     BaseAgentState,
-    CompositeMapping,
     PDPSnapshot,
     Permission,
     ProposedDiff,

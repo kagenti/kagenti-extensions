@@ -1,5 +1,6 @@
-from pydantic import BaseModel, ConfigDict
 from aiac.idp.configuration.models import Role, Scope
+from pydantic import BaseModel, ConfigDict
+
 
 class Rule(BaseModel):
     model_config  = ConfigDict(extra="ignore")

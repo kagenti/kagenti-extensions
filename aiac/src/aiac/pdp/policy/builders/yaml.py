@@ -7,7 +7,6 @@ Public API:
 """
 
 import yaml
-
 from aiac.policy.model.models import PolicyRule
 
 __all__ = ["save_policy_yaml"]

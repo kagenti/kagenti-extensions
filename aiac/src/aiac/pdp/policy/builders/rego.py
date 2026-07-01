@@ -7,7 +7,7 @@ Public API:
 """
 
 from pathlib import Path
-from typing import Any, Dict
+from typing import Dict
 
 from aiac.idp.configuration.api import Configuration
 from aiac.policy.model.models import PolicyRule
@@ -51,15 +51,15 @@ def _generate_privileges_rego(privileges_map: Dict[str, dict], scopes: list) -> 
         for priv in service_info["roles"]:
             priv_name = priv.get("name", "")
             priv_desc = priv.get("description", "").replace('"', '\\"')
-            rego_content += f'    {{\n'
+            rego_content += '    {\n'
             rego_content += f'        "name": "{priv_name}",\n'
             rego_content += f'        "description": "{priv_desc}",\n'
-            rego_content += f'        "scopes": [\n'
+            rego_content += '        "scopes": [\n'
             for scope_name in scope_names:
                 scope_name_escaped = scope_name.replace('"', '\\"')
                 rego_content += f'            "{scope_name_escaped}",\n'
             rego_content += '        ]\n'
-            rego_content += f'    }},\n'
+            rego_content += '    },\n'
         rego_content += "]\n\n"
     return rego_content
 
@@ -90,7 +90,7 @@ def _generate_policy_rego_inbound(
         Rego file content as string
     """
 
-    rego_content = f"""package authbridge.inbound.request
+    rego_content = """package authbridge.inbound.request
 
 import data.authz.realm_roles.realm_roles
 
@@ -112,7 +112,7 @@ import data.authz.realm_roles.realm_roles
         role_name_escaped = rule.role.name.replace('"', '\\"')
         rego_content += f"# Actor with role of **{role_name_escaped}**\n"
         rego_content += f"# may access service with id **{service_escaped}**\n"
-        rego_content += f'allow if {{\n'
+        rego_content += 'allow if {\n'
         rego_content += f'  "{role_name_escaped}" in object.get(realm_roles, input.identity.subject, [])\n'
         rego_content += f'  input.a2a.client_id == "{service_escaped}"\n'
         rego_content += "}\n\n"
@@ -143,7 +143,7 @@ def save_policy_rego(
     dir_path = Path(file_dir)
     dir_path.mkdir(parents=True, exist_ok=True)
 
-    # defaults and user data structure 
+    # defaults and user data structure
     if not policy_only:
         config_api = Configuration.for_realm(realm)
         user_to_roles: dict = {}
