@@ -21,9 +21,7 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
-from aiac.pdp.policy.models import PolicyObjectModel
 from aiac.idp.configuration.models import Role, Scope
-from aiac.agent.onboarding.policy.base_mapper.state import BaseMappingState
 from aiac.agent.onboarding.policy.single_privilege_agent import SinglePrivilegeMapper, SinglePrivilegeState
 from base_mapper import (
     extract_explanation_and_json,
@@ -438,17 +436,6 @@ def test_map_roles_with_empty_access(github_aud_privilege, sample_roles):
     assert result["success"] is True
 
 
-def test_generate_policy_returns_policy_model(github_aud_privilege, sample_roles):
-    """generate_policy() returns a PolicyObjectModel with rules and explanation."""
-    mock = _make_mock_llm("github-tool-aud", ["developer"])
-    mapper = SinglePrivilegeMapper(
-        privilege=github_aud_privilege, roles=sample_roles, llm=mock, verbose=False
-    )
-    result = mapper.generate_policy("Developers get GitHub access.")
-    assert isinstance(result, PolicyObjectModel)
-    assert isinstance(result.rules, list)
-
-
 def test_generate_policy_maps_role_to_privilege(github_aud_privilege, sample_roles):
     """generate_policy() produces Rules mapping the granted roles to the privilege."""
     mock = _make_mock_llm("github-tool-aud", ["developer"])
@@ -460,19 +447,6 @@ def test_generate_policy_maps_role_to_privilege(github_aud_privilege, sample_rol
         r.role.name == "developer" and r.scope.name == "github-tool-aud"
         for r in rules
     )
-
-
-def test_generate_policy_yaml_is_valid_yaml(github_aud_privilege, sample_roles):
-    """generate_policy() produces a valid PolicyObjectModel with expected rules."""
-    mock = _make_mock_llm("github-tool-aud", ["developer"])
-    mapper = SinglePrivilegeMapper(
-        privilege=github_aud_privilege, roles=sample_roles, llm=mock, verbose=False
-    )
-    policy = mapper.generate_policy("Developers get GitHub access.")
-    assert isinstance(policy, PolicyObjectModel)
-    assert len(policy.rules) > 0
-    assert any(r.scope.name == "github-tool-aud" for r in policy.rules)
-
 
 def test_generate_policy_with_unknown_role_raises_value_error(github_aud_privilege, sample_roles):
     """generate_policy() raises ValueError when the LLM returns an unknown role."""

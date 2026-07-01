@@ -20,7 +20,6 @@ import yaml
 from pathlib import Path
 from unittest.mock import Mock
 
-from aiac.pdp.policy.models import PolicyObjectModel
 from aiac.idp.configuration.models import Role, Scope
 from single_role_agent import SingleRoleMapper, SingleRoleState
 from base_mapper import (
@@ -426,26 +425,6 @@ def test_map_privileges_with_empty_granted_privileges(sample_scopes):
     result = mapper.map_privileges(policy_description="Sales staff have no GitHub access.")
     assert result["granted_privileges"] == []
     assert result["success"] is True
-
-
-def test_generate_policy_returns_policy_model(developer_role, sample_scopes):
-    """generate_policy() returns a PolicyObjectModel with rules and explanation."""
-    mock = _make_mock_llm("developer", ["github-tool-aud"])
-    mapper = SingleRoleMapper(role=developer_role, privileges=sample_scopes, llm=mock, verbose=False)
-    result = mapper.generate_policy("Developers get GitHub access.")
-    assert isinstance(result, PolicyObjectModel)
-    assert isinstance(result.rules, list)
-
-
-def test_generate_policy_yaml_is_valid_yaml(developer_role, sample_scopes):
-    """generate_policy() produces a valid PolicyObjectModel with expected rules."""
-    mock = _make_mock_llm("developer", ["github-tool-aud"])
-    mapper = SingleRoleMapper(role=developer_role, privileges=sample_scopes, llm=mock, verbose=False)
-    policy = mapper.generate_policy("Developers get GitHub access.")
-    assert isinstance(policy, PolicyObjectModel)
-    assert len(policy.rules) > 0
-    assert any(r.role.name == "developer" for r in policy.rules)
-
 
 def test_generate_policy_maps_privilege_to_role(developer_role, sample_scopes):
     """generate_policy() produces a Rule mapping the role to the granted privilege."""

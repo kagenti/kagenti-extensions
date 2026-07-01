@@ -1,4 +1,5 @@
 import os
+from typing import cast
 
 from fastapi import HTTPException
 from langchain_openai import ChatOpenAI
@@ -53,14 +54,16 @@ def fetch_pdp_state(state: BaseAgentState) -> dict:
 
 
 def propose_mappings(state: BaseAgentState) -> dict:
-    snapshot: PDPSnapshot = state["pdp_snapshot"]
+    snapshot = state["pdp_snapshot"]
+    if snapshot is None:
+        raise ValueError("pdp_snapshot is not set; fetch_pdp_state must run before propose_mappings")
     policy_chunks = state["policy_chunks"]
     domain_chunks = state["domain_knowledge_chunks"]
     trigger = state["trigger"]
     entity_id = trigger["entity_id"]
 
     affected_role = next((r for r in snapshot.roles if r.id == entity_id), None)
-    role_name = affected_role.name if affected_role else entity_id
+    role_name = affected_role.name if affected_role else (entity_id or "")
 
     context = "\n".join([
         "## Access Control Policy",
@@ -78,11 +81,14 @@ def propose_mappings(state: BaseAgentState) -> dict:
 
     try:
         llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini"), temperature=0)
-        diff: ProposedDiff = llm.with_structured_output(ProposedDiff).invoke(
-            [
-                {"role": "system", "content": PLANNER_SYSTEM},
-                {"role": "user", "content": context},
-            ]
+        diff = cast(
+            ProposedDiff,
+            llm.with_structured_output(ProposedDiff).invoke(
+                [
+                    {"role": "system", "content": PLANNER_SYSTEM},
+                    {"role": "user", "content": context},
+                ]
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=504, detail=f"LLM unavailable: {exc}") from exc
@@ -91,8 +97,12 @@ def propose_mappings(state: BaseAgentState) -> dict:
 
 
 def validate_mappings(state: BaseAgentState) -> dict:
-    snapshot: PDPSnapshot = state["pdp_snapshot"]
-    diff: ProposedDiff = state["proposed_diff"]
+    snapshot = state["pdp_snapshot"]
+    if snapshot is None:
+        raise ValueError("pdp_snapshot is not set; fetch_pdp_state must run before propose_mappings")
+    diff = state["proposed_diff"]
+    if diff is None:
+        raise ValueError("proposed_diff is not set; propose_mappings must run before validate_mappings")
     trigger = state["trigger"]
     entity_id = trigger["entity_id"]
 
@@ -133,11 +143,14 @@ def validate_mappings(state: BaseAgentState) -> dict:
 
     try:
         llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini"), temperature=0)
-        verdict: ValidationVerdict = llm.with_structured_output(ValidationVerdict).invoke(
-            [
-                {"role": "system", "content": AUDITOR_SYSTEM},
-                {"role": "user", "content": f"Proposed diff: {diff.model_dump_json()}"},
-            ]
+        verdict = cast(
+            ValidationVerdict,
+            llm.with_structured_output(ValidationVerdict).invoke(
+                [
+                    {"role": "system", "content": AUDITOR_SYSTEM},
+                    {"role": "user", "content": f"Proposed diff: {diff.model_dump_json()}"},
+                ]
+            ),
         )
     except Exception as exc:
         raise HTTPException(status_code=504, detail=f"LLM unavailable during audit: {exc}") from exc
@@ -150,10 +163,12 @@ def validate_mappings(state: BaseAgentState) -> dict:
 
 def apply_mappings(state: BaseAgentState) -> dict:
     if state.get("validation_errors"):
-        return state
+        return {**state}
 
     realm = state["realm"]
-    diff: ProposedDiff = state["proposed_diff"]
+    diff = state["proposed_diff"]
+    if diff is None:
+        raise ValueError("proposed_diff is not set; propose_mappings must run before apply_diff")
 
     try:
         policy = Policy.for_realm(realm)
