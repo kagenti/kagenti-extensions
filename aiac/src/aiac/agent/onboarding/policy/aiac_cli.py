@@ -41,7 +41,6 @@ from dotenv import load_dotenv
 
 from full_policy_agent.graph import PolicyBuilder
 from config import create_llm
-from aiac.pdp.policy.builders.rego import save_policy_rego
 
 load_dotenv(dotenv_path="aiac.env", override=True)
 
@@ -116,10 +115,6 @@ def generate_policy_only(
         return
 
     print("✓ Access rules generated successfully!\n")
-
-    print("\nGenerating Rego policy files...")
-    rego_dir = Path(output_file).parent / "rego_policy"
-    save_policy_rego(policy, str(rego_dir), realm=builder.realm)
 
     print("\n" + "=" * 80)
     print("Parsed Role-to-Privilege Mappings:")
