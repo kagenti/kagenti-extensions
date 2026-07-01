@@ -1,2 +1,4 @@
 # Claude Code related ignores
 handoff*
+# PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
+test/pdp/policy/rego_out/
