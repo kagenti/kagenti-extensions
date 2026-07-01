@@ -2,6 +2,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Query
 from keycloak import KeycloakAdmin

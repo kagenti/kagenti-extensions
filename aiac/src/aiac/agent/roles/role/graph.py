@@ -1,6 +1,5 @@
 from langgraph.graph import END, StateGraph
 
-from aiac.agent.shared.state import BaseAgentState
 from aiac.agent.roles.role.nodes import (
     apply_mappings,
     fetch_pdp_state,
@@ -8,6 +7,7 @@ from aiac.agent.roles.role.nodes import (
     propose_mappings,
     validate_mappings,
 )
+from aiac.agent.shared.state import BaseAgentState
 
 
 def _has_errors(state: BaseAgentState) -> str:

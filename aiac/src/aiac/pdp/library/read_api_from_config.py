@@ -4,7 +4,7 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from aiac.idp.configuration.models import Subject, Role, Service, Scope
+from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
