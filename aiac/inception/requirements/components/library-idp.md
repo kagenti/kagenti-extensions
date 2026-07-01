@@ -38,14 +38,7 @@ All models use `model_config = ConfigDict(extra='ignore')` to silently discard u
 
 Model definition order: `Subject` → `Role` → `Service` → `Scope`. Because `Subject`, `Role`, and `Service` reference `Scope` (and `Subject` references `Role`) as forward references, the module calls `Subject.model_rebuild()`, `Role.model_rebuild()`, and `Service.model_rebuild()` after `Scope` is defined.
 
-`Service`, `Role`, `Scope`, and `Subject` implement custom `__hash__` and `__eq__` based on their `id` field only:
-
-```python
-__hash__ = lambda self: hash(self.id)
-__eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
-```
-
-`frozen=True` is **not** used — these models have list fields that must remain mutable. The `id`-only hash enables their use as dict keys in `AgentPolicyModel.source_roles`, `AgentPolicyModel.subject_roles`, and `AgentPolicyModel.scope_targets`.
+`Service`, `Role`, `Scope`, and `Subject` use pydantic's default equality (field-based) and are **not hashable** — they define no custom `__hash__`/`__eq__` and are never used as dict keys or set members. The relationship maps in `AgentPolicyModel` (`source_roles`, `subject_roles`, `target_scopes`) are keyed by the entity's string `id` instead, so no identity override is needed.
 
 #### `Subject`
 

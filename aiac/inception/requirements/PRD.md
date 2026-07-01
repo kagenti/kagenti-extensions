@@ -294,7 +294,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **Clean `idp` / `pdp` / `policy` Python namespace split.** IdP-related code (Keycloak entity management) lives under `aiac.idp.*`; PDP policy code (OPA Rego writing) lives under `aiac.pdp.*`; shared policy model and computation code lives under `aiac.policy.*`.
 - **`aiac.policy.model` is dependency-free (only `pydantic` + `aiac.idp.configuration.models`).** `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` live in a neutral namespace importable by any consumer — Policy Store library, PDP Policy Library, PCE — without forcing a dependency on any service namespace.
 - **`PolicyRule.role` and `PolicyRule.scope` are typed objects.** They hold `Role` and `Scope` instances from `aiac.idp.configuration.models`, enabling the PCE to call `Configuration.get_services_by_role` and `Configuration.get_services_by_scope` without additional type conversion.
-- **`Service`, `Role`, `Scope` use `id`-only hash/eq.** Custom `__hash__` and `__eq__` on `id` field enables their use as dict keys in `AgentPolicyModel.source_roles` and `AgentPolicyModel.scope_targets` without `frozen=True` (these models have mutable list fields).
+- **`AgentPolicyModel` relationship maps are keyed by string `id`.** `source_roles`, `subject_roles`, and `target_scopes` use the entity's string `id` as the dict key, so `Service`, `Role`, `Scope`, and `Subject` need no custom hash/eq and keep pydantic's default field-based equality. This also lets the maps serialize to JSON without a custom key serializer.
 - **PCE merge semantics are additive only.** New rules are appended to existing `inbound_rules`/`outbound_rules`; existing rules are never removed. Rule revocation is TBD.
 - **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
 - **RBAC via OPA Rego rules.** AIAC manages role → service permission mappings by writing `AgentPolicyModel` instances to the `AuthorizationPolicy` CR. Each agent pod's OPA plugin fetches its packages from the CR at startup.
@@ -373,7 +373,7 @@ The PCE is the **single point of coordination** between the Policy Store and PDP
 Python package at `aiac/src/`. Clean `idp` / `pdp` / `policy` namespace split:
 
 **IdP library** (Keycloak entity management):
-- **`aiac.idp.configuration.models`** — dependency-free Pydantic models for IdP entities (`Subject`, `Role`, `Service`, `Scope`). `Service`, `Role`, `Scope` implement `id`-only `__hash__`/`__eq__` for use as dict keys.
+- **`aiac.idp.configuration.models`** — dependency-free Pydantic models for IdP entities (`Subject`, `Role`, `Service`, `Scope`). Plain pydantic models with default field-based equality; not hashable and not used as dict keys.
 - **`aiac.idp.configuration.api`** — HTTP client wrapping the IdP Configuration Service; read and write access to configuration entities; returns typed Pydantic instances; all methods require a `realm: str` parameter. Includes `get_services_by_role(role)` and `get_services_by_scope(scope)` used by the PCE.
 
 **Policy model** (shared, dependency-light):

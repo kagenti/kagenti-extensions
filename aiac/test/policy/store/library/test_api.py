@@ -13,9 +13,9 @@ _AGENT_POLICY_DICT = {
     "agent_id": "agent-1",
     "agent_roles": [],
     "agent_scopes": [],
-    "subject_roles": [],
-    "source_roles": [],
-    "scope_targets": [],
+    "subject_roles": {},
+    "source_roles": {},
+    "target_scopes": {},
     "inbound_rules": [],
     "outbound_rules": [],
 }

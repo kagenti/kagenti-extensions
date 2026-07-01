@@ -14,12 +14,6 @@ class Subject(BaseModel):
     enabled: bool
     roles: list["Role"] = []
 
-    def __hash__(self) -> int:
-        return hash(self.id)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Subject) and self.id == other.id
-
 
 class Role(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -29,12 +23,6 @@ class Role(BaseModel):
     description: str | None = None
     composite: bool
     childRoles: list["Role"] = []
-
-    def __hash__(self) -> int:
-        return hash(self.id)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Role) and self.id == other.id
 
 
 class Service(BaseModel):
@@ -48,12 +36,6 @@ class Service(BaseModel):
     type: Literal["Agent", "Tool"] | None = None
     roles: list["Role"] = []
     scopes: list["Scope"] = []
-
-    def __hash__(self) -> int:
-        return hash(self.id)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Service) and self.id == other.id
 
     @model_validator(mode="before")
     @classmethod
@@ -92,12 +74,6 @@ class Scope(BaseModel):
     id: str
     name: str
     description: str | None = None
-
-    def __hash__(self) -> int:
-        return hash(self.id)
-
-    def __eq__(self, other: object) -> bool:
-        return isinstance(other, Scope) and self.id == other.id
 
 
 Subject.model_rebuild()

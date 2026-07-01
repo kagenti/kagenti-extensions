@@ -723,41 +723,6 @@ class TestGetServicesByRole:
 
 
 # ---------------------------------------------------------------------------
-# Subject hashability (8.15)
-# ---------------------------------------------------------------------------
-
-
-class TestSubjectHashability:
-    def _make_subject(self, id_, **kwargs):
-        defaults = {"id": id_, "username": f"user-{id_}", "enabled": True}
-        return Subject.model_validate({**defaults, **kwargs})
-
-    def test_equal_ids_are_equal(self):
-        assert self._make_subject("u1") == self._make_subject("u1")
-
-    def test_equal_ids_have_same_hash(self):
-        assert hash(self._make_subject("u1")) == hash(self._make_subject("u1"))
-
-    def test_different_ids_are_not_equal(self):
-        assert self._make_subject("u1") != self._make_subject("u2")
-
-    def test_subject_vs_role_same_id_not_equal(self):
-        s = self._make_subject("x1")
-        r = Role.model_validate({"id": "x1", "name": "viewer", "composite": False})
-        assert s != r
-
-    def test_subject_vs_service_same_id_not_equal(self):
-        s = self._make_subject("x1")
-        svc = Service.model_validate({"id": "x1", "clientId": "my-app", "name": "my-app", "enabled": True})
-        assert s != svc
-
-    def test_subject_usable_as_dict_key(self):
-        s = self._make_subject("u1")
-        d = {s: "value"}
-        assert d[s] == "value"
-
-
-# ---------------------------------------------------------------------------
 # get_subjects_by_role (8.15)
 # ---------------------------------------------------------------------------
 

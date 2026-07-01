@@ -12,9 +12,13 @@ Keeping the canonical model definitions inside a PDP-namespaced module (`aiac.pd
 
 Additionally, the old `PolicyRule` used plain `str` for `role` and `scope`. The PCE algorithm requires typed `Role` and `Scope` objects (from `aiac.idp.configuration.models`) to invoke `Configuration.get_services_by_role` and `Configuration.get_services_by_scope`.
 
+Finally, the original `source_roles`, `subject_roles`, and `scope_targets` maps used pydantic model objects (`Service`, `Subject`, `Scope`) as dict keys. Model-object keys do not round-trip through `model_dump(mode="json")` / JSON without custom key handling, and they couple `aiac.policy.model` to the id-only `__hash__`/`__eq__` of the IdP models. The outbound map was also keyed by scope (`scope → targets`), whereas consumers need the inverse (`target → scopes`) to emit per-target authorization directly.
+
 ## Solution
 
 A canonical, dependency-free model module at `aiac.policy.model` defines `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` with typed fields. No HTTP client, no service code — importable by any consumer without side effects. `PolicyRule.role` and `PolicyRule.scope` are typed `Role` and `Scope` objects from `aiac.idp.configuration.models`.
+
+The relationship maps (`source_roles`, `subject_roles`, `target_scopes`) are keyed by the string `id` of the referenced entity rather than by a typed object, so they serialize to JSON natively and carry no hashability requirement into `aiac.policy.model`. Typed `Role` / `Scope` objects are retained as the map *values* (and in `PolicyRule`), preserving the typing the PCE needs for IdP queries. The outbound map is `target_scopes` (`target service id → scopes permitted`), the inverse of the former `scope_targets`.
 
 ---
 
@@ -24,8 +28,10 @@ A canonical, dependency-free model module at `aiac.policy.model` defines `Policy
 2. As the PDP Policy Library, I want to import `PolicyModel` and `AgentPolicyModel` from `aiac.policy.model`, so that my HTTP serialization logic does not duplicate model definitions.
 3. As the Policy Store Library, I want to import `AgentPolicyModel` and `PolicyModel` from `aiac.policy.model`, so that response deserialization uses the same canonical types as every other consumer.
 4. As an AIAC Agent sub-UC agent, I want to construct a `PolicyRule` with typed `Role` and `Scope` objects, so that the PCE can use them for IdP queries without additional type conversion.
-5. As a developer, I want `Service`, `Role`, and `Scope` to be usable as dict keys, so that the PCE can build `source_roles` and `scope_targets` maps without wrapping them.
+5. As the Policy Computation Engine, I want `source_roles`, `subject_roles`, and `target_scopes` keyed by string entity IDs, so that I build them with `entity.id` and they serialize to JSON without custom key handling.
 6. As a developer, I want all models to silently ignore unknown fields from API responses, so that IdP API additions do not break deserialization.
+7. As the PDP Policy Library, I want outbound permissions expressed as `target service id → allowed scopes`, so that I can emit per-target authorization directly without inverting a `scope → targets` map.
+8. As a consumer serializing an `AgentPolicyModel` to JSON, I want every relationship map to have string keys, so that `model_dump(mode="json")` round-trips without a custom key serializer.
 
 ---
 
@@ -51,7 +57,7 @@ aiac/src/aiac/policy/
 | Dependency | Purpose |
 |------------|---------|
 | `pydantic` | `BaseModel`, `ConfigDict` |
-| `aiac.idp.configuration.models` | Typed `Role`, `Scope`, `Service`, `Subject` |
+| `aiac.idp.configuration.models` | Typed `Role`, `Scope` (as map values and in `PolicyRule`) |
 
 No HTTP client dependency. No `requests`, no `python-dotenv`.
 
@@ -77,9 +83,9 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 | `agent_id` | `str` | Service ID from the AIAC trigger event (`aiac.apply.service.{id}`) |
 | `agent_roles` | `list[Role]` | Realm roles assigned to this agent |
 | `agent_scopes` | `list[Scope]` | Scopes this agent exposes |
-| `source_roles` | `dict[Service, list[Role]]` | Inbound: source service → roles granted |
-| `subject_roles` | `dict[Subject, list[Role]]` | Inbound: subject (user) → roles held on behalf of which this agent acts |
-| `scope_targets` | `dict[Scope, list[Service]]` | Outbound: scope → target services permitted |
+| `source_roles` | `dict[str, list[Role]]` | Inbound: source service **id** → roles granted |
+| `subject_roles` | `dict[str, list[Role]]` | Inbound: subject (user) **id** → roles held on behalf of which this agent acts |
+| `target_scopes` | `dict[str, list[Scope]]` | Outbound: target service **id** → scopes this agent may request on it |
 | `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(caller_role, requested_scope)` tuples |
 | `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, requested_scope)` tuples |
 
@@ -95,27 +101,23 @@ A partial or full system policy model. When sent to `POST /policy` on the Policy
 |-------|------|
 | `agents` | `list[AgentPolicyModel]` |
 
-### Hashability of `Service`, `Role`, `Scope`
+### Map keys are string IDs
 
-`Service`, `Role`, `Scope`, and `Subject` (defined in `aiac.idp.configuration.models`) are used as dict keys in `AgentPolicyModel.source_roles`, `AgentPolicyModel.subject_roles`, and `AgentPolicyModel.scope_targets`. They implement custom `__hash__` and `__eq__` based on their `id` field only:
+`source_roles`, `subject_roles`, and `target_scopes` are keyed by the string `id` of the referenced Keycloak entity (source service id, subject id, target service id) rather than by the typed `Service` / `Subject` / `Scope` object. Rationale:
 
-```python
-# On Service, Role, Scope, Subject in aiac.idp.configuration.models:
-__hash__ = lambda self: hash(self.id)
-__eq__ = lambda self, other: isinstance(other, type(self)) and self.id == other.id
-```
+- JSON object keys must be strings. A dict keyed by a pydantic model does not round-trip through `model_dump(mode="json")` / JSON without a custom key serializer; a `str` key serializes natively.
+- The IdP models are plain pydantic models (default field-based equality, not hashable). Consumers build these maps with `entity.id` as the key.
 
-`frozen=True` is **not** used — these models have list fields (`childRoles`, `roles`, `scopes`) that must remain mutable. The `id`-only hash is the correct approach.
+As a result, no field in `aiac.policy.model` uses a typed object as a dict key, and this module imports only `Role` and `Scope` from `aiac.idp.configuration.models` (as map *values* and in `PolicyRule`). `Service` and `Subject` are no longer referenced here.
 
 ### Usage
 
 ```python
 from aiac.policy.model.models import PolicyRule, AgentPolicyModel, PolicyModel
-from aiac.idp.configuration.models import Role, Scope, Service, Subject
+from aiac.idp.configuration.models import Role, Scope
 
 role = Role(id="r1", name="weather-reader", composite=False)
 scope = Scope(id="s1", name="read")
-subject = Subject(id="u1", username="alice", enabled=True)
 
 rule = PolicyRule(role=role, scope=scope)
 agent_model = AgentPolicyModel(
@@ -123,8 +125,8 @@ agent_model = AgentPolicyModel(
     agent_roles=[role],
     agent_scopes=[scope],
     source_roles={},
-    subject_roles={subject: [role]},
-    scope_targets={},
+    subject_roles={"u1": [role]},        # keyed by subject id
+    target_scopes={"github-tool": [scope]},  # target service id → scopes
     inbound_rules=[rule],
     outbound_rules=[],
 )
@@ -143,9 +145,9 @@ model = PolicyModel(agents=[agent_model])
 
 Key behaviors to assert:
 - `PolicyRule` accepts typed `Role` and `Scope` objects; rejects plain `str` where `Role`/`Scope` is expected.
-- `AgentPolicyModel` with `Service`, `Subject`, and `Scope` keys in `source_roles`, `subject_roles`, and `scope_targets` is serializable and deserializable via `model_dump()` / `model_validate()`.
-- Two `Role` / `Scope` / `Service` / `Subject` instances with the same `id` are equal and hash-equal (usable as dict keys without collision).
-- Two instances with different `id` values are not equal.
+- `AgentPolicyModel` with string-ID keys in `source_roles`, `subject_roles`, and `target_scopes` round-trips through `model_dump(mode="json")` / `model_validate()` with the typed `Role` / `Scope` list values preserved.
+- `target_scopes` maps a target service id to the list of `Scope` objects permitted on it (outbound direction is `target → scopes`, not `scope → targets`).
+- A relationship map keyed by a plain string serializes to a JSON object without a custom key serializer.
 - `ConfigDict(extra='ignore')` causes unknown fields to be silently discarded on `model_validate()`.
 
 ---
@@ -160,5 +162,5 @@ Key behaviors to assert:
 
 ## Further Notes
 
-- The `id`-only hash is intentional: two `Role` / `Subject` / `Service` / `Scope` objects representing the same Keycloak entity but fetched at different times (with potentially different enrichment fields) must be treated as equal for dict key lookup.
+- Keying maps by string `id` sidesteps the previous reliance on id-only hashing of the IdP models: two records for the same Keycloak entity fetched at different times (with potentially different enrichment fields) collapse to the same string key regardless of those differences.
 - `aiac/src/aiac/agent/policy/api.py` imports `PolicyRule` from `aiac.policy.model`. The `role_to_scopes` / `roles_to_scope` helpers in that file remain in place and are used by AIAC Agent sub-UC agents directly; they are not consumed by the PCE.

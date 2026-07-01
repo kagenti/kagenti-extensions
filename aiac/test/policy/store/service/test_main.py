@@ -38,9 +38,9 @@ def _make_agent(agent_id: str = "agent-1") -> AgentPolicyModel:
         agent_id=agent_id,
         agent_roles=[_role()],
         agent_scopes=[_scope()],
-        subject_roles={_subject(): [_role()]},
-        source_roles={_service(): [_role()]},
-        scope_targets={_scope(): [_service()]},
+        subject_roles={_subject().id: [_role()]},
+        source_roles={_service().id: [_role()]},
+        target_scopes={_service().id: [_scope()]},
         inbound_rules=[PolicyRule(role=_role(), scope=_scope())],
         outbound_rules=[],
     )
