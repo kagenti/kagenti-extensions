@@ -1,5 +1,5 @@
-from aiac.pdp.library.configuration.api import Configuration
-from aiac.pdp.library.configuration.models import Service
+from aiac.idp.configuration.api import Configuration
+from aiac.idp.configuration.models import Service
 
 
 class ServiceMaps:

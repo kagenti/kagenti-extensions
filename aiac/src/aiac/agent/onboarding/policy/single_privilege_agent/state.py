@@ -3,7 +3,7 @@
 State Definitions for Single Privilege Mapper
 """
 
-from aiac.pdp.library.configuration.models import Role, Scope
+from aiac.idp.configuration.models import Role, Scope
 from base_mapper.state import BaseMappingState
 
 

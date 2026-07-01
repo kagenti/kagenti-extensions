@@ -24,11 +24,11 @@ from dataclasses import dataclass
 from langgraph.graph import StateGraph, END
 from langchain_core.language_models import BaseChatModel
 
+from aiac.idp.configuration.api import Configuration
+from aiac.idp.configuration.models import Role, Service
 from config import create_llm
 from full_policy_agent_roles.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.configuration.api import Configuration
-from aiac.pdp.library.configuration.models import Role, Service
 from aiac.pdp.policy.models import PolicyObjectModel, Rule
 from single_role_agent import SingleRoleMapper
 from utils.validators import validate_policy_structure

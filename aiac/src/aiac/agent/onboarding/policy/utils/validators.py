@@ -8,7 +8,7 @@ structural validation and semantic verification using LLM.
 
 from typing import Dict, List, Any, Optional
 
-from aiac.pdp.library.configuration.models import Role
+from aiac.idp.configuration.models import Role
 from aiac.pdp.policy.models import PolicyObjectModel
 
 

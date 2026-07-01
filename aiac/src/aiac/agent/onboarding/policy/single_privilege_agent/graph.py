@@ -19,7 +19,7 @@ from langgraph.graph.state import CompiledStateGraph
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.language_models import BaseChatModel
 
-from aiac.pdp.library.configuration.models import Role, Scope
+from aiac.policy.model.models import Role, Scope
 from aiac.pdp.policy.models import Rule
 from .state import SinglePrivilegeState
 from base_mapper import (

@@ -29,7 +29,7 @@ Key Features:
     - Retry mechanism with semantic verification
 """
 
-from aiac.pdp.library.configuration.models import Role, Service
+from aiac.idp.configuration.models import Role, Service
 from aiac.pdp.policy.models import PolicyObjectModel, Rule
 from typing import Optional, Dict
 import sys
@@ -40,7 +40,7 @@ from langchain_core.language_models import BaseChatModel
 
 from full_policy_agent.state import PolicyState
 from config.constants import MAX_VALIDATION_RETRIES
-from aiac.pdp.library.configuration.api import Configuration
+from aiac.idp.configuration.api import Configuration
 from single_privilege_agent import SinglePrivilegeMapper
 from utils.validators import validate_policy_structure
 from aiac.pdp.policy.builders.yaml import _generate_yaml_output
