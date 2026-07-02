@@ -36,8 +36,8 @@ Per-task handoff documents live under `inception/handoffs/` — one markdown fil
 Key stable structure:
 - `idp/` — IdP configuration service and models
 - `pdp/` — PDP policy writer service and library
-- `agent/` — FastAPI controller, NATS consumer, orchestrators
-  - `agent/onboarding/policy/` — FROZEN, do not modify (PreToolUse hook blocks writes)
+- `agent/` — reset pending a fresh rebuild; currently only `__init__.py` plus the archived `onboarding.old/`. The prior controller/orchestrator/shared implementation was removed as stale (built on the superseded `ProposedDiff` model).
+  - `agent/onboarding.old/policy/` — archived prior implementation (was FROZEN); not part of the active build
 
 Pending namespaces (to be added per PRD): `policy/model/`, `policy/store/`, `policy/computation/`.
 
@@ -83,5 +83,6 @@ Docker images:
 | `aiac-pdp-config` | `src/aiac/idp/service/configuration/keycloak/Dockerfile` |
 | `aiac-pdp-policy-opa` | `src/aiac/pdp/service/policy/opa/Dockerfile` |
 | `aiac-policy-store` | `src/aiac/policy/store/service/Dockerfile` |
-| `aiac-agent` | `src/aiac/agent/controller/Dockerfile` |
 | `aiac-rag-ingest` | `rag-ingest/` (separate directory) |
+
+> `aiac-agent` (was `src/aiac/agent/controller/Dockerfile`) is temporarily removed — the agent layer was reset and will be rebuilt; the image and its Dockerfile will return with it.
