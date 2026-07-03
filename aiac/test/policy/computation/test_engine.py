@@ -71,7 +71,7 @@ class _Result:
 
 
 def run_engine(rules, *, scope_services=None, role_services=None, role_subjects=None,
-               existing=None, missing_404=False):
+               existing=None, missing_404=False, override=False):
     scope_services = scope_services or {}
     role_services = role_services or {}
     role_subjects = role_subjects or {}
@@ -106,7 +106,7 @@ def run_engine(rules, *, scope_services=None, role_services=None, role_subjects=
         ap = stack.enter_context(
             patch("aiac.policy.computation.engine.apply_policy", side_effect=_rec_policy))
         from aiac.policy.computation.engine import compute_and_apply
-        compute_and_apply(rules)
+        compute_and_apply(rules, override=override)
         return _Result(aap, ap, gsbs, gsbr, gsubr, gap, order)
 
 
@@ -176,10 +176,11 @@ def test_target_records_subject_roles_by_username():
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 5 — a composite role is flattened to its non-composite children; the   #
-# IdP is queried for each child, never for the composite itself.               #
+# Cycle 5 — the PCE does NOT flatten: rules arrive pre-flattened from the UC,   #
+# so a rule carrying a composite role queries the IdP exactly once with that    #
+# role as-is — never once per child.                                            #
 # --------------------------------------------------------------------------- #
-def test_composite_role_is_flattened_to_its_children():
+def test_composite_role_is_not_flattened():
     child_a = _role("r-a", "reader")
     child_b = _role("r-b", "writer")
     composite = _role("r-comp", "editor", composite=True, children=[child_a, child_b])
@@ -187,11 +188,12 @@ def test_composite_role_is_flattened_to_its_children():
 
     res = run_engine([rule], scope_services={"s-write": [_service("github-tool")]})
 
+    res.get_services_by_role.assert_called_once_with(composite)
+    res.get_subjects_by_role.assert_called_once_with(composite)
     roles_queried = [c.args[0] for c in res.get_services_by_role.call_args_list]
     subjects_queried = [c.args[0] for c in res.get_subjects_by_role.call_args_list]
-    assert roles_queried == [child_a, child_b]
-    assert subjects_queried == [child_a, child_b]
-    assert composite not in roles_queried and composite not in subjects_queried
+    assert child_a not in roles_queried and child_b not in roles_queried
+    assert child_a not in subjects_queried and child_b not in subjects_queried
 
 
 # --------------------------------------------------------------------------- #
@@ -345,3 +347,78 @@ def test_writes_precede_single_push_and_model_is_json_serializable():
     pushed = res.apply_policy.call_args.args[0]
     restored = PolicyModel.model_validate(pushed.model_dump(mode="json"))
     assert {a.agent_id for a in restored.agents} == {"github-tool", "weather-agent"}
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 13 — override=True authoritatively replaces the input role's mappings: #
+# stale entries for that role are purged from BOTH directions (and dropped     #
+# from source_roles / subject_roles, with target_scopes reconciled) before the #
+# fresh rules are appended; an unrelated role's mappings survive untouched.    #
+# --------------------------------------------------------------------------- #
+def test_override_purges_input_role_before_appending():
+    edit = _role("r-edit")
+    keep = _role("r-keep")
+
+    target_prior = _fresh("github-tool")
+    target_prior.inbound_rules.append(PolicyRule(role=edit, scope=_scope("s-stale")))
+    target_prior.inbound_rules.append(PolicyRule(role=keep, scope=_scope("s-keep")))
+    target_prior.source_roles["weather-agent"] = [edit, keep]
+    target_prior.subject_roles["alice"] = [edit, keep]
+
+    source_prior = _fresh("weather-agent")
+    source_prior.outbound_rules.append(PolicyRule(role=edit, scope=_scope("s-stale")))
+    source_prior.target_scopes["github-tool"] = [_scope("s-stale")]
+
+    rule = _rule(role=edit, scope=_scope("s-write"))
+    res = run_engine(
+        [rule],
+        scope_services={"s-write": [_service("github-tool")]},
+        role_services={"r-edit": [_service("weather-agent")]},
+        existing={"github-tool": target_prior, "weather-agent": source_prior},
+        override=True,
+    )
+
+    target = res.written["github-tool"]
+    source = res.written["weather-agent"]
+
+    target_inbound = {(r.role.id, r.scope.id) for r in target.inbound_rules}
+    assert ("r-edit", "s-stale") not in target_inbound  # stale purged
+    assert ("r-edit", "s-write") in target_inbound  # fresh applied
+    assert ("r-keep", "s-keep") in target_inbound  # unrelated role survives
+
+    # r-edit dropped from source_roles/subject_roles then re-added only where
+    # the fresh resolution puts it back (source_roles, not subject_roles here).
+    assert {r.id for r in target.source_roles["weather-agent"]} == {"r-keep", "r-edit"}
+    assert {r.id for r in target.subject_roles["alice"]} == {"r-keep"}
+
+    source_outbound = {(r.role.id, r.scope.id) for r in source.outbound_rules}
+    assert ("r-edit", "s-stale") not in source_outbound  # stale purged
+    assert ("r-edit", "s-write") in source_outbound  # fresh applied
+    # target_scopes reconciled: only scopes justified by surviving outbound rules.
+    assert {s.id for s in source.target_scopes["github-tool"]} == {"s-write"}
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 14 — override=True purges each input role ONCE, up-front: two input    #
+# rules sharing a role must both land, i.e. the shared role's purge does not    #
+# wipe the first rule's mapping after the second is processed.                  #
+# --------------------------------------------------------------------------- #
+def test_override_shared_role_purged_once_up_front():
+    edit = _role("r-edit")
+
+    source_prior = _fresh("weather-agent")
+    source_prior.outbound_rules.append(PolicyRule(role=edit, scope=_scope("s-old")))
+    source_prior.target_scopes["tool-old"] = [_scope("s-old")]
+
+    rules = [_rule(role=edit, scope=_scope("s-a")), _rule(role=edit, scope=_scope("s-b"))]
+    res = run_engine(
+        rules,
+        scope_services={"s-a": [_service("tool-a")], "s-b": [_service("tool-b")]},
+        role_services={"r-edit": [_service("weather-agent")]},
+        existing={"weather-agent": source_prior},
+        override=True,
+    )
+
+    source = res.written["weather-agent"]
+    out_pairs = {(r.role.id, r.scope.id) for r in source.outbound_rules}
+    assert out_pairs == {("r-edit", "s-a"), ("r-edit", "s-b")}  # both survive; s-old purged once
