@@ -14,7 +14,7 @@ This bespoke logic was duplicated across every sub-agent that produced policy ru
 
 ## Solution
 
-A pure Python library module `aiac.policy.computation` centralises all policy computation. Sub-agents call a single function `compute_and_apply(rules: list[PolicyRule]) -> None`, which handles IdP resolution, additive merging, Policy Store read/write, and PDP Policy Writer invocation. No FastAPI service, no Kubernetes deployment — the module is imported directly into the calling sub-agent's process.
+A pure Python library module `aiac.policy.computation` centralises all policy computation. Sub-agents call a single function `compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None`, which handles IdP resolution, merging (additive append or override-replace), Policy Store read/write, and PDP Policy Writer invocation. No FastAPI service, no Kubernetes deployment — the module is imported directly into the calling sub-agent's process.
 
 ---
 
@@ -56,37 +56,50 @@ No FastAPI. No Kubernetes deployment. No container image. Imported as a library 
 Single entry point:
 
 ```python
-def compute_and_apply(rules: list[PolicyRule]) -> None
+def compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None
 ```
 
 - **Fire-and-forget:** the caller receives no return value. The function logs exceptions and does not propagate them — a transient failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push must not crash the calling sub-agent.
+- **`override`:** selects the merge mode (see [Merge Semantics](#merge-semantics)). `False` (default) appends additively; `True` authoritatively replaces every input role's mappings. Set by the caller (the Controller) from the producing UC's choice — UC1 = `False`, UC3 = `True`, UC2 Rebuild = `True`, UC2 Build = TBD.
 - Import path: `from aiac.policy.computation.engine import compute_and_apply`
 
 ### Algorithm
 
-Given `rules: list[PolicyRule]`, the engine executes these steps:
+Given `rules: list[PolicyRule]` and an `override` flag, the engine executes these steps.
 
-1. **Composite role flattening:** for each rule's `role`, recursively collect the role and all descendant roles from `role.childRoles` into a flat list of leaf roles, de-duplicated by `role.id`. (`Role` is not hashable, so de-duplication tracks seen `id`s rather than adding `Role` objects to a `set`.) All subsequent role-based queries operate on this flattened list. A non-composite role yields a list containing only itself.
+> **Input rules arrive with roles already flattened to their closure** by the calling
+> sub-agent (UC1/UC2/UC3) — the role itself plus all descendant roles (recursively via
+> `role.childRoles`), de-duplicated by `role.id`. The PCE performs **no role flattening**;
+> each rule's `role` is treated as-is (it may be a composite role or one of its children).
 
-2. **Scope → inbound services:** for each rule's `scope`, call `Configuration.get_services_by_scope(rule.scope) -> list[Service]`. Add the rule to `inbound_rules` of each returned service's `AgentPolicyModel`.
+1. **Scope → inbound services:** for each rule's `scope`, call `Configuration.get_services_by_scope(rule.scope) -> list[Service]`. Add the rule to `inbound_rules` of each returned service's `AgentPolicyModel`.
 
-3. **Role → outbound services + `source_roles` + `target_scopes`:** for each flattened role R, call `Configuration.get_services_by_role(R) -> list[Service]`. For each returned service S:
+2. **Role → outbound services + `source_roles` + `target_scopes`:** for the rule's role R, call `Configuration.get_services_by_role(R) -> list[Service]`. For each returned service S:
    - Add the rule to `outbound_rules` of S's `AgentPolicyModel`.
    - Append R to `source_roles[S.id]` (creating the entry if absent). The map is keyed by the service's string `id`, not the `Service` object; the appended value is the typed `Role`.
-   - For each target service T resolved in step 2 (services exposing `rule.scope`), append `rule.scope` to `target_scopes[T.id]` on S's `AgentPolicyModel` (creating the entry if absent). This records the outbound direction — S acting as R may request `rule.scope` on target T — keyed by the target service's string `id` with the typed `Scope` as the value.
+   - For each target service T resolved in step 1 (services exposing `rule.scope`), append `rule.scope` to `target_scopes[T.id]` on S's `AgentPolicyModel` (creating the entry if absent). This records the outbound direction — S acting as R may request `rule.scope` on target T — keyed by the target service's string `id` with the typed `Scope` as the value.
 
-4. **Role → subjects + `subject_roles`:** for each flattened role R, call `Configuration.get_subjects_by_role(R) -> list[Subject]`. For each returned subject S:
+3. **Role → subjects + `subject_roles`:** for the rule's role R, call `Configuration.get_subjects_by_role(R) -> list[Subject]`. For each returned subject S:
    - Append R to `subject_roles[S.id]` (creating the entry if absent). The map is keyed by the subject's string `id`; the appended value is the typed `Role`.
 
-5. **Realm-level roles (no owning service):** if `get_services_by_role(R)` returns an empty list for a flattened role R, the role is realm-level. No outbound assignment or `source_roles` entry is made for that role. `subject_roles` entries are still recorded if `get_subjects_by_role(R)` returns subjects.
+4. **Realm-level roles (no owning service):** if `get_services_by_role(R)` returns an empty list for the rule's role R, the role is realm-level. No outbound assignment or `source_roles` entry is made for that role. `subject_roles` entries are still recorded if `get_subjects_by_role(R)` returns subjects.
 
-6. **Additive merge:** for each affected service/agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`. Append new rules and map entries that are not already present (de-duplicate rules by value; de-duplicate `source_roles`, `subject_roles`, and `target_scopes` list values by the entity's `id`). Because the maps are keyed by string `id`, merging is a plain dict-key lookup — no hashing of `Service` / `Subject` / `Scope` objects is involved. Write the updated model back via `apply_agent_policy(agent_id, model)`.
+5. **Merge (additive append, or override replace):** for each affected service/agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`.
+   - **If `override` is `True`:** first purge the **distinct set of input roles** from the model — remove every stored `PolicyRule` whose `role.id` matches from **both** `inbound_rules` and `outbound_rules`, drop those role `id`s from all `source_roles` / `subject_roles` lists, and reconcile `target_scopes` by recomputing it from the surviving `outbound_rules`. This purge is done **once, up-front** for the whole input-role set — before any new rule is applied — so rules for a shared role are not wiped after being added.
+   - **Then (both modes):** append new rules and map entries that are not already present (de-duplicate rules by value; de-duplicate `source_roles`, `subject_roles`, and `target_scopes` list values by the entity's `id`). Because the maps are keyed by string `id`, merging is a plain dict-key lookup — no hashing of `Service` / `Subject` / `Scope` objects is involved.
 
-7. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
+   Write the updated model back via `apply_agent_policy(agent_id, model)`.
+
+6. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
 
 ### Merge Semantics
 
-Rules are appended additively — existing `inbound_rules` and `outbound_rules` entries are preserved. De-duplication compares rules by value (`role.id` + `scope.id`). **Rule revocation is TBD** — removing individual rules from an `AgentPolicyModel` is not yet specified.
+The `override` flag (set by the caller from the producing UC's choice) selects the merge mode:
+
+- **`override=False` (default — additive append):** existing `inbound_rules` and `outbound_rules` entries are preserved; new rules and map entries are appended. De-duplication compares rules by value (`role.id` + `scope.id`) and map list values by the entity's `id`. This is the incremental path (e.g. UC1 Service Onboarding, where existing roles receive a partial new mapping and must not lose their other access).
+- **`override=True` (authoritative role-keyed replace):** before appending, the engine purges every input role from the stored model (both directions + `target_scopes` reconciliation, per algorithm step 5) so the fresh rules become that role's complete mapping. Used by role-scoped recomputes (UC3 Role Update) and full rebuilds (UC2 Rebuild), where the input already represents each role's complete intended scope set.
+
+`override=True` provides **role-level** revocation — a role's stale mappings are removed before re-applying. Finer-grained single-rule revocation (removing one `PolicyRule` without replacing its whole role) is still **TBD**.
 
 ### Dependencies
 
@@ -124,12 +137,13 @@ Good tests assert external behavior — what the engine does to the Policy Store
 Key behaviors to assert:
 - Rules with a resolvable scope result in `apply_agent_policy` calls for each service returned by `get_services_by_scope`.
 - Rules with a resolvable role result in `apply_agent_policy` calls for each service returned by `get_services_by_role`; `source_roles` on the written model is keyed by the service's string `id` with the typed `Role` in the value list.
-- `get_subjects_by_role` is called for each flattened role; `subject_roles` on the written model is keyed by the subject's string `id` with the typed `Role` in the value list.
+- `get_subjects_by_role` is called once per rule's role; `subject_roles` on the written model is keyed by the subject's string `id` with the typed `Role` in the value list.
 - `target_scopes` on the written model is keyed by the target service's string `id` (a service exposing the rule's scope) with the typed `Scope` in the value list.
 - Every relationship map on the written model has string keys, so `model_dump(mode="json")` round-trips without a custom key serializer.
-- A composite role is flattened: `get_services_by_role` and `get_subjects_by_role` are called for each child role, not the composite role itself.
+- The PCE does **not** flatten roles: `get_services_by_role` / `get_subjects_by_role` are called once per rule's role as-is (rules arrive pre-flattened from the UC); passing a rule with a composite role does not trigger per-child calls inside the PCE.
 - Realm-level roles (empty service list from `get_services_by_role`) do not produce `outbound_rules` or `source_roles` entries; `subject_roles` entries are still recorded for any subjects returned by `get_subjects_by_role`.
-- Existing rules and map entries in the fetched `AgentPolicyModel` are preserved after merge.
+- With `override=False` (default), existing rules and map entries in the fetched `AgentPolicyModel` are preserved after merge (additive append).
+- With `override=True`, every input role's stored mappings are purged from both `inbound_rules` and `outbound_rules` (and dropped from `source_roles` / `subject_roles`, with `target_scopes` reconciled from surviving outbound rules) before the fresh rules are applied; the distinct input-role set is purged once, up-front (rules for a role shared across the input are not wiped after being added).
 - Duplicate rules (same role + scope already present) are not appended twice; duplicate `source_roles` / `subject_roles` / `target_scopes` list entries (same `id`) are not appended twice.
 - `apply_policy` is called exactly once after all `apply_agent_policy` writes complete.
 - An exception from any dependency is logged and does not propagate to the caller.
@@ -140,7 +154,7 @@ Key behaviors to assert:
 
 ## Out of Scope
 
-- **Rule revocation:** removing individual `PolicyRule` entries from an `AgentPolicyModel`. Not yet designed — marked TBD.
+- **Fine-grained rule revocation:** removing an individual `PolicyRule` without replacing its whole role. `override=True` covers role-level replace (see [Merge Semantics](#merge-semantics)); single-rule revocation is not yet designed — marked TBD.
 - **Full policy rebuild:** the PCE handles incremental updates only. Full rebuilds (clear + reapply all) are driven by higher-level orchestration outside this module.
 - **Direct Keycloak calls:** all IdP queries go through `aiac.idp.configuration.library.Configuration`. The PCE never calls Keycloak directly.
 - **Persistence of `PolicyRule` inputs:** the PCE does not store the input rule list — only the merged `AgentPolicyModel` output is persisted.

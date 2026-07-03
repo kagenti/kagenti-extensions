@@ -31,24 +31,26 @@ flowchart TD
     end
 
     PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
-    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
+    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules, override)"]
 
     SA_REBUILD -->|"delegates"| SA_BUILD
     SA_BUILD -->|"calls"| PRB
 
     CTRL -->|"build"| SA_BUILD
     CTRL -->|"rebuild"| SA_REBUILD
-    SA_BUILD -->|"list[PolicyRule]"| CTRL
-    SA_REBUILD -->|"list[PolicyRule]"| CTRL
-    CTRL -->|"merged rules"| PCE
+    SA_BUILD -->|"(list[PolicyRule], override)"| CTRL
+    SA_REBUILD -->|"(list[PolicyRule], override=True)"| CTRL
+    CTRL -->|"merged rules, override"| PCE
 ```
 
 ## What is known
 
 - **Two sub-agents:** Build (responds to `aiac.apply.policy.build` + `POST /apply/policy/build`) and Rebuild (responds to `POST /apply/policy/rebuild` only).
-- Build calls the PRB directly, merges the results, and returns `list[PolicyRule]` to the Controller.
-- Rebuild delegates to Build and returns Build's `list[PolicyRule]` to the Controller.
-- The Controller calls `compute_and_apply(merged_rules)` via the PCE — the same pattern as all other UCs.
+- Build calls the PRB directly, merges the results, and returns `(list[PolicyRule], override)` to the Controller.
+- **Composite role flattening:** before calling the PRB, Build flattens every role it reads to its **closure** via the shared `flatten_role` helper — the role plus all descendant roles from `role.childRoles`, de-duplicated by `role.id` (a non-composite role yields just itself). The PRB receives already-flattened roles; the PCE performs no flattening. (Same helper and semantics as UC1 and UC3.)
+- Rebuild delegates to Build for rule generation and returns Build's rules to the Controller.
+- **Append vs override:** the sub-agent conveys an `override` flag to the Controller alongside its rules. **Rebuild is the full-rebuild case (`override=True`)** — the PCE purges every input role's mappings before applying (see [`../policy-computation-engine.md`](../policy-computation-engine.md)). **Build's** `override` value is **TBD** (whether an incremental post-ingest build appends or replaces).
+- The Controller calls `compute_and_apply(merged_rules, override)` via the PCE — the same pattern as all other UCs.
 - Internal behavior (how Build/Rebuild sub-agents derive their tuple content, what IdP data they read, whether any LLM node is involved) is **deferred** — to be resolved in a dedicated grill session.
 
 ## Out of scope (this stub)

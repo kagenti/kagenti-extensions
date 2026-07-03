@@ -16,7 +16,7 @@ UC1 is the only use case with an Orchestrator, because it is a two-stage pipelin
 1. **Service Provision** (LLM-based): classify the new service, derive its roles + scopes, write them into the IdP.
 2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), package into `list[tuple]`, return to the Orchestrator.
 
-The Orchestrator returns `list[PolicyRule]` to the Controller. The Controller calls the PCE; the PCE owns all rule reconciliation.
+The Orchestrator returns `(list[PolicyRule], override=False)` to the Controller. The Controller calls the PCE with that `override` flag; the PCE owns all rule reconciliation. UC1 is **incremental** — existing roles receive a partial new mapping and must not lose their other access — so the mode is always append (`override=False`).
 
 ```mermaid
 flowchart TD
@@ -38,12 +38,12 @@ flowchart TD
     end
 
     PRB["Policy Rules Builder (shared)\nagent/policy_rules_builder/"]
-    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules)"]
+    PCE["Policy Computation Engine\naiac.policy.computation\ncompute_and_apply(merged_rules, override)"]
 
     CTRL -->|"service/:id"| ORC
     SA_POL -->|"calls"| PRB
-    ORC -->|"list[PolicyRule]"| CTRL
-    CTRL -->|"merged rules"| PCE
+    ORC -->|"(list[PolicyRule], override=False)"| CTRL
+    CTRL -->|"merged rules, override=False"| PCE
 ```
 
 ## Orchestrator
@@ -53,7 +53,7 @@ flowchart TD
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
 2. Call `ServicePolicyUpdate.run(service_provision, service_type)` → get back `list[PolicyRule]`.
-3. Return the `list[PolicyRule]` to the Controller.
+3. Return `(list[PolicyRule], override=False)` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
 
@@ -172,12 +172,22 @@ The two call directions prevent self-mapping and keep each PRB call's semantic i
 1. Receive `service_provision: ServiceProvision` + `service_type: ServiceType` from the Orchestrator.
 2. Read **all roles** from `aiac.idp.configuration.api`, **excluding** the new service's own roles (i.e. exclude `role.name in {r.name for r in service_provision.roles}`).
 3. Read **all scopes** from `aiac.idp.configuration.api`, **excluding** the new service's own scopes (i.e. exclude `scope.name in {s.name for s in service_provision.scopes}`).
-4. Call PRB and merge:
-   - **`service_type = tool`:** call `build_scope_rules(other_roles, scope)` for each scope in `service_provision.scopes`. Merge results into a single `list[PolicyRule]`.
-   - **`service_type = agent`:** call `build_scope_rules(other_roles, scope)` for each scope in `service_provision.scopes`; call `build_role_rules(role, other_scopes)` for each role in `service_provision.roles`. Merge all results into a single `list[PolicyRule]`.
-5. Return merged `list[PolicyRule]` to the Orchestrator.
+4. **Flatten roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): expand `other_roles` into the union of every role's closure, de-duplicated by `role.id` (call this `flattened_other_roles`); on the agent path, also expand each of `service_provision.roles`.
+5. Call PRB and merge:
+   - **`service_type = tool`:** call `build_scope_rules(flattened_other_roles, scope)` for each scope in `service_provision.scopes`. Merge results into a single `list[PolicyRule]`.
+   - **`service_type = agent`:** call `build_scope_rules(flattened_other_roles, scope)` for each scope in `service_provision.scopes`; for each role in `service_provision.roles`, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
+6. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
 
 **Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full excluded-self scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
+
+### Composite role flattening
+
+Every role passed to the PRB is first flattened to its **closure** via the shared
+`flatten_role` helper (aiac-agent Shared Module): recursively collect the role and all
+descendant roles from `role.childRoles` into a flat list, de-duplicated by `role.id`
+(`Role` is not hashable, so de-duplication tracks seen `id`s rather than adding `Role`
+objects to a `set`). A non-composite role yields a list containing only itself. The PRB
+therefore receives already-flattened roles, and the PCE performs no further flattening.
 
 ## File structure
 
