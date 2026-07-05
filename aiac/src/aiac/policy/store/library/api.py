@@ -7,8 +7,6 @@ from aiac.policy.model.models import AgentPolicyModel, PolicyModel
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
-_BASE_URL = os.getenv("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
-
 
 def _base_url() -> str:
     return os.getenv("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
