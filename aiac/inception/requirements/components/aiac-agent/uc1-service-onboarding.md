@@ -210,5 +210,5 @@ aiac/src/aiac/agent/uc/
 
 - PRB internals — see [`policy-rules-builder.md`](policy-rules-builder.md).
 - PCE reconcile mechanics — see [`../policy-computation-engine.md`](../policy-computation-engine.md).
-- Response body shape — no response bodies; handlers return bare HTTP status codes. Summary + debug go to the log.
+- Response body shape — no success body; handlers return bare HTTP status codes (error responses carry FastAPI's default JSON error body from the raised `HTTPException`). Summary + debug go to the log.
 - MCP endpoint lookup strategy for tools — tracked in `inception/issues/6.2-analyze-tool-lookup-strategy.md`.

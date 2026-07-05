@@ -1,0 +1,10 @@
+langgraph
+langchain-openai
+chromadb
+tenacity
+fastapi
+uvicorn[standard]
+requests
+python-dotenv
+kubernetes
+nats-py

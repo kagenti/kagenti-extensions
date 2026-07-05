@@ -143,7 +143,7 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 | POST | `/apply/role/{role_id}` | Role Update | Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision |
 
-All endpoints return bare HTTP status codes: `200 OK` on success, and the status codes from the Error Handling table on upstream failure. No JSON body is returned. Summary, applied-rule details, and debug information are written to the service log. Validation failures surface as an error status and log entry; detailed reporting is specified in [policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
+All endpoints return bare HTTP status codes: `200 OK` on success (no response body), and the status codes from the Error Handling table on upstream failure. Success responses carry no body; upstream failures are raised as FastAPI `HTTPException`s, so error responses carry FastAPI's default JSON error body (`{"detail": ...}`) alongside the status code. Summary, applied-rule details, and debug information are written to the service log. Validation failures surface as an error status and log entry; detailed reporting is specified in [policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
 
 ---
 
@@ -181,7 +181,7 @@ All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponenti
 | Kubernetes API | `502 Bad Gateway` |
 | LLM API | `504 Gateway Timeout` |
 
-Upstream failures propagate as bare HTTP error responses (see table above); no JSON body is returned. All failure details are logged.
+Upstream failures propagate as bare HTTP error responses (see table above), raised as FastAPI `HTTPException`s; the status code is authoritative and error responses carry FastAPI's default JSON error body (`{"detail": ...}`). All failure details are logged.
 
 ---
 
