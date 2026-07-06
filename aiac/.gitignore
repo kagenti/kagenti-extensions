@@ -1,4 +1,7 @@
-# Claude Code related ignores
-handoff*
+# AIAC working artefacts (regenerated; not source of truth)
+inception/plans/
+inception/issues/
+inception/handoffs/
+
 # PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
 test/pdp/policy/rego_out/

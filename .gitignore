@@ -69,9 +69,5 @@ __pycache__/
 test-jwt-rotation.sh
 kagenti-webhook/bin/
 
-# AIAC working artefacts (regenerated; not source of truth)
-aiac/inception/issues/
-aiac/inception/handoffs/
-
 # Claude Code / AI assistant files
 docs/agents/
