@@ -5,6 +5,11 @@
 > and why users Y and agent B are denied.
 > Includes a full RBAC section (§10–§13) covering the role-mapped model
 > where user U holds realm role UR and user Y holds realm role YR.
+>
+> **§18–§23 cover the OPA-as-PDP architecture** — the production model where
+> OPA plugins replace Keycloak gate 3, reducing the required Keycloak
+> configuration to gates 1 and 2 only. §§1–17 remain as reference material
+> for the Keycloak-native RBAC model.
 
 ---
 
@@ -251,7 +256,17 @@ pure PEP — it carries no policy knowledge.
 
 ---
 
-# RBAC Extension: Role-Mapped Model (UR and YR)
+# RBAC Extension: Role-Mapped Model (UR and YR) — Keycloak-Native Reference
+
+> **Note:** The RBAC sections below (§9–§17) describe the Keycloak-native
+> access control model where Keycloak itself evaluates gate 3 (scope-to-role
+> gating). This model is retained as reference material.
+>
+> The **production model** is OPA-as-PDP (§18–§23): OPA plugins on the AuthBridge
+> inbound and outbound pipelines own all access control rule evaluation.
+> Keycloak is reduced to a token issuer and exchange facilitator (gates 1 and 2
+> only). Scope-to-role mappings, client roles, and composite role mappings on
+> realm roles are **not required** in the OPA model.
 
 > The following sections (§9–§13) re-answer all questions for the RBAC
 > security model where:
@@ -619,3 +634,150 @@ no AuthBridge changes required.
 | `authlib/plugins/tokenexchange/exchange/client.go` | RFC 8693 exchange POST construction |
 | `authbridge/demos/token-exchange-routes/README.md` | `authproxy-routes` ConfigMap shape and troubleshooting |
 | `aiac/inception/keycloak-roles-vs-scopes.md` | Conceptual guide: roles vs scopes, hybrid vs pure PDP/PEP |
+
+---
+
+---
+
+# OPA-as-PDP Architecture: Minimal Keycloak Configuration
+
+## 18. OPA as PDP — Design Principle
+
+In the OPA-as-PDP architecture, two OPA plugins are attached to the AuthBridge inbound and
+outbound pipelines:
+
+- **Inbound OPA plugin** — evaluates whether the incoming request's subject (JWT `sub` claim,
+  roles, and other token claims) is permitted to call this service. Replaces the audience-only
+  check of the Keycloak-native model with full policy evaluation.
+- **Outbound OPA plugin** — evaluates whether the subject token is permitted to be exchanged
+  for a target-audience token before AuthBridge performs the RFC 8693 exchange.
+
+OPA owns **all access control rule formulation and validation**. Keycloak is responsible only for:
+
+1. **Token issuance** — issuing tokens with the correct `aud` claim so AuthBridge inbound can
+   verify token authenticity (gate 1: signature + issuer; gate 2: audience anchor).
+2. **Token exchange facilitation** — performing RFC 8693 exchanges, enforcing only that the
+   acting client is registered and has the target scope assigned (gates 1 and 2). Gate 3
+   (scope-to-role evaluation) is **bypassed**: scopes are created with `fullScopeAllowed=true`
+   so Keycloak never evaluates role membership — that decision belongs to OPA.
+
+---
+
+## 19. What Keycloak No Longer Needs (OPA Model)
+
+The following Keycloak objects and configuration steps from the RBAC model (§9–§17) are
+**not required** in the OPA model:
+
+| Object / Operation | Old purpose | OPA model |
+|---|---|---|
+| `fullScopeAllowed=false` on scopes | Gate 3: role-based scope inclusion | **Not needed** — scopes use `fullScopeAllowed=true` |
+| Scope-to-role mappings (`scope-mappings/realm`) | Gate 3: which roles unlock which scopes | **Not needed** — OPA evaluates this |
+| Scope-to-client-role mappings (`scope-mappings/clients/{id}`) | Gate 3 via client role intermediary | **Not needed** |
+| Client roles (`agent-A:github-agent`, `tool-T:tool-T-aud`) | Scope-to-role mapping target | **Not needed** |
+| Realm roles as composites of client roles | Policy application lever | **Not needed** as Keycloak mechanism |
+| `POST /roles-by-id/{role_id}/composites` | Apply composite mapping | **Not needed** |
+
+> **Realm roles may still be useful as OPA input data.** If users carry realm role claims in
+> their JWT (e.g. `roles: ["developer"]`), OPA can use those claims as policy input. But
+> their presence in the token is incidental — they are no longer the mechanism that gates
+> scope inclusion.
+
+---
+
+## 20. Minimal Keycloak Configuration (OPA Model)
+
+```
+Realm: kagenti
+│
+├── Clients
+│   ├── kagenti-ui  (or per-user client)
+│   │   └── default scope: agent-A-aud      ← token₁ always has aud=A-SPIFFE
+│   │
+│   ├── agent-A  [clientId=A-SPIFFE]
+│   │   ├── standard.token.exchange.enabled=true
+│   │   └── optional scope: tool-T-aud      ← gate 2: A can request T audience
+│   │
+│   └── tool-T  [clientId=T-SPIFFE]
+│       └── standard.token.exchange.enabled=true
+│
+├── Client Scopes
+│   ├── agent-A-aud  (oidc-audience-mapper → A-SPIFFE, fullScopeAllowed=true)
+│   └── tool-T-aud   (oidc-audience-mapper → T-SPIFFE, fullScopeAllowed=true)
+│
+└── Users
+    ├── U  (realm roles populated as JWT claims for OPA input)
+    └── Y
+```
+
+Each audience scope (`X-aud`) is created once when the service is registered and assigned as:
+- **Default** scope on the callee's own client — tokens issued through that client always
+  carry `aud=X-SPIFFE`.
+- **Optional** scope on each caller agent's client — enables gate 2 for that agent's
+  token exchange calls.
+
+`fullScopeAllowed=true` everywhere — Keycloak never gates by role. OPA receives the full
+subject token and makes all access decisions.
+
+---
+
+## 21. The Two Remaining Keycloak Gates (OPA Model)
+
+| Gate | Enforced by | What it checks | What must exist |
+|------|-------------|----------------|-----------------|
+| **Gate 1** | Keycloak | `standard.token.exchange.enabled=true` on the acting client | Set at service registration |
+| **Gate 2** | Keycloak | Is `tool-T-aud` assigned (default or optional) to the caller's client? | `add_client_optional_client_scope(caller, tool-T-aud)` |
+| **Gate 3** | ~~Keycloak~~ **OPA** | Does the subject have permission to reach this target? | OPA policy — no Keycloak configuration |
+
+Gate 2 remains a Keycloak-enforced boundary but is now **topological** (which agents can
+attempt an exchange toward which tools) rather than **subject-based** (which users can call
+which tools through which agents). OPA handles subject-based policy on top.
+
+---
+
+## 22. Service Registration and Wiring (OPA Model)
+
+The two operations that produce the required Keycloak state for a new service are:
+
+### `register_service_audience(service)` — callee setup
+
+Creates the service's canonical audience scope `{serviceId}-aud` and assigns it as a
+**default** scope to the service's Keycloak client. Called once when a new agent or tool
+is registered.
+
+```
+POST /scopes          {"name": "github-tool-aud", "protocol": "openid-connect"}
+POST /services/{id}/scopes/{scope_id}/default
+```
+
+After this call, any user authenticating through `github-tool`'s client receives a token
+with `aud=github-tool-SPIFFE` — AuthBridge inbound at `github-tool` will accept it.
+
+### `allow_service_to_call(caller, callee)` — gate 2 wiring
+
+Assigns the callee's canonical audience scope as an **optional** scope to the caller's
+Keycloak client. Called whenever a new caller→callee edge is permitted.
+
+```
+POST /services/{caller.id}/scopes/{callee_aud_scope.id}/optional
+```
+
+After this call, `caller`'s AuthBridge can perform an RFC 8693 exchange requesting
+`scope=github-tool-aud`, passing gate 2. OPA's outbound plugin then makes the final
+allow/deny decision before the exchange is forwarded.
+
+Both operations are **idempotent** — safe to call on every operator reconciliation.
+
+---
+
+## 23. Summary: Both Models Side by Side
+
+| Dimension | Keycloak-native RBAC (§9–§17) | OPA-as-PDP (§18–§22) |
+|---|---|---|
+| **Gate 3 enforcement** | Keycloak scope-to-role evaluation | OPA outbound plugin |
+| **Policy change mechanism** | `POST /roles-by-id/{id}/composites` | OPA Rego policy update |
+| **Client roles required** | Yes (scope-to-role mapping targets) | No |
+| **Composite role mappings** | Yes (policy lever) | No |
+| **`fullScopeAllowed`** | `false` (role gate enabled) | `true` (OPA owns the gate) |
+| **Keycloak objects per boundary** | Realm role + client role + scope-mapping + composite | Audience scope only |
+| **Policy redeployment on change** | No (Keycloak API call only) | No (OPA policy update only) |
+| **AuthBridge changes on policy change** | None | None |
