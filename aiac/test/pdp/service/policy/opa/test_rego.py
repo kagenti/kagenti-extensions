@@ -26,6 +26,7 @@ def _model(
     target_scopes: dict[str, list[Scope]] | None = None,
     inbound_rules: list[PolicyRule] | None = None,
     outbound_rules: list[PolicyRule] | None = None,
+    outbound_subject_rules: list[PolicyRule] | None = None,
 ) -> AgentPolicyModel:
     return AgentPolicyModel(
         agent_id=agent_id,
@@ -36,6 +37,7 @@ def _model(
         target_scopes=target_scopes or {},
         inbound_rules=inbound_rules or [],
         outbound_rules=outbound_rules or [],
+        outbound_subject_rules=outbound_subject_rules or [],
     )
 
 
@@ -69,6 +71,13 @@ def _github_agent() -> AgentPolicyModel:
             PolicyRule(role=source_helper, scope=source_write),
             PolicyRule(role=issues_helper, scope=issues_read),
             PolicyRule(role=issues_helper, scope=issues_write),
+        ],
+        outbound_subject_rules=[
+            PolicyRule(role=developer, scope=source_read),
+            PolicyRule(role=developer, scope=source_write),
+            PolicyRule(role=developer, scope=issues_read),
+            PolicyRule(role=tester, scope=issues_read),
+            PolicyRule(role=tester, scope=issues_write),
         ],
     )
 
@@ -181,9 +190,36 @@ def test_outbound_target_scopes_rendered_directly():
     assert "scope_targets" not in rego
 
 
-def test_outbound_has_subject_and_target_gates_and_allow():
+def test_outbound_subject_role_scopes_grouped_from_outbound_subject_rules():
     rego = generate_outbound_rego(_github_agent())
+    assert "outbound_subject_role_scopes := {" in rego
+    assert '"developer": ["source-read", "source-write", "issues-read"]' in rego
+    assert '"tester": ["issues-read", "issues-write"]' in rego
+
+
+def test_outbound_subject_ok_matches_target_scopes_not_agent_scopes():
+    rego = generate_outbound_rego(_github_agent())
+    # The outbound subject gate is user->tool: it reads outbound_subject_role_scopes
+    # and matches against the tool's scopes, not the agent's own scopes.
     assert "subject_ok if {" in rego
+    assert "some role in subject_roles[input.subject]" in rego
+    assert "some scope in outbound_subject_role_scopes[role]" in rego
+    assert "scope in target_scopes[input.target]" in rego
+    # The inbound-flavoured subject gate must NOT appear in the outbound package.
+    assert "some scope in role_scopes[role]" not in rego
+    assert "scope in agent_scopes" not in rego
+
+
+def test_outbound_does_not_embed_inbound_role_scopes():
+    rego = generate_outbound_rego(_github_agent())
+    # The inbound ``role_scopes`` map (from inbound_rules) must not leak into the
+    # outbound package. Line-anchored so it does not match outbound_subject_role_scopes.
+    assert "\nrole_scopes :=" not in rego
+    assert not rego.startswith("role_scopes :=")
+
+
+def test_outbound_has_target_gate_and_allow():
+    rego = generate_outbound_rego(_github_agent())
     assert "target_ok if {" in rego
     assert "some role in agent_roles" in rego
     assert "some scope in agent_role_scopes[role]" in rego
@@ -204,7 +240,7 @@ def test_outbound_empty_model_renders_valid_empty_literals():
     assert "agent_roles := []" in rego
     assert "agent_scopes := []" in rego
     assert "subject_roles := {}" in rego
-    assert "role_scopes := {}" in rego
+    assert "outbound_subject_role_scopes := {}" in rego
     assert "agent_role_scopes := {}" in rego
     assert "target_scopes := {}" in rego
     assert "default allow := false" in rego

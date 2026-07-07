@@ -88,10 +88,13 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 | `target_scopes` | `dict[str, list[Scope]]` | Outbound: target service **id** → scopes this agent may request on it |
 | `inbound_rules` | `list[PolicyRule]` | Who may call this agent: `(subject_role, agent_scope)` tuples |
 | `outbound_rules` | `list[PolicyRule]` | What this agent may call: `(this_agent_role, target_scope)` tuples |
+| `outbound_subject_rules` | `list[PolicyRule]` | Which users may reach the agent's targets: `(user_role, tool_scope)` tuples. Defaults to `[]`. |
 
 **Inbound rule semantics:** a subject holding realm role `role` is permitted to invoke this agent for the agent scope `scope`. The PDP Policy Writer consumes `inbound_rules` as a role → agent-scope map; its inbound gate is keyed on the subject id (mandatory), with the calling source id optional.
 
 **Outbound rule semantics:** this agent acting as realm role `role` is permitted to request the target scope `scope`. The PDP Policy Writer consumes `outbound_rules` as an agent-role → target-scope map; its outbound gate requires both the subject and the agent to be authorized.
+
+**Outbound subject rule semantics:** `outbound_subject_rules` holds `(user role, tool scope)` pairs — the outbound subject gate; a user holding `role` may reach a tool exposing `scope`. It is the outbound counterpart of `inbound_rules` (which pairs a user role with an *agent* scope): where `inbound_rules` answers "may this user call the agent?", `outbound_subject_rules` answers "may this user reach the tool the agent targets?". The PDP Policy Writer groups it into `outbound_subject_role_scopes` (user role → tool-scope names) and matches against `target_scopes[input.target]`, not against `agent_scopes`.
 
 #### `PolicyModel`
 
@@ -129,6 +132,7 @@ agent_model = AgentPolicyModel(
     target_scopes={"github-tool": [scope]},  # target service id → scopes
     inbound_rules=[rule],
     outbound_rules=[],
+    outbound_subject_rules=[],               # (user_role, tool_scope) pairs; defaults to []
 )
 model = PolicyModel(agents=[agent_model])
 ```
@@ -147,6 +151,7 @@ Key behaviors to assert:
 - `PolicyRule` accepts typed `Role` and `Scope` objects; rejects plain `str` where `Role`/`Scope` is expected.
 - `AgentPolicyModel` with string-ID keys in `source_roles`, `subject_roles`, and `target_scopes` round-trips through `model_dump(mode="json")` / `model_validate()` with the typed `Role` / `Scope` list values preserved.
 - `target_scopes` maps a target service id to the list of `Scope` objects permitted on it (outbound direction is `target → scopes`, not `scope → targets`).
+- `outbound_subject_rules` defaults to `[]` (constructors that omit it still validate) and round-trips through `model_dump(mode="json")` / `model_validate()` with its `(user_role, tool_scope)` `PolicyRule` values preserved.
 - A relationship map keyed by a plain string serializes to a JSON object without a custom key serializer.
 - `ConfigDict(extra='ignore')` causes unknown fields to be silently discarded on `model_validate()`.
 

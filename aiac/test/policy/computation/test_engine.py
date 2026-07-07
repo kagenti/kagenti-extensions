@@ -1,6 +1,18 @@
 """Unit tests for aiac.policy.computation.engine.compute_and_apply.
 
-All four downstream dependencies are mocked at the engine's import boundary:
+The engine routes each pre-flattened PolicyRule by kind (P5b):
+
+    (user role,  agent scope) -> inbound_rules                    [mapping a]
+    (user role,  tool scope)  -> outbound_subject_rules           [mapping b]
+    (agent role, tool scope)  -> outbound_rules + target_scopes   [mapping c]
+
+Role kind is read from service ownership (an agent role is owned by an Agent
+service; a user role is realm-level). Scope kind is read from the exposing
+service's type. Only Agent services are ever modelled (P4); each written model
+embeds its own service-account roles/scopes (P2).
+
+All downstream dependencies are mocked at the engine's import boundary:
+  - Configuration.get_services (the catalog: type + own roles/scopes)
   - Configuration.get_services_by_scope / get_services_by_role / get_subjects_by_role
   - aiac.policy.computation.engine.get_agent_policy / apply_agent_policy   (Policy Store)
   - aiac.policy.computation.engine.apply_policy                           (PDP Policy Writer)
@@ -16,7 +28,7 @@ from aiac.policy.model.models import AgentPolicyModel, PolicyModel, PolicyRule
 
 
 # --------------------------------------------------------------------------- #
-# builders (mirror test/policy/model/test_models.py)                          #
+# builders                                                                    #
 # --------------------------------------------------------------------------- #
 def _role(id="r-edit", name="editor", composite=False, children=None) -> Role:
     return Role(id=id, name=name, composite=composite, childRoles=children or [])
@@ -26,8 +38,23 @@ def _scope(id="s-write", name="write") -> Scope:
     return Scope(id=id, name=name)
 
 
-def _service(service_id, id=None, enabled=True) -> Service:
-    return Service(id=id or f"uuid-{service_id}", serviceId=service_id, enabled=enabled)
+def _service(service_id, id=None, enabled=True, type=None, roles=None, scopes=None) -> Service:
+    return Service(
+        id=id or f"uuid-{service_id}",
+        serviceId=service_id,
+        enabled=enabled,
+        type=type,
+        roles=roles or [],
+        scopes=scopes or [],
+    )
+
+
+def _agent(service_id, roles=None, scopes=None) -> Service:
+    return _service(service_id, type="Agent", roles=roles, scopes=scopes)
+
+
+def _tool(service_id, roles=None, scopes=None) -> Service:
+    return _service(service_id, type="Tool", roles=roles, scopes=scopes)
 
 
 def _subject(username, id=None, enabled=True) -> Subject:
@@ -42,7 +69,7 @@ def _fresh(agent_id) -> AgentPolicyModel:
     return AgentPolicyModel(
         agent_id=agent_id, agent_roles=[], agent_scopes=[],
         source_roles={}, subject_roles={}, target_scopes={},
-        inbound_rules=[], outbound_rules=[],
+        inbound_rules=[], outbound_rules=[], outbound_subject_rules=[],
     )
 
 
@@ -55,9 +82,10 @@ def _lookup(mapping):
 
 
 class _Result:
-    def __init__(self, aap, ap, gsbs, gsbr, gsubr, gap, order):
+    def __init__(self, aap, ap, gs, gsbs, gsbr, gsubr, gap, order):
         self.apply_agent_policy = aap
         self.apply_policy = ap
+        self.get_services = gs
         self.get_services_by_scope = gsbs
         self.get_services_by_role = gsbr
         self.get_subjects_by_role = gsubr
@@ -70,8 +98,9 @@ class _Result:
         return {c.args[0]: c.args[1] for c in self.apply_agent_policy.call_args_list}
 
 
-def run_engine(rules, *, scope_services=None, role_services=None, role_subjects=None,
-               existing=None, missing_404=False, override=False):
+def run_engine(rules, *, catalog=None, scope_services=None, role_services=None,
+               role_subjects=None, existing=None, missing_404=False, override=False):
+    catalog = catalog or []
     scope_services = scope_services or {}
     role_services = role_services or {}
     role_subjects = role_subjects or {}
@@ -93,6 +122,8 @@ def run_engine(rules, *, scope_services=None, role_services=None, role_subjects=
 
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, {"AIAC_REALM": "test-realm"}))
+        gs = stack.enter_context(
+            patch.object(Configuration, "get_services", return_value=list(catalog)))
         gsbs = stack.enter_context(
             patch.object(Configuration, "get_services_by_scope", side_effect=_lookup(scope_services)))
         gsbr = stack.enter_context(
@@ -107,210 +138,252 @@ def run_engine(rules, *, scope_services=None, role_services=None, role_subjects=
             patch("aiac.policy.computation.engine.apply_policy", side_effect=_rec_policy))
         from aiac.policy.computation.engine import compute_and_apply
         compute_and_apply(rules, override=override)
-        return _Result(aap, ap, gsbs, gsbr, gsubr, gap, order)
+        return _Result(aap, ap, gs, gsbs, gsbr, gsubr, gap, order)
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 1 — tracer: a rule whose scope resolves to one target service gets an #
-# inbound rule on that target's model, and the PDP is pushed exactly once.    #
+# Cycle 1 — tracer (mapping a): a (user role, agent scope) rule lands in the   #
+# agent's inbound_rules, and the PDP is pushed exactly once.                   #
 # --------------------------------------------------------------------------- #
-def test_scope_resolves_to_target_inbound_and_pushes_once():
-    rule = _rule(role=_role(), scope=_scope("s-write"))
-    res = run_engine([rule], scope_services={"s-write": [_service("github-tool")]})
+def test_user_role_agent_scope_lands_inbound_and_pushes_once():
+    agent = _agent("github-agent")
+    rule = _rule(role=_role("r-dev", "developer"), scope=_scope("s-src-access", "source-access"))
+    res = run_engine(
+        [rule],
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},  # agent exposes the agent scope
+        role_services={},                           # developer is realm-level (user role)
+    )
 
-    assert set(res.written) == {"github-tool"}
-    assert res.written["github-tool"].inbound_rules == [rule]
+    assert set(res.written) == {"github-agent"}
+    assert res.written["github-agent"].inbound_rules == [rule]
     assert res.apply_policy.call_count == 1
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 2 — a rule whose role resolves to a source service gets an outbound    #
-# rule on that source's model, plus a target_scopes entry per resolved target. #
+# Cycle 2 — mapping c: a (agent role, tool scope) rule lands in the agent's    #
+# outbound_rules, plus a target_scopes entry per resolved tool.                #
 # --------------------------------------------------------------------------- #
-def test_role_resolves_to_source_outbound_and_target_scopes():
-    role = _role("r-edit")
-    scope = _scope("s-write")
+def test_agent_role_tool_scope_lands_outbound_and_target_scopes():
+    agent = _agent("github-agent")
+    tool = _tool("github-tool")
+    role = _role("r-src-helper", "source-helper")
+    scope = _scope("s-src-read", "source-read")
     rule = _rule(role=role, scope=scope)
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
+        catalog=[agent, tool],
+        scope_services={"s-src-read": [tool]},       # tool exposes the tool scope
+        role_services={"r-src-helper": [agent]},     # agent owns the agent role
     )
 
-    src = res.written["weather-agent"]
-    assert src.outbound_rules == [rule]
-    assert src.target_scopes == {"github-tool": [scope]}
+    m = res.written["github-agent"]
+    assert m.outbound_rules == [rule]
+    assert m.target_scopes == {"github-tool": [scope]}
+    assert set(res.written) == {"github-agent"}      # P4: no tool model
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 3 — the target model records which source services (by serviceId) can #
-# reach it, under source_roles, with the typed Role in the value list.        #
+# Cycle 3 — mapping b: a (user role, tool scope) rule lands in the             #
+# outbound_subject_rules of the agent that targets that tool (established by    #
+# a mapping-c rule in the same batch).                                          #
 # --------------------------------------------------------------------------- #
-def test_target_records_source_roles_by_source_service_id():
-    role = _role("r-edit")
-    rule = _rule(role=role, scope=_scope("s-write"))
+def test_user_role_tool_scope_lands_outbound_subject():
+    agent = _agent("github-agent")
+    tool = _tool("github-tool")
+    dev = _role("r-dev", "developer")
+    helper = _role("r-src-helper", "source-helper")
+    read = _scope("s-src-read", "source-read")
+    c_rule = _rule(role=helper, scope=read)   # (c) establishes agent -> tool target_scopes
+    b_rule = _rule(role=dev, scope=read)       # (b) user -> tool scope
+    res = run_engine(
+        [c_rule, b_rule],
+        catalog=[agent, tool],
+        scope_services={"s-src-read": [tool]},
+        role_services={"r-src-helper": [agent]},   # helper owned by agent; dev realm-level
+    )
+
+    m = res.written["github-agent"]
+    assert m.outbound_subject_rules == [b_rule]
+    assert set(res.written) == {"github-agent"}
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 4 — a (user role, tool scope) rule with NO agent targeting that tool    #
+# produces no model at all (it cannot be attached anywhere).                    #
+# --------------------------------------------------------------------------- #
+def test_user_role_tool_scope_without_targeting_agent_drops():
+    tool = _tool("github-tool")
+    rule = _rule(role=_role("r-dev", "developer"), scope=_scope("s-src-read", "source-read"))
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
+        catalog=[tool],
+        scope_services={"s-src-read": [tool]},
+        role_services={},  # developer realm-level; no agent owns any role here
     )
 
-    assert res.written["github-tool"].source_roles == {"weather-agent": [role]}
+    assert res.written == {}
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 4 — get_subjects_by_role is consulted for the rule's role, and the     #
-# target model records subject_roles keyed by the subject's username.          #
+# Cycle 5 — P2: each written agent embeds its own service-account roles and     #
+# exposed scopes, read from the service catalog.                                #
 # --------------------------------------------------------------------------- #
-def test_target_records_subject_roles_by_username():
-    role = _role("r-edit")
-    rule = _rule(role=role, scope=_scope("s-write"))
+def test_agent_roles_and_scopes_populated_from_catalog():
+    helper = _role("r-src-helper", "source-helper")
+    ihelper = _role("r-iss-helper", "issues-helper")
+    src_access = _scope("s-src-access", "source-access")
+    iss_access = _scope("s-iss-access", "issues-access")
+    agent = _agent("github-agent", roles=[helper, ihelper], scopes=[src_access, iss_access])
+    rule = _rule(role=_role("r-dev", "developer"), scope=src_access)
+    res = run_engine([rule], catalog=[agent], scope_services={"s-src-access": [agent]})
+
+    m = res.written["github-agent"]
+    assert m.agent_roles == [helper, ihelper]
+    assert m.agent_scopes == [src_access, iss_access]
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 6 — a modelled agent with no own roles/scopes in the catalog keeps [].  #
+# --------------------------------------------------------------------------- #
+def test_agent_without_catalog_roles_scopes_keeps_empty():
+    agent = _agent("github-agent")  # no roles, no scopes
+    rule = _rule(role=_role("r-dev", "developer"), scope=_scope("s-src-access", "source-access"))
+    res = run_engine([rule], catalog=[agent], scope_services={"s-src-access": [agent]})
+
+    m = res.written["github-agent"]
+    assert m.agent_roles == []
+    assert m.agent_scopes == []
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 7 — P4: a pure-target Tool service is never modelled, even though it     #
+# exposes the scope the agent reaches; the agent -> tool target_scopes edge      #
+# still records the tool.                                                        #
+# --------------------------------------------------------------------------- #
+def test_pure_target_tool_is_not_modelled():
+    agent = _agent("github-agent")
+    tool = _tool("github-tool")
+    rule = _rule(role=_role("r-src-helper", "source-helper"), scope=_scope("s-src-read", "source-read"))
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_subjects={"r-edit": [_subject("alice")]},
+        catalog=[agent, tool],
+        scope_services={"s-src-read": [tool]},
+        role_services={"r-src-helper": [agent]},
     )
 
-    assert res.written["github-tool"].subject_roles == {"alice": [role]}
-    res.get_subjects_by_role.assert_called_once_with(role)
+    assert "github-tool" not in res.written
+    assert res.written["github-agent"].target_scopes == {"github-tool": [rule.scope]}
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 5 — the PCE does NOT flatten: rules arrive pre-flattened from the UC,   #
-# so a rule carrying a composite role queries the IdP exactly once with that    #
-# role as-is — never once per child.                                            #
+# Cycle 8 — a (user role, agent scope) rule records the role's subjects on the  #
+# agent, keyed by username.                                                     #
+# --------------------------------------------------------------------------- #
+def test_inbound_records_subject_roles_by_username():
+    agent = _agent("github-agent")
+    dev = _role("r-dev", "developer")
+    rule = _rule(role=dev, scope=_scope("s-src-access", "source-access"))
+    res = run_engine(
+        [rule],
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},
+        role_subjects={"r-dev": [_subject("dev-user")]},
+    )
+
+    assert res.written["github-agent"].subject_roles == {"dev-user": [dev]}
+    res.get_subjects_by_role.assert_called_with(dev)
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 9 — the PCE does NOT flatten: a rule carrying a composite role queries   #
+# the IdP exactly once with that role as-is — never once per child.             #
 # --------------------------------------------------------------------------- #
 def test_composite_role_is_not_flattened():
     child_a = _role("r-a", "reader")
     child_b = _role("r-b", "writer")
     composite = _role("r-comp", "editor", composite=True, children=[child_a, child_b])
-    rule = _rule(role=composite, scope=_scope("s-write"))
+    agent = _agent("github-agent")
+    rule = _rule(role=composite, scope=_scope("s-src-access", "source-access"))
 
-    res = run_engine([rule], scope_services={"s-write": [_service("github-tool")]})
+    res = run_engine(
+        [rule],
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},
+    )
 
     res.get_services_by_role.assert_called_once_with(composite)
-    res.get_subjects_by_role.assert_called_once_with(composite)
     roles_queried = [c.args[0] for c in res.get_services_by_role.call_args_list]
-    subjects_queried = [c.args[0] for c in res.get_subjects_by_role.call_args_list]
     assert child_a not in roles_queried and child_b not in roles_queried
-    assert child_a not in subjects_queried and child_b not in subjects_queried
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 6 — a realm-level role (owned by no service) still records its         #
-# subjects on the target, but produces no source model / no source_roles.      #
-# --------------------------------------------------------------------------- #
-def test_realm_level_role_records_subjects_but_no_source():
-    role = _role("r-realm")
-    rule = _rule(role=role, scope=_scope("s-write"))
-    res = run_engine(
-        [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={},  # realm-level: owned by no service
-        role_subjects={"r-realm": [_subject("alice")]},
-    )
-
-    assert set(res.written) == {"github-tool"}  # no source model created
-    target = res.written["github-tool"]
-    assert target.inbound_rules == [rule]
-    assert target.subject_roles == {"alice": [role]}
-    assert target.source_roles == {}
-    assert target.outbound_rules == []
-
-
-# --------------------------------------------------------------------------- #
-# Cycle 7 — the engine reads each agent's current model from the store and     #
-# appends to it; pre-existing rules and map entries survive the merge.         #
+# Cycle 10 — the engine reads each agent's current model from the store and     #
+# appends to it; pre-existing rules survive the merge.                          #
 # --------------------------------------------------------------------------- #
 def test_merge_preserves_existing_store_model():
-    prior_rule = _rule(role=_role("r-old"), scope=_scope("s-old"))
-    prior = _fresh("github-tool")
+    agent = _agent("github-agent")
+    prior_rule = _rule(role=_role("r-old", "old"), scope=_scope("s-old-access", "old-access"))
+    prior = _fresh("github-agent")
     prior.inbound_rules.append(prior_rule)
-    prior.source_roles["old-src"] = [_role("r-old")]
-    prior.subject_roles["bob"] = [_role("r-old")]
 
-    rule = _rule(role=_role("r-edit"), scope=_scope("s-write"))
+    dev = _role("r-dev", "developer")
+    rule = _rule(role=dev, scope=_scope("s-src-access", "source-access"))
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
-        role_subjects={"r-edit": [_subject("alice")]},
-        existing={"github-tool": prior},
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},
+        existing={"github-agent": prior},
     )
 
-    target = res.written["github-tool"]
-    assert prior_rule in target.inbound_rules and rule in target.inbound_rules
-    assert set(target.source_roles) == {"old-src", "weather-agent"}
-    assert set(target.subject_roles) == {"bob", "alice"}
+    m = res.written["github-agent"]
+    assert prior_rule in m.inbound_rules and rule in m.inbound_rules
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 8 — a rule already present (same role.id + scope.id) is not appended   #
-# a second time; de-duplication is by value, not object identity.             #
+# Cycle 11 — a rule already present (same role.id + scope.id) is not appended    #
+# a second time; de-duplication is by value, not object identity.               #
 # --------------------------------------------------------------------------- #
 def test_duplicate_rule_not_appended_twice():
-    prior = _fresh("github-tool")
-    prior.inbound_rules.append(PolicyRule(role=_role("r-edit"), scope=_scope("s-write")))
-
-    rule = _rule(role=_role("r-edit"), scope=_scope("s-write"))  # same ids, new object
-    res = run_engine(
-        [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        existing={"github-tool": prior},
+    agent = _agent("github-agent")
+    prior = _fresh("github-agent")
+    prior.inbound_rules.append(
+        PolicyRule(role=_role("r-dev", "developer"), scope=_scope("s-src-access", "source-access"))
     )
 
-    assert len(res.written["github-tool"].inbound_rules) == 1
-
-
-# --------------------------------------------------------------------------- #
-# Cycle 9 — a map entry already present (same entity .id) is not appended a    #
-# second time, for source_roles / subject_roles / target_scopes alike.        #
-# --------------------------------------------------------------------------- #
-def test_duplicate_map_entries_not_appended_twice():
-    role = _role("r-edit")
-    scope = _scope("s-write")
-    target_prior = _fresh("github-tool")
-    target_prior.source_roles["weather-agent"] = [_role("r-edit")]
-    target_prior.subject_roles["alice"] = [_role("r-edit")]
-    source_prior = _fresh("weather-agent")
-    source_prior.target_scopes["github-tool"] = [_scope("s-write")]
-
-    rule = _rule(role=role, scope=scope)
+    rule = _rule(role=_role("r-dev", "developer"), scope=_scope("s-src-access", "source-access"))
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
-        role_subjects={"r-edit": [_subject("alice")]},
-        existing={"github-tool": target_prior, "weather-agent": source_prior},
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},
+        existing={"github-agent": prior},
     )
 
-    target = res.written["github-tool"]
-    source = res.written["weather-agent"]
-    assert len(target.source_roles["weather-agent"]) == 1
-    assert len(target.subject_roles["alice"]) == 1
-    assert len(source.target_scopes["github-tool"]) == 1
+    assert len(res.written["github-agent"].inbound_rules) == 1
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 10 — when the store has no record for an agent (404), the engine       #
-# starts from a fresh model rather than crashing.                             #
+# Cycle 12 — when the store has no record for an agent (404), the engine        #
+# starts from a fresh model rather than crashing.                              #
 # --------------------------------------------------------------------------- #
 def test_missing_agent_404_creates_fresh_model():
-    rule = _rule(role=_role(), scope=_scope("s-write"))
+    agent = _agent("github-agent")
+    rule = _rule(role=_role("r-dev", "developer"), scope=_scope("s-src-access", "source-access"))
     res = run_engine(
         [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        missing_404=True,  # get_agent_policy raises RuntimeError("...404")
+        catalog=[agent],
+        scope_services={"s-src-access": [agent]},
+        missing_404=True,
     )
 
-    assert set(res.written) == {"github-tool"}
-    assert res.written["github-tool"].inbound_rules == [rule]
+    assert set(res.written) == {"github-agent"}
+    assert res.written["github-agent"].inbound_rules == [rule]
     assert res.apply_policy.call_count == 1
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 11 — any dependency failure is logged and swallowed; compute_and_apply #
-# never propagates (fire-and-forget), and nothing is pushed to the PDP.       #
+# Cycle 13 — any dependency failure is logged and swallowed; compute_and_apply  #
+# never propagates (fire-and-forget), and nothing is pushed to the PDP.        #
 # --------------------------------------------------------------------------- #
 def test_dependency_exception_is_swallowed():
     from aiac.policy.computation.engine import compute_and_apply
@@ -318,7 +391,7 @@ def test_dependency_exception_is_swallowed():
     with ExitStack() as stack:
         stack.enter_context(patch.dict(os.environ, {"AIAC_REALM": "test-realm"}))
         stack.enter_context(
-            patch.object(Configuration, "get_services_by_scope", side_effect=RuntimeError("boom")))
+            patch.object(Configuration, "get_services", side_effect=RuntimeError("boom")))
         stack.enter_context(patch("aiac.policy.computation.engine.get_agent_policy"))
         stack.enter_context(patch("aiac.policy.computation.engine.apply_agent_policy"))
         ap = stack.enter_context(patch("aiac.policy.computation.engine.apply_policy"))
@@ -328,97 +401,76 @@ def test_dependency_exception_is_swallowed():
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 12 — every store write happens before the single PDP push, and the     #
-# pushed PolicyModel round-trips through JSON (all map keys are strings).       #
+# Cycle 14 — every store write happens before the single PDP push, and the      #
+# pushed PolicyModel round-trips through JSON (including outbound_subject_rules).#
 # --------------------------------------------------------------------------- #
 def test_writes_precede_single_push_and_model_is_json_serializable():
-    rule = _rule(role=_role("r-edit"), scope=_scope("s-write"))
+    agent = _agent("github-agent")
+    tool = _tool("github-tool")
+    dev = _role("r-dev", "developer")
+    helper = _role("r-src-helper", "source-helper")
+    read = _scope("s-src-read", "source-read")
+    src_access = _scope("s-src-access", "source-access")
+    rules = [
+        _rule(role=dev, scope=src_access),   # (a)
+        _rule(role=helper, scope=read),      # (c) establishes target_scopes
+        _rule(role=dev, scope=read),         # (b) user -> tool scope
+    ]
     res = run_engine(
-        [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
-        role_subjects={"r-edit": [_subject("alice")]},
+        rules,
+        catalog=[agent, tool],
+        scope_services={"s-src-access": [agent], "s-src-read": [tool]},
+        role_services={"r-src-helper": [agent]},
+        role_subjects={"r-dev": [_subject("dev-user")]},
     )
 
     assert res.order.count(("policy",)) == 1
     assert res.order[-1] == ("policy",)
     assert res.order[:-1] and all(step[0] == "agent" for step in res.order[:-1])
 
+    m = res.written["github-agent"]
+    assert m.outbound_subject_rules  # non-empty (mapping b landed)
+
     pushed = res.apply_policy.call_args.args[0]
     restored = PolicyModel.model_validate(pushed.model_dump(mode="json"))
-    assert {a.agent_id for a in restored.agents} == {"github-tool", "weather-agent"}
+    assert {a.agent_id for a in restored.agents} == {"github-agent"}
+    restored_agent = restored.agents[0]
+    assert {(r.role.id, r.scope.id) for r in restored_agent.outbound_subject_rules} == {("r-dev", "s-src-read")}
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 13 — override=True authoritatively replaces the input role's mappings: #
-# stale entries for that role are purged from BOTH directions (and dropped     #
-# from source_roles / subject_roles, with target_scopes reconciled) before the #
-# fresh rules are appended; an unrelated role's mappings survive untouched.    #
+# Cycle 15 — override=True authoritatively replaces the input role's mappings   #
+# across inbound_rules, outbound_rules, AND outbound_subject_rules before the    #
+# fresh rules are appended; an unrelated role's mappings survive untouched.     #
 # --------------------------------------------------------------------------- #
 def test_override_purges_input_role_before_appending():
-    edit = _role("r-edit")
-    keep = _role("r-keep")
+    agent = _agent("github-agent")
+    tool = _tool("github-tool")
+    dev = _role("r-dev", "developer")
+    keep = _role("r-keep", "keeper")
+    read = _scope("s-src-read", "source-read")
 
-    target_prior = _fresh("github-tool")
-    target_prior.inbound_rules.append(PolicyRule(role=edit, scope=_scope("s-stale")))
-    target_prior.inbound_rules.append(PolicyRule(role=keep, scope=_scope("s-keep")))
-    target_prior.source_roles["weather-agent"] = [edit, keep]
-    target_prior.subject_roles["alice"] = [edit, keep]
+    prior = _fresh("github-agent")
+    prior.outbound_subject_rules.append(PolicyRule(role=dev, scope=_scope("s-stale", "stale")))
+    prior.outbound_subject_rules.append(PolicyRule(role=keep, scope=_scope("s-keep", "keep")))
+    prior.target_scopes["github-tool"] = [read]
 
-    source_prior = _fresh("weather-agent")
-    source_prior.outbound_rules.append(PolicyRule(role=edit, scope=_scope("s-stale")))
-    source_prior.target_scopes["github-tool"] = [_scope("s-stale")]
-
-    rule = _rule(role=edit, scope=_scope("s-write"))
-    res = run_engine(
-        [rule],
-        scope_services={"s-write": [_service("github-tool")]},
-        role_services={"r-edit": [_service("weather-agent")]},
-        existing={"github-tool": target_prior, "weather-agent": source_prior},
-        override=True,
-    )
-
-    target = res.written["github-tool"]
-    source = res.written["weather-agent"]
-
-    target_inbound = {(r.role.id, r.scope.id) for r in target.inbound_rules}
-    assert ("r-edit", "s-stale") not in target_inbound  # stale purged
-    assert ("r-edit", "s-write") in target_inbound  # fresh applied
-    assert ("r-keep", "s-keep") in target_inbound  # unrelated role survives
-
-    # r-edit dropped from source_roles/subject_roles then re-added only where
-    # the fresh resolution puts it back (source_roles, not subject_roles here).
-    assert {r.id for r in target.source_roles["weather-agent"]} == {"r-keep", "r-edit"}
-    assert {r.id for r in target.subject_roles["alice"]} == {"r-keep"}
-
-    source_outbound = {(r.role.id, r.scope.id) for r in source.outbound_rules}
-    assert ("r-edit", "s-stale") not in source_outbound  # stale purged
-    assert ("r-edit", "s-write") in source_outbound  # fresh applied
-    # target_scopes reconciled: only scopes justified by surviving outbound rules.
-    assert {s.id for s in source.target_scopes["github-tool"]} == {"s-write"}
-
-
-# --------------------------------------------------------------------------- #
-# Cycle 14 — override=True purges each input role ONCE, up-front: two input    #
-# rules sharing a role must both land, i.e. the shared role's purge does not    #
-# wipe the first rule's mapping after the second is processed.                  #
-# --------------------------------------------------------------------------- #
-def test_override_shared_role_purged_once_up_front():
-    edit = _role("r-edit")
-
-    source_prior = _fresh("weather-agent")
-    source_prior.outbound_rules.append(PolicyRule(role=edit, scope=_scope("s-old")))
-    source_prior.target_scopes["tool-old"] = [_scope("s-old")]
-
-    rules = [_rule(role=edit, scope=_scope("s-a")), _rule(role=edit, scope=_scope("s-b"))]
+    helper = _role("r-src-helper", "source-helper")
+    rules = [
+        _rule(role=helper, scope=read),   # (c) re-establishes target_scopes edge
+        _rule(role=dev, scope=read),      # (b) fresh user -> tool scope
+    ]
     res = run_engine(
         rules,
-        scope_services={"s-a": [_service("tool-a")], "s-b": [_service("tool-b")]},
-        role_services={"r-edit": [_service("weather-agent")]},
-        existing={"weather-agent": source_prior},
+        catalog=[agent, tool],
+        scope_services={"s-src-read": [tool]},
+        role_services={"r-src-helper": [agent]},
+        existing={"github-agent": prior},
         override=True,
     )
 
-    source = res.written["weather-agent"]
-    out_pairs = {(r.role.id, r.scope.id) for r in source.outbound_rules}
-    assert out_pairs == {("r-edit", "s-a"), ("r-edit", "s-b")}  # both survive; s-old purged once
+    m = res.written["github-agent"]
+    pairs = {(r.role.id, r.scope.id) for r in m.outbound_subject_rules}
+    assert ("r-dev", "s-stale") not in pairs   # stale purged
+    assert ("r-dev", "s-src-read") in pairs      # fresh applied
+    assert ("r-keep", "s-keep") in pairs         # unrelated role survives

@@ -96,6 +96,41 @@ def test_agent_policy_model_subject_roles_keyed_by_subject_id():
     assert list(dumped["subject_roles"].keys()) == [subject.id]
 
 
+# --- outbound_subject_rules (user role -> tool scope) ---
+
+
+def test_agent_policy_model_outbound_subject_rules_defaults_empty():
+    model = AgentPolicyModel(
+        agent_id="agent-1",
+        agent_roles=[],
+        agent_scopes=[],
+        subject_roles={},
+        source_roles={},
+        target_scopes={},
+        inbound_rules=[],
+        outbound_rules=[],
+    )
+    assert model.outbound_subject_rules == []
+
+
+def test_agent_policy_model_outbound_subject_rules_round_trip():
+    role = _role()
+    scope = _scope()
+    model = AgentPolicyModel(
+        agent_id="agent-1",
+        agent_roles=[],
+        agent_scopes=[],
+        subject_roles={},
+        source_roles={},
+        target_scopes={},
+        inbound_rules=[],
+        outbound_rules=[],
+        outbound_subject_rules=[PolicyRule(role=role, scope=scope)],
+    )
+    restored = AgentPolicyModel.model_validate(model.model_dump(mode="json"))
+    assert restored.outbound_subject_rules == [PolicyRule(role=role, scope=scope)]
+
+
 # --- model_validate round-trip (JSON mode) ---
 
 

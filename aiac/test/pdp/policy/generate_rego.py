@@ -63,6 +63,13 @@ def build_model() -> PolicyModel:
             PolicyRule(role=issues_helper, scope=issues_read),
             PolicyRule(role=issues_helper, scope=issues_write),
         ],
+        outbound_subject_rules=[
+            PolicyRule(role=developer, scope=source_read),
+            PolicyRule(role=developer, scope=source_write),
+            PolicyRule(role=developer, scope=issues_read),
+            PolicyRule(role=tester,    scope=issues_read),
+            PolicyRule(role=tester,    scope=issues_write),
+        ],
     )
     return PolicyModel(agents=[agent])
 

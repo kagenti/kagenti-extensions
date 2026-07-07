@@ -62,6 +62,10 @@ Role → access, as encoded by the model's inbound and outbound rules:
 - `developer` — source read/write, issues read.
 - `tester` — issues read/write.
 
+This user→tool access is encoded in the model's `outbound_subject_rules` (`(user_role, tool_scope)`
+pairs), which the outbound package renders as `outbound_subject_role_scopes`. The model's
+`inbound_rules` (user→agent-scope) and `outbound_rules` (agent-role→tool-scope) are unchanged.
+
 Applying this `PolicyModel` produces exactly two files in `REGO_OUTPUT_DIR`:
 
 - `github_agent.inbound.rego` — package `authz.github_agent.inbound`
@@ -71,9 +75,12 @@ Both must match the **ID-only** package shapes in
 [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md): input is IDs only
 (`{subject, source}` inbound, `{subject, target}` outbound); all role/scope maps are embedded in the
 package; the inbound gate is subject-mandatory + source-optional; the outbound gate requires both
-subject and agent to pass; and `target_scopes` is emitted verbatim (target id → scopes, no
-inversion). Because the input carries no per-request scope, the decision is coarse — a principal
-passes on having access to **at least one** relevant scope.
+subject and agent to pass, but its **subject** gate is now user→**tool** — it reads
+`outbound_subject_role_scopes` (grouped from `outbound_subject_rules`) and matches against
+`target_scopes[input.target]`, distinct from the inbound user→agent gate — while `target_ok`
+(agent→tool, from `agent_roles` × `agent_role_scopes`) is unchanged; and `target_scopes` is emitted
+verbatim (target id → scopes, no inversion). Because the input carries no per-request scope, the
+decision is coarse — a principal passes on having access to **at least one** relevant scope.
 
 The `PolicyModel` / `AgentPolicyModel` / `PolicyRule` objects come from `aiac.policy.model.models`
 ([../components/policy-model.md](../components/policy-model.md)); the script constructs them in
@@ -136,6 +143,10 @@ This is **one** integration-test spec among several indexed by the master PRD
 run in/near CI against a live Keycloak/NATS, asserting on typed responses — tracked by issue
 `testing/5.1-integration-tests.md`. This launcher, by contrast, is standalone, write-only, and
 manually inspected.
+
+For the full identity→policy pipeline (Keycloak → PRB → PCE → OPA) — which drives the same
+`github-agent` scenario end to end through the real Policy Computation Engine rather than a
+hand-built `PolicyModel` — see [policy-pipeline.md](policy-pipeline.md).
 
 Tracking issue for this test: `testing/5.2-pdp-writer-integration-test.md`.
 

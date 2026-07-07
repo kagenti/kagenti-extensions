@@ -72,25 +72,36 @@ Given `rules: list[PolicyRule]` and an `override` flag, the engine executes thes
 > `role.childRoles`), de-duplicated by `role.id`. The PCE performs **no role flattening**;
 > each rule's `role` is treated as-is (it may be a composite role or one of its children).
 
-1. **Scope → inbound services:** for each rule's `scope`, call `Configuration.get_services_by_scope(rule.scope) -> list[Service]`. Add the rule to `inbound_rules` of each returned service's `AgentPolicyModel`.
+0. **Service catalog + classification.** Resolve the full service catalog once via `Configuration.get_services() -> list[Service]`, keyed as `serviceId → Service`. Each `Service` carries its `type` (inferred as `Agent` / `Tool`), its own service-account realm roles, and its exposed scopes. A service is an **agent** iff `type == "Agent"`; any other service (notably `Tool`) is a **pure target**. This catalog drives both agent identity (P2) and the "only agents are modelled" rule (P4). `get_services_by_role` / `get_services_by_scope` honor the **P1 client-side service filter**, so they return only services that genuinely own the role / expose the scope.
 
-2. **Role → outbound services + `source_roles` + `target_scopes`:** for the rule's role R, call `Configuration.get_services_by_role(R) -> list[Service]`. For each returned service S:
-   - Add the rule to `outbound_rules` of S's `AgentPolicyModel`.
-   - Append R to `source_roles[S.serviceId]` (creating the entry if absent). The map is keyed by the service's string `serviceId`, not the `Service` object; the appended value is the typed `Role`.
-   - For each target service T resolved in step 1 (services exposing `rule.scope`), append `rule.scope` to `target_scopes[T.serviceId]` on S's `AgentPolicyModel` (creating the entry if absent). This records the outbound direction — S acting as R may request `rule.scope` on target T — keyed by the target service's string `serviceId` with the typed `Scope` as the value.
+1. **Classify and route each rule by kind (P5b).** The PCE is called with a single concatenated `list[PolicyRule]` spanning all three mappings, so each rule is classified by the kind of its role and scope and routed accordingly:
 
-3. **Role → subjects + `subject_roles`:** for the rule's role R, call `Configuration.get_subjects_by_role(R) -> list[Subject]`. For each returned subject S:
-   - Append R to `subject_roles[S.username]` (creating the entry if absent). The map is keyed by the subject's string `username`; the appended value is the typed `Role`.
+   | Rule kind (role, scope) | Routed to (on the agent model) |
+   |---|---|
+   | (user role, agent scope) | `inbound_rules` (+ `subject_roles`) |
+   | (user role, tool scope) | `outbound_subject_rules` (+ `subject_roles`) |
+   | (agent role, tool scope) | `outbound_rules` + `target_scopes[tool]` |
 
-4. **Realm-level roles (no owning service):** if `get_services_by_role(R)` returns an empty list for the rule's role R, the role is realm-level. No outbound assignment or `source_roles` entry is made for that role. `subject_roles` entries are still recorded if `get_subjects_by_role(R)` returns subjects.
+   - **Role kind** is read from ownership: `get_services_by_role(role)` returning an **agent** service ⇒ *agent role*; returning no agent (realm-level) ⇒ *user role*.
+   - **Scope kind** is read from exposure: `get_services_by_scope(scope)` returning an **agent** ⇒ *agent scope*; returning a **tool** ⇒ *tool scope*.
 
-5. **Merge (additive append, or override replace):** for each affected service/agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`.
-   - **If `override` is `True`:** first purge the **distinct set of input roles** from the model — remove every stored `PolicyRule` whose `role.id` matches from **both** `inbound_rules` and `outbound_rules`, drop those role `id`s from all `source_roles` / `subject_roles` lists, and reconcile `target_scopes` by recomputing it from the surviving `outbound_rules`. This purge is done **once, up-front** for the whole input-role set — before any new rule is applied — so rules for a shared role are not wiped after being added.
-   - **Then (both modes):** append new rules and map entries that are not already present (de-duplicate rules by value; de-duplicate `source_roles`, `subject_roles`, and `target_scopes` list values by the entity's `id`). Because the maps are keyed by plain strings (service `serviceId` / subject `username`), merging is a plain dict-key lookup — no hashing of `Service` / `Subject` / `Scope` objects is involved.
+2. **(agent role, tool scope) — mapping c:** for each agent owning the rule's role, add the rule to that agent's `outbound_rules`, and append the tool scope to `target_scopes[tool.serviceId]` for each tool exposing it (keyed by the tool's string `serviceId`, value is the typed `Scope`). This records "the agent may reach the tool".
+
+3. **(user role, agent scope) — mapping a:** for each agent exposing the rule's scope, add the rule to that agent's `inbound_rules`, and record the role's subjects — `get_subjects_by_role(role)` → append the typed `Role` to `subject_roles[subject.username]`. This records "the user may call the agent".
+
+4. **(user role, tool scope) — mapping b:** deferred until `target_scopes` is populated by mapping-c rules in the same batch. Then, for each agent model whose `target_scopes` already exposes that tool scope, add the rule to that agent's `outbound_subject_rules` and record the role's subjects in `subject_roles`. This records "the user may reach the tool the agent targets" — the outbound subject gate. A (user role, tool scope) rule with no agent targeting that tool is dropped (it cannot be attached to any agent).
+
+5. **P4 — only agents are modelled.** Routing only ever creates an `AgentPolicyModel` for a service identified as an **agent** (one owning the rule's role, or exposing the agent scope). A pure-target **Tool** therefore never gets its own model — no `github_tool.*.rego` is emitted. The agent→tool `target_scopes` edge is still recorded on the agent's model.
+
+6. **P2 — embed each agent's own identity.** For every agent model the PCE writes, set `agent_roles` / `agent_scopes` from that agent's `Service` record in the catalog (its own service-account realm roles and exposed scopes). A realm-level agent with no owning service in the catalog keeps `[]`. Without this, both generated gates would deny-all (inbound `subject_ok` needs a non-empty `agent_scopes`; outbound `target_ok` needs a non-empty `agent_roles`).
+
+7. **Merge (additive append, or override replace):** for each affected agent, read the current `AgentPolicyModel` from the Policy Store via `get_agent_policy(agent_id)`.
+   - **If `override` is `True`:** first purge the **distinct set of input roles** from the model — remove every stored `PolicyRule` whose `role.id` matches from `inbound_rules`, `outbound_rules`, **and** `outbound_subject_rules`, drop those role `id`s from all `source_roles` / `subject_roles` lists, and reconcile `target_scopes` by recomputing it from the surviving `outbound_rules`. This purge is done **once, up-front** for the whole input-role set — before any new rule is applied — so rules for a shared role are not wiped after being added.
+   - **Then (both modes):** append new rules and map entries that are not already present (de-duplicate rules by value; de-duplicate map list values by the entity's `id`). Because the maps are keyed by plain strings, merging is a plain dict-key lookup. P2's `agent_roles` / `agent_scopes` are then set from the catalog (authoritative for the agent's own identity).
 
    Write the updated model back via `apply_agent_policy(agent_id, model)`.
 
-6. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
+8. **PDP push:** once all Policy Store writes complete, build a `PolicyModel` from the updated agents and call `aiac.pdp.policy.library.apply_policy(model)` (fire-and-forget within this function).
 
 ### Merge Semantics
 
@@ -106,7 +117,7 @@ The `override` flag (set by the caller from the producing UC's choice) selects t
 | Module | Purpose |
 |--------|---------|
 | `aiac.policy.model` | `PolicyRule`, `AgentPolicyModel`, `PolicyModel` |
-| `aiac.idp.configuration.library` | `Configuration` — `get_services_by_role`, `get_services_by_scope`, `get_subjects_by_role` |
+| `aiac.idp.configuration.library` | `Configuration` — `get_services` (catalog: type + own roles/scopes), `get_services_by_role`, `get_services_by_scope`, `get_subjects_by_role` |
 | `aiac.policy.store.library` | `get_agent_policy`, `apply_agent_policy` |
 | `aiac.pdp.policy.library` | `apply_policy` — push updated `PolicyModel` to OPA |
 
@@ -129,22 +140,22 @@ The PCE is **not** called by:
 
 Good tests assert external behavior — what the engine does to the Policy Store and PDP Policy Writer — not internal merge logic directly.
 
-**Seam:** mock all four downstream dependencies at their module-level import boundary:
-- `aiac.idp.configuration.library` — mock `Configuration.get_services_by_role`, `Configuration.get_services_by_scope`, and `Configuration.get_subjects_by_role`
+**Seam:** mock all downstream dependencies at their module-level import boundary:
+- `aiac.idp.configuration.library` — mock `Configuration.get_services` (the catalog, carrying `type` + each service's own roles/scopes), `Configuration.get_services_by_role`, `Configuration.get_services_by_scope`, and `Configuration.get_subjects_by_role`
 - `aiac.policy.store.library` — mock `get_agent_policy`, `apply_agent_policy`
 - `aiac.pdp.policy.library` — mock `apply_policy`
 
 Key behaviors to assert:
-- Rules with a resolvable scope result in `apply_agent_policy` calls for each service returned by `get_services_by_scope`.
-- Rules with a resolvable role result in `apply_agent_policy` calls for each service returned by `get_services_by_role`; `source_roles` on the written model is keyed by the service's string `serviceId` with the typed `Role` in the value list.
-- `get_subjects_by_role` is called once per rule's role; `subject_roles` on the written model is keyed by the subject's string `username` with the typed `Role` in the value list.
-- `target_scopes` on the written model is keyed by the target service's string `serviceId` (a service exposing the rule's scope) with the typed `Scope` in the value list.
-- Every relationship map on the written model has string keys, so `model_dump(mode="json")` round-trips without a custom key serializer.
-- The PCE does **not** flatten roles: `get_services_by_role` / `get_subjects_by_role` are called once per rule's role as-is (rules arrive pre-flattened from the UC); passing a rule with a composite role does not trigger per-child calls inside the PCE.
-- Realm-level roles (empty service list from `get_services_by_role`) do not produce `outbound_rules` or `source_roles` entries; `subject_roles` entries are still recorded for any subjects returned by `get_subjects_by_role`.
+- **Routing by kind (P5b):** a (user role, agent scope) rule lands in the exposing agent's `inbound_rules`; a (agent role, tool scope) rule lands in the owning agent's `outbound_rules` with a `target_scopes[tool]` entry; a (user role, tool scope) rule lands in `outbound_subject_rules` of the agent whose `target_scopes` already exposes that tool scope.
+- A (user role, tool scope) rule with no agent targeting that tool produces no model.
+- **P2:** each written agent model carries its own `agent_roles` / `agent_scopes` read from the service catalog; an agent with no catalog roles/scopes keeps `[]`.
+- **P4:** a pure-target **Tool** service is never written as its own model, even though it exposes a scope the agent reaches; the agent→tool `target_scopes` edge is still recorded.
+- `get_subjects_by_role` records `subject_roles` keyed by the subject's string `username` with the typed `Role` in the value list (for both user→agent and user→tool rules).
+- `target_scopes` on the written model is keyed by the target service's string `serviceId` with the typed `Scope` in the value list; every relationship map has string keys, so `model_dump(mode="json")` round-trips without a custom key serializer.
+- The PCE does **not** flatten roles: `get_services_by_role` is called once per rule's role as-is (rules arrive pre-flattened from the UC); passing a rule with a composite role does not trigger per-child calls inside the PCE.
 - With `override=False` (default), existing rules and map entries in the fetched `AgentPolicyModel` are preserved after merge (additive append).
-- With `override=True`, every input role's stored mappings are purged from both `inbound_rules` and `outbound_rules` (and dropped from `source_roles` / `subject_roles`, with `target_scopes` reconciled from surviving outbound rules) before the fresh rules are applied; the distinct input-role set is purged once, up-front (rules for a role shared across the input are not wiped after being added).
-- Duplicate rules (same role + scope already present) are not appended twice; duplicate `source_roles` / `subject_roles` / `target_scopes` list entries (same `id`) are not appended twice.
+- With `override=True`, every input role's stored mappings are purged from `inbound_rules`, `outbound_rules`, **and** `outbound_subject_rules` (and dropped from `source_roles` / `subject_roles`, with `target_scopes` reconciled from surviving outbound rules) before the fresh rules are applied; the distinct input-role set is purged once, up-front.
+- Duplicate rules (same role + scope already present) are not appended twice; duplicate map list entries (same `id`) are not appended twice.
 - `apply_policy` is called exactly once after all `apply_agent_policy` writes complete.
 - An exception from any dependency is logged and does not propagate to the caller.
 

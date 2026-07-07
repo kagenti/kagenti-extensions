@@ -23,6 +23,10 @@ class AgentPolicyModel(BaseModel):
     target_scopes: dict[str, list[Scope]]  # target service id -> scopes permitted
     inbound_rules: list[PolicyRule]
     outbound_rules: list[PolicyRule]
+    # (user role, tool scope) pairs — the outbound subject gate; a user holding
+    # ``role`` may reach a tool exposing ``scope``. Outbound counterpart of
+    # ``inbound_rules`` (which pairs a user role with an *agent* scope).
+    outbound_subject_rules: list[PolicyRule] = []
 
 
 class PolicyModel(BaseModel):

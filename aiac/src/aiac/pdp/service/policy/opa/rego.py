@@ -96,13 +96,25 @@ def generate_inbound_rego(model: AgentPolicyModel) -> str:
     return "\n\n".join(parts) + "\n"
 
 
+# The outbound subject gate is user->tool (distinct from inbound's user->agent):
+# the subject holds a role that grants at least one tool scope the target accepts.
+_OUTBOUND_SUBJECT_OK = (
+    "subject_ok if {\n"
+    "    some role in subject_roles[input.subject]\n"
+    "    some scope in outbound_subject_role_scopes[role]\n"
+    "    scope in target_scopes[input.target]\n"
+    "}"
+)
+
+
 def generate_outbound_rego(model: AgentPolicyModel) -> str:
     """Render the ``authz.{slug}.outbound`` Rego package for an agent.
 
     Input is ``{subject, target}`` (ids only). Both must pass: the subject
-    holds a role granting >=1 agent scope, AND the agent (via ``agent_roles``)
-    is permitted >=1 scope the ``target`` accepts. ``target_scopes`` is used
-    directly (target id -> scopes) -- no inversion.
+    holds a role granting >=1 tool scope the ``target`` accepts (user->tool, via
+    ``outbound_subject_role_scopes`` from ``outbound_subject_rules``), AND the
+    agent (via ``agent_roles``) is permitted >=1 scope the ``target`` accepts.
+    ``target_scopes`` is used directly (target id -> scopes) -- no inversion.
     """
     slug = slugify(model.agent_id)
     parts = [
@@ -110,10 +122,12 @@ def generate_outbound_rego(model: AgentPolicyModel) -> str:
         _render_list("agent_roles", _names(model.agent_roles)),
         _render_list("agent_scopes", _names(model.agent_scopes)),
         _render_map("subject_roles", _name_map(model.subject_roles)),
-        _render_map("role_scopes", _group_rules(model.inbound_rules)),
+        _render_map(
+            "outbound_subject_role_scopes", _group_rules(model.outbound_subject_rules)
+        ),
         _render_map("agent_role_scopes", _group_rules(model.outbound_rules)),
         _render_map("target_scopes", _name_map(model.target_scopes)),
-        _SUBJECT_OK,
+        _OUTBOUND_SUBJECT_OK,
         (
             "target_ok if {\n"
             "    some role in agent_roles\n"
