@@ -101,12 +101,8 @@ class Configuration:
         return self._build_service(resp.json(), self._all_roles_map(), self._all_scopes_map())
 
     def get_services_by_role(self, role: Role) -> list[Service]:
-        resp = requests.get(
-            f"{self._base_url()}/services",
-            params={"role_id": role.id, "realm": self.realm},
-        )
-        self._check(resp)
-        return [Service.model_validate(s) for s in resp.json()]
+        """Services whose service-account holds ``role`` (client-side filter of get_services)."""
+        return [s for s in self.get_services() if any(r.id == role.id for r in s.roles)]
 
     def get_subjects_by_role(self, role: Role) -> list[Subject]:
         resp = requests.get(
@@ -117,12 +113,8 @@ class Configuration:
         return [Subject.model_validate(s) for s in resp.json()]
 
     def get_services_by_scope(self, scope: Scope) -> list[Service]:
-        resp = requests.get(
-            f"{self._base_url()}/services",
-            params={"scope_id": scope.id, "realm": self.realm},
-        )
-        self._check(resp)
-        return [Service.model_validate(s) for s in resp.json()]
+        """Services exposing ``scope`` as a default client scope (client-side filter of get_services)."""
+        return [s for s in self.get_services() if any(sc.id == scope.id for sc in s.scopes)]
 
     def get_scopes(self) -> list[Scope]:
         resp = requests.get(f"{self._base_url()}/scopes", params=self._params())

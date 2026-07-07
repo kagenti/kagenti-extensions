@@ -188,22 +188,6 @@ def list_role_composites(role_name: str, admin: KeycloakAdmin = Depends(get_admi
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
-@app.get("/roles/{role_name}/scopes")
-def list_role_scopes(role_name: str, admin: KeycloakAdmin = Depends(get_admin)):
-    try:
-        role = admin.get_realm_role(role_name)
-        role_id = role["id"]
-        mapped = []
-        for scope in admin.get_client_scopes():
-            all_mappings = admin.get_all_roles_of_client_scope(scope["id"])
-            realm_mappings = all_mappings.get("realmMappings", [])
-            if any(r["id"] == role_id for r in realm_mappings):
-                mapped.append(scope)
-        return mapped
-    except KeycloakError as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-
-
 @app.get("/scopes")
 def list_scopes(admin: KeycloakAdmin = Depends(get_admin)):
     try:

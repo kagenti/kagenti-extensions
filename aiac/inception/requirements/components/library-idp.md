@@ -182,14 +182,16 @@ class Configuration:
 4. Return `list[Role]` with `childRoles` populated.
 
 `get_services_by_role(role: Role) -> list[Service]`:
-1. `GET {AIAC_PDP_CONFIG_URL}/services?role_id={role.id}&realm=<self.realm>`
-2. Returns all services that have this role mapped to them.
-3. Raises `RuntimeError` on non-2xx. Returns an empty list when no service owns the role (realm-level role).
+1. Fetches the fully-enriched service list via `get_services()` and filters it **client-side**: returns those services whose `.roles` contains a role with `role.id`. The server `GET /services` endpoint has no `role_id` filter, so filtering happens in the library.
+2. Returns an empty list when no service owns the role (e.g. a realm-level role).
+3. Raises `RuntimeError` on any underlying non-2xx (propagated from `get_services()` / `_build_service()`).
 
 `get_services_by_scope(scope: Scope) -> list[Service]`:
-1. `GET {AIAC_PDP_CONFIG_URL}/services?scope_id={scope.id}&realm=<self.realm>`
-2. Returns all services that expose this scope.
-3. Raises `RuntimeError` on non-2xx. Returns an empty list when no service exposes the scope.
+1. Fetches the fully-enriched service list via `get_services()` and filters it **client-side**: returns those services whose `.scopes` contains a scope with `scope.id`. The server `GET /services` endpoint has no `scope_id` filter, so filtering happens in the library.
+2. Returns an empty list when no service exposes the scope.
+3. Raises `RuntimeError` on any underlying non-2xx (propagated from `get_services()` / `_build_service()`).
+
+> **Performance note:** because both methods delegate to `get_services()`, each call inherits its full fan-out cost (see the `get_services()` performance note above — `2N + 1 + roles` HTTP requests for N services). Acceptable for the low-frequency PCE resolution path. If it becomes a bottleneck, the right fix is a real server-side `role_id` / `scope_id` filter on `GET /services`.
 
 `get_subjects_by_role(role: Role) -> list[Subject]`:
 1. `GET {AIAC_PDP_CONFIG_URL}/subjects?role_id={role.id}&realm=<self.realm>`

@@ -679,55 +679,45 @@ def test_default_base_url_used_when_env_unset(monkeypatch):
 
 
 class TestGetServicesByRole:
+    """``get_services_by_role`` filters ``get_services()`` client-side by role ``id``."""
+
     def _make_role(self, **kwargs):
         defaults = {"id": "role-uuid", "name": "viewer", "composite": False}
         return Role.model_validate({**defaults, **kwargs})
 
-    def test_returns_list_of_service(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        role = self._make_role()
-        payload = [{"id": "svc1", "clientId": "my-app", "name": "my-app", "enabled": True}]
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+    def _make_service(self, sid, role_ids):
+        return Service.model_validate({
+            "id": sid,
+            "clientId": sid,
+            "name": sid,
+            "enabled": True,
+            "roles": [{"id": rid, "name": rid, "composite": False} for rid in role_ids],
+        })
+
+    def test_returns_only_services_whose_roles_contain_role_id(self):
+        role = self._make_role(id="r1")
+        services = [
+            self._make_service("svc1", ["r1"]),
+            self._make_service("svc2", ["r2"]),
+            self._make_service("svc3", ["r1", "r2"]),
+        ]
+        with patch.object(Configuration, "get_services", return_value=services):
             result = Configuration.for_realm(REALM).get_services_by_role(role)
-        assert isinstance(result[0], Service)
-        assert result[0].id == "svc1"
+        assert [s.id for s in result] == ["svc1", "svc3"]
+        assert all(isinstance(s, Service) for s in result)
 
-    def test_issues_get_with_role_id_param(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        role = self._make_role(id="my-role-id")
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
-            Configuration.for_realm(REALM).get_services_by_role(role)
-        assert m.call_args[0][0] == f"{BASE}/services"
-        assert m.call_args[1]["params"] == {"role_id": "my-role-id", "realm": REALM}
-
-    def test_returns_empty_list_for_realm_level_role(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        role = self._make_role()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])):
+    def test_returns_empty_list_for_realm_level_role(self):
+        role = self._make_role(id="r-nobody")
+        services = [self._make_service("svc1", ["r1"]), self._make_service("svc2", ["r2"])]
+        with patch.object(Configuration, "get_services", return_value=services):
             result = Configuration.for_realm(REALM).get_services_by_role(role)
         assert result == []
 
-    def test_raises_on_non_2xx(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+    def test_raises_on_non_2xx(self):
         role = self._make_role()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_err(500)):
+        with patch.object(Configuration, "get_services", side_effect=RuntimeError("HTTP 500")):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_services_by_role(role)
-
-    def test_realm_forwarded_as_query_param(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        role = self._make_role()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
-            Configuration.for_realm(REALM).get_services_by_role(role)
-        assert m.call_args[1]["params"]["realm"] == REALM
-
-    def test_no_secondary_enrichment_calls(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        role = self._make_role()
-        payload = [{"id": "svc1", "clientId": "my-app", "name": "my-app", "enabled": True}]
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)) as m:
-            Configuration.for_realm(REALM).get_services_by_role(role)
-        assert m.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -798,52 +788,42 @@ class TestGetSubjectsByRole:
 
 
 class TestGetServicesByScope:
+    """``get_services_by_scope`` filters ``get_services()`` client-side by scope ``id``."""
+
     def _make_scope(self, **kwargs):
         defaults = {"id": "scope-uuid", "name": "read:data"}
         return Scope.model_validate({**defaults, **kwargs})
 
-    def test_returns_list_of_service(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        scope = self._make_scope()
-        payload = [{"id": "svc1", "clientId": "my-app", "name": "my-app", "enabled": True}]
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+    def _make_service(self, sid, scope_ids):
+        return Service.model_validate({
+            "id": sid,
+            "clientId": sid,
+            "name": sid,
+            "enabled": True,
+            "scopes": [{"id": scid, "name": scid} for scid in scope_ids],
+        })
+
+    def test_returns_only_services_whose_scopes_contain_scope_id(self):
+        scope = self._make_scope(id="s1")
+        services = [
+            self._make_service("svc1", ["s1"]),
+            self._make_service("svc2", ["s2"]),
+            self._make_service("svc3", ["s1", "s2"]),
+        ]
+        with patch.object(Configuration, "get_services", return_value=services):
             result = Configuration.for_realm(REALM).get_services_by_scope(scope)
-        assert isinstance(result[0], Service)
-        assert result[0].id == "svc1"
+        assert [s.id for s in result] == ["svc1", "svc3"]
+        assert all(isinstance(s, Service) for s in result)
 
-    def test_issues_get_with_scope_id_param(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        scope = self._make_scope(id="my-scope-id")
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
-            Configuration.for_realm(REALM).get_services_by_scope(scope)
-        assert m.call_args[0][0] == f"{BASE}/services"
-        assert m.call_args[1]["params"] == {"scope_id": "my-scope-id", "realm": REALM}
-
-    def test_returns_empty_list_when_no_service_exposes_scope(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        scope = self._make_scope()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])):
+    def test_returns_empty_list_when_no_service_exposes_scope(self):
+        scope = self._make_scope(id="s-nobody")
+        services = [self._make_service("svc1", ["s1"]), self._make_service("svc2", ["s2"])]
+        with patch.object(Configuration, "get_services", return_value=services):
             result = Configuration.for_realm(REALM).get_services_by_scope(scope)
         assert result == []
 
-    def test_raises_on_non_2xx(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+    def test_raises_on_non_2xx(self):
         scope = self._make_scope()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_err(500)):
+        with patch.object(Configuration, "get_services", side_effect=RuntimeError("HTTP 500")):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_services_by_scope(scope)
-
-    def test_realm_forwarded_as_query_param(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        scope = self._make_scope()
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok([])) as m:
-            Configuration.for_realm(REALM).get_services_by_scope(scope)
-        assert m.call_args[1]["params"]["realm"] == REALM
-
-    def test_no_secondary_enrichment_calls(self, monkeypatch):
-        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
-        scope = self._make_scope()
-        payload = [{"id": "svc1", "clientId": "my-app", "name": "my-app", "enabled": True}]
-        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)) as m:
-            Configuration.for_realm(REALM).get_services_by_scope(scope)
-        assert m.call_count == 1
