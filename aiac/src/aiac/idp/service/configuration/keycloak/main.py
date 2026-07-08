@@ -2,6 +2,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Query
@@ -20,6 +21,12 @@ _lock = threading.Lock()
 # mirrors ``AIAC_MANAGED_ATTRIBUTE`` in ``aiac.idp.configuration.models``. Realm-role attribute
 # values are lists of strings; client-scope attribute values are plain strings.
 _AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
+
+# Keycloak client attribute carrying a service's type. AIAC calls the concept "service type"
+# (``Agent``/``Tool``); the Keycloak attribute is named ``client.type`` and its value is a plain
+# string. Mirrors ``SERVICE_TYPE_ATTRIBUTE`` in ``aiac.idp.configuration.models`` (the aiac library
+# is not on this service image's path, so it is redefined locally).
+_SERVICE_TYPE_ATTRIBUTE = "client.type"
 
 
 def _get_or_create_admin(realm: str) -> KeycloakAdmin:
@@ -57,6 +64,10 @@ class _ScopeCreate(BaseModel):
 class _RoleCreate(BaseModel):
     name: str
     description: str = ""
+
+
+class _ServiceTypeUpdate(BaseModel):
+    type: Literal["Agent", "Tool"]
 
 
 @app.get("/subjects")
@@ -108,6 +119,22 @@ def list_services(admin: KeycloakAdmin = Depends(get_admin)):
 @app.get("/services/{service_id}")
 def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
+        return admin.get_client(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.post("/services/{service_id}/type", status_code=200)
+def set_service_type(
+    service_id: str, body: _ServiceTypeUpdate, admin: KeycloakAdmin = Depends(get_admin)
+):
+    try:
+        client = admin.get_client(service_id)
+        # Merge into the existing attributes so we don't clobber other client attributes;
+        # Keycloak replaces the whole attributes map on update.
+        attributes = dict(client.get("attributes") or {})
+        attributes[_SERVICE_TYPE_ATTRIBUTE] = body.type  # capitalized plain string
+        admin.update_client(service_id, {"attributes": attributes})
         return admin.get_client(service_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})

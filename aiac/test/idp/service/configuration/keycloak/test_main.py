@@ -372,6 +372,60 @@ class TestGetService:
 
 
 # ---------------------------------------------------------------------------
+# POST /services/{service_id}/type
+# ---------------------------------------------------------------------------
+
+
+class TestSetServiceType:
+    def test_returns_200_with_updated_client(self):
+        admin = MagicMock()
+        admin.get_client.side_effect = [
+            {"id": "svc-uuid", "clientId": "my-app", "attributes": {}},
+            {"id": "svc-uuid", "clientId": "my-app", "attributes": {"client.type": "Agent"}},
+        ]
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/type?realm={REALM}", json={"type": "Agent"}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["attributes"] == {"client.type": "Agent"}
+
+    def test_sets_client_type_attribute_via_update_client(self):
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "attributes": {"existing": "keep"}}
+        _make_client(admin).post(f"/services/svc-uuid/type?realm={REALM}", json={"type": "Tool"})
+        # existing attributes preserved; client.type merged in (not clobbered)
+        admin.update_client.assert_called_once_with(
+            "svc-uuid", {"attributes": {"existing": "keep", "client.type": "Tool"}}
+        )
+
+    def test_stores_capitalized_plain_string_value(self):
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "attributes": {}}
+        _make_client(admin).post(f"/services/svc-uuid/type?realm={REALM}", json={"type": "Agent"})
+        payload = admin.update_client.call_args[0][1]
+        assert payload["attributes"]["client.type"] == "Agent"  # plain string, not a list
+
+    def test_rejects_invalid_type_with_422(self):
+        admin = MagicMock()
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/type?realm={REALM}", json={"type": "agent"}
+        )
+        assert resp.status_code == 422
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.get_client.side_effect = KeycloakError(error_message="not found", response_code=404)
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/type?realm={REALM}", json={"type": "Agent"}
+        )
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # POST /scopes
 # ---------------------------------------------------------------------------
 

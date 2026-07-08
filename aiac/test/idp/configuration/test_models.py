@@ -260,24 +260,24 @@ class TestServiceNameResolution:
 
 
 class TestServiceTypeResolution:
-    def test_type_agent_from_kagenti_attribute(self):
+    def test_type_agent_from_client_type_attribute(self):
         s = Service.model_validate(
             {
                 "id": "c1",
                 "clientId": "some-agent",
                 "enabled": True,
-                "attributes": {"kagenti.service.type": "Agent"},
+                "attributes": {"client.type": "Agent"},
             }
         )
         assert s.type == "Agent"
 
-    def test_type_tool_from_kagenti_attribute(self):
+    def test_type_tool_from_client_type_attribute(self):
         s = Service.model_validate(
             {
                 "id": "c2",
                 "clientId": "github-tool",
                 "enabled": True,
-                "attributes": {"kagenti.service.type": "Tool"},
+                "attributes": {"client.type": "Tool"},
             }
         )
         assert s.type == "Tool"
@@ -292,6 +292,17 @@ class TestServiceTypeResolution:
         )
         assert s.type == "Agent"
 
+    def test_type_none_when_no_attribute_and_non_spiffe_clientId(self):
+        s = Service.model_validate(
+            {
+                "id": "c3b",
+                "clientId": "mlflow",
+                "enabled": True,
+                "attributes": {},
+            }
+        )
+        assert s.type is None
+
     def test_explicit_type_not_overridden_by_validator(self):
         s = Service.model_validate(
             {
@@ -303,13 +314,27 @@ class TestServiceTypeResolution:
         )
         assert s.type == "Tool"
 
-    def test_unknown_kagenti_attribute_value_gives_none(self):
+    def test_unknown_client_type_attribute_value_gives_none(self):
         s = Service.model_validate(
             {
                 "id": "c5",
                 "clientId": "mlflow",
                 "enabled": True,
-                "attributes": {"kagenti.service.type": "Unknown"},
+                "attributes": {"client.type": "Unknown"},
+            }
+        )
+        assert s.type is None
+
+    def test_list_valued_client_type_attribute_gives_none(self):
+        # Plain-string invariant: client attributes are plain strings. A list value
+        # (as realm-role attributes use) fails the ``in ("Agent","Tool")`` check → type None.
+        # Regression guard for the silent empty-pipeline-output failure mode.
+        s = Service.model_validate(
+            {
+                "id": "c6",
+                "clientId": "mlflow",
+                "enabled": True,
+                "attributes": {"client.type": ["Agent"]},
             }
         )
         assert s.type is None

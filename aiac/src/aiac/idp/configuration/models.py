@@ -10,6 +10,12 @@ from pydantic import BaseModel, ConfigDict, model_validator
 # (``{"aiac.managed": "true"}``) — the helper below tolerates both shapes.
 AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
 
+# Keycloak attribute that carries a service's (client's) type. AIAC calls the concept
+# "service type" everywhere (``Service.type`` ∈ {``Agent``,``Tool``}); the underlying Keycloak
+# client attribute is named ``client.type``. The value is a plain string (``"Agent"``/``"Tool"``,
+# capitalized to match ``Literal["Agent","Tool"]``) — a list value fails resolution → type ``None``.
+SERVICE_TYPE_ATTRIBUTE = "client.type"
+
 
 def _is_aiac_managed(attributes: dict[str, Any]) -> bool:
     value = attributes.get(AIAC_MANAGED_ATTRIBUTE)
@@ -76,11 +82,12 @@ class Service(BaseModel):
         if client_id and not data.get("serviceId"):
             updates["serviceId"] = client_id
 
-        # Resolve service type: explicit Keycloak attribute takes precedence,
-        # then SPIFFE-format clientId implies an agent workload.
+        # Resolve service type. Precedence: explicit ``type`` (already set, skipped here) →
+        # Keycloak ``client.type`` attribute (plain string ∈ {Agent,Tool}) → SPIFFE-format
+        # clientId ⇒ Agent → None. A list-valued attribute fails the string check → None.
         if data.get("type") is None:
             attrs = data.get("attributes") or {}
-            stored_type = attrs.get("kagenti.service.type")
+            stored_type = attrs.get(SERVICE_TYPE_ATTRIBUTE)
             if stored_type in ("Agent", "Tool"):
                 updates["type"] = stored_type
             elif client_id and str(client_id).startswith("spiffe://"):

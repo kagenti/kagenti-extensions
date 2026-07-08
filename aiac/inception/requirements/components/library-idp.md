@@ -80,9 +80,18 @@ Represents a service (Keycloak: `client`).
 | `name` | `str \| None` | `name` | |
 | `description` | `str \| None` | `description` | `None` |
 | `enabled` | `bool` | `enabled` | |
-| `type` | `Literal["Agent", "Tool"] \| None` | `attributes.type` | `None` |
+| `type` | `Literal["Agent", "Tool"] \| None` | `attributes.client.type` | `None` |
 | `roles` | `list[Role]` | _(roles for this client)_ | `[]` |
 | `scopes` | `list[Scope]` | _(default client scopes)_ | `[]` |
+
+**Service type resolution** (`Service._resolve_keycloak_fields`, a `model_validator(mode="before")`). AIAC calls the concept "service type" everywhere; the backing Keycloak client attribute is named **`client.type`**. Resolution precedence:
+
+1. An explicit `type` already present on the input wins (never overridden).
+2. Otherwise the Keycloak client attribute **`client.type`** ∈ {`Agent`, `Tool`} — a **plain string**. Client attribute values are plain strings; a **list** value (e.g. `["Agent"]`, the shape realm-role attributes use) fails the check and resolves to `None`. Capitalization matches `Literal["Agent", "Tool"]`.
+3. Otherwise a `clientId` starting with `spiffe://` implies an `Agent` workload.
+4. Otherwise `None`.
+
+The attribute is set via `Configuration.set_service_type` (below); its authoritative origin is UC1 `classify_service` (see the aiac-agent UC1 spec), which persists the discovered service type onto the client. There is **no** description-keyword inference — typing is attribute/`spiffe://`-only.
 
 #### `Scope`
 
@@ -148,6 +157,8 @@ class Configuration:
 
     def create_role(self, role_name: str, role_description: str) -> Role: ...
     def map_role_to_service(self, service: Service, role: Role) -> Service: ...
+
+    def set_service_type(self, service: Service, service_type: Literal["Agent", "Tool"]) -> Service: ...
 ```
 
 `get_scopes()` — simple read:
@@ -227,6 +238,12 @@ class Configuration:
 2. Raises `RuntimeError` on non-2xx HTTP status (including 409 if the role is already mapped to the service).
 3. Re-fetches the service via `GET {AIAC_PDP_CONFIG_URL}/services/{service.id}`, appending `?realm=<self.realm>`.
 4. Returns the updated `Service` instance parsed from the response.
+
+`set_service_type(service: Service, service_type: Literal["Agent", "Tool"]) -> Service`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/type` with body `{"type": service_type}`, appending `?realm=<self.realm>`.
+2. The service persists the value onto the Keycloak client as the **`client.type`** attribute (a plain string, capitalized). The Keycloak attribute name is an IdP-Service/mapping-layer detail — callers pass the generic `service_type` and never see it.
+3. Raises `RuntimeError` on non-2xx HTTP status.
+4. Returns the updated `Service` instance parsed from the response (`type` now resolved from the new attribute).
 
 ### Configuration
 

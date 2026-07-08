@@ -15,6 +15,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | GET | `/subjects/{subject_id}/assignments` | `GET /admin/realms/{realm}/users/{subject_id}/role-mappings` | Realm and service permission assignments for a subject |
 | GET | `/services` | `GET /admin/realms/{realm}/clients` | All services (clients) |
 | GET | `/services/{service_id}` | `GET /admin/realms/{realm}/clients/{service_id}` | Single service by ID |
+| POST | `/services/{service_id}/type` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"attributes": {...}})` | Set a service's type via the `client.type` client attribute |
 | GET | `/scopes` | `GET /admin/realms/{realm}/client-scopes` | All scopes |
 | GET | `/services/{service_id}/roles` | `admin.get_client_service_account_user(service_id)` → `admin.get_realm_roles_of_user(user_id)` | Realm roles assigned to a service's account |
 | GET | `/services/{service_id}/scopes` | `admin.get_client_default_client_scopes(service_id)` | Default client scopes assigned to a service |
@@ -37,6 +38,15 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 1. Calls `admin.get_client(service_id)`.
 2. Returns `200 OK` with the client JSON on success.
 3. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+All service reads (`GET /services`, `GET /services/{service_id}`) return the Keycloak client representation **unmodified**, so client `attributes` — including `client.type` — flow through verbatim for the library's generic-model mapping (`Service._resolve_keycloak_fields`) to resolve service type. The Keycloak attribute name is confined to this service (writes) and the library mapping layer (reads); it is never exposed to library callers.
+
+`POST /services/{service_id}/type`:
+Accepts JSON body `{"type": "Agent" | "Tool"}` (rejected with `422` otherwise). It:
+1. Calls `admin.get_client(service_id)` and copies its existing `attributes`.
+2. Sets the **`client.type`** attribute to the (capitalized, plain-string) type value and calls `admin.update_client(service_id, {"attributes": {...}})`. The existing attributes are merged, not clobbered.
+3. Returns `200 OK` with the updated client JSON (re-fetched via `admin.get_client`).
+4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 `POST /scopes`:
 Accepts JSON body `{"name": ..., "description": ...}`. It:

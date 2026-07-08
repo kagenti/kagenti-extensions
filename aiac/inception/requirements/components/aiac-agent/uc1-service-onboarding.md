@@ -119,6 +119,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   > MCP path convention: all MCP tool services must serve at `/mcp`.
 
 - **`provision_service`**: non-LLM node; calls `create_service_role` and `create_service_scope` from `aiac.idp.configuration.api` for each entry in `ServiceProvision`. Reads `service_id` from state. Writes are **idempotent** (create-or-get).
+  - Also persists the discovered `service_type` onto the Keycloak client via `Configuration.set_service_type(service, service_type)`, which stores it as the **`client.type`** attribute. This is the **authoritative origin** of the attribute that the IdP library's `Service._resolve_keycloak_fields` reads back (see the IdP library spec's type-resolution precedence). Case must be normalized at this persistence step: `ServiceType` is lowercase (`agent`/`tool`) but `client.type` is capitalized (`Agent`/`Tool`) to match `Literal["Agent", "Tool"]` — map `agent`→`Agent`, `tool`→`Tool`.
 
 ### State: `OnboardingProvisionState`
 

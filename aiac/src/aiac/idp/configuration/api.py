@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Literal
 
 import requests
 from dotenv import load_dotenv
@@ -72,15 +73,9 @@ class Configuration:
         roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
         service_scope_ids = {s["id"] for s in scopes_resp.json()}
         scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
-        # TEMP: infer type from description when not set by Keycloak attributes
-        desc = raw.get("description") or ""
-        inferred_type: str | None = None
-        if "Agent" in desc:
-            inferred_type = "Agent"
-        elif "Tool" in desc:
-            inferred_type = "Tool"
-        patch = {"type": inferred_type} if inferred_type and not raw.get("type") else {}
-        return Service.model_validate({**raw, "roles": roles, "scopes": scopes, **patch})
+        # Type resolution is handled entirely by Service._resolve_keycloak_fields
+        # (client.type attribute → spiffe:// clientId → None); the library does not infer it here.
+        return Service.model_validate({**raw, "roles": roles, "scopes": scopes})
 
     def _all_roles_map(self) -> dict[str, Role]:
         return {r.id: r for r in self.get_roles()}
@@ -139,6 +134,20 @@ class Configuration:
         get_resp = requests.get(f"{self._base_url()}/services/{service.id}", params=self._params())
         self._check(get_resp)
         return Service.model_validate(get_resp.json())
+
+    def set_service_type(self, service: Service, service_type: Literal["Agent", "Tool"]) -> Service:
+        """Persist a service's type onto the Keycloak client as the ``client.type`` attribute.
+
+        The value is stored capitalized (``Agent``/``Tool``) so ``Service._resolve_keycloak_fields``
+        resolves it back on read. Returns the updated ``Service``.
+        """
+        resp = requests.post(
+            f"{self._base_url()}/services/{service.id}/type",
+            json={"type": service_type},
+            params=self._params(),
+        )
+        self._check(resp)
+        return Service.model_validate(resp.json())
 
     def create_role(self, role_name: str, role_description: str) -> Role:
         resp = requests.post(
