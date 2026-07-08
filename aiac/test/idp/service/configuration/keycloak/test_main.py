@@ -306,7 +306,7 @@ class TestCreateScope:
             f"/services/svc-abc/scopes?realm={REALM}",
             json={"name": "write", "description": "Write access"},
         )
-        admin.add_default_default_client_scope.assert_called_once_with("svc-abc", "scope-id-42")
+        admin.add_client_default_client_scope.assert_called_once_with("svc-abc", "scope-id-42", {})
 
     def test_creates_scope_with_openid_connect_protocol(self):
         admin = MagicMock()
@@ -444,11 +444,11 @@ class TestAssignScopeToService:
         admin = MagicMock()
         resp = _make_client(admin).post(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
         assert resp.status_code == 201
-        admin.add_default_default_client_scope.assert_called_once_with("svc-uuid", "scope-id")
+        admin.add_client_default_client_scope.assert_called_once_with("svc-uuid", "scope-id", {})
 
     def test_returns_409_when_already_assigned(self):
         admin = MagicMock()
-        admin.add_default_default_client_scope.side_effect = KeycloakError(
+        admin.add_client_default_client_scope.side_effect = KeycloakError(
             error_message="Conflict", response_code=409
         )
         resp = _make_client(admin).post(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
@@ -456,7 +456,7 @@ class TestAssignScopeToService:
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
-        admin.add_default_default_client_scope.side_effect = KeycloakError(
+        admin.add_client_default_client_scope.side_effect = KeycloakError(
             error_message="failure", response_code=500
         )
         resp = _make_client(admin).post(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
@@ -528,10 +528,14 @@ class TestAssignRoleToService:
     def test_returns_201_on_success(self):
         admin = MagicMock()
         admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.get_realm_role_by_id.return_value = {"id": "role-id", "name": "src-helper"}
         resp = _make_client(admin).post(f"/services/svc-uuid/roles/role-id?realm={REALM}")
         assert resp.status_code == 201
         admin.get_client_service_account_user.assert_called_once_with("svc-uuid")
-        admin.assign_realm_roles.assert_called_once_with("sa-user-id", [{"id": "role-id"}])
+        admin.get_realm_role_by_id.assert_called_once_with("role-id")
+        admin.assign_realm_roles.assert_called_once_with(
+            "sa-user-id", [{"id": "role-id", "name": "src-helper"}]
+        )
 
     def test_returns_409_when_already_assigned(self):
         admin = MagicMock()

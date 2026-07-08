@@ -122,7 +122,10 @@ def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin =
     try:
         sa_user = admin.get_client_service_account_user(service_id)
         user_id = sa_user["id"]
-        admin.assign_realm_roles(user_id, [{"id": role_id}])
+        # Keycloak's role-mappings endpoint needs the full role representation (id + name),
+        # not just the id, so resolve the role before assigning it to the service account.
+        role = admin.get_realm_role_by_id(role_id)
+        admin.assign_realm_roles(user_id, [role])
         return JSONResponse(status_code=201, content={})
     except KeycloakError as e:
         if e.response_code == 409:
@@ -144,7 +147,7 @@ def create_scope(service_id: str, body: _ScopeCreate, admin: KeycloakAdmin = Dep
         scope_id = admin.create_client_scope(
             {"name": body.name, "description": body.description, "protocol": "openid-connect"}
         )
-        admin.add_default_default_client_scope(service_id, scope_id)
+        admin.add_client_default_client_scope(service_id, scope_id, {})
         return admin.get_client_scope(scope_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
@@ -153,7 +156,7 @@ def create_scope(service_id: str, body: _ScopeCreate, admin: KeycloakAdmin = Dep
 @app.post("/services/{service_id}/scopes/{scope_id}", status_code=201)
 def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        admin.add_default_default_client_scope(service_id, scope_id)
+        admin.add_client_default_client_scope(service_id, scope_id, {})
         return JSONResponse(status_code=201, content={})
     except KeycloakError as e:
         if e.response_code == 409:
