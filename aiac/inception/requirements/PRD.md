@@ -555,8 +555,9 @@ Beyond the marker-gated pytest tests above, individual integration tests are spe
 | Integration test | Description | Spec |
 |---|---|---|
 | PDP Policy Writer — `generate_rego.py` | Standalone launcher (no Docker) that boots the OPA stub locally, applies a `PolicyModel` through `aiac.pdp.policy.library`, and writes the generated Rego to a known directory for manual inspection. Write-only; not `@pytest.mark.integration`. | [integration-test/pdp-policy-writer.md](integration-test/pdp-policy-writer.md) |
+| `policy-pipeline` — `policy_pipeline.py` | Standalone launcher (no Docker) driving the full identity→policy pipeline — provisions a Keycloak realm + entities, runs the three PRB mappings, applies via the PCE, and writes the generated Rego to a known directory for manual inspection. Write-only; not `@pytest.mark.integration`. | [integration-test/policy-pipeline.md](integration-test/policy-pipeline.md) |
 
-Tracking issues: the live-Keycloak pytest integration tests in `testing/5.1-integration-tests.md`; the PDP Policy Writer integration test in `testing/5.2-pdp-writer-integration-test.md`.
+Tracking issues: the live-Keycloak pytest integration tests in `testing/5.1-integration-tests.md`; the PDP Policy Writer integration test in `testing/5.2-pdp-writer-integration-test.md`; the policy-pipeline integration test in `testing/5.3-policy-pipeline-integration-test.md`.
 
 ---
 
