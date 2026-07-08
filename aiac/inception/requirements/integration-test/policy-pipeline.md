@@ -9,8 +9,9 @@
 
 ## Location
 `aiac/test/integration/policy_pipeline.py`, plus two shared modules it imports:
-`aiac/test/integration/scenario.py` — the canonical `github-agent` scenario as pure data (the single
-source of truth the *Further Notes* mandate) — and `aiac/test/integration/launcher.py` — the shared
+`aiac/test/integration/scenario.py` — the canonical `github-agent` scenario as pure data (one of the
+role→access fact sources the *Further Notes* mandate — the pair-lists, alongside the *Scenario* table
+and both `policy.md` variants) — and `aiac/test/integration/launcher.py` — the shared
 `uvicorn` subprocess-lifecycle helpers. The `5.2` launcher `test/pdp/policy/generate_rego.py` was
 refactored onto both so the two launchers cannot drift.
 
@@ -49,15 +50,24 @@ Kubernetes-CR implementation, so the output is `.rego` files instead of a patche
    - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
      users `dev-user` and `test-user`; create realm roles `developer` and `tester`; assign roles to
      users; create the `github-agent` and `github-tool` clients with the descriptions in
-     *[Scenario inputs](#scenario-inputs-prb-functional-inputs)* so the IdP library's `type` inference
-     (`_build_service`) tags them **Agent** / **Tool**.
+     *[Scenario inputs](#scenario-inputs-prb-functional-inputs)* and with the `client.type`
+     client attribute set to the plain string `"Agent"` / `"Tool"` respectively, so `Service` type
+     resolution tags them from the attribute (not from description prose). Set the type via the product
+     surface `Configuration.set_service_type(service, type)` (`POST /services/{id}/type`) or by writing
+     the `client.type` attribute directly at client create. The attribute value is a plain string,
+     **not** a list — a list fails the `in ("Agent","Tool")` check, resolves the type to `None`, and
+     yields empty pipeline output.
    - via the **aiac IdP `Configuration` library** (the real product surface the PCE reads back): create
      the client roles (`source-helper`, `issues-helper`) and scopes (`source-access`, `issues-access`,
      `source-read`, `source-write`, `issues-read`, `issues-write`) with the descriptions in
      *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*, and map roles→services and
      scopes→services so `get_services_by_role` / `get_services_by_scope` and `get_service().roles` /
      `.scopes` resolve correctly.
-4. **Proto-UC1 orchestration** — run the three PRB mappings against a pinned LLM (`temperature=0`) and
+4. **Read-back type guard** — after provisioning, call `Configuration.get_service` for both clients and
+   assert each resolved `.type` (`github-agent` ⇒ `Agent`, `github-tool` ⇒ `Tool`) **before** spawning
+   the pipeline; abort with a clear message otherwise. This is a provisioning sanity check on the
+   `client.type` attribute, **not** a Rego-output assertion — the test stays write-only.
+5. **Proto-UC1 orchestration** — run the three PRB mappings against a pinned LLM (`temperature=0`) and
    concatenate the results into one `list[PolicyRule]`:
    - **(a)** `build_scope_rules(user_roles, agent_scope)` per agent scope → user→agent-scope rules.
    - **(b)** `build_scope_rules(user_roles, tool_scope)` per tool scope → user→tool-scope rules.
@@ -68,12 +78,13 @@ Kubernetes-CR implementation, so the output is `.rego` files instead of a patche
    Store. The PCE resolves the IdP relationships, builds the `github-agent` model (with `agent_roles` /
    `agent_scopes`; mapping (b) routed into `outbound_subject_rules`; and **no** `github-tool` model),
    writes it to the store, and pushes it to the OPA stub.
-5. **Terminate the three subprocesses in `finally`.**
-6. **Print** `REGO_OUTPUT_DIR` and the two `.rego` filenames.
+6. **Terminate the three subprocesses in `finally`.**
+7. **Print** `REGO_OUTPUT_DIR` and the two `.rego` filenames.
 
-**Write-only.** The script performs no read-back and makes **no assertions**. The realm is left in
-place; the `.rego` files are left on disk for eyeballing. There is no pass/fail exit contract beyond
-the script running to completion.
+**Write-only.** Apart from the step-4 provisioning type guard (a `Configuration.get_service` `.type`
+check on the freshly provisioned attribute), the script reads nothing back and makes **no assertions**
+on the pipeline output. The realm is left in place; the `.rego` files are left on disk for eyeballing.
+There is no pass/fail exit contract on the generated Rego beyond the script running to completion.
 
 ## Expected output
 
@@ -107,8 +118,8 @@ through the real pipeline rather than a hand-built `PolicyModel`.
 | `developer` | source read/write + issues read |
 | `tester` | issues read/write |
 
-Role → access (confirmed with the user; the single source of truth the descriptions and both
-`policy.md` versions below must agree with):
+Role → access (confirmed with the user; the fixed facts that both `policy.md` versions below and the
+`scenario.py` pair-lists must agree with — the generic descriptions are not part of this triad):
 
 - `developer` — source read/write, issues read.
 - `tester` — issues read/write.
@@ -157,13 +168,19 @@ Policy Store DB and the provisioned Keycloak realm.
 - **Highest seam available.** Real libraries + real services + real Keycloak + real LLM. The launcher
   drives the pipeline through its real surfaces — the IdP `Configuration` library, the PRB entry points
   (`build_scope_rules` / `build_role_rules`), and the PCE's `compute_and_apply` — and observes the real
-  filesystem output. The only shortcut is the OPA filesystem stub (same as `5.2`). It asserts nothing;
-  it produces artefacts a human reviews.
+  filesystem output. The only shortcut is the OPA filesystem stub (same as `5.2`). It makes no
+  assertions on the pipeline output; it produces artefacts a human reviews.
+- **Attribute-based client typing + read-back guard.** Clients are typed by the `client.type`
+  attribute (plain string `"Agent"` / `"Tool"`), provisioned by the launcher — not by description
+  keywords. Because that attribute drives whether the PCE emits an agent model (and suppresses the tool
+  model), the launcher reads each service back via `Configuration.get_service` and asserts its `.type`
+  before running the pipeline, aborting on mismatch. This is a **provisioning** sanity check, not a
+  Rego-output assertion — the write-only ethos is preserved.
 - **Self-contained subprocess lifecycle.** The launcher spawns IdP (7071), Policy Store (7074), and OPA
   (7072) as `uvicorn` subprocesses, polls each `GET /health` before use, and tears them all down in
   `finally`. Keycloak and the LLM are **external** (reached via env).
 - **Write-only, human-verified.** LLM nondeterminism is tolerated precisely because there are no
-  assertions — the reviewer eyeballs the two `.rego` files against
+  assertions on the output — the reviewer eyeballs the two `.rego` files against
   [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md). The value is the
   concrete, real-pipeline `.rego` output for a known scenario.
 - **Prior art, shared not copied.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established
@@ -204,21 +221,21 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 
 ## Further Notes
 
-- The scenario is deliberately fixed. The role→access facts in the *Scenario* table, the entity/role/
-  scope descriptions, and **both** `policy.md` versions in *Scenario inputs* must be kept mutually
-  consistent — they are a single source of truth. If the role→access facts change, update all three
+- The scenario is deliberately fixed. The role→access facts are owned by **three** artefacts that must
+  agree: the *Scenario* table, **both** `policy.md` versions in *Scenario inputs*, and the
+  `scenario.py` pair-lists (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`). The
+  entity/role/scope **descriptions no longer encode those facts** — they are generic and functional and
+  drop out of the fact triad; they must stay generic and simply not contradict the facts. If the
+  role→access facts change, update the *Scenario* table, both `policy.md` variants, and the pair-lists
   together so the eyeballed output stays reviewable.
 - Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
   **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
-  output on explicit vs. abstract policy text against the same expected Rego.
-- **Keycloak truncates long descriptions (255 chars).** Keycloak caps realm-role and client
-  descriptions at 255 characters, and four scenario descriptions exceed it (`developer`, `tester`, and
-  the `github-agent` / `github-tool` client descriptions). The launcher therefore provisions
-  **shortened (≤255) renderings** of those four into Keycloak — the client ones keep the "Agent" /
-  "Tool" keyword the IdP `type` inference relies on — while `scenario.py` keeps the **verbatim** text
-  as the source of truth. The PRB reads the shortened `developer` / `tester` text back from Keycloak,
-  so the shortened renderings must stay semantically consistent with the verbatim descriptions and the
-  role→access facts above.
+  output on explicit vs. abstract policy text against the same expected Rego. The abstract variant now
+  carries an agent-capability line (the `source-helper` / `issues-helper` bullet) so mapping (c)
+  survives deny-by-default and both variants reproduce the same Rego.
+- Descriptions are ≤255 characters and written **verbatim** into Keycloak; there is no shortened /
+  verbatim split. (Keycloak caps role and client descriptions at 255 chars, and the generic descriptions
+  are authored to stay within that cap.)
 
 ## Blocked-by
 
@@ -242,66 +259,54 @@ with the user; keep them in sync with the *Scenario* table (see *Further Notes*)
 
 ### Entity descriptions
 
-The `github-agent` and `github-tool` client descriptions deliberately contain the words **"Agent"** /
-**"Tool"** so the IdP library's `type` inference (`_build_service`) tags them correctly (needed by the
-type-based suppression that omits the tool model).
+The descriptions are **generic and keyword-free** — they describe what each entity/role/scope *does*,
+carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
+cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
+description prose: the launcher provisions each client's `client.type` attribute (the type UC1
+discovers from the agent card / `kagenti.io/type` label) as a plain string `"Agent"` / `"Tool"`, so
+`Service` type resolution ([../../src/aiac/idp/configuration/models.py:79-87](../../src/aiac/idp/configuration/models.py#L79-L87))
+tags each client from the attribute without touching the TEMP description-keyword fallback.
 
 **`github-agent`** — client (Agent):
-> GitHub Agent — an autonomous agent that acts on a user's GitHub source repositories and issue tracker
-> on the user's behalf. It performs source-code work (inspecting repository file contents and committing
-> changes) and issue-management work (reading issue threads and creating or updating issues). Its
-> source-code responsibility is represented by the `source-helper` client role and gated at the agent
-> boundary by the `source-access` scope; its issue-management responsibility is represented by the
-> `issues-helper` client role and gated by the `issues-access` scope. The agent does not call GitHub
-> directly — it delegates each concrete operation to the `github-tool`, so its own scopes describe
-> capabilities it may exercise while the tool's scopes describe the operations those capabilities
-> resolve to.
+> Autonomous Agent acting on a user's behalf against source repositories and an issue tracker. It
+> inspects and changes repository source contents and reads, creates, and updates issues and their
+> threads.
 
 **`github-tool`** — client (Tool):
-> GitHub Tool — a capability provider that exposes fine-grained, least-privilege operations against
-> GitHub source repositories and the issue tracker. It offers four distinct operations, each represented
-> by its own scope: read source (`source-read`) and write source (`source-write`) for repository file
-> contents, and read issues (`issues-read`) and write issues (`issues-write`) for the issue tracker. The
-> tool performs the actual GitHub calls; every caller (such as the `github-agent` acting for a user)
-> must present the specific scope for each operation it invokes.
+> Capability provider Tool for source repositories and an issue tracker. It performs read and write
+> operations on repository source contents and on issues and their comment threads.
 
 **`developer`** — realm role (user):
-> Developer — an engineering user who works on the codebase. A developer needs full read and write
-> access to source repository contents (to inspect and change code) and read access to the issue tracker
-> (to see reported work), but does not modify issues. Resolves to source read, source write, and issues
-> read.
+> Developer — an engineering user who develops the source codebase (writing and maintaining code) and
+> fixes code defects reported in the issue tracker; works primarily in source and consults issues for
+> defect reports.
 
 **`tester`** — realm role (user):
-> Tester — a quality-assurance user who works through the issue tracker. A tester needs full read and
-> write access to issues (to file, triage, and update defect and test reports) but does not touch source
-> repository contents. Resolves to issues read and issues write.
+> Tester — a quality-assurance user who verifies software quality and tracks defects through the issue
+> tracker: filing, triaging, and updating issue reports; works in the issue tracker, not in source.
 
 ### Role & scope descriptions
 
 **Client roles (agent):**
 
-- `source-helper` — The github-agent's client role for source-code operations. Groups the agent's
-  ability to read and write repository source content; gated at the agent boundary by `source-access`,
-  and downstream resolves to the tool's `source-read` / `source-write`.
-- `issues-helper` — The github-agent's client role for issue operations. Groups the agent's ability to
-  read and write issues; gated at the agent boundary by `issues-access`, and downstream resolves to the
-  tool's `issues-read` / `issues-write`.
+- `source-helper` — Client role for source-code operations, covering reading and writing repository
+  source content.
+- `issues-helper` — Client role for issue-tracker operations, covering reading and writing issues and
+  their threads.
 
 **Agent scopes:**
 
-- `source-access` — Agent-boundary scope granting use of the github-agent's source capability (the
-  `source-helper` role). A user holding it may invoke the agent's source-code functions.
-- `issues-access` — Agent-boundary scope granting use of the github-agent's issues capability (the
-  `issues-helper` role). A user holding it may invoke the agent's issue functions.
+- `source-access` — Scope granting use of a source-code capability — invoking source-code functions such
+  as reading and changing repository contents.
+- `issues-access` — Scope granting use of an issue-management capability — invoking issue functions such
+  as reading and updating issues.
 
 **Tool scopes:**
 
-- `source-read` — Tool operation: read source repository contents (file listings and file bodies).
-  Read-only.
-- `source-write` — Tool operation: create, modify, or delete source repository contents (commits /
-  file writes).
-- `issues-read` — Tool operation: read issues and their comments/threads. Read-only.
-- `issues-write` — Tool operation: create and update issues (open, edit, comment, close).
+- `source-read` — Read source repository contents: file listings and file bodies. Read-only.
+- `source-write` — Create, modify, or delete source repository contents; commit file changes.
+- `issues-read` — Read issues and their comment threads. Read-only.
+- `issues-write` — Create and update issues: open, edit, comment, and close.
 
 ### `policy.md` — Version 1 (explicit)
 
@@ -330,11 +335,14 @@ policy supports it; deny by default.
 ### `policy.md` — Version 2 (abstract)
 
 Relies on the PRB / LLM to expand "read and modify source" into the concrete scopes. Encodes the same
-role→access facts as Version 1.
+role→access facts as Version 1. The third bullet is an abstract agent-capability line so mapping (c)
+(agent-role→tool-scope) survives the PRB's deny-by-default-on-silence rule and both variants reproduce
+the same Rego.
 
 ```markdown
 Grant access on a least-privilege basis: allow only what this policy states; deny by default.
 
 - Developers may read and modify source, and read issues.
 - Testers may read and modify issues.
+- The source-helper role covers reading and modifying source; the issues-helper role covers reading and modifying issues.
 ```
