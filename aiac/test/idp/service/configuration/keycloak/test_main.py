@@ -43,6 +43,14 @@ class TestGetRoles:
         assert resp.status_code == 200
         assert resp.json() == [{"id": "r1", "name": "admin"}]
 
+    def test_requests_full_representation_for_attributes(self):
+        # The aiac.managed marker lives in role attributes, which Keycloak's brief
+        # representation omits — the endpoint must ask for the full representation.
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = []
+        _make_client(admin).get(f"/roles?realm={REALM}")
+        admin.get_realm_roles.assert_called_once_with(brief_representation=False)
+
 
 # ---------------------------------------------------------------------------
 # GET /services
@@ -320,6 +328,7 @@ class TestCreateScope:
         assert call_payload["protocol"] == "openid-connect"
         assert call_payload["name"] == "read"
         assert call_payload["description"] == "desc"
+        assert call_payload["attributes"] == {"aiac.managed": "true"}
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
@@ -394,6 +403,7 @@ class TestCreateScopeEndpoint:
         assert payload["protocol"] == "openid-connect"
         assert payload["name"] == "read"
         assert payload["description"] == "desc"
+        assert payload["attributes"] == {"aiac.managed": "true"}
 
     def test_returns_409_on_duplicate_name(self):
         admin = MagicMock()
@@ -496,7 +506,11 @@ class TestCreateRoleEndpoint:
         admin.get_realm_role.return_value = {"id": "rid", "name": "reader"}
         _make_client(admin).post(f"/roles?realm={REALM}", json={"name": "reader", "description": "desc"})
         payload = admin.create_realm_role.call_args[0][0]
-        assert payload == {"name": "reader", "description": "desc"}
+        assert payload == {
+            "name": "reader",
+            "description": "desc",
+            "attributes": {"aiac.managed": ["true"]},
+        }
 
     def test_returns_409_on_duplicate_name(self):
         admin = MagicMock()

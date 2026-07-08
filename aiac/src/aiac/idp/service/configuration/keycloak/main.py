@@ -13,6 +13,14 @@ from starlette.responses import JSONResponse
 _cache: dict[str, KeycloakAdmin] = {}
 _lock = threading.Lock()
 
+# AIAC naming convention: stamp every role/scope this service provisions with the
+# ``aiac.managed=true`` Keycloak attribute so downstream consumers (the Policy Computation
+# Engine) can keep only AIAC-provisioned entities and drop Keycloak built-ins. Defined locally
+# because this service image ships only ``main.py`` (the aiac library is not on its path); it
+# mirrors ``AIAC_MANAGED_ATTRIBUTE`` in ``aiac.idp.configuration.models``. Realm-role attribute
+# values are lists of strings; client-scope attribute values are plain strings.
+_AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
+
 
 def _get_or_create_admin(realm: str) -> KeycloakAdmin:
     if realm not in _cache:
@@ -144,9 +152,12 @@ def list_service_scopes(service_id: str, admin: KeycloakAdmin = Depends(get_admi
 @app.post("/services/{service_id}/scopes", status_code=201)
 def create_scope(service_id: str, body: _ScopeCreate, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        scope_id = admin.create_client_scope(
-            {"name": body.name, "description": body.description, "protocol": "openid-connect"}
-        )
+        scope_id = admin.create_client_scope({
+            "name": body.name,
+            "description": body.description,
+            "protocol": "openid-connect",
+            "attributes": {_AIAC_MANAGED_ATTRIBUTE: "true"},  # AIAC provisioning marker
+        })
         admin.add_client_default_client_scope(service_id, scope_id, {})
         return admin.get_client_scope(scope_id)
     except KeycloakError as e:
@@ -167,7 +178,9 @@ def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin
 @app.get("/roles")
 def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        return admin.get_realm_roles()
+        # brief_representation=False so realm-role attributes (incl. the aiac.managed marker)
+        # are returned; the brief representation Keycloak returns by default omits them.
+        return admin.get_realm_roles(brief_representation=False)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -175,7 +188,11 @@ def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
 @app.post("/roles", status_code=201)
 def create_role(body: _RoleCreate, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        admin.create_realm_role({"name": body.name, "description": body.description})
+        admin.create_realm_role({
+            "name": body.name,
+            "description": body.description,
+            "attributes": {_AIAC_MANAGED_ATTRIBUTE: ["true"]},  # AIAC provisioning marker
+        })
         return admin.get_realm_role(body.name)
     except KeycloakError as e:
         if e.response_code == 409:
@@ -202,9 +219,12 @@ def list_scopes(admin: KeycloakAdmin = Depends(get_admin)):
 @app.post("/scopes", status_code=201)
 def create_scope_standalone(body: _ScopeCreate, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        scope_id = admin.create_client_scope(
-            {"name": body.name, "description": body.description, "protocol": "openid-connect"}
-        )
+        scope_id = admin.create_client_scope({
+            "name": body.name,
+            "description": body.description,
+            "protocol": "openid-connect",
+            "attributes": {_AIAC_MANAGED_ATTRIBUTE: "true"},  # AIAC provisioning marker
+        })
         return admin.get_client_scope(scope_id)
     except KeycloakError as e:
         if e.response_code == 409:

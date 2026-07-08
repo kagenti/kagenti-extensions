@@ -65,6 +65,9 @@ Represents a role (Keycloak: realm role).
 | `description` | `str \| None` | `description` | |
 | `composite` | `bool` | `composite` | |
 | `childRoles` | `list[Role]` | `composites.realm` | `[]` |
+| `attributes` | `dict[str, Any]` | `attributes` | `{}` |
+
+Roles also expose an `aiac_managed` property (`bool`): `True` when `attributes` carries the AIAC provisioning marker `aiac.managed` (realm-role attribute values are lists, so the marker appears as `["true"]`). See the naming convention in the idp-configuration-service spec.
 
 #### `Service`
 
@@ -90,6 +93,9 @@ Represents a service scope (Keycloak: `client scope`).
 | `id` | `str` | `id` |
 | `name` | `str` | `name` |
 | `description` | `str \| None` | `description` |
+| `attributes` | `dict[str, Any]` | `attributes` |
+
+Scopes also expose an `aiac_managed` property (`bool`): `True` when `attributes` carries the AIAC provisioning marker `aiac.managed` (client-scope attribute values are plain strings, so the marker appears as `"true"`). See the naming convention in the idp-configuration-service spec.
 
 ### Usage
 

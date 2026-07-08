@@ -30,12 +30,17 @@ from aiac.policy.model.models import AgentPolicyModel, PolicyModel, PolicyRule
 # --------------------------------------------------------------------------- #
 # builders                                                                    #
 # --------------------------------------------------------------------------- #
-def _role(id="r-edit", name="editor", composite=False, children=None) -> Role:
-    return Role(id=id, name=name, composite=composite, childRoles=children or [])
+def _role(id="r-edit", name="editor", composite=False, children=None, aiac_managed=True) -> Role:
+    # Roles in these tests model AIAC-provisioned agent roles, so they carry the marker by
+    # default; pass aiac_managed=False to simulate a Keycloak built-in (e.g. default-roles-<realm>).
+    attributes = {"aiac.managed": ["true"]} if aiac_managed else {}
+    return Role(id=id, name=name, composite=composite, childRoles=children or [], attributes=attributes)
 
 
-def _scope(id="s-write", name="write") -> Scope:
-    return Scope(id=id, name=name)
+def _scope(id="s-write", name="write", aiac_managed=True) -> Scope:
+    # AIAC-provisioned by default; pass aiac_managed=False for a Keycloak built-in (e.g. profile).
+    attributes = {"aiac.managed": "true"} if aiac_managed else {}
+    return Scope(id=id, name=name, attributes=attributes)
 
 
 def _service(service_id, id=None, enabled=True, type=None, roles=None, scopes=None) -> Service:
@@ -254,6 +259,29 @@ def test_agent_without_catalog_roles_scopes_keeps_empty():
     m = res.written["github-agent"]
     assert m.agent_roles == []
     assert m.agent_scopes == []
+
+
+# --------------------------------------------------------------------------- #
+# Cycle 6b — P2: only AIAC-provisioned roles/scopes (carrying the aiac.managed   #
+# marker) are embedded; Keycloak built-ins (default-roles-<realm>, profile, ...) #
+# are dropped from the agent's embed.                                           #
+# --------------------------------------------------------------------------- #
+def test_builtin_roles_and_scopes_are_filtered_from_embed():
+    helper = _role("r-src-helper", "source-helper")                      # AIAC-provisioned
+    default_roles = _role("r-def", "default-roles-aiac", aiac_managed=False)  # Keycloak built-in
+    src_access = _scope("s-src-access", "source-access")                 # AIAC-provisioned
+    profile = _scope("s-profile", "profile", aiac_managed=False)         # Keycloak built-in
+    agent = _agent(
+        "github-agent",
+        roles=[helper, default_roles],
+        scopes=[src_access, profile],
+    )
+    rule = _rule(role=_role("r-dev", "developer"), scope=src_access)
+    res = run_engine([rule], catalog=[agent], scope_services={"s-src-access": [agent]})
+
+    m = res.written["github-agent"]
+    assert m.agent_roles == [helper]        # default-roles-<realm> dropped
+    assert m.agent_scopes == [src_access]   # profile dropped
 
 
 # --------------------------------------------------------------------------- #

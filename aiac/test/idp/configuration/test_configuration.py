@@ -28,6 +28,36 @@ def _err(status=500):
 
 
 # ---------------------------------------------------------------------------
+# aiac.managed marker surfaced on Role / Scope (naming convention)
+# ---------------------------------------------------------------------------
+
+
+class TestAiacManagedMarker:
+    def test_role_with_marker_is_managed(self):
+        role = Role.model_validate(
+            {"id": "r1", "name": "source-helper", "composite": False,
+             "attributes": {"aiac.managed": ["true"]}}
+        )
+        assert role.aiac_managed is True
+
+    def test_role_without_marker_is_not_managed(self):
+        role = Role.model_validate(
+            {"id": "r1", "name": "default-roles-realm", "composite": False}
+        )
+        assert role.aiac_managed is False
+
+    def test_scope_with_marker_is_managed(self):
+        scope = Scope.model_validate(
+            {"id": "s1", "name": "source-access", "attributes": {"aiac.managed": "true"}}
+        )
+        assert scope.aiac_managed is True
+
+    def test_scope_without_marker_is_not_managed(self):
+        scope = Scope.model_validate({"id": "s1", "name": "profile"})
+        assert scope.aiac_managed is False
+
+
+# ---------------------------------------------------------------------------
 # Factory method
 # ---------------------------------------------------------------------------
 

@@ -2,6 +2,21 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+# AIAC naming convention: every role and client scope AIAC provisions carries the Keycloak
+# attribute ``aiac.managed`` with value ``true``. Keycloak's own built-ins (default client
+# scopes, ``default-roles-<realm>``) never carry it, so consumers filter on this marker to
+# distinguish AIAC-provisioned entities. Realm-role attribute values are lists of strings
+# (``{"aiac.managed": ["true"]}``); client-scope attribute values are plain strings
+# (``{"aiac.managed": "true"}``) — the helper below tolerates both shapes.
+AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
+
+
+def _is_aiac_managed(attributes: dict[str, Any]) -> bool:
+    value = attributes.get(AIAC_MANAGED_ATTRIBUTE)
+    if isinstance(value, list):
+        return "true" in value
+    return value == "true"
+
 
 class Subject(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -23,6 +38,12 @@ class Role(BaseModel):
     description: str | None = None
     composite: bool
     childRoles: list["Role"] = []
+    attributes: dict[str, Any] = {}
+
+    @property
+    def aiac_managed(self) -> bool:
+        """True when this role carries the ``aiac.managed`` provisioning marker."""
+        return _is_aiac_managed(self.attributes)
 
 
 class Service(BaseModel):
@@ -74,6 +95,12 @@ class Scope(BaseModel):
     id: str
     name: str
     description: str | None = None
+    attributes: dict[str, Any] = {}
+
+    @property
+    def aiac_managed(self) -> bool:
+        """True when this scope carries the ``aiac.managed`` provisioning marker."""
+        return _is_aiac_managed(self.attributes)
 
 
 Subject.model_rebuild()

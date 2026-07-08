@@ -11,7 +11,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | Method | Path | Keycloak Admin API call | Description |
 |--------|------|------------------------|-------------|
 | GET | `/subjects` | `GET /admin/realms/{realm}/users` | All subjects (users) in realm; filtered to subjects with a specific role when `role_id` query param is provided |
-| GET | `/roles` | `GET /admin/realms/{realm}/roles` | All realm-level roles |
+| GET | `/roles` | `GET /admin/realms/{realm}/roles` (full representation, `brief_representation=False`) | All realm-level roles, including attributes (so the `aiac.managed` marker is visible) |
 | GET | `/subjects/{subject_id}/assignments` | `GET /admin/realms/{realm}/users/{subject_id}/role-mappings` | Realm and service permission assignments for a subject |
 | GET | `/services` | `GET /admin/realms/{realm}/clients` | All services (clients) |
 | GET | `/services/{service_id}` | `GET /admin/realms/{realm}/clients/{service_id}` | Single service by ID |
@@ -40,7 +40,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 
 `POST /scopes`:
 Accepts JSON body `{"name": ..., "description": ...}`. It:
-1. Calls `admin.create_client_scope({"name": ..., "description": ..., "protocol": "openid-connect"})` to create the scope at realm level.
+1. Calls `admin.create_client_scope({"name": ..., "description": ..., "protocol": "openid-connect", "attributes": {"aiac.managed": "true"}})` to create the scope at realm level. The `aiac.managed` attribute is the AIAC provisioning marker (client-scope attribute values are plain strings).
 2. Returns `201 Created` with the created scope JSON (`{"id": ..., "name": ..., "description": ...}`).
 3. Returns `409 Conflict` if a scope with that name already exists.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
@@ -53,7 +53,7 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 
 `POST /roles`:
 Accepts JSON body `{"name": ..., "description": ...}`. It:
-1. Calls `admin.create_realm_role({"name": ..., "description": ...})` to create the role at realm level.
+1. Calls `admin.create_realm_role({"name": ..., "description": ..., "attributes": {"aiac.managed": ["true"]}})` to create the role at realm level. The `aiac.managed` attribute is the AIAC provisioning marker (realm-role attribute values are lists of strings).
 2. Returns `201 Created` with the created role JSON (`{"id": ..., "name": ..., "description": ...}`).
 3. Returns `409 Conflict` if a role with that name already exists.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
@@ -82,6 +82,10 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 All endpoints except `/health` require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent. `/health` accepts no realm parameter — it calls `_get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])` directly.
 
 All GET endpoints return `200 OK` with a JSON array on success, except `/subjects/{subject_id}/assignments` which returns a JSON object with `realmMappings` and `serviceMappings` fields. All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Admin API call fails.
+
+### AIAC provisioning marker (`aiac.managed`)
+
+Every role and client scope this service creates is stamped with the Keycloak attribute `aiac.managed` = `true` — the AIAC naming convention that distinguishes AIAC-provisioned entities from Keycloak's own built-ins (default client scopes, the `default-roles-<realm>` composite). Attribute value shape differs by entity: realm-role attribute values are lists (`{"aiac.managed": ["true"]}`), client-scope attribute values are plain strings (`{"aiac.managed": "true"}`). Because Keycloak's brief role representation omits attributes, `GET /roles` requests the full representation so the marker survives the read. Downstream consumers (the Policy Computation Engine's P2 embed) filter on this marker to keep only domain entities.
 
 ## Configuration
 

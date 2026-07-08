@@ -204,11 +204,14 @@ def _run(rules: list[PolicyRule], override: bool) -> None:
             _purge_roles(existing, input_role_ids)
         _merge(existing, delta)
         # P2: each written agent embeds its own service-account roles and exposed
-        # scopes. Realm-level agents (no owning service in the catalog) keep [].
+        # scopes. Only AIAC-provisioned entities (carrying the aiac.managed marker) are
+        # embedded — Keycloak built-ins (default client scopes, default-roles-<realm>) are
+        # dropped so the model holds only domain entities. Realm-level agents (no owning
+        # service in the catalog) keep [].
         svc = catalog.get(agent_id)
         if svc is not None:
-            existing.agent_roles = list(svc.roles)
-            existing.agent_scopes = list(svc.scopes)
+            existing.agent_roles = [r for r in svc.roles if r.aiac_managed]
+            existing.agent_scopes = [s for s in svc.scopes if s.aiac_managed]
         apply_agent_policy(agent_id, existing)
         written.append(existing)
 
