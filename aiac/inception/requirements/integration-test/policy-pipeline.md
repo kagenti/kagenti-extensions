@@ -8,7 +8,11 @@
 > the only integration-test PRD.
 
 ## Location
-`aiac/test/integration/policy_pipeline.py`
+`aiac/test/integration/policy_pipeline.py`, plus two shared modules it imports:
+`aiac/test/integration/scenario.py` — the canonical `github-agent` scenario as pure data (the single
+source of truth the *Further Notes* mandate) — and `aiac/test/integration/launcher.py` — the shared
+`uvicorn` subprocess-lifecycle helpers. The `5.2` launcher `test/pdp/policy/generate_rego.py` was
+refactored onto both so the two launchers cannot drift.
 
 ## Description
 
@@ -162,10 +166,13 @@ Policy Store DB and the provisioned Keycloak realm.
   assertions — the reviewer eyeballs the two `.rego` files against
   [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md). The value is the
   concrete, real-pipeline `.rego` output for a known scenario.
-- **Prior art.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established the shape this test
-  reuses: `uvicorn` subprocess spawn, `GET /health` poll, env-before-import ordering, `finally`
-  teardown, and print-the-dir. The live-Keycloak pytest suite (`testing/5.1-integration-tests.md`) is
-  the marker-gated counterpart for the read-side services.
+- **Prior art, shared not copied.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established
+  the shape this test reuses — `uvicorn` subprocess spawn, `GET /health` poll, env-before-import
+  ordering, `finally` teardown, and print-the-dir. Rather than duplicate it, that machinery lives in
+  the shared `test/integration/launcher.py`, and the fixed scenario lives in
+  `test/integration/scenario.py`; `generate_rego.py` was refactored onto both (its `.rego` output
+  verified byte-identical to before the refactor). The live-Keycloak pytest suite
+  (`testing/5.1-integration-tests.md`) is the marker-gated counterpart for the read-side services.
 
 ## Relationship to other integration tests
 
@@ -204,6 +211,14 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 - Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
   **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
   output on explicit vs. abstract policy text against the same expected Rego.
+- **Keycloak truncates long descriptions (255 chars).** Keycloak caps realm-role and client
+  descriptions at 255 characters, and four scenario descriptions exceed it (`developer`, `tester`, and
+  the `github-agent` / `github-tool` client descriptions). The launcher therefore provisions
+  **shortened (≤255) renderings** of those four into Keycloak — the client ones keep the "Agent" /
+  "Tool" keyword the IdP `type` inference relies on — while `scenario.py` keeps the **verbatim** text
+  as the source of truth. The PRB reads the shortened `developer` / `tester` text back from Keycloak,
+  so the shortened renderings must stay semantically consistent with the verbatim descriptions and the
+  role→access facts above.
 
 ## Blocked-by
 
