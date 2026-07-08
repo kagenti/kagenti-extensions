@@ -1,0 +1,55 @@
+# GENERALIZED deploy-time propagation shim for ANY uninstrumented Kagenti app.
+# (STUDY §10.5 / §10.10. Supersedes the app-specific Dockerfile.trivia-otel.)
+#
+# We DO NOT touch the app's source. We layer OpenTelemetry auto-instrumentation
+# ON TOP of the user's image so it PROPAGATES traceparent (extract on the inbound
+# ASGI/Starlette/FastAPI request, inject on the outbound httpx/requests/aiohttp
+# call) — nothing more. Spans are NOT exported (the Deployment passes
+# --traces_exporter none), so DG is never polluted; only the W3C traceparent
+# header flows to the sidecar, which does the actual capture.
+#
+# The instrumentors target LIBRARIES, not the app. `opentelemetry-instrument`
+# auto-activates whichever of these the app actually imports, so the SAME image
+# recipe works across every app whose server is ASGI/Starlette/FastAPI and whose
+# client is httpx / requests / aiohttp — the mainstream Python A2A/MCP stack.
+#
+# Build (parameterized — only BASE_IMAGE changes per app):
+#   podman build -f lineage-sidecar/Dockerfile.otel-shim \
+#     --build-arg BASE_IMAGE=docker.io/library/<app>:latest \
+#     -t <app>-otel:latest lineage-sidecar
+# or use lineage-sidecar/build-otel-shim.sh which also kind-loads it.
+#
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+# Where the app's virtualenv python lives. All agent-examples images use the
+# astral uv base with the venv at /app/.venv; override for anything else.
+ARG VENV_PYTHON=/app/.venv/bin/python
+# The non-root UID the app runs as (agent-examples default 1001).
+ARG APP_UID=1001
+
+USER root
+# One layer, all mainstream instrumentors. opentelemetry-distro pulls the SDK +
+# the `opentelemetry-instrument` launcher; the rest are the server/client
+# library instrumentors. aiohttp-client is the outbound aiohttp instrumentor
+# (slack_researcher / ag2). requests covers reservation_service. fastapi+asgi
+# cover wiki_memory_tool. starlette+asgi cover the a2a-sdk servers.
+#
+# `-threading` is load-bearing for frameworks that run the LLM/tool call in a
+# worker thread (ag2/autogen use `loop.run_in_executor`; others use
+# ThreadPoolExecutor). OTEL context is contextvars-based and does NOT cross a
+# thread boundary by default, so without this the inbound trace is lost before
+# the outbound call and traceparent propagation silently breaks (the sidecar
+# then collapses all outbound onto one inbound under concurrency — 1/N). The
+# threading instrumentor copies the active context across `Thread.start` /
+# `ThreadPoolExecutor.submit`, restoring propagation.
+RUN uv pip install --python ${VENV_PYTHON} \
+      opentelemetry-distro \
+      opentelemetry-instrumentation-starlette \
+      opentelemetry-instrumentation-asgi \
+      opentelemetry-instrumentation-fastapi \
+      opentelemetry-instrumentation-httpx \
+      opentelemetry-instrumentation-requests \
+      opentelemetry-instrumentation-aiohttp-client \
+      opentelemetry-instrumentation-threading
+USER ${APP_UID}

@@ -1,0 +1,21 @@
+# SCENARIO-SPECIFIC dependency fix for #2 a2a_contact_extractor — NOT part of the
+# general shim (the general shim only propagates traceparent; it does not touch
+# app deps). This overlay works around an UPSTREAM defect in the prebuilt image:
+#
+#   The image ships marvin==3.2.7 + pydantic-ai==1.106.0. marvin 3.2.7 declares
+#   only `pydantic-ai>=1.9.0` (unbounded), so the lockfile floated to 1.106.0,
+#   which changed `ModelResponsePartsManager.__init__` to REQUIRE a
+#   `model_request_parameters` arg that marvin 3.2.7 does not pass. Result: EVERY
+#   LLM call crashes at marvin/engine/streaming.py:76, BEFORE any HTTP request —
+#   with ANY provider (not an Ollama/plaintext issue, not a shim issue).
+#
+# Fix: pin pydantic-ai back into marvin 3.2.7's compatible window (1.9.0–1.60.0
+# all have the no-arg constructor; 1.20.0 verified end-to-end against Ollama).
+#
+# Build:
+#   podman build -f lineage-sidecar/Dockerfile.contact-extractor-fix \
+#     -t a2a_contact_extractor-otel:latest lineage-sidecar   # overwrite the -otel tag
+FROM docker.io/library/a2a_contact_extractor-otel:latest
+USER root
+RUN uv pip install --python /app/.venv/bin/python 'pydantic-ai==1.20.0'
+USER 1001
