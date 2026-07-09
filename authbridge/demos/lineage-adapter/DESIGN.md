@@ -42,6 +42,50 @@ libraries. `Dockerfile.otel-shim` layers them on the app image and runs it under
 Zero app source changes; `opentelemetry-instrument` auto-activates whichever libs
 the app actually imports, so one image recipe fits every in-envelope app.
 
+### 2a. Why `threading` is load-bearing (and why it's correct, not a hack)
+
+The OTEL "context" is a `contextvars` value holding the currently **active span**
+(→ its `trace_id`/`span_id`). It flows automatically **within one async task**,
+but **not across a thread boundary**: a bare `threading.Thread`, a
+`ThreadPoolExecutor`, or `loop.run_in_executor` starts the worker with an **empty**
+context. Frameworks like ag2/autogen and crewai run the *synchronous* LLM client
+in exactly such a worker (to avoid blocking the event loop). So without help, the
+worker has no active span → the client instrumentation (httpx/requests) emits no
+`traceparent` (or a fresh root) → the sidecar can't match that outbound to the
+inbound request → it falls back to the single-in-flight `agentCurrentInbound`
+heuristic → under concurrency all outbounds collapse onto one inbound (**1/N**).
+
+The `threading` instrumentor does **not** blindly stamp one traceparent on every
+thread. It **snapshots the parent's active context at the instant of
+`.start()`/`.submit()`** and **re-activates that snapshot inside the child for the
+duration of its work, then detaches it**:
+
+```
+Thread.start  (parent):  thread._otel_context = context.get_current()
+Thread.run    (worker):  token = context.attach(thread._otel_context)
+                         try: <child work> finally: context.detach(token)
+ThreadPoolExecutor.submit: capture at submit; attach in the worker; detach after.
+```
+
+Note it propagates the **Context**, not a header — the `traceparent` header is
+generated later by the HTTP-client instrumentation, which reads
+`context.get_current()` at call time. Correctness follows from the snapshot being
+**per-submit** and **torn down on exit**:
+
+- A worker thread a handler dispatches to *is doing that request's work* (the
+  thread is just an implementation detail), so re-activating the request's context
+  there is semantically exact.
+- Two concurrent requests snapshot two **different** contexts → their workers carry
+  **different** `trace_id`s (this is what turns 1/N into N/N).
+- `detach` in `finally` means a pooled worker reused for the next task does not
+  inherit a stale context.
+
+**Caveats:** it only helps a thread spawned *from within* the request's active
+context (a long-lived thread started at app boot snapshots an empty context and
+carries nothing — that needs explicit propagation); and it covers threads/timers/
+`ThreadPoolExecutor` only — **not** `multiprocessing` or `subprocess` (the latter
+being the documented git/CLI exceptions in §4).
+
 ## 3. Two problems, one artifact
 
 - **Problem 1 (correlation):** the sidecar needs `traceparent` propagated through
