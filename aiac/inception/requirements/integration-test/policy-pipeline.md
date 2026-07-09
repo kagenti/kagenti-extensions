@@ -1,4 +1,4 @@
-# Integration Test: policy-pipeline — `policy_pipeline.py`
+# Integration Test: policy-pipeline — `test_policy_pipeline.py`
 
 > **One spec among several.** This document specifies a **single** integration test.
 > Integration-test specs live **one spec per test** under `inception/requirements/integration-test/`
@@ -8,20 +8,28 @@
 > the only integration-test PRD.
 
 ## Location
-`aiac/test/integration/policy_pipeline.py`, plus two shared modules it imports:
-`aiac/test/integration/scenario.py` — the canonical `github-agent` scenario as pure data (one of the
-role→access fact sources the *Further Notes* mandate — the pair-lists, alongside the *Scenario* table
-and both `policy.md` variants) — and `aiac/test/integration/launcher.py` — the shared
-`uvicorn` subprocess-lifecycle helpers. The `5.2` launcher `test/pdp/policy/generate_rego.py` was
-refactored onto both so the two launchers cannot drift.
+`aiac/test/integration/test_policy_pipeline.py` — a pytest module marked `@pytest.mark.integration`.
+It imports two shared modules: `aiac/test/integration/scenario.py` — the canonical `github-agent`
+scenario as pure data (one of the role→access fact sources the *Further Notes* mandate — the pair-lists,
+alongside the *Scenario* table and both `policy.md` variants) — and `aiac/test/integration/launcher.py`
+— the shared `uvicorn` subprocess-lifecycle helpers. It also ships a new
+`aiac/test/integration/probe.rego` — a small standalone Rego module used only as the outbound
+verification query (see *[What it does](#what-it-does)*). The `5.2` launcher
+`test/pdp/policy/generate_rego.py` was refactored onto the same `launcher.py` + `scenario.py` so the two
+launchers cannot drift.
 
 ## Description
 
-A standalone launcher script that drives the **whole identity→policy pipeline** —
-**Keycloak → PRB → PCE → OPA Policy Writer** — end-to-end and leaves the generated Rego on disk for a
-human to eyeball. It is **not** a pytest test, **not** part of CI, and **not** marked
-`@pytest.mark.integration` — it is run by hand when an operator wants to see the actual `.rego` output
-produced by the real pipeline for a known scenario.
+A `@pytest.mark.integration` test that drives the **whole identity→policy pipeline** —
+**Keycloak → PRB → PCE → OPA Policy Writer** — end-to-end, then **asserts** the generated Rego decides
+correctly by running the standalone `opa eval` binary as its verification oracle. The `.rego` files are
+still left on disk per policy variant, so the test doubles as the eyeball workflow: running the test
+*is* the eyeball. There is no separate standalone script.
+
+The generated Rego is the **artifact under test** — the LLM/PCE that produced it might be wrong — so the
+test never trusts it. Instead it feeds `opa eval` requests derived from the **scenario spec (the
+intended policy)** and asserts the real Rego admits/denies each one as the scenario truth table
+requires. A mismatch fails the test and names the exact cell.
 
 This is the same *flavor* as the PDP Policy Writer launcher
 ([pdp-policy-writer.md](pdp-policy-writer.md), issue `testing/5.2-pdp-writer-integration-test.md`) but
@@ -34,7 +42,15 @@ emit Rego. Nothing is mocked; the only shortcut is that the OPA target is the fi
 Kubernetes-CR implementation, so the output is `.rego` files instead of a patched
 `AuthorizationPolicy` CR — identical to `5.2`.
 
+Because it needs a live Keycloak and a real LLM, it is `@pytest.mark.integration` and stays out of the
+default unit-test run (`-m "not integration"`); it additionally `pytest.skip`s when no `opa` binary is
+found.
+
 ### What it does
+
+The pipeline (provision → PRB → PCE → OPA) is driven **once per `policy.md` variant** — `explicit` and
+`abstract` — each writing into its own `rego_out/<variant>/` directory. `opa eval` then asserts the
+scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
 
 1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
    `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `AIAC_REALM` *before* importing the aiac
@@ -44,12 +60,14 @@ Kubernetes-CR implementation, so the output is `.rego` files instead of a patche
    until ready, with a bounded timeout:
    - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
    - Policy Store — its ASGI app on `7074`, with `AGENTPOLICY_DB_PATH` pointed at a fresh temp dir.
-   - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR` and
-     the Policy Store DB path in its env.
+   - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR`
+     (pointed at the current variant's `rego_out/<variant>/`) and the Policy Store DB path in its env.
 3. **Provision Keycloak** (idempotent — delete-if-exists the realm first, then create):
    - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
-     users `dev-user` and `test-user`; create realm roles `developer` and `tester`; assign roles to
-     users; create the `github-agent` and `github-tool` clients with the descriptions in
+     users `dev-user`, `test-user`, and `devops-user`; create realm roles `developer`, `tester`, and
+     `devops`; assign roles to users (`devops-user`→`devops`, which maps to **no** agent/tool scope —
+     the inbound deny case, see *[Scenario](#scenario)*); create the `github-agent` and `github-tool`
+     clients with the descriptions in
      *[Scenario inputs](#scenario-inputs-prb-functional-inputs)* and with the `client.type`
      client attribute set to the plain string `"Agent"` / `"Tool"` respectively, so `Service` type
      resolution tags them from the attribute (not from description prose). Set the type via the product
@@ -66,7 +84,7 @@ Kubernetes-CR implementation, so the output is `.rego` files instead of a patche
 4. **Read-back type guard** — after provisioning, call `Configuration.get_service` for both clients and
    assert each resolved `.type` (`github-agent` ⇒ `Agent`, `github-tool` ⇒ `Tool`) **before** spawning
    the pipeline; abort with a clear message otherwise. This is a provisioning sanity check on the
-   `client.type` attribute, **not** a Rego-output assertion — the test stays write-only.
+   `client.type` attribute, distinct from the step-7 Rego-decision assertions.
 5. **Proto-UC1 orchestration** — run the three PRB mappings against a pinned LLM (`temperature=0`) and
    concatenate the results into one `list[PolicyRule]`:
    - **(a)** `build_scope_rules(user_roles, agent_scope)` per agent scope → user→agent-scope rules.
@@ -78,20 +96,64 @@ Kubernetes-CR implementation, so the output is `.rego` files instead of a patche
    Store. The PCE resolves the IdP relationships, builds the `github-agent` model (with `agent_roles` /
    `agent_scopes`; mapping (b) routed into `outbound_subject_rules`; and **no** `github-tool` model),
    writes it to the store, and pushes it to the OPA stub.
-6. **Terminate the three subprocesses in `finally`.**
-7. **Print** `REGO_OUTPUT_DIR` and the two `.rego` filenames.
-
-**Write-only.** Apart from the step-4 provisioning type guard (a `Configuration.get_service` `.type`
-check on the freshly provisioned attribute), the script reads nothing back and makes **no assertions**
-on the pipeline output. The realm is left in place; the `.rego` files are left on disk for eyeballing.
-There is no pass/fail exit contract on the generated Rego beyond the script running to completion.
+6. **Terminate the three subprocesses in `finally`.** The realm and the `.rego` files are left in
+   place for eyeballing.
+7. **Assert the truth table with `opa eval`.** Once both variants' Rego is on disk, evaluate a matrix of
+   **(request JSON, rego file)** tuples with the standalone `opa` binary and hard-assert each decision
+   against the scenario truth table (see *[Expected output](#expected-output)*):
+   - **`opa` discovery** — `$OPA_BIN` → else `shutil.which("opa")` → else `pytest.skip("opa not
+     found")`. Missing `opa` skips (does not fail) the suite.
+   - **Inbound** — one node per `(variant × subject)`. Request `{"subject": <id>}` (source omitted, so
+     the generated `source_ok` passes) is evaluated against the real
+     `data.authz.github_agent.inbound.allow`. Coarse "can this user reach the agent at all" — there is
+     no intent field.
+   - **Outbound** — one node per `(variant × subject × function_name)`, where `function_name` is the
+     agent's operation (a tool scope). Because the generated `allow` / `subject_ok` are existential and
+     ignore any scope, the outbound decision is evaluated by a **probe query**,
+     `data.probe.outbound.allow` (defined in `test/integration/probe.rego`), which binds
+     `input.function_name` against the generated data maps and requires **both** the user→tool gate and
+     the agent→tool gate to admit the function. Request shape `{"subject", "target", "function_name"}`.
+   - **Soft match** `function_name`↔scope — the probe compares names by splitting **both** on `[._-]+`,
+     lowercasing, and comparing as **sets** (token-set equality): `source.read`, `read_source`, and
+     `Source-Read` all match `source-read`; bare `source` matches nothing.
+   - The expected verdict for every cell is **computed from** the scenario pair-lists
+     (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS` in `scenario.py`), not from a second
+     hand-maintained copy — a wrong LLM/PCE mapping therefore fails the test. A failing node names the
+     exact `variant / subject / function_name` cell.
 
 ## Expected output
 
-Exactly **two** files in `REGO_OUTPUT_DIR`:
+The test passes when `opa eval` decides every cell of the scenario truth table as follows, for **both**
+policy variants. Verdicts are **computed from** the `scenario.py` pair-lists (`INBOUND_PAIRS` /
+`OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`), not a hand-maintained copy — this table is the human-
+readable rendering of them.
+
+`USERS`: `dev-user`→`developer`, `test-user`→`tester`, `devops-user`→`devops`.
+
+**Inbound allow** (`data.authz.github_agent.inbound.allow`, from `INBOUND_PAIRS`, user-role→agent-scope):
+
+| Subject | Inbound |
+|---|---|
+| dev-user | ✅ |
+| test-user | ✅ |
+| devops-user | ❌ |
+
+**Outbound allow(subject, function)** (`data.probe.outbound.allow`, from `OUTBOUND_SUBJECT_PAIRS`
+user→tool; the agent→tool gate covers all four scopes, so the user gate discriminates):
+
+| | source-read | source-write | issues-read | issues-write |
+|---|---|---|---|---|
+| dev-user | ✅ | ✅ | ✅ | ❌ |
+| test-user | ❌ | ❌ | ✅ | ✅ |
+| devops-user | ❌ | ❌ | ❌ | ❌ |
+
+Alongside the assertions, each variant leaves exactly **two** files on disk in its
+`rego_out/<variant>/` for eyeballing:
 
 - `github_agent.inbound.rego` — package `authz.github_agent.inbound`; the **user→agent** gate.
   `subject_roles` = `{dev-user: [developer], test-user: [tester]}`; `agent_scopes` populated.
+  (`devops-user` holds `devops`, which maps to no agent scope, so it is absent from `subject_roles` and
+  denied inbound.)
 - `github_agent.outbound.rego` — package `authz.github_agent.outbound`; `allow if { subject_ok;
   target_ok }`. Its **`subject_ok`** is the new **user→tool** gate (mapping (b), grouped from
   `outbound_subject_rules` into `outbound_subject_role_scopes`, matched against
@@ -105,24 +167,29 @@ the **ID-only** package shapes in
 
 ## Scenario
 
-A single agent + tool + two users, fixed so the generated Rego is reproducible and reviewable by
+A single agent + tool + three users, fixed so the generated Rego is reproducible and reviewable by
 inspection. This is the same canonical `github-agent` worked example as `5.2`, driven end to end
-through the real pipeline rather than a hand-built `PolicyModel`.
+through the real pipeline rather than a hand-built `PolicyModel`, plus a third `devops-user` that
+exercises the deny-by-default path.
 
 | Element | Value |
 |---------|-------|
 | Realm | `AIAC_TEST_REALM` (default `aiac-e2e`) |
 | Agent | `github-agent` (client roles `source-helper`, `issues-helper`; scopes `source-access`, `issues-access`) |
 | Tool | `github-tool` (scopes `source-read`, `source-write`, `issues-read`, `issues-write`) |
-| Users | `dev-user` (role `developer`), `test-user` (role `tester`) |
+| Users | `dev-user` (role `developer`), `test-user` (role `tester`), `devops-user` (role `devops`) |
 | `developer` | source read/write + issues read |
 | `tester` | issues read/write |
+| `devops` | no access (inbound deny; denied every outbound function) |
 
 Role → access (confirmed with the user; the fixed facts that both `policy.md` versions below and the
 `scenario.py` pair-lists must agree with — the generic descriptions are not part of this triad):
 
 - `developer` — source read/write, issues read.
 - `tester` — issues read/write.
+- `devops` — no access. Conveyed by the **role description only** — it is absent from every pair-list
+  and both `policy.md` variants are **unchanged** (deny-by-default), so it is denied inbound and on
+  every outbound function.
 
 ## Configuration (env)
 
@@ -131,93 +198,117 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds | — (required) |
-| `AIAC_TEST_REALM` | Realm the launcher provisions | `aiac-e2e` |
+| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-e2e` |
 | `AIAC_REALM` | Realm the PCE reads back (= `AIAC_TEST_REALM`) | `aiac-e2e` |
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
 | `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
-| `REGO_OUTPUT_DIR` | Dir the OPA stub subprocess writes `.rego` to; printed at end | operator-chosen local dir |
+| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
 | `AGENTPOLICY_DB_PATH` | Policy Store DB path for the subprocess (fresh temp dir) | temp |
-| `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant to feed the PRB | `/etc/aiac/policy.md` |
+| `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant fed to the PRB; the test sets it per variant (`policy.explicit.md`, `policy.abstract.md`) | `/etc/aiac/policy.md` |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`) | — (required) |
+| `OPA_BIN` | Path to the standalone `opa` binary used as the verification oracle; else `PATH` (`shutil.which`), else the test `pytest.skip`s | — (optional; PATH lookup) |
 
-> When the launcher is written, confirm the Policy Store's ASGI import path and its DB-path env-var
+> When the test is written, confirm the Policy Store's ASGI import path and its DB-path env-var
 > name against the Policy Store component spec / issue — `AGENTPOLICY_DB_PATH` is the placeholder used
 > here; use the real one. `AIAC_POLICY_FILE` selects which `policy.md` variant (see
 > *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*) the PRB reads.
 
 ## Runbook
 
-Runnable only once the pipeline fixes (handoffs 01 + 02, P1–P5) have landed.
+Runnable only once the pipeline fixes (handoffs 01 + 02, P1–P5) have landed, and requires a live
+Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 
 ```bash
-# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-e2e
-.venv/bin/python test/integration/policy_pipeline.py
-# then inspect the printed REGO_OUTPUT_DIR, e.g.:
-#   github_agent.inbound.rego    (user->agent gate; subject_roles dev-user/test-user)
-#   github_agent.outbound.rego   (user->tool AND agent->tool gates)
-#   (no github_tool.*.rego)
+# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-e2e; opa on PATH or $OPA_BIN
+.venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
+# ~30 parametrized nodes (variant × subject inbound; variant × subject × function_name outbound).
+# A failing node names the exact cell, e.g.:
+#   test_outbound[abstract-test-user-source-read] — expected deny, opa allowed
+# The generated Rego is left on disk per variant for eyeballing:
+#   rego_out/explicit/github_agent.{inbound,outbound}.rego
+#   rego_out/abstract/github_agent.{inbound,outbound}.rego
+#   (no github_tool.*.rego in either)
 ```
 
-Eyeball against the adjusted package shapes in
+The suite `pytest.skip`s when no `opa` binary is found (`$OPA_BIN` → `PATH`). Eyeball the persisted
+Rego against the adjusted package shapes in
 [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md); optionally inspect the
 Policy Store DB and the provisioned Keycloak realm.
 
 ## Testing Decisions
 
-- **Highest seam available.** Real libraries + real services + real Keycloak + real LLM. The launcher
-  drives the pipeline through its real surfaces — the IdP `Configuration` library, the PRB entry points
-  (`build_scope_rules` / `build_role_rules`), and the PCE's `compute_and_apply` — and observes the real
-  filesystem output. The only shortcut is the OPA filesystem stub (same as `5.2`). It makes no
-  assertions on the pipeline output; it produces artefacts a human reviews.
+- **Highest seam available, verified by a real oracle.** Real libraries + real services + real Keycloak
+  + real LLM. The test drives the pipeline through its real surfaces — the IdP `Configuration` library,
+  the PRB entry points (`build_scope_rules` / `build_role_rules`), and the PCE's `compute_and_apply` —
+  and then verifies the real filesystem output with the standalone **`opa eval`** binary. The only
+  shortcut is the OPA filesystem stub (same as `5.2`). A good test here asserts only **external
+  behavior** — the policy *decisions* the generated Rego makes for scenario-derived requests — never the
+  internal Rego structure (which the OPA Policy Writer's own unit tests own).
+- **Rego is the artifact under test; the scenario is the oracle.** The LLM/PCE that produced the Rego
+  might be wrong, so the expected verdicts are **computed from** the scenario pair-lists
+  (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`), not from a second hand-maintained
+  copy or from the Rego itself. A wrong role→scope mapping therefore fails the test at the exact cell.
+- **Outbound needs a probe.** The generated `allow` / `subject_ok` are existential and ignore any
+  scope, so a raw query cannot answer "may this subject invoke *this* function." A small
+  `test/integration/probe.rego` (`data.probe.outbound.allow`) binds `input.function_name` against the
+  generated data maps and requires **both** the user→tool and agent→tool gates to admit it. Names are
+  compared by **token-set equality** (split on `[._-]+`, lowercased) so `source.read` / `read_source` /
+  `Source-Read` all match `source-read` while bare `source` matches nothing.
 - **Attribute-based client typing + read-back guard.** Clients are typed by the `client.type`
-  attribute (plain string `"Agent"` / `"Tool"`), provisioned by the launcher — not by description
-  keywords. Because that attribute drives whether the PCE emits an agent model (and suppresses the tool
-  model), the launcher reads each service back via `Configuration.get_service` and asserts its `.type`
-  before running the pipeline, aborting on mismatch. This is a **provisioning** sanity check, not a
-  Rego-output assertion — the write-only ethos is preserved.
-- **Self-contained subprocess lifecycle.** The launcher spawns IdP (7071), Policy Store (7074), and OPA
+  attribute (plain string `"Agent"` / `"Tool"`), provisioned by the test — not by description keywords.
+  Because that attribute drives whether the PCE emits an agent model (and suppresses the tool model),
+  the test reads each service back via `Configuration.get_service` and asserts its `.type` before
+  running the pipeline, aborting on mismatch. This is a **provisioning** sanity check, distinct from the
+  Rego-decision assertions.
+- **Self-contained subprocess lifecycle.** The test spawns IdP (7071), Policy Store (7074), and OPA
   (7072) as `uvicorn` subprocesses, polls each `GET /health` before use, and tears them all down in
-  `finally`. Keycloak and the LLM are **external** (reached via env).
-- **Write-only, human-verified.** LLM nondeterminism is tolerated precisely because there are no
-  assertions on the output — the reviewer eyeballs the two `.rego` files against
-  [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md). The value is the
-  concrete, real-pipeline `.rego` output for a known scenario.
+  `finally`. Keycloak and the LLM are **external** (reached via env); `opa` is an external binary.
+- **LLM nondeterminism, contained.** The PRB LLM is pinned to `temperature=0`, and the **explicit**
+  `policy.md` variant states each `(role, scope)` grant outright, so its mapping is stable. The
+  **abstract** variant is *also* asserted against the same truth table — accepting some flakiness, since
+  it leans on the LLM to expand prose into concrete scopes — because it is a valuable signal and the
+  test is `@pytest.mark.integration`, out of the default CI run.
 - **Prior art, shared not copied.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established
   the shape this test reuses — `uvicorn` subprocess spawn, `GET /health` poll, env-before-import
-  ordering, `finally` teardown, and print-the-dir. Rather than duplicate it, that machinery lives in
-  the shared `test/integration/launcher.py`, and the fixed scenario lives in
-  `test/integration/scenario.py`; `generate_rego.py` was refactored onto both (its `.rego` output
-  verified byte-identical to before the refactor). The live-Keycloak pytest suite
-  (`testing/5.1-integration-tests.md`) is the marker-gated counterpart for the read-side services.
+  ordering, and `finally` teardown. Rather than duplicate it, that machinery lives in the shared
+  `test/integration/launcher.py`, and the fixed scenario lives in `test/integration/scenario.py`;
+  `generate_rego.py` was refactored onto both (its `.rego` output verified byte-identical to before the
+  refactor). The live-Keycloak pytest suite (`testing/5.1-integration-tests.md`) is the sibling
+  marker-gated, decision-asserting counterpart for the read-side services and is the prior art for the
+  `@pytest.mark.integration` + `opa eval` shape.
 
 ## Relationship to other integration tests
 
 This is **one** integration-test spec among several indexed by the master PRD
 ([../PRD.md](../PRD.md), § *Integration test specifications*).
 
-- Distinct from the **live-Keycloak pytest integration tests** (`testing/5.1-integration-tests.md`) — a
-  different flavor: `@pytest.mark.integration`, run in/near CI against a live Keycloak/NATS, asserting
-  on typed responses.
+- Same flavor as the **live-Keycloak pytest integration tests** (`testing/5.1-integration-tests.md`) —
+  both are `@pytest.mark.integration`, run outside the default unit run against live dependencies, and
+  assert on decisions. This test additionally uses `opa eval` as its oracle and skips when `opa` is
+  absent.
 - **Broader than** the OPA-stub-only **PDP Policy Writer** launcher
   ([pdp-policy-writer.md](pdp-policy-writer.md), `testing/5.2-pdp-writer-integration-test.md`): `5.2`
-  hand-builds a `PolicyModel` and exercises only OPA; this test adds Keycloak provisioning + PRB + PCE
-  in front of the **same** OPA stub, so both eyeball their output against the same package shapes.
+  hand-builds a `PolicyModel`, exercises only OPA, and is still a write-only eyeball launcher; this test
+  adds Keycloak provisioning + PRB + PCE in front of the **same** OPA stub and **asserts** the resulting
+  decisions with `opa eval`. Both still leave `.rego` on disk against the same package shapes.
 
 Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 
 ## Out of Scope
 
-- **Writing `policy_pipeline.py` or any P1–P5 pipeline code** — this spec *describes* the launcher; the
-  launcher itself is written in a later session against the fixed pipeline (tracked by
-  `testing/5.3-policy-pipeline-integration-test.md` and the prerequisite issues).
+- **Writing `test_policy_pipeline.py`, `probe.rego`, or any P1–P5 pipeline code** — this spec
+  *describes* the test; the test itself is written in a later session against the fixed pipeline
+  (tracked by `testing/5.3-policy-pipeline-integration-test.md` and the prerequisite issues).
 - **The Rego generator, the canonical policy model, the PRB, and the PCE implementations** — specified
   and unit-tested by their own components ([../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md),
   [../components/policy-model.md](../components/policy-model.md),
   [../components/policy-computation-engine.md](../components/policy-computation-engine.md), and the PRB
-  component spec), not here.
+  component spec), not here. In particular, the internal **structure** of the generated Rego is the
+  Policy Writer's concern; this test asserts only the **decisions** that Rego makes.
 - **The Kubernetes-CR Policy Writer (1.13)** — this test targets the filesystem **stub** (1.14) only.
-- **Automated pass/fail** — no assertions, no CI wiring, no `@pytest.mark.integration`.
+- **Default-CI wiring** — the test is `@pytest.mark.integration` and requires live Keycloak + LLM + an
+  `opa` binary, so it runs on demand, not in the default `-m "not integration"` unit run.
 
 ## Further Notes
 
@@ -236,6 +327,12 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 - Descriptions are ≤255 characters and written **verbatim** into Keycloak; there is no shortened /
   verbatim split. (Keycloak caps role and client descriptions at 255 chars, and the generic descriptions
   are authored to stay within that cap.)
+- The `devops` role's **zero access** is conveyed by its **role description only**. It is absent from
+  every pair-list (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`) and both `policy.md`
+  variants are **unchanged**, so deny-by-default alone denies it inbound and on every outbound function —
+  which is precisely what the truth table's `devops-user` row asserts. Because `devops-user` lives in
+  the shared `scenario.py`, it also appears in the `5.2` launcher's eyeball output (denied everywhere);
+  that is intentional and keeps the two launchers consistent.
 
 ## Blocked-by
 
@@ -262,7 +359,7 @@ with the user; keep them in sync with the *Scenario* table (see *Further Notes*)
 The descriptions are **generic and keyword-free** — they describe what each entity/role/scope *does*,
 carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
 cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
-description prose: the launcher provisions each client's `client.type` attribute (the type UC1
+description prose: the test provisions each client's `client.type` attribute (the type UC1
 discovers from the agent card / `kagenti.io/type` label) as a plain string `"Agent"` / `"Tool"`, so
 `Service` type resolution ([../../src/aiac/idp/configuration/models.py:79-87](../../src/aiac/idp/configuration/models.py#L79-L87))
 tags each client from the attribute without touching the TEMP description-keyword fallback.
@@ -284,6 +381,15 @@ tags each client from the attribute without touching the TEMP description-keywor
 **`tester`** — realm role (user):
 > Tester — a quality-assurance user who verifies software quality and tracks defects through the issue
 > tracker: filing, triaging, and updating issue reports; works in the issue tracker, not in source.
+
+**`devops`** — realm role (user):
+> DevOps — an operations user who manages deployment infrastructure and runtime environments; does not
+> author source code and does not manage the issue tracker.
+
+> The `devops` description is deliberately **unrelated** to source and issue work, so the PRB derives no
+> agent or tool scope for it and deny-by-default leaves `devops-user` denied everywhere — the inbound
+> deny case. It is added to the realm-role set only; the pair-lists and both `policy.md` variants stay
+> unchanged (see *Further Notes*).
 
 ### Role & scope descriptions
 
