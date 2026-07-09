@@ -25,6 +25,7 @@ TOOL_ID = "github-tool"
 USERS: dict[str, str] = {
     "dev-user": "developer",
     "test-user": "tester",
+    "devops-user": "devops",
 }
 
 # Fixed dev password for the provisioned test users (throwaway realm).
@@ -32,86 +33,72 @@ USER_PASSWORD = "password"
 
 # --- Descriptions (verbatim from the spec's *Scenario inputs*) ------------------------------
 #
-# The client descriptions deliberately contain the words "Agent" / "Tool" so the IdP library's
-# type inference (``_build_service``) tags them Agent / Tool — the tool tag is what makes the PCE
-# omit the tool model.
+# These descriptions feed the PRB's LLM role→scope mapping. They do NOT drive service typing:
+# the IdP types services via the canonical ``client.type`` attribute (set by the launcher through
+# ``config.set_service_type``), not by inferring "Agent"/"Tool" from the description text.
 
 AGENT_DESCRIPTION = (
-    "GitHub Agent — an autonomous agent that acts on a user's GitHub source repositories and "
-    "issue tracker on the user's behalf. It performs source-code work (inspecting repository "
-    "file contents and committing changes) and issue-management work (reading issue threads and "
-    "creating or updating issues). Its source-code responsibility is represented by the "
-    "`source-helper` client role and gated at the agent boundary by the `source-access` scope; "
-    "its issue-management responsibility is represented by the `issues-helper` client role and "
-    "gated by the `issues-access` scope. The agent does not call GitHub directly — it delegates "
-    "each concrete operation to the `github-tool`, so its own scopes describe capabilities it may "
-    "exercise while the tool's scopes describe the operations those capabilities resolve to."
+    "Autonomous Agent acting on a user's behalf against source repositories and an issue tracker. "
+    "It inspects and changes repository source contents and reads, creates, and updates issues and "
+    "their threads."
 )
 
 TOOL_DESCRIPTION = (
-    "GitHub Tool — a capability provider that exposes fine-grained, least-privilege operations "
-    "against GitHub source repositories and the issue tracker. It offers four distinct "
-    "operations, each represented by its own scope: read source (`source-read`) and write source "
-    "(`source-write`) for repository file contents, and read issues (`issues-read`) and write "
-    "issues (`issues-write`) for the issue tracker. The tool performs the actual GitHub calls; "
-    "every caller (such as the `github-agent` acting for a user) must present the specific scope "
-    "for each operation it invokes."
+    "Capability provider Tool for source repositories and an issue tracker. It performs read and "
+    "write operations on repository source contents and on issues and their comment threads."
 )
 
 # name -> description. Realm roles held by users.
 USER_ROLES: dict[str, str] = {
     "developer": (
-        "Developer — an engineering user who works on the codebase. A developer needs full read "
-        "and write access to source repository contents (to inspect and change code) and read "
-        "access to the issue tracker (to see reported work), but does not modify issues. "
-        "Resolves to source read, source write, and issues read."
+        "Developer — an engineering user who develops the source codebase (writing and maintaining "
+        "code) and fixes code defects reported in the issue tracker; works primarily in source and "
+        "consults issues for defect reports."
     ),
     "tester": (
-        "Tester — a quality-assurance user who works through the issue tracker. A tester needs "
-        "full read and write access to issues (to file, triage, and update defect and test "
-        "reports) but does not touch source repository contents. Resolves to issues read and "
-        "issues write."
+        "Tester — a quality-assurance user who verifies software quality and tracks defects through "
+        "the issue tracker: filing, triaging, and updating issue reports; works in the issue "
+        "tracker, not in source."
+    ),
+    # Deny-by-default control: devops appears in no INBOUND/OUTBOUND pair below. Its description is
+    # deliberately unrelated to source and issue work, so the PRB derives no agent or tool scope for
+    # it and deny-by-default leaves devops-user denied everywhere.
+    "devops": (
+        "DevOps — an operations user who manages deployment infrastructure and runtime "
+        "environments; does not author source code and does not manage the issue tracker."
     ),
 }
 
 # name -> description. The github-agent's client roles.
 AGENT_ROLES: dict[str, str] = {
     "source-helper": (
-        "The github-agent's client role for source-code operations. Groups the agent's ability "
-        "to read and write repository source content; gated at the agent boundary by "
-        "`source-access`, and downstream resolves to the tool's `source-read` / `source-write`."
+        "Client role for source-code operations, covering reading and writing repository source "
+        "content."
     ),
     "issues-helper": (
-        "The github-agent's client role for issue operations. Groups the agent's ability to read "
-        "and write issues; gated at the agent boundary by `issues-access`, and downstream "
-        "resolves to the tool's `issues-read` / `issues-write`."
+        "Client role for issue-tracker operations, covering reading and writing issues and their "
+        "threads."
     ),
 }
 
 # name -> description. Agent-boundary scopes exposed by the github-agent.
 AGENT_SCOPES: dict[str, str] = {
     "source-access": (
-        "Agent-boundary scope granting use of the github-agent's source capability (the "
-        "`source-helper` role). A user holding it may invoke the agent's source-code functions."
+        "Scope granting use of a source-code capability — invoking source-code functions such as "
+        "reading and changing repository contents."
     ),
     "issues-access": (
-        "Agent-boundary scope granting use of the github-agent's issues capability (the "
-        "`issues-helper` role). A user holding it may invoke the agent's issue functions."
+        "Scope granting use of an issue-management capability — invoking issue functions such as "
+        "reading and updating issues."
     ),
 }
 
 # name -> description. Fine-grained operations exposed by the github-tool.
 TOOL_SCOPES: dict[str, str] = {
-    "source-read": (
-        "Tool operation: read source repository contents (file listings and file bodies). "
-        "Read-only."
-    ),
-    "source-write": (
-        "Tool operation: create, modify, or delete source repository contents (commits / file "
-        "writes)."
-    ),
-    "issues-read": "Tool operation: read issues and their comments/threads. Read-only.",
-    "issues-write": "Tool operation: create and update issues (open, edit, comment, close).",
+    "source-read": "Read source repository contents: file listings and file bodies. Read-only.",
+    "source-write": "Create, modify, or delete source repository contents; commit file changes.",
+    "issues-read": "Read issues and their comment threads. Read-only.",
+    "issues-write": "Create and update issues: open, edit, comment, and close.",
 }
 
 # --- Role → access facts (name-level; the single source of truth) ---------------------------
