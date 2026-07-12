@@ -70,6 +70,14 @@ USER_ROLES: dict[str, str] = {
 }
 
 # name -> description. The github-agent's client roles.
+#
+# NOTE: ``issues-operator`` is intentionally PLURAL. The singular ``issue-operator`` reads to the PRB
+# LLM auditor as an actor competing with the ``tester`` subject and makes it wrongly reject the valid
+# (tester, issues-write) grant in mapping (b), aborting the pipeline. Plural is also consistent with
+# every other issues-* name (issues-access / issues-read / issues-write). The PRB auditor was hardened
+# against this class of collision (see issues/agent/3.20-policy-rules-builder.md, "Follow-up: auditor
+# relationship-scoping"), but keep
+# the plural here regardless — do not "tidy" it to singular to match source-operator.
 AGENT_ROLES: dict[str, str] = {
     "source-operator": (
         "Covers read and write access to source repository contents — listing, reading, creating, "
