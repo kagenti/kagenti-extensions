@@ -16,7 +16,7 @@
 UC1 is the only use case with an Orchestrator, because it is a two-stage pipeline:
 
 1. **Service Provision** (LLM-based): classify the new service, derive its roles + scopes, write them into the IdP.
-2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), call the PRB for each applicable pair, and return a merged `list[PolicyRule]` to the Orchestrator.
+2. **Service Policy Builder** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), call the PRB for each applicable pair, and return a merged `list[PolicyRule]` to the Orchestrator.
 
 The Orchestrator returns `(list[PolicyRule], override=False)` to the Controller. The Controller calls the PCE with that `override` flag; the PCE owns all rule reconciliation. UC1 is **incremental** — existing roles receive a partial new mapping and must not lose their other access — so the mode is always append (`override=False`).
 
@@ -34,7 +34,7 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC["Orchestrator"]
         SA_PROV["Service Provision\n(LLM)"]
-        SA_POL["Service Policy\n(deterministic)"]
+        SA_POL["Service Policy Builder\n(deterministic)"]
         ORC --> SA_PROV
         ORC --> SA_POL
     end
@@ -54,7 +54,7 @@ flowchart TD
 
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
-2. Call `ServicePolicyUpdate.run(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy re-reads the service's own roles/scopes from the IdP by `service_id` (Provision has already persisted them), so it needs only the id, not the `ServiceProvision`.
+2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-reads the service's own roles/scopes from the IdP by `service_id` (Provision has already persisted them), so it needs only the id, not the `ServiceProvision`.
 3. Return `(list[PolicyRule], override=False)` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
@@ -174,9 +174,9 @@ class ServiceProvision(BaseModel):
 
 ---
 
-## Sub-agent: Service Policy
+## Sub-agent: Service Policy Builder
 
-`onboarding/service_policy/`
+`onboarding/policy_builder/`
 
 **Nature:** deterministic IdP reader + PRB invoker.
 
@@ -188,7 +188,7 @@ class ServiceProvision(BaseModel):
 - **Own roles / own scopes** — the roles and scopes the just-provisioned service defines for *itself*, fetched from the IdP by `service_id`: `service.roles` / `service.scopes` (`get_service(service_id)`). These are exactly the entities Service Provision wrote.
 - **Other roles / other scopes** — every *pre-existing* role/scope in the IdP universe **minus** the new service's own entities. These belong to other services.
 
-**Self-mapping invariant (must hold):** the PRB must **never** be handed an *(own role, own scope)* pair — a service's own role must never be mapped to its own scope. Onboarding only ever grants **cross-service** access: *who else* may call this service, and (agents only) *what else* this service may call. A service's own role reaching its own scope is not something onboarding needs to author (that access is intrinsic and out of scope here) and would pollute the policy set. The Service Policy sub-agent guarantees the invariant **by construction** through two complementary guards:
+**Self-mapping invariant (must hold):** the PRB must **never** be handed an *(own role, own scope)* pair — a service's own role must never be mapped to its own scope. Onboarding only ever grants **cross-service** access: *who else* may call this service, and (agents only) *what else* this service may call. A service's own role reaching its own scope is not something onboarding needs to author (that access is intrinsic and out of scope here) and would pollute the policy set. The Service Policy Builder sub-agent guarantees the invariant **by construction** through two complementary guards:
 
 1. **Exclusion (own entities never appear on the "other" side).** Own roles are removed from `other_roles` and own scopes from `other_scopes` before any PRB call (steps 3–4). Flattening runs *after* exclusion and cannot reintroduce an own role: the just-provisioned roles are brand new and are not yet referenced as `childRoles` by any existing role.
 2. **Call direction (each call's "self" side is one own entity of the *opposite* kind).** Each PRB call pairs a single own entity with the other-side universe, never own-with-own, and keeps the semantic intent crisp:
@@ -232,9 +232,9 @@ aiac/src/aiac/agent/uc/
     │   ├── nodes.py      ← classify_service, analyze_agent, analyze_tool, provision_service
     │   ├── state.py      ← OnboardingProvisionState
     │   └── types.py      ← RoleDefinition, ScopeDefinition, ServiceProvision (ServiceType imported from aiac.idp.configuration.models)
-    └── service_policy/
+    └── policy_builder/
         ├── __init__.py
-        └── runner.py     ← ServicePolicyUpdate.run(service_id, service_type) → list[PolicyRule]
+        └── builder.py     ← ServicePolicyBuilder.build(service_id, service_type) → list[PolicyRule]
 ```
 
 ## Out of scope

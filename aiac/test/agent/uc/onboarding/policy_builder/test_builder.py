@@ -1,7 +1,7 @@
-"""Unit tests for the Service Policy sub-agent (UC1, issue 4.4).
+"""Unit tests for the Service Policy Builder sub-agent (UC1, issue 4.4).
 
 The idp-library `Configuration` is mocked via the `_config` seam, and the PRB entry
-points (`build_scope_rules` / `build_role_rules`) are patched on the runner module —
+points (`build_scope_rules` / `build_role_rules`) are patched on the builder module —
 no live services, no LLM. The sub-agent is deterministic and applies nothing.
 """
 
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from aiac.agent.uc.onboarding.service_policy import runner
+from aiac.agent.uc.onboarding.policy_builder import builder
 from aiac.idp.configuration.models import Role, Scope, Service, ServiceType
 from aiac.policy.model.models import PolicyRule
 
@@ -59,16 +59,16 @@ def _invoke(
     get_service_exc=None,
     get_roles_exc=None,
 ):
-    """Run ServicePolicyUpdate.run with all IdP + PRB calls mocked.
+    """Run ServicePolicyBuilder.build with all IdP + PRB calls mocked.
 
     `scope_rules` / `role_rules` are optional side_effect callables; default to
     returning an empty list so calls are counted without inventing rule content.
     `get_service_exc` / `get_roles_exc` inject IdP-read failures.
     """
     with (
-        patch.object(runner, "_config") as cfg,
-        patch.object(runner, "build_scope_rules") as bsr,
-        patch.object(runner, "build_role_rules") as brr,
+        patch.object(builder, "_config") as cfg,
+        patch.object(builder, "build_scope_rules") as bsr,
+        patch.object(builder, "build_role_rules") as brr,
     ):
         conf = MagicMock()
         if get_service_exc is not None:
@@ -83,7 +83,7 @@ def _invoke(
         cfg.return_value = conf
         bsr.side_effect = scope_rules or (lambda roles, scope: [])
         brr.side_effect = role_rules or (lambda role, scopes: [])
-        result = runner.ServicePolicyUpdate.run(SERVICE_ID, service_type)
+        result = builder.ServicePolicyBuilder.build(SERVICE_ID, service_type)
         return result, bsr, brr, conf
 
 

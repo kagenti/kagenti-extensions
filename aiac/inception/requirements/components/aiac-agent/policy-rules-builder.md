@@ -159,7 +159,7 @@ retry layers, kept distinct:
 
 | Use Case | Caller | Function(s) called |
 |---|---|---|
-| UC1 — Service Onboarding | Service Policy sub-agent | `build_scope_rules(other_roles, scope)` per agent/tool scope + `build_role_rules(role, other_scopes)` per agent role (agent path only) |
+| UC1 — Service Onboarding | Service Policy Builder sub-agent | `build_scope_rules(other_roles, scope)` per agent/tool scope + `build_role_rules(role, other_scopes)` per agent role (agent path only) |
 | UC2 — Policy Update (Build) | Build sub-agent | TBD |
 | UC3 — Role Update | Role sub-agent | `build_role_rules(role, all_scopes)` — one call |
 

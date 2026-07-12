@@ -404,7 +404,7 @@ FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via th
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
-| Service Onboarding | `aiac.apply.service.{id}` | Service Provision → Service Policy (sequential) |
+| Service Onboarding | `aiac.apply.service.{id}` | Service Provision → Service Policy Builder (sequential) |
 | Policy Update | `aiac.apply.policy.build`, `/apply/policy/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
 | Role Update | `aiac.apply.role.{id}` | Role sub-agent |
 

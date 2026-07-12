@@ -1,4 +1,4 @@
-"""Service Policy sub-agent (UC1).
+"""Service Policy Builder sub-agent (UC1).
 
 Second of the two stages sequenced by the Service Onboarding Orchestrator, run after
 Service Provision. Deterministic (non-LLM): reads the full IdP role/scope universe
@@ -42,9 +42,9 @@ def _flatten_dedup(roles):
     return out
 
 
-class ServicePolicyUpdate:
+class ServicePolicyBuilder:
     @staticmethod
-    def run(service_id: str, service_type: ServiceType) -> list[PolicyRule]:
+    def build(service_id: str, service_type: ServiceType) -> list[PolicyRule]:
         config = _config()
 
         try:

@@ -1,6 +1,6 @@
 """Service Onboarding Orchestrator (UC1) — stub.
 
-Two-stage (Provision → Service Policy) orchestration lands in 3.4/3.5/3.6.
+Two-stage (Provision → Service Policy Builder) orchestration lands in 3.4/3.5/3.6.
 At the foundation stage it returns an empty rule set with ``override=False``
 (service onboarding merges additively).
 """

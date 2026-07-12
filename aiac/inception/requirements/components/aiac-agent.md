@@ -17,7 +17,7 @@ The service is structured as a **Controller** (FastAPI routes) that dispatches t
 
 | Use Case | Dispatch | Sub-agents | Sub-agent output |
 |---|---|---|---|
-| Service Onboarding (UC1) | via Orchestrator | Service Provision + Service Policy | `list[PolicyRule]` |
+| Service Onboarding (UC1) | via Orchestrator | Service Provision + Service Policy Builder | `list[PolicyRule]` |
 | Policy Update (UC2) | Controller → sub-agent directly | Build or Rebuild (TBD) | `list[PolicyRule]` |
 | Role Update (UC3) | Controller → sub-agent directly | Role sub-agent | `list[PolicyRule]` |
 
@@ -39,7 +39,7 @@ flowchart TD
     subgraph CO["Service Onboarding"]
         ORC1["Orchestrator"]
         SA1["Service Provision"]
-        SA2["Service Policy"]
+        SA2["Service Policy Builder"]
         ORC1 --> SA1
         ORC1 --> SA2
     end
@@ -126,7 +126,7 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 
 | Use Case | Sub-PRD | Trigger(s) | Notes |
 |---|---|---|---|
-| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` | Orchestrator sequences: Service Provision → Service Policy (IdP reader + PRB invoker) |
+| Service Onboarding | [aiac-agent/uc1-service-onboarding.md](aiac-agent/uc1-service-onboarding.md) | `aiac.apply.service.{id}`, `POST /apply/service/{id}` | Orchestrator sequences: Service Provision → Service Policy Builder (IdP reader + PRB invoker) |
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` | |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` | |
 
@@ -134,7 +134,7 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 
 ### IdP access — library, not service
 
-Every sub-agent (UC1 Provision + Service Policy, UC2 Build + Rebuild, UC3 Role) performs **all** IdP reads and writes through the **idp-library** API — `aiac.idp.configuration.api.Configuration` — and **never** calls the IdP Configuration **service** (`aiac.idp.service.configuration.*`) or its HTTP endpoints directly. The library owns the HTTP transport, retry/backoff, and Keycloak↔model mapping; sub-agents depend only on its typed `Configuration` methods (e.g. `get_service`, `get_roles`, `get_scopes`, `create_service_role`, `create_service_scope`, `set_service_type`). The shared service-type vocabulary is `aiac.idp.configuration.models.ServiceType` (`Agent`/`Tool`) — the same enum used by `Service.type`. See [library-idp.md](library-idp.md).
+Every sub-agent (UC1 Provision + Service Policy Builder, UC2 Build + Rebuild, UC3 Role) performs **all** IdP reads and writes through the **idp-library** API — `aiac.idp.configuration.api.Configuration` — and **never** calls the IdP Configuration **service** (`aiac.idp.service.configuration.*`) or its HTTP endpoints directly. The library owns the HTTP transport, retry/backoff, and Keycloak↔model mapping; sub-agents depend only on its typed `Configuration` methods (e.g. `get_service`, `get_roles`, `get_scopes`, `create_service_role`, `create_service_scope`, `set_service_type`). The shared service-type vocabulary is `aiac.idp.configuration.models.ServiceType` (`Agent`/`Tool`) — the same enum used by `Service.type`. See [library-idp.md](library-idp.md).
 
 ---
 
@@ -206,14 +206,14 @@ aiac/src/aiac/agent/
 ├── shared/                             ← flatten_role (roles.py), run_upstream (upstream.py)
 ├── uc/
 │   ├── onboarding/
-│   │   ├── orchestrator.py          ← sequences provision → service_policy, returns list[PolicyRule]
+│   │   ├── orchestrator.py          ← sequences provision → policy_builder, returns list[PolicyRule]
 │   │   ├── provision/               ← LLM sub-agent: classify, analyze, write to IdP
-│   │   └── service_policy/          ← IdP reader + PRB invoker: read IdP, call PRB, return list[PolicyRule]
+│   │   └── policy_builder/          ← IdP reader + PRB invoker: read IdP, call PRB, return list[PolicyRule]
 │   ├── policy_update/
 │   │   ├── build/                   ← calls PRB, returns list[PolicyRule]; TBD internals
 │   │   └── rebuild/                 ← delegates to Build; TBD internals
 │   └── role_update/                 ← calls PRB with (role, all_scopes), returns list[PolicyRule]
-└── policy_rules_builder/            ← shared; called by Service Policy, Build, and Role sub-agent
+└── policy_rules_builder/            ← shared; called by Service Policy Builder, Build, and Role sub-agent
 ```
 
 Docker build command (run from repo root):

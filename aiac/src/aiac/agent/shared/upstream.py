@@ -9,8 +9,8 @@ caller to map the failure to the right HTTP status at the service boundary (e.g.
 call time, so tests can tune it via the environment.
 
 Consolidates the retry helper that was previously inlined in each onboarding sub-agent;
-callers today are the UC1 Provision (``provision/nodes.py``) and Service Policy
-(``service_policy/runner.py``) sub-agents.
+callers today are the UC1 Provision (``provision/nodes.py``) and Service Policy Builder
+(``policy_builder/builder.py``) sub-agents.
 """
 
 import os
