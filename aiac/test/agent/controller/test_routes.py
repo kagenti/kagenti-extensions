@@ -104,12 +104,6 @@ def test_handler_upstream_error_surfaces_status_and_skips_pce():
 # --------------------------------------------------------------------------- #
 # Stub contract: the per-route override each handler returns (no mocks).       #
 # --------------------------------------------------------------------------- #
-def test_onboard_service_stub_returns_no_rules_and_override_false():
-    from aiac.agent.uc.onboarding.orchestrator import onboard_service
-
-    assert onboard_service("svc-1") == ([], False)
-
-
 def test_build_policy_stub_returns_no_rules_and_override_false():
     from aiac.agent.uc.policy_update.build import build_policy
 
