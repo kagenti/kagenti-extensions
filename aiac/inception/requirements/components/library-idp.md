@@ -88,10 +88,9 @@ Represents a service (Keycloak: `client`).
 
 1. An explicit `type` already present on the input wins (never overridden).
 2. Otherwise the Keycloak client attribute **`client.type`** ∈ {`Agent`, `Tool`} — a **plain string**. Client attribute values are plain strings; a **list** value (e.g. `["Agent"]`, the shape realm-role attributes use) fails the check and resolves to `None`. Capitalization matches `Literal["Agent", "Tool"]`.
-3. Otherwise a `clientId` starting with `spiffe://` implies an `Agent` workload.
-4. Otherwise `None`.
+3. Otherwise `None`.
 
-The attribute is set via `Configuration.set_service_type` (below); its authoritative origin is UC1 `classify_service` (see the aiac-agent UC1 spec), which persists the discovered service type onto the client. There is **no** description-keyword inference — typing is attribute/`spiffe://`-only.
+The attribute is set via `Configuration.set_service_type` (below); its authoritative origin is UC1 Service Onboarding — `classify_service` **discovers** the type from the operator's `kagenti.io/type` label and `provision_service` **persists** it onto the client via `set_service_type` (see the aiac-agent UC1 spec). There is **no** `spiffe://` clientId fallback and **no** description-keyword inference — typing is `client.type`-attribute-only. (The former `spiffe:// ⇒ Agent` fallback was **removed**: a `spiffe://` clientId indicates a SPIRE-enabled workload, **not** necessarily an agent — it could mis-type a SPIRE-enabled tool — so clients without a `client.type` attribute now resolve to `None`.)
 
 #### `Scope`
 

@@ -79,18 +79,17 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
 ### Nodes
 
-- **`classify_service`**: determines service type.
+- **`classify_service`**: resolves identity + determines service type from the operator's authoritative `kagenti.io/type` label (values `agent`/`tool`) — **not** from the `entity_id` format.
   1. Store `service_id = trigger.entity_id` (Keycloak `client_id`).
-  2. Check format:
-     - **SPIFFE format** `spiffe://{domain}/ns/{namespace}/sa/{serviceAccount}` → extract `namespace` and `workload_name = serviceAccount`; continue to step 3.
-     - **Any other format** → `service_type = tool`; `namespace = None`; `workload_name = None`; route to `analyze_tool`. No K8s access.
-  3. LIST pods in `namespace`, find one whose `spec.serviceAccountName == workload_name`. Returns `502` on Kubernetes API failure or pod not found.
-  4. Validate `kagenti.io/type` label on the pod (applied by kagenti-operator):
+  2. Resolve identity: call `get_service(service_id)` from `aiac.idp.configuration.api` → `client.name`, which the kagenti-operator sets to `"{namespace}/{workload_name}"` for every workload (agents and tools, SPIRE-enabled or not). Split on the first `/` → store `namespace` and `workload_name`. `502` if `client.name` has no `/` (namespace unrecoverable).
+  3. LIST pods in `namespace`; select the pod owned by `workload_name` via `ownerReferences` (Deployment → ReplicaSet name prefix, or `StatefulSet`/`Sandbox` name match). `502` on Kubernetes API failure or no matching pod.
+  4. Read the `kagenti.io/type` label on that pod:
      - `agent` → `service_type = agent`; route to `analyze_agent`.
+     - `tool` → `service_type = tool`; route to `analyze_tool`.
      - Absent or any other value → `502` (inconsistent deployment).
 
-  > K8s access: `list` on `pods` in the target namespace. Agent path only.
-  > `kagenti.io/type` is authoritative — applied exclusively by the kagenti-operator admission webhook.
+  > K8s access: `list` on `pods` in the target namespace (both paths).
+  > `kagenti.io/type` is authoritative — applied by the kagenti-operator (via the AgentRuntime CR) and propagated to pod labels; it is the operator's own agent/tool discriminator (`SkipReason`, kagenti-operator `internal/clientreg/names.go`). The operator only registers a Keycloak client for a workload that already carries this label, so it is effectively guaranteed for operator-registered clients; a missing/invalid value still fails loud (`502`, naming the workload + label). The `entity_id` format (SPIFFE vs plain) reflects whether SPIRE is enabled, **not** the service type, so it is not used for classification.
 
 - **`analyze_agent`**: non-LLM node; reads AgentCard CR.
   1. LIST `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) in `namespace`; find the one matching `workload_name`.
@@ -105,18 +104,20 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
   > K8s access: `list` on `agentcards.agent.kagenti.dev` in the target namespace.
 
-- **`analyze_tool`**: non-LLM node; discovers MCP tools.
-  1. Resolve `workload_name`: call `get_service(service_id)` from `aiac.idp.configuration.api` → `workload_name = client.name`.
-  2. Locate MCP endpoint: **TBD** — see issue [`inception/issues/6.2-analyze-tool-lookup-strategy.md`](../../issues/6.2-analyze-tool-lookup-strategy.md).
-  3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
-  4. Produce `ServiceProvision`:
+- **`analyze_tool`**: non-LLM node; discovers MCP tools. `namespace` + `workload_name` are already resolved by `classify_service` (from the `client.name` split). MCP endpoint lookup uses the **hybrid Keycloak→K8s strategy** decided in issue [`6.2`](../../issues/agent/service-onboarding/6.2-analyze-tool-lookup-strategy.md): the Keycloak client name supplied the key `{namespace, workload_name}`; K8s supplies the reachable endpoint.
+  1. Locate MCP endpoint:
+     a. GET the K8s `Service` named `workload_name` in `namespace` (operator convention: Service name == workload name).
+     b. Require the `protocol.kagenti.io/mcp` label present on that Service; `502` (actionable) if absent — the label is applied at deploy time, not stamped by the operator.
+     c. Build `http://{workload_name}.{namespace}.svc.cluster.local:{port}/mcp`, where `port` is the Service's first port (not hardcoded).
+  2. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
+  3. Produce `ServiceProvision`:
      - `roles`: `[]` (tools do not initiate further calls)
      - `scopes`: `[ScopeDefinition(name=f"{workload_name}.{tool.name}", description=tool.description) for tool in manifest.tools]`
      - `reasoning`: `f"derived from MCP manifest: {len(tools)} tools"`
-  5. Returns `502` on config API failure, endpoint lookup failure, or MCP call failure.
+  4. Returns `502` on Service/label lookup failure or MCP call failure.
 
-  > K8s access: none. Tool path uses config API only (pending issue 6.2).
-  > MCP path convention: all MCP tool services must serve at `/mcp`.
+  > K8s access: `get` on `services` in the workload namespace (tool path). Identity is resolved by `classify_service` (config API).
+  > MCP path convention: all MCP tool services must serve at `/mcp` and carry the `protocol.kagenti.io/mcp` label. This label is a **deploy-time prerequisite** — the kagenti-operator does not stamp it today; automatic stamping is requested upstream (`inception/gh-issues/kagenti-operator-mcp-label-stamping.md`). Until then it must be applied at deploy time; `analyze_tool` fails loud (`502`, naming the workload + missing label) if it is absent.
 
 - **`provision_service`**: non-LLM node; calls `create_service_role` and `create_service_scope` from `aiac.idp.configuration.api` for each entry in `ServiceProvision`. Reads `service_id` from state. Writes are **idempotent** (create-or-get).
   - Also persists the discovered `service_type` onto the Keycloak client via `Configuration.set_service_type(service, service_type)`, which stores it as the **`client.type`** attribute. This is the **authoritative origin** of the attribute that the IdP library's `Service._resolve_keycloak_fields` reads back (see the IdP library spec's type-resolution precedence). Case must be normalized at this persistence step: `ServiceType` is lowercase (`agent`/`tool`) but `client.type` is capitalized (`Agent`/`Tool`) to match `Literal["Agent", "Tool"]` — map `agent`→`Agent`, `tool`→`Tool`.
@@ -128,8 +129,8 @@ Extends `BaseAgentState` with:
 | Field | Type | Description |
 |---|---|---|
 | `service_id` | `str \| None` | Keycloak `client_id` = `trigger.entity_id` |
-| `namespace` | `str \| None` | Parsed from SPIFFE URI; agents only |
-| `workload_name` | `str \| None` | From SPIFFE URI (agents) or config API (tools) |
+| `namespace` | `str \| None` | From the `client.name` split in `classify_service` (agents and tools) |
+| `workload_name` | `str \| None` | From the `client.name` split in `classify_service` (agents and tools) |
 | `service_type` | `ServiceType \| None` | `agent` or `tool`; routing field |
 | `service_provision` | `ServiceProvision \| None` | Populated by `analyze_agent` or `analyze_tool` |
 
@@ -212,4 +213,4 @@ aiac/src/aiac/agent/uc/
 - PRB internals — see [`policy-rules-builder.md`](policy-rules-builder.md).
 - PCE reconcile mechanics — see [`../policy-computation-engine.md`](../policy-computation-engine.md).
 - Response body shape — no success body; handlers return bare HTTP status codes (error responses carry FastAPI's default JSON error body from the raised `HTTPException`). Summary + debug go to the log.
-- MCP endpoint lookup strategy for tools — tracked in `inception/issues/6.2-analyze-tool-lookup-strategy.md`.
+- MCP endpoint lookup strategy for tools — **resolved** (hybrid Keycloak→K8s) in `inception/issues/agent/service-onboarding/6.2-analyze-tool-lookup-strategy.md` and reflected in the `analyze_tool` node above.
