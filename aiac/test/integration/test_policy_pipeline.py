@@ -158,8 +158,8 @@ def provision_via_config(config: Configuration) -> None:
         config.map_role_to_service(agent_svc, role)
 
     # Type the services via the canonical ``client.type`` attribute using the IdP setter. The IdP no
-    # longer infers type from the description (``_build_service`` leaves it to the ``client.type``
-    # attribute / spiffe:// clientId). The Agent tag makes the PCE build the agent model; the Tool
+    # longer infers type from the description or clientId shape (``_build_service`` leaves it to the
+    # ``client.type`` attribute). The Agent tag makes the PCE build the agent model; the Tool
     # tag makes it omit the tool model. Without this the PCE builds an empty model — nothing is
     # stored and no rego is written.
     config.set_service_type(agent_svc, "Agent")

@@ -74,7 +74,7 @@ class Configuration:
         service_scope_ids = {s["id"] for s in scopes_resp.json()}
         scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
         # Type resolution is handled entirely by Service._resolve_keycloak_fields
-        # (client.type attribute → spiffe:// clientId → None); the library does not infer it here.
+        # (client.type attribute → None); the library does not infer it here.
         return Service.model_validate({**raw, "roles": roles, "scopes": scopes})
 
     def _all_roles_map(self) -> dict[str, Role]:

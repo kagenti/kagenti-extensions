@@ -282,7 +282,11 @@ class TestServiceTypeResolution:
         )
         assert s.type == "Tool"
 
-    def test_type_agent_from_spiffe_clientId(self):
+    def test_type_none_from_spiffe_clientId_without_attribute(self):
+        # A spiffe:// clientId means the workload is SPIRE-enabled, not that it is an
+        # agent. Without a client.type attribute the type stays None regardless of
+        # clientId shape; the operator's kagenti.io/type label (persisted as client.type)
+        # is the authoritative agent/tool signal.
         s = Service.model_validate(
             {
                 "id": "c3",
@@ -290,7 +294,7 @@ class TestServiceTypeResolution:
                 "enabled": True,
             }
         )
-        assert s.type == "Agent"
+        assert s.type is None
 
     def test_type_none_when_no_attribute_and_non_spiffe_clientId(self):
         s = Service.model_validate(

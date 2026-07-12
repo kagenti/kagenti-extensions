@@ -83,15 +83,16 @@ class Service(BaseModel):
             updates["serviceId"] = client_id
 
         # Resolve service type. Precedence: explicit ``type`` (already set, skipped here) →
-        # Keycloak ``client.type`` attribute (plain string ∈ {Agent,Tool}) → SPIFFE-format
-        # clientId ⇒ Agent → None. A list-valued attribute fails the string check → None.
+        # Keycloak ``client.type`` attribute (plain string ∈ {Agent,Tool}) → None. A
+        # list-valued or unrecognized attribute fails the string check → None. clientId
+        # shape (e.g. ``spiffe://``) is not consulted: it signals SPIRE-enablement, not
+        # agent-vs-tool — the operator's ``kagenti.io/type`` label (persisted as
+        # ``client.type``) is the authoritative type signal.
         if data.get("type") is None:
             attrs = data.get("attributes") or {}
             stored_type = attrs.get(SERVICE_TYPE_ATTRIBUTE)
             if stored_type in ("Agent", "Tool"):
                 updates["type"] = stored_type
-            elif client_id and str(client_id).startswith("spiffe://"):
-                updates["type"] = "Agent"
 
         return {**data, **updates} if updates else data
 
