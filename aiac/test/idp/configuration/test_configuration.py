@@ -1,11 +1,12 @@
 """Unit tests for aiac.idp.configuration."""
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from aiac.idp.configuration.api import Configuration
-from aiac.idp.configuration.models import Role, Scope, Service, Subject
+from aiac.idp.configuration.models import Role, Scope, Service, ServiceType, Subject
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7071"
@@ -478,6 +479,96 @@ class TestSetServiceType:
         with patch("aiac.idp.configuration.api.requests.post", return_value=_err(502)):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).set_service_type(service, "Agent")
+
+    def test_accepts_service_type_enum(self, monkeypatch):
+        # ServiceType is a str enum; set_service_type unwraps it to the plain "Agent"/"Tool" value.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True,
+                   "attributes": {"client.type": "Agent"}}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)) as m:
+            Configuration.for_realm(REALM).set_service_type(service, ServiceType.AGENT)
+        assert m.call_args[1].get("json") == {"type": "Agent"}
+
+
+# ---------------------------------------------------------------------------
+# create_service_role / create_service_scope — idempotent create-or-get + map
+# (tested by patching the Configuration methods they compose)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateServiceRole:
+    def _svc(self):
+        return Service.model_validate({"id": "svc-1", "clientId": "svc-1", "enabled": True})
+
+    def test_creates_role_when_absent_then_maps_to_service(self):
+        cfg = Configuration.for_realm(REALM)
+        role_def = SimpleNamespace(name="app.agent", description="Agent role")
+        created = Role(id="r-1", name="app.agent", description="Agent role", composite=False)
+        svc = self._svc()
+        with (
+            patch.object(cfg, "get_roles", return_value=[]),
+            patch.object(cfg, "create_role", return_value=created) as create,
+            patch.object(cfg, "get_service", return_value=svc),
+            patch.object(cfg, "map_role_to_service", return_value=svc) as mapper,
+        ):
+            result = cfg.create_service_role("svc-1", role_def)
+        create.assert_called_once_with("app.agent", "Agent role")
+        mapper.assert_called_once_with(svc, created)
+        assert result is created
+
+    def test_reuses_existing_role_without_creating(self):
+        cfg = Configuration.for_realm(REALM)
+        role_def = SimpleNamespace(name="app.agent", description="Agent role")
+        existing = Role(id="r-1", name="app.agent", description="Agent role", composite=False)
+        svc = self._svc()
+        with (
+            patch.object(cfg, "get_roles", return_value=[existing]),
+            patch.object(cfg, "create_role") as create,
+            patch.object(cfg, "get_service", return_value=svc),
+            patch.object(cfg, "map_role_to_service", return_value=svc) as mapper,
+        ):
+            result = cfg.create_service_role("svc-1", role_def)
+        create.assert_not_called()
+        mapper.assert_called_once_with(svc, existing)
+        assert result is existing
+
+
+class TestCreateServiceScope:
+    def _svc(self):
+        return Service.model_validate({"id": "svc-1", "clientId": "svc-1", "enabled": True})
+
+    def test_creates_scope_when_absent_then_maps_to_service(self):
+        cfg = Configuration.for_realm(REALM)
+        scope_def = SimpleNamespace(name="app.read", description="Read tool")
+        created = Scope(id="s-1", name="app.read", description="Read tool")
+        svc = self._svc()
+        with (
+            patch.object(cfg, "get_scopes", return_value=[]),
+            patch.object(cfg, "create_scope", return_value=created) as create,
+            patch.object(cfg, "get_service", return_value=svc),
+            patch.object(cfg, "map_scope_to_service", return_value=svc) as mapper,
+        ):
+            result = cfg.create_service_scope("svc-1", scope_def)
+        create.assert_called_once_with("app.read", "Read tool")
+        mapper.assert_called_once_with(svc, created)
+        assert result is created
+
+    def test_reuses_existing_scope_without_creating(self):
+        cfg = Configuration.for_realm(REALM)
+        scope_def = SimpleNamespace(name="app.read", description="Read tool")
+        existing = Scope(id="s-1", name="app.read", description="Read tool")
+        svc = self._svc()
+        with (
+            patch.object(cfg, "get_scopes", return_value=[existing]),
+            patch.object(cfg, "create_scope") as create,
+            patch.object(cfg, "get_service", return_value=svc),
+            patch.object(cfg, "map_scope_to_service", return_value=svc) as mapper,
+        ):
+            result = cfg.create_service_scope("svc-1", scope_def)
+        create.assert_not_called()
+        mapper.assert_called_once_with(svc, existing)
+        assert result is existing
 
 
 # ---------------------------------------------------------------------------

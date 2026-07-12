@@ -80,17 +80,19 @@ Represents a service (Keycloak: `client`).
 | `name` | `str \| None` | `name` | |
 | `description` | `str \| None` | `description` | `None` |
 | `enabled` | `bool` | `enabled` | |
-| `type` | `Literal["Agent", "Tool"] \| None` | `attributes.client.type` | `None` |
+| `type` | `ServiceType \| None` | `attributes.client.type` | `None` |
 | `roles` | `list[Role]` | _(roles for this client)_ | `[]` |
 | `scopes` | `list[Scope]` | _(default client scopes)_ | `[]` |
 
 **Service type resolution** (`Service._resolve_keycloak_fields`, a `model_validator(mode="before")`). AIAC calls the concept "service type" everywhere; the backing Keycloak client attribute is named **`client.type`**. Resolution precedence:
 
 1. An explicit `type` already present on the input wins (never overridden).
-2. Otherwise the Keycloak client attribute **`client.type`** ∈ {`Agent`, `Tool`} — a **plain string**. Client attribute values are plain strings; a **list** value (e.g. `["Agent"]`, the shape realm-role attributes use) fails the check and resolves to `None`. Capitalization matches `Literal["Agent", "Tool"]`.
+2. Otherwise the Keycloak client attribute **`client.type`** ∈ {`Agent`, `Tool`} — a **plain string**. Client attribute values are plain strings; a **list** value (e.g. `["Agent"]`, the shape realm-role attributes use) fails the check and resolves to `None`. Capitalization matches the `ServiceType` values.
 3. Otherwise `None`.
 
 The attribute is set via `Configuration.set_service_type` (below); its authoritative origin is UC1 Service Onboarding — `classify_service` **discovers** the type from the operator's `kagenti.io/type` label and `provision_service` **persists** it onto the client via `set_service_type` (see the aiac-agent UC1 spec). There is **no** `spiffe://` clientId fallback and **no** description-keyword inference — typing is `client.type`-attribute-only. (The former `spiffe:// ⇒ Agent` fallback was **removed**: a `spiffe://` clientId indicates a SPIRE-enabled workload, **not** necessarily an agent — it could mis-type a SPIRE-enabled tool — so clients without a `client.type` attribute now resolve to `None`.)
+
+> **`ServiceType`** (`aiac.idp.configuration.models`) is a `str` enum — `AGENT = "Agent"`, `TOOL = "Tool"` — shared by `Service.type`, `set_service_type`, and the aiac-agent sub-agents (one vocabulary, no duplication). Values are capitalized to match the `client.type` attribute; because it subclasses `str`, `ServiceType.AGENT == "Agent"`, so it is a drop-in for the former `Literal["Agent", "Tool"]`. The operator's lowercase `kagenti.io/type` pod label is normalized to a member via `ServiceType(label.capitalize())` in UC1 `classify_service`.
 
 #### `Scope`
 
@@ -157,7 +159,13 @@ class Configuration:
     def create_role(self, role_name: str, role_description: str) -> Role: ...
     def map_role_to_service(self, service: Service, role: Role) -> Service: ...
 
-    def set_service_type(self, service: Service, service_type: Literal["Agent", "Tool"]) -> Service: ...
+    # Idempotent create-or-get (by name) + map to the service. Accept any object exposing
+    # .name / .description (e.g. the aiac-agent RoleDefinition / ScopeDefinition), so the
+    # library never imports the agent layer.
+    def create_service_role(self, service_id: str, role) -> Role: ...
+    def create_service_scope(self, service_id: str, scope) -> Scope: ...
+
+    def set_service_type(self, service: Service, service_type: ServiceType) -> Service: ...
 ```
 
 `get_scopes()` — simple read:
@@ -238,8 +246,20 @@ class Configuration:
 3. Re-fetches the service via `GET {AIAC_PDP_CONFIG_URL}/services/{service.id}`, appending `?realm=<self.realm>`.
 4. Returns the updated `Service` instance parsed from the response.
 
-`set_service_type(service: Service, service_type: Literal["Agent", "Tool"]) -> Service`:
-1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/type` with body `{"type": service_type}`, appending `?realm=<self.realm>`.
+`create_service_role(service_id: str, role) -> Role`: idempotent create-or-get + map.
+1. `get_roles()` and reuse an existing realm role whose `name == role.name`; otherwise `create_role(role.name, role.description)`.
+2. `map_role_to_service(get_service(service_id), resolved_role)` (itself idempotent).
+3. Raises `RuntimeError` on any underlying non-2xx HTTP status. Returns the resolved `Role`.
+4. `role` is any object exposing `.name` / `.description` (e.g. the aiac-agent `RoleDefinition`); the library does not import the agent layer.
+
+`create_service_scope(service_id: str, scope) -> Scope`: idempotent create-or-get + map.
+1. `get_scopes()` and reuse an existing client scope whose `name == scope.name`; otherwise `create_scope(scope.name, scope.description)`.
+2. `map_scope_to_service(get_service(service_id), resolved_scope)` (itself idempotent).
+3. Raises `RuntimeError` on any underlying non-2xx HTTP status. Returns the resolved `Scope`.
+4. `scope` is any object exposing `.name` / `.description` (e.g. the aiac-agent `ScopeDefinition`).
+
+`set_service_type(service: Service, service_type: ServiceType) -> Service`:
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/type` with body `{"type": <value>}` (the `ServiceType`'s `Agent`/`Tool` value; a bare `"Agent"`/`"Tool"` string is accepted too since `ServiceType` is a `str` enum), appending `?realm=<self.realm>`.
 2. The service persists the value onto the Keycloak client as the **`client.type`** attribute (a plain string, capitalized). The Keycloak attribute name is an IdP-Service/mapping-layer detail — callers pass the generic `service_type` and never see it.
 3. Raises `RuntimeError` on non-2xx HTTP status.
 4. Returns the updated `Service` instance parsed from the response (`type` now resolved from the new attribute).

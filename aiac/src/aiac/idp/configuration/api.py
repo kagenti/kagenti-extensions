@@ -1,11 +1,20 @@
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Protocol
 
 import requests
 from dotenv import load_dotenv
 
-from aiac.idp.configuration.models import Role, Scope, Service, Subject
+from aiac.idp.configuration.models import Role, Scope, Service, ServiceType, Subject
+
+
+class _NamedDefinition(Protocol):
+    """Structural type for a not-yet-persisted role/scope: just a name + description.
+    Lets ``create_service_role`` / ``create_service_scope`` accept the agent layer's
+    ``RoleDefinition`` / ``ScopeDefinition`` without the IdP library importing the agent."""
+
+    name: str
+    description: str
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
@@ -135,19 +144,46 @@ class Configuration:
         self._check(get_resp)
         return Service.model_validate(get_resp.json())
 
-    def set_service_type(self, service: Service, service_type: Literal["Agent", "Tool"]) -> Service:
+    def set_service_type(self, service: Service, service_type: ServiceType) -> Service:
         """Persist a service's type onto the Keycloak client as the ``client.type`` attribute.
 
-        The value is stored capitalized (``Agent``/``Tool``) so ``Service._resolve_keycloak_fields``
-        resolves it back on read. Returns the updated ``Service``.
+        The value is stored capitalized (``Agent``/``Tool`` — ``ServiceType``'s values) so
+        ``Service._resolve_keycloak_fields`` resolves it back on read. Returns the updated
+        ``Service``. A bare ``"Agent"``/``"Tool"`` string is accepted too (``ServiceType`` is a
+        ``str`` enum).
         """
+        value = service_type.value if isinstance(service_type, ServiceType) else service_type
         resp = requests.post(
             f"{self._base_url()}/services/{service.id}/type",
-            json={"type": service_type},
+            json={"type": value},
             params=self._params(),
         )
         self._check(resp)
         return Service.model_validate(resp.json())
+
+    def create_service_role(self, service_id: str, role: _NamedDefinition) -> Role:
+        """Idempotent create-or-get of a realm role by name, then map it to ``service_id``.
+
+        If a realm role with ``role.name`` already exists it is reused (no duplicate create);
+        otherwise it is created. The role is then mapped to the service's service-account
+        (``map_role_to_service`` is itself idempotent). Returns the resolved ``Role``.
+        """
+        existing = next((r for r in self.get_roles() if r.name == role.name), None)
+        resolved = existing or self.create_role(role.name, role.description)
+        self.map_role_to_service(self.get_service(service_id), resolved)
+        return resolved
+
+    def create_service_scope(self, service_id: str, scope: _NamedDefinition) -> Scope:
+        """Idempotent create-or-get of a client scope by name, then map it to ``service_id``.
+
+        If a client scope with ``scope.name`` already exists it is reused; otherwise it is
+        created. The scope is then mapped to the service as a default client scope
+        (``map_scope_to_service`` is itself idempotent). Returns the resolved ``Scope``.
+        """
+        existing = next((s for s in self.get_scopes() if s.name == scope.name), None)
+        resolved = existing or self.create_scope(scope.name, scope.description)
+        self.map_scope_to_service(self.get_service(service_id), resolved)
+        return resolved
 
     def create_role(self, role_name: str, role_description: str) -> Role:
         resp = requests.post(

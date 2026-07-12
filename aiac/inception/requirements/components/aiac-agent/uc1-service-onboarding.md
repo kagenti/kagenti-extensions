@@ -2,6 +2,8 @@
 
 > **Depends on:** [`../aiac-agent.md`](../aiac-agent.md) — NATS Consumer, Controller, Shared Module, Configuration, Error Handling, Runtime.
 
+> **IdP access — library, not service.** All IdP reads and writes go through the **idp-library** API (`aiac.idp.configuration.api.Configuration`), **never** the IdP Configuration **service** (`aiac.idp.service.configuration.*`) or its HTTP endpoints directly. See [aiac-agent.md → IdP access](../aiac-agent.md#idp-access--library-not-service).
+
 ## Triggers
 
 | Source | Subject / Path |
@@ -67,9 +69,9 @@ No LLM calls, retry logic, or response assembly in the Orchestrator beyond seque
 
 **Nature:** LLM-based. Classifies the new service (agent or tool), derives roles + scopes from AgentCard / MCP manifest, and **writes them into the IdP**.
 
-All IdP writes and reads target **`aiac.idp.configuration.api`**:
-- `create_service_role(service_id, role)` — idempotent (create-or-get)
-- `create_service_scope(service_id, scope)` — idempotent (create-or-get)
+All IdP writes and reads target the **idp-library** — `aiac.idp.configuration.api.Configuration` — not the IdP service directly:
+- `create_service_role(service_id, role)` — idempotent (create-or-get by name, then map)
+- `create_service_scope(service_id, scope)` — idempotent (create-or-get by name, then map)
 
 ### Graph
 
@@ -83,10 +85,12 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   1. Store `service_id = trigger.entity_id` (Keycloak `client_id`).
   2. Resolve identity: call `get_service(service_id)` from `aiac.idp.configuration.api` → `client.name`, which the kagenti-operator sets to `"{namespace}/{workload_name}"` for every workload (agents and tools, SPIRE-enabled or not). Split on the first `/` → store `namespace` and `workload_name`. `502` if `client.name` has no `/` (namespace unrecoverable).
   3. LIST pods in `namespace`; select the pod owned by `workload_name` via `ownerReferences` (Deployment → ReplicaSet name prefix, or `StatefulSet`/`Sandbox` name match). `502` on Kubernetes API failure or no matching pod.
-  4. Read the `kagenti.io/type` label on that pod:
-     - `agent` → `service_type = agent`; route to `analyze_agent`.
-     - `tool` → `service_type = tool`; route to `analyze_tool`.
-     - Absent or any other value → `502` (inconsistent deployment).
+  4. Read the `kagenti.io/type` label on that pod and normalize it to a `ServiceType`
+     member via `ServiceType(label.capitalize())` — the label is lowercase
+     (`agent`/`tool`); `ServiceType` values are capitalized (`Agent`/`Tool`):
+     - `agent` → `ServiceType.AGENT`; route to `analyze_agent`.
+     - `tool` → `ServiceType.TOOL`; route to `analyze_tool`.
+     - Absent or any other value (normalization raises `ValueError`) → `502` (inconsistent deployment).
 
   > K8s access: `list` on `pods` in the target namespace (both paths).
   > `kagenti.io/type` is authoritative — applied by the kagenti-operator (via the AgentRuntime CR) and propagated to pod labels; it is the operator's own agent/tool discriminator (`SkipReason`, kagenti-operator `internal/clientreg/names.go`). The operator only registers a Keycloak client for a workload that already carries this label, so it is effectively guaranteed for operator-registered clients; a missing/invalid value still fails loud (`502`, naming the workload + label). The `entity_id` format (SPIFFE vs plain) reflects whether SPIRE is enabled, **not** the service type, so it is not used for classification.
@@ -120,7 +124,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   > MCP path convention: all MCP tool services must serve at `/mcp` and carry the `protocol.kagenti.io/mcp` label. This label is a **deploy-time prerequisite** — the kagenti-operator does not stamp it today; automatic stamping is requested upstream (`inception/gh-issues/kagenti-operator-mcp-label-stamping.md`). Until then it must be applied at deploy time; `analyze_tool` fails loud (`502`, naming the workload + missing label) if it is absent.
 
 - **`provision_service`**: non-LLM node; calls `create_service_role` and `create_service_scope` from `aiac.idp.configuration.api` for each entry in `ServiceProvision`. Reads `service_id` from state. Writes are **idempotent** (create-or-get).
-  - Also persists the discovered `service_type` onto the Keycloak client via `Configuration.set_service_type(service, service_type)`, which stores it as the **`client.type`** attribute. This is the **authoritative origin** of the attribute that the IdP library's `Service._resolve_keycloak_fields` reads back (see the IdP library spec's type-resolution precedence). Case must be normalized at this persistence step: `ServiceType` is lowercase (`agent`/`tool`) but `client.type` is capitalized (`Agent`/`Tool`) to match `Literal["Agent", "Tool"]` — map `agent`→`Agent`, `tool`→`Tool`.
+  - Also persists the discovered `service_type` onto the Keycloak client via `Configuration.set_service_type(service, service_type)`, which stores it as the **`client.type`** attribute. This is the **authoritative origin** of the attribute that the IdP library's `Service._resolve_keycloak_fields` reads back (see the IdP library spec's type-resolution precedence). No case mapping is needed here: `service_type` is a `ServiceType` (values `Agent`/`Tool`), already matching `client.type` and `Service.type`. Case normalization happens once, upstream, when `classify_service` reads the lowercase `kagenti.io/type` label.
 
 ### State: `OnboardingProvisionState`
 
@@ -136,11 +140,24 @@ Extends `BaseAgentState` with:
 
 ### Types
 
-```python
-class ServiceType(str, Enum):
-    agent = "agent"
-    tool = "tool"
+`ServiceType` is **not** redefined here — it is imported from `aiac.idp.configuration.models`
+(the same enum backing `Service.type`), so the sub-agent, the IdP library, and the IdP service
+share one vocabulary:
 
+```python
+# aiac.idp.configuration.models — shared, reused by the sub-agent (do not duplicate):
+class ServiceType(str, Enum):
+    AGENT = "Agent"   # values capitalized to match the Keycloak client.type attribute
+    TOOL = "Tool"
+```
+
+The remaining types are sub-agent–local (in `provision/types.py`). `RoleDefinition` /
+`ScopeDefinition` are deliberately distinct from the IdP `Role` / `Scope` models: a derived
+role/scope is a pre-persistence *name + description* with no Keycloak `id` yet (idp `Role`
+requires `id` + `composite`, `Scope` requires `id`), so it cannot be an idp model until
+`provision_service` writes it.
+
+```python
 class RoleDefinition(BaseModel):
     name: str
     description: str
@@ -211,7 +228,7 @@ aiac/src/aiac/agent/uc/
     │   ├── graph.py      ← ServiceProvisionGraph (LLM-based StateGraph)
     │   ├── nodes.py      ← classify_service, analyze_agent, analyze_tool, provision_service
     │   ├── state.py      ← OnboardingProvisionState
-    │   └── types.py      ← ServiceType, RoleDefinition, ScopeDefinition, ServiceProvision
+    │   └── types.py      ← RoleDefinition, ScopeDefinition, ServiceProvision (ServiceType imported from aiac.idp.configuration.models)
     └── service_policy/
         ├── __init__.py
         └── runner.py     ← ServicePolicyUpdate.run(service_provision, service_type) → list[PolicyRule]

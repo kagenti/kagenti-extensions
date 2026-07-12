@@ -1,6 +1,19 @@
-from typing import Any, Literal
+from enum import Enum
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, model_validator
+
+
+class ServiceType(str, Enum):
+    """Canonical service-type vocabulary, shared by the IdP library, the IdP service, and the
+    AIAC agent sub-agents. Values are capitalized (``Agent``/``Tool``) to match the Keycloak
+    ``client.type`` attribute; as a ``str`` enum, ``ServiceType.AGENT == "Agent"`` holds, so it
+    is a drop-in for the former ``Literal["Agent", "Tool"]``. The operator's ``kagenti.io/type``
+    pod label is lowercase (``agent``/``tool``) and is normalized to a member via
+    ``ServiceType(label.capitalize())`` at classification time."""
+
+    AGENT = "Agent"
+    TOOL = "Tool"
 
 # AIAC naming convention: every role and client scope AIAC provisions carries the Keycloak
 # attribute ``aiac.managed`` with value ``true``. Keycloak's own built-ins (default client
@@ -13,7 +26,7 @@ AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
 # Keycloak attribute that carries a service's (client's) type. AIAC calls the concept
 # "service type" everywhere (``Service.type`` ∈ {``Agent``,``Tool``}); the underlying Keycloak
 # client attribute is named ``client.type``. The value is a plain string (``"Agent"``/``"Tool"``,
-# capitalized to match ``Literal["Agent","Tool"]``) — a list value fails resolution → type ``None``.
+# capitalized to match ``ServiceType``) — a list value fails resolution → type ``None``.
 SERVICE_TYPE_ATTRIBUTE = "client.type"
 
 
@@ -60,7 +73,7 @@ class Service(BaseModel):
     name: str | None = None
     description: str | None = None
     enabled: bool
-    type: Literal["Agent", "Tool"] | None = None
+    type: ServiceType | None = None
     roles: list["Role"] = []
     scopes: list["Scope"] = []
 
