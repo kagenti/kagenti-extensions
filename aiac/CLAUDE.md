@@ -55,6 +55,16 @@ For current file list, `ls` or `find` under `src/aiac/`.
 
 Use `ls test/` to discover current test directories.
 
+**Integration tests** (`-m integration`) need live config — Keycloak + admin creds + an LLM
+endpoint (`opa` on PATH for the policy-pipeline suite). Those variables live in
+`test/integration/.env` (gitignored): `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `KEYCLOAK_URL`,
+`KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD`. Source it before running:
+
+```bash
+set -a; . test/integration/.env; set +a
+.venv/bin/pytest test/integration/ -m integration
+```
+
 **Smoke test** (requires live service at `AIAC_PDP_CONFIG_URL`, default `http://127.0.0.1:7071`):
 
 ```bash

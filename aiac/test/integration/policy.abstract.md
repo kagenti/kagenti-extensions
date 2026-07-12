@@ -1,5 +1,2 @@
-Grant access on a least-privilege basis: allow only what this policy states; deny by default.
-
 - Developers work primarily in source — writing and maintaining code — and consult the issue tracker only to follow defect reports; grant them full read and write access to source contents, and read-only access to issues.
 - Testers work exclusively in the issue tracker — filing, triaging, and updating defect reports — and do not work in source; grant them full read and write access to issues, and no access to source.
-- The agent's internal operator roles are each confined to their own domain: grant every operator role exactly the tool operations within the domain it is responsible for, and nothing outside that domain.

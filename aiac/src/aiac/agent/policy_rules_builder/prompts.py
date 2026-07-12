@@ -1,15 +1,37 @@
 """Lean proposer/auditor message builders for both PRB directions.
 
-No worked examples, no domain content. The static system message carries the
-task framing plus two shared safety meta-rules (deny-by-default / policy-silence,
+No worked examples, no scenario domain content. The static system message carries
+the task framing plus two shared safety meta-rules (deny-by-default / policy-silence,
 and stay strictly scoped to the single focal entity) and two shared mapping rules
 (capability projection and relationship scoping — see _MAPPING_RULES). Both the
 proposer and the auditor reason under the same rules because both make the same
 grant decision. Everything variable — policy text, focal entity, candidates, and
 any auditor feedback — goes in the user message so it is observable in tests.
+
+The user message's POLICY block is built from three layers, in order: the
+least-privilege deny-by-default directive (``_GRANT_ACCESS`` here in the prompt),
+the bundled generic baseline policy (``generic_policy.md`` — agent operator-role
+domain confinement, applies to every policy decision), and finally the scenario policy
+text. Factoring the universal clauses out of the file means a scenario policy file
+only has to state what is specific to that scenario; the baseline is always present.
 """
 
+from pathlib import Path
+
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+
+# Least-privilege framing that heads every POLICY block, before any file-based policy.
+_GRANT_ACCESS = "Grant access on a least-privilege basis: allow only what this policy states; deny by default."
+
+# Generic baseline policy, bundled next to this module and prepended to every scenario policy.
+# Loaded once at import (static, domain-agnostic — safe to read eagerly).
+_GENERIC_POLICY = (Path(__file__).parent / "generic_policy.md").read_text(encoding="utf-8").strip()
+
+
+def _policy_block(policy_text: str) -> str:
+    """Compose the POLICY block: least-privilege directive, then the generic baseline, then the
+    scenario policy."""
+    return f"{_GRANT_ACCESS}\n\n{_GENERIC_POLICY}\n\n{policy_text}"
 
 _SAFETY = (
     "Rules:\n"
@@ -67,7 +89,7 @@ def build_proposer_messages(
     contract: str,
     audit_feedback: str | None,
 ) -> list[BaseMessage]:
-    body = f"POLICY:\n{policy_text}\n\nFOCAL ENTITY:\n{focal}\n\nCANDIDATES:\n{candidates}\n\n{contract}"
+    body = f"POLICY:\n{_policy_block(policy_text)}\n\nFOCAL ENTITY:\n{focal}\n\nCANDIDATES:\n{candidates}\n\n{contract}"
     if audit_feedback:
         body += f"\n\nA prior proposal was REJECTED. Fix per this feedback:\n{audit_feedback}"
     return [SystemMessage(content=_PROPOSER_SYSTEM), HumanMessage(content=body)]
@@ -80,7 +102,7 @@ def build_auditor_messages(
     selected_names: list[str],
 ) -> list[BaseMessage]:
     body = (
-        f"POLICY:\n{policy_text}\n\nFOCAL ENTITY:\n{focal}\n\nCANDIDATES:\n{candidates}\n\n"
+        f"POLICY:\n{_policy_block(policy_text)}\n\nFOCAL ENTITY:\n{focal}\n\nCANDIDATES:\n{candidates}\n\n"
         f"PROPOSED SELECTION (names): {selected_names}"
     )
     return [SystemMessage(content=_AUDITOR_SYSTEM), HumanMessage(content=body)]

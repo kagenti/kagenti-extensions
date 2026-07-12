@@ -330,6 +330,12 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
   drop out of the fact triad; they must stay generic and simply not contradict the facts. If the
   role→access facts change, update the *Scenario* table, both `policy.md` variants, and the pair-lists
   together so the eyeballed output stays reviewable.
+- The least-privilege **deny-by-default** directive is supplied by the PRB prompt itself
+  (`_GRANT_ACCESS` in `agent/policy_rules_builder/prompts.py`), which prepends it — followed by the
+  bundled generic baseline policy (`generic_policy.md`) — ahead of the scenario `policy.md` on every
+  call, so every policy decision gets it regardless of which variant is read. The **explicit** variant
+  still spells the directive out (its whole point is to state everything outright); the **abstract**
+  variant relies on the prompt and does not restate it — do not re-add it to the abstract variant.
 - Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
   **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
   output on explicit vs. abstract policy text against the same expected Rego. The abstract variant
@@ -459,8 +465,6 @@ role descriptions (see *Role & scope descriptions*), so it survives the PRB's de
 rule and both variants reproduce the same Rego.
 
 ```markdown
-Grant access on a least-privilege basis: allow only what this policy states; deny by default.
-
 - Developers work primarily in source — writing and maintaining code — and consult the issue tracker only to follow defect reports; grant them full read and write access to source contents, and read-only access to issues.
 - Testers work exclusively in the issue tracker — filing, triaging, and updating defect reports — and do not work in source; grant them full read and write access to issues, and no access to source.
 ```
