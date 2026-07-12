@@ -1,5 +1,4 @@
 Grant access on a least-privilege basis: allow only what this policy states; deny by default.
 
-- Developers may read and modify source, and read issues.
-- Testers may read and modify issues.
-- The source-helper role covers reading and modifying source; the issues-helper role covers reading and modifying issues.
+- Developers work primarily in source — writing and maintaining code — and consult the issue tracker only to follow defect reports; grant them full read and write access to source contents, and read-only access to issues.
+- Testers work exclusively in the issue tracker — filing, triaging, and updating defect reports — and do not work in source; grant them full read and write access to issues, and no access to source.

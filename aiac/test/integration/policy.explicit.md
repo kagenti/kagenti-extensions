@@ -12,5 +12,5 @@ policy supports it; deny by default.
 - tester may perform issues-read and issues-write.
 
 ## Agent roles → tool operations (outbound target; agent may reach the tool)
-- source-helper may perform source-read and source-write.
-- issues-helper may perform issues-read and issues-write.
+- source-operator may perform source-read and source-write.
+- issues-operator may perform issues-read and issues-write.

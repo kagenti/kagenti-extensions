@@ -71,13 +71,13 @@ USER_ROLES: dict[str, str] = {
 
 # name -> description. The github-agent's client roles.
 AGENT_ROLES: dict[str, str] = {
-    "source-helper": (
-        "Client role for source-code operations, covering reading and writing repository source "
-        "content."
+    "source-operator": (
+        "Covers read and write access to source repository contents — listing, reading, creating, "
+        "and modifying files."
     ),
-    "issues-helper": (
-        "Client role for issue-tracker operations, covering reading and writing issues and their "
-        "threads."
+    "issues-operator": (
+        "Covers read and write access to the issue tracker — reading, filing, updating, and "
+        "commenting on issues and their threads."
     ),
 }
 
@@ -116,10 +116,10 @@ INBOUND_PAIRS: list[tuple[str, str]] = [
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("source-helper", "source-read"),
-    ("source-helper", "source-write"),
-    ("issues-helper", "issues-read"),
-    ("issues-helper", "issues-write"),
+    ("source-operator", "source-read"),
+    ("source-operator", "source-write"),
+    ("issues-operator", "issues-read"),
+    ("issues-operator", "issues-write"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
