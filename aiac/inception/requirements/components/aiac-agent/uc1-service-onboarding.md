@@ -165,9 +165,18 @@ class ServiceProvision(BaseModel):
 
 **Purpose:** given the just-provisioned service's own roles + scopes (from Provision output), read the full IdP universe **excluding the new service's own entities**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
 
-The two call directions prevent self-mapping and keep each PRB call's semantic intent crisp:
-- `build_scope_rules(other_roles, agent_scope)` = *who else may call this skill*
-- `build_role_rules(agent_role, other_scopes)` = *what else may this role call* (agent path only)
+**Terminology — own vs other (used throughout this section):**
+- **Own roles / own scopes** — the roles and scopes the just-provisioned service defines for *itself*: exactly `service_provision.roles` / `service_provision.scopes`, written into the IdP by Service Provision.
+- **Other roles / other scopes** — every *pre-existing* role/scope in the IdP universe **minus** the new service's own entities. These belong to other services.
+
+**Self-mapping invariant (must hold):** the PRB must **never** be handed an *(own role, own scope)* pair — a service's own role must never be mapped to its own scope. Onboarding only ever grants **cross-service** access: *who else* may call this service, and (agents only) *what else* this service may call. A service's own role reaching its own scope is not something onboarding needs to author (that access is intrinsic and out of scope here) and would pollute the policy set. The Service Policy sub-agent guarantees the invariant **by construction** through two complementary guards:
+
+1. **Exclusion (own entities never appear on the "other" side).** Own roles are removed from `other_roles` and own scopes from `other_scopes` before any PRB call (steps 2–3). Flattening runs *after* exclusion and cannot reintroduce an own role: the just-provisioned roles are brand new and are not yet referenced as `childRoles` by any existing role.
+2. **Call direction (each call's "self" side is one own entity of the *opposite* kind).** Each PRB call pairs a single own entity with the other-side universe, never own-with-own, and keeps the semantic intent crisp:
+   - `build_scope_rules(flattened_other_roles, own_scope)` = *who else may call this skill* (an **own scope** against **other roles**)
+   - `build_role_rules(own_role, other_scopes)` = *what else may this role call* (an **own role** against **other scopes**; agent path only)
+
+Neither guard alone is sufficient — exclusion keeps own entities off the other side, and the call direction keeps the self side and the other side of *opposite* kinds (a scope vs roles, or a role vs scopes). Together they make an *(own role, own scope)* pair unrepresentable in any PRB call.
 
 ### Steps
 
