@@ -16,7 +16,7 @@
 UC1 is the only use case with an Orchestrator, because it is a two-stage pipeline:
 
 1. **Service Provision** (LLM-based): classify the new service, derive its roles + scopes, write them into the IdP.
-2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), package into `list[tuple]`, return to the Orchestrator.
+2. **Service Policy** (deterministic): read the full IdP role + scope universe (excluding the new service's own entities), call the PRB for each applicable pair, and return a merged `list[PolicyRule]` to the Orchestrator.
 
 The Orchestrator returns `(list[PolicyRule], override=False)` to the Controller. The Controller calls the PCE with that `override` flag; the PCE owns all rule reconciliation. UC1 is **incremental** — existing roles receive a partial new mapping and must not lose their other access — so the mode is always append (`override=False`).
 
@@ -54,7 +54,7 @@ flowchart TD
 
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
-2. Call `ServicePolicyUpdate.run(service_provision, service_type)` → get back `list[PolicyRule]`.
+2. Call `ServicePolicyUpdate.run(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy re-reads the service's own roles/scopes from the IdP by `service_id` (Provision has already persisted them), so it needs only the id, not the `ServiceProvision`.
 3. Return `(list[PolicyRule], override=False)` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
@@ -180,15 +180,17 @@ class ServiceProvision(BaseModel):
 
 **Nature:** deterministic IdP reader + PRB invoker.
 
-**Purpose:** given the just-provisioned service's own roles + scopes (from Provision output), read the full IdP universe **excluding the new service's own entities**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
+**Purpose:** given the just-provisioned service's `service_id`, fetch its own roles + scopes from the IdP (`get_service(service_id)`), read the full IdP universe **excluding the new service's own entities**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
+
+**Why `service_id`, not `ServiceProvision`:** own roles/scopes must be id-bearing `Role`/`Scope` — `flatten_role` needs a `Role` (with `childRoles`) and the PRB builds `PolicyRule(role=Role, scope=Scope)`. The Provision-time `RoleDefinition`/`ScopeDefinition` carry only name+description (no Keycloak id), so they cannot be passed to the PRB. Provision has already persisted these entities, so `get_service(service_id).roles` / `.scopes` returns them with ids.
 
 **Terminology — own vs other (used throughout this section):**
-- **Own roles / own scopes** — the roles and scopes the just-provisioned service defines for *itself*: exactly `service_provision.roles` / `service_provision.scopes`, written into the IdP by Service Provision.
+- **Own roles / own scopes** — the roles and scopes the just-provisioned service defines for *itself*, fetched from the IdP by `service_id`: `service.roles` / `service.scopes` (`get_service(service_id)`). These are exactly the entities Service Provision wrote.
 - **Other roles / other scopes** — every *pre-existing* role/scope in the IdP universe **minus** the new service's own entities. These belong to other services.
 
 **Self-mapping invariant (must hold):** the PRB must **never** be handed an *(own role, own scope)* pair — a service's own role must never be mapped to its own scope. Onboarding only ever grants **cross-service** access: *who else* may call this service, and (agents only) *what else* this service may call. A service's own role reaching its own scope is not something onboarding needs to author (that access is intrinsic and out of scope here) and would pollute the policy set. The Service Policy sub-agent guarantees the invariant **by construction** through two complementary guards:
 
-1. **Exclusion (own entities never appear on the "other" side).** Own roles are removed from `other_roles` and own scopes from `other_scopes` before any PRB call (steps 2–3). Flattening runs *after* exclusion and cannot reintroduce an own role: the just-provisioned roles are brand new and are not yet referenced as `childRoles` by any existing role.
+1. **Exclusion (own entities never appear on the "other" side).** Own roles are removed from `other_roles` and own scopes from `other_scopes` before any PRB call (steps 3–4). Flattening runs *after* exclusion and cannot reintroduce an own role: the just-provisioned roles are brand new and are not yet referenced as `childRoles` by any existing role.
 2. **Call direction (each call's "self" side is one own entity of the *opposite* kind).** Each PRB call pairs a single own entity with the other-side universe, never own-with-own, and keeps the semantic intent crisp:
    - `build_scope_rules(flattened_other_roles, own_scope)` = *who else may call this skill* (an **own scope** against **other roles**)
    - `build_role_rules(own_role, other_scopes)` = *what else may this role call* (an **own role** against **other scopes**; agent path only)
@@ -197,14 +199,15 @@ Neither guard alone is sufficient — exclusion keeps own entities off the other
 
 ### Steps
 
-1. Receive `service_provision: ServiceProvision` + `service_type: ServiceType` from the Orchestrator.
-2. Read **all roles** from `aiac.idp.configuration.api`, **excluding** the new service's own roles (i.e. exclude `role.name in {r.name for r in service_provision.roles}`).
-3. Read **all scopes** from `aiac.idp.configuration.api`, **excluding** the new service's own scopes (i.e. exclude `scope.name in {s.name for s in service_provision.scopes}`).
-4. **Flatten roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): expand `other_roles` into the union of every role's closure, de-duplicated by `role.id` (call this `flattened_other_roles`); on the agent path, also expand each of `service_provision.roles`.
-5. Call PRB and merge:
-   - **`service_type = tool`:** call `build_scope_rules(flattened_other_roles, scope)` for each scope in `service_provision.scopes`. Merge results into a single `list[PolicyRule]`.
-   - **`service_type = agent`:** call `build_scope_rules(flattened_other_roles, scope)` for each scope in `service_provision.scopes`; for each role in `service_provision.roles`, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
-6. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
+1. Receive `service_id: str` + `service_type: ServiceType` from the Orchestrator.
+2. Fetch the service's **own roles + scopes** from the IdP by `service_id` via `aiac.idp.configuration.api` (`get_service(service_id)` → `service.roles` / `service.scopes`, id-bearing `Role`/`Scope`).
+3. Read **all roles** from `aiac.idp.configuration.api`, **excluding** the service's own roles (i.e. exclude `role.name in {r.name for r in service.roles}`).
+4. Read **all scopes** from `aiac.idp.configuration.api`, **excluding** the service's own scopes (i.e. exclude `scope.name in {s.name for s in service.scopes}`).
+5. **Flatten roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): expand `other_roles` into the union of every role's closure, de-duplicated by `role.id` (call this `flattened_other_roles`); on the agent path, also expand each of the service's own roles.
+6. Call PRB and merge:
+   - **`service_type = tool`:** call `build_scope_rules(flattened_other_roles, scope)` for each of the service's own scopes. Merge results into a single `list[PolicyRule]`.
+   - **`service_type = agent`:** call `build_scope_rules(flattened_other_roles, scope)` for each own scope; for each of the service's own roles, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
+7. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
 
 **Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full excluded-self scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
 
@@ -231,7 +234,7 @@ aiac/src/aiac/agent/uc/
     │   └── types.py      ← RoleDefinition, ScopeDefinition, ServiceProvision (ServiceType imported from aiac.idp.configuration.models)
     └── service_policy/
         ├── __init__.py
-        └── runner.py     ← ServicePolicyUpdate.run(service_provision, service_type) → list[PolicyRule]
+        └── runner.py     ← ServicePolicyUpdate.run(service_id, service_type) → list[PolicyRule]
 ```
 
 ## Out of scope

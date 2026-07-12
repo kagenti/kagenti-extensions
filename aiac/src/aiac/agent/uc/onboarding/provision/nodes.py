@@ -6,16 +6,16 @@ All nodes are **non-LLM**. Graph:
 
 IdP access is via the **idp-library** `Configuration` (the `_config` seam), never the IdP
 service directly. Kubernetes access is via the `_core_v1` / `_custom_objects` seams, which
-lazily import the `kubernetes` client so unit tests (which patch the seams) never need it
-installed. Any upstream failure surfaces as an `HTTPException(502, ...)` whose message names
-the workload and the specific missing/invalid label — actionable, never silent.
+unit tests patch. Any upstream failure surfaces as an `HTTPException(502, ...)` whose message
+names the workload and the specific missing/invalid label — actionable, never silent.
 """
 
 import os
 
 from fastapi import HTTPException
-from tenacity import Retrying, stop_after_attempt, wait_exponential
+from kubernetes import client, config
 
+from aiac.agent.shared.upstream import run_upstream
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import ServiceType
 
@@ -37,23 +37,18 @@ def _config() -> Configuration:
 
 
 def _core_v1():
-    """CoreV1Api client (pods, services). Lazily imports kubernetes so tests that patch
-    this seam never require the package."""
-    from kubernetes import client, config
-
-    _load_kube_config(config)
+    """CoreV1Api client (pods, services)."""
+    _load_kube_config()
     return client.CoreV1Api()
 
 
 def _custom_objects():
-    """CustomObjectsApi client (AgentCard CRs). Lazily imports kubernetes."""
-    from kubernetes import client, config
-
-    _load_kube_config(config)
+    """CustomObjectsApi client (AgentCard CRs)."""
+    _load_kube_config()
     return client.CustomObjectsApi()
 
 
-def _load_kube_config(config) -> None:
+def _load_kube_config() -> None:
     try:
         config.load_incluster_config()
     except Exception:
@@ -72,17 +67,6 @@ def _mcp_tools_list(endpoint: str) -> list[dict]:
     )
     resp.raise_for_status()
     return (resp.json().get("result") or {}).get("tools", [])
-
-
-def _run_upstream(fn):
-    """Run an upstream call with bounded retries (UPSTREAM_MAX_RETRIES), reraising the last
-    error so the caller can convert it to a 502."""
-    retryer = Retrying(
-        stop=stop_after_attempt(int(os.getenv("UPSTREAM_MAX_RETRIES", "3"))),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
-        reraise=True,
-    )
-    return retryer(fn)
 
 
 def _select_pod(pods, workload_name: str):
@@ -106,7 +90,7 @@ def classify_service(state: OnboardingProvisionState) -> dict:
     service_id = state.trigger.entity_id
 
     try:
-        service = _run_upstream(lambda: _config().get_service(service_id))
+        service = run_upstream(lambda: _config().get_service(service_id))
     except Exception as e:
         raise HTTPException(502, f"IdP config unavailable resolving service {service_id!r}: {e}")
 
@@ -120,7 +104,7 @@ def classify_service(state: OnboardingProvisionState) -> dict:
     namespace, workload_name = name.split("/", 1)
 
     try:
-        pods = _run_upstream(lambda: _core_v1().list_namespaced_pod(namespace).items)
+        pods = run_upstream(lambda: _core_v1().list_namespaced_pod(namespace).items)
     except Exception as e:
         raise HTTPException(502, f"Kubernetes pod LIST failed in namespace {namespace!r}: {e}")
 
@@ -155,7 +139,7 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     role = RoleDefinition(name=f"{workload}.agent", description="Agent role")
 
     try:
-        resp = _run_upstream(
+        resp = run_upstream(
             lambda: _custom_objects().list_namespaced_custom_object(
                 group=_AGENTCARD_GROUP,
                 version=_AGENTCARD_VERSION,
@@ -198,7 +182,7 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     namespace, workload = state.namespace, state.workload_name
 
     try:
-        svc = _run_upstream(lambda: _core_v1().read_namespaced_service(workload, namespace))
+        svc = run_upstream(lambda: _core_v1().read_namespaced_service(workload, namespace))
     except Exception as e:
         raise HTTPException(
             502, f"Kubernetes Service GET failed for {workload!r} in namespace {namespace!r}: {e}"
@@ -216,7 +200,7 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     endpoint = f"http://{workload}.{namespace}.svc.cluster.local:{port}/mcp"
 
     try:
-        tools = _run_upstream(lambda: _mcp_tools_list(endpoint))
+        tools = run_upstream(lambda: _mcp_tools_list(endpoint))
     except Exception as e:
         raise HTTPException(502, f"MCP tools/list failed at {endpoint}: {e}")
 
@@ -242,11 +226,11 @@ def provision_service(state: OnboardingProvisionState) -> dict:
 
     try:
         for role in provision.roles:
-            _run_upstream(lambda role=role: config.create_service_role(service_id, role))
+            run_upstream(lambda role=role: config.create_service_role(service_id, role))
         for scope in provision.scopes:
-            _run_upstream(lambda scope=scope: config.create_service_scope(service_id, scope))
-        service = _run_upstream(lambda: config.get_service(service_id))
-        _run_upstream(lambda: config.set_service_type(service, state.service_type))
+            run_upstream(lambda scope=scope: config.create_service_scope(service_id, scope))
+        service = run_upstream(lambda: config.get_service(service_id))
+        run_upstream(lambda: config.set_service_type(service, state.service_type))
     except HTTPException:
         raise
     except Exception as e:
