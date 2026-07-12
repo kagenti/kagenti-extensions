@@ -12,6 +12,13 @@ REALM = "kagenti"
 BASE = "http://127.0.0.1:7071"
 
 
+@pytest.fixture(autouse=True)
+def _single_attempt(monkeypatch):
+    """Configuration now retries transient failures internally (``_request`` → ``run_upstream``).
+    Pin the budget to a single attempt so error-path unit tests stay fast and single-call."""
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "1")
+
+
 def _ok(json_data, status=200):
     resp = MagicMock()
     resp.ok = True

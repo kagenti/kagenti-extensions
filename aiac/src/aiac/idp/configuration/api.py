@@ -6,6 +6,7 @@ import requests
 from dotenv import load_dotenv
 
 from aiac.idp.configuration.models import Role, Scope, Service, ServiceType, Subject
+from aiac.shared.upstream import run_upstream
 
 
 class _NamedDefinition(Protocol):
@@ -37,47 +38,60 @@ class Configuration:
         if not resp.ok:
             raise RuntimeError(f"HTTP {resp.status_code}: {resp.text}")
 
+    def _request(self, method: str, path: str, **kwargs):
+        """Issue an HTTP request to the config service with bounded transport retries.
+
+        Dispatches to the named ``requests.get`` / ``requests.post`` (not ``requests.request``)
+        so callers and tests keep a stable, mockable surface. Retries transient failures via
+        ``run_upstream`` and raises on a non-OK response (``_check``), so callers just consume
+        ``resp.json()``. Retrying at this leaf boundary means composite methods
+        (``create_service_role`` / ``create_service_scope``) retry each sub-request without
+        compounding.
+        """
+        caller = getattr(requests, method.lower())
+
+        def _do():
+            resp = caller(f"{self._base_url()}{path}", **kwargs)
+            self._check(resp)
+            return resp
+
+        return run_upstream(_do)
+
     def _build_subject(self, raw: dict, all_roles: dict[str, Role]) -> Subject:
         subject_id = raw["id"]
-        assignments_resp = requests.get(
-            f"{self._base_url()}/subjects/{subject_id}/assignments", params=self._params()
+        assignments_resp = self._request(
+            "GET", f"/subjects/{subject_id}/assignments", params=self._params()
         )
-        self._check(assignments_resp)
         realm_role_ids = {r["id"] for r in assignments_resp.json().get("realmMappings", [])}
         roles = [r.model_dump() for r in all_roles.values() if r.id in realm_role_ids]
         return Subject.model_validate({**raw, "roles": roles})
 
     def get_subjects(self) -> list[Subject]:
-        resp = requests.get(f"{self._base_url()}/subjects", params=self._params())
-        self._check(resp)
+        resp = self._request("GET", "/subjects", params=self._params())
         all_roles = self._all_roles_map()
         return [self._build_subject(raw, all_roles) for raw in resp.json()]
 
     def get_roles(self) -> list[Role]:
-        resp = requests.get(f"{self._base_url()}/roles", params=self._params())
-        self._check(resp)
+        resp = self._request("GET", "/roles", params=self._params())
         roles = []
         for raw in resp.json():
             role_data = dict(raw)
             if raw.get("composite"):
-                composites_resp = requests.get(
-                    f"{self._base_url()}/roles/{raw['name']}/composites", params=self._params()
+                composites_resp = self._request(
+                    "GET", f"/roles/{raw['name']}/composites", params=self._params()
                 )
-                self._check(composites_resp)
                 role_data["childRoles"] = composites_resp.json()
             roles.append(Role.model_validate(role_data))
         return roles
 
     def _build_service(self, raw: dict, all_roles: dict[str, Role], all_scopes: dict[str, Scope]) -> Service:
         service_id = raw["id"]
-        roles_resp = requests.get(
-            f"{self._base_url()}/services/{service_id}/roles", params=self._params()
+        roles_resp = self._request(
+            "GET", f"/services/{service_id}/roles", params=self._params()
         )
-        self._check(roles_resp)
-        scopes_resp = requests.get(
-            f"{self._base_url()}/services/{service_id}/scopes", params=self._params()
+        scopes_resp = self._request(
+            "GET", f"/services/{service_id}/scopes", params=self._params()
         )
-        self._check(scopes_resp)
         service_role_ids = {r["id"] for r in roles_resp.json()}
         roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
         service_scope_ids = {s["id"] for s in scopes_resp.json()}
@@ -93,15 +107,13 @@ class Configuration:
         return {s.id: s for s in self.get_scopes()}
 
     def get_services(self) -> list[Service]:
-        resp = requests.get(f"{self._base_url()}/services", params=self._params())
-        self._check(resp)
+        resp = self._request("GET", "/services", params=self._params())
         all_roles = self._all_roles_map()
         all_scopes = self._all_scopes_map()
         return [self._build_service(raw, all_roles, all_scopes) for raw in resp.json()]
 
     def get_service(self, service_id: str) -> Service:
-        resp = requests.get(f"{self._base_url()}/services/{service_id}", params=self._params())
-        self._check(resp)
+        resp = self._request("GET", f"/services/{service_id}", params=self._params())
         return self._build_service(resp.json(), self._all_roles_map(), self._all_scopes_map())
 
     def get_services_by_role(self, role: Role) -> list[Service]:
@@ -109,11 +121,9 @@ class Configuration:
         return [s for s in self.get_services() if any(r.id == role.id for r in s.roles)]
 
     def get_subjects_by_role(self, role: Role) -> list[Subject]:
-        resp = requests.get(
-            f"{self._base_url()}/subjects",
-            params={"role_id": role.id, "realm": self.realm},
+        resp = self._request(
+            "GET", "/subjects", params={"role_id": role.id, "realm": self.realm}
         )
-        self._check(resp)
         return [Subject.model_validate(s) for s in resp.json()]
 
     def get_services_by_scope(self, scope: Scope) -> list[Service]:
@@ -121,27 +131,23 @@ class Configuration:
         return [s for s in self.get_services() if any(sc.id == scope.id for sc in s.scopes)]
 
     def get_scopes(self) -> list[Scope]:
-        resp = requests.get(f"{self._base_url()}/scopes", params=self._params())
-        self._check(resp)
+        resp = self._request("GET", "/scopes", params=self._params())
         return [Scope.model_validate(s) for s in resp.json()]
 
     def create_scope(self, scope_name: str, scope_description: str) -> Scope:
-        resp = requests.post(
-            f"{self._base_url()}/scopes",
+        resp = self._request(
+            "POST",
+            "/scopes",
             json={"name": scope_name, "description": scope_description},
             params=self._params(),
         )
-        self._check(resp)
         return Scope.model_validate(resp.json())
 
     def map_scope_to_service(self, service: Service, scope: Scope) -> Service:
-        resp = requests.post(
-            f"{self._base_url()}/services/{service.id}/scopes/{scope.id}",
-            params=self._params(),
+        self._request(
+            "POST", f"/services/{service.id}/scopes/{scope.id}", params=self._params()
         )
-        self._check(resp)
-        get_resp = requests.get(f"{self._base_url()}/services/{service.id}", params=self._params())
-        self._check(get_resp)
+        get_resp = self._request("GET", f"/services/{service.id}", params=self._params())
         return Service.model_validate(get_resp.json())
 
     def set_service_type(self, service: Service, service_type: ServiceType) -> Service:
@@ -153,12 +159,12 @@ class Configuration:
         ``str`` enum).
         """
         value = service_type.value if isinstance(service_type, ServiceType) else service_type
-        resp = requests.post(
-            f"{self._base_url()}/services/{service.id}/type",
+        resp = self._request(
+            "POST",
+            f"/services/{service.id}/type",
             json={"type": value},
             params=self._params(),
         )
-        self._check(resp)
         return Service.model_validate(resp.json())
 
     def create_service_role(self, service_id: str, role: _NamedDefinition) -> Role:
@@ -186,20 +192,17 @@ class Configuration:
         return resolved
 
     def create_role(self, role_name: str, role_description: str) -> Role:
-        resp = requests.post(
-            f"{self._base_url()}/roles",
+        resp = self._request(
+            "POST",
+            "/roles",
             json={"name": role_name, "description": role_description},
             params=self._params(),
         )
-        self._check(resp)
         return Role.model_validate(resp.json())
 
     def map_role_to_service(self, service: Service, role: Role) -> Service:
-        resp = requests.post(
-            f"{self._base_url()}/services/{service.id}/roles/{role.id}",
-            params=self._params(),
+        self._request(
+            "POST", f"/services/{service.id}/roles/{role.id}", params=self._params()
         )
-        self._check(resp)
-        get_resp = requests.get(f"{self._base_url()}/services/{service.id}", params=self._params())
-        self._check(get_resp)
+        get_resp = self._request("GET", f"/services/{service.id}", params=self._params())
         return Service.model_validate(get_resp.json())

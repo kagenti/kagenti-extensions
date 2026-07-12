@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from aiac.agent.uc.onboarding.provision import graph as graph_mod
-from aiac.agent.uc.onboarding.provision import nodes
+from aiac.agent.uc.onboarding.provision import kube, nodes
 from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, Trigger
 from aiac.idp.configuration.models import Service, ServiceType
 
@@ -58,8 +58,8 @@ class TestEndToEnd:
     def test_agent_path_end_to_end(self):
         with (
             patch.object(nodes, "_config") as cfg,
-            patch.object(nodes, "_core_v1") as core_v1,
-            patch.object(nodes, "_custom_objects") as co,
+            patch.object(kube, "_core_v1") as core_v1,
+            patch.object(kube, "_custom_objects") as co,
         ):
             cfg.return_value.get_service.return_value = _service()
             core = MagicMock()
@@ -84,7 +84,7 @@ class TestEndToEnd:
     def test_tool_path_end_to_end(self):
         with (
             patch.object(nodes, "_config") as cfg,
-            patch.object(nodes, "_core_v1") as core_v1,
+            patch.object(kube, "_core_v1") as core_v1,
             patch.object(nodes, "_mcp_tools_list", return_value=[{"name": "t1", "description": "d"}]),
         ):
             cfg.return_value.get_service.return_value = _service()

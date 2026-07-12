@@ -175,7 +175,7 @@ ChromaDB collections: `aiac-policies` and `aiac-domain-knowledge`.
 
 ## Error Handling
 
-All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponential backoff (`tenacity`) before propagating the error. This is centralised in the shared `run_upstream(fn)` helper (`agent/shared/upstream.py`), which is transport-agnostic: it re-raises the original exception after the final attempt, and each caller maps it to the status below (e.g. an IdP/Kubernetes failure → `502`).
+All upstream calls are retried up to `UPSTREAM_MAX_RETRIES` times with exponential backoff (`tenacity`) before propagating the error. The retry primitive is the project-level shared `run_upstream(fn)` helper (`aiac/shared/upstream.py`), which is transport-agnostic: it re-raises the original exception after the final attempt. Retry is applied at the **transport boundary**, not at the agent call sites — inside the idp-library `Configuration` (its `_request` helper), inside the provision MCP helper (`_mcp_tools_list`), and inside the provision Kubernetes seam (`uc/onboarding/provision/kube.py`). Each caller then maps the re-raised failure to the status below (e.g. an IdP/Kubernetes failure → `502`).
 
 | Upstream | HTTP status on final failure |
 |---|---|
@@ -201,19 +201,21 @@ Upstream failures propagate as bare HTTP error responses (see table above), rais
 ## File Structure
 
 ```
-aiac/src/aiac/agent/
-├── controller/
-├── shared/                             ← flatten_role (roles.py), run_upstream (upstream.py)
-├── uc/
-│   ├── onboarding/
-│   │   ├── orchestrator.py          ← sequences provision → policy_builder, returns list[PolicyRule]
-│   │   ├── provision/               ← LLM sub-agent: classify, analyze, write to IdP
-│   │   └── policy_builder/          ← IdP reader + PRB invoker: read IdP, call PRB, return list[PolicyRule]
-│   ├── policy_update/
-│   │   ├── build/                   ← calls PRB, returns list[PolicyRule]; TBD internals
-│   │   └── rebuild/                 ← delegates to Build; TBD internals
-│   └── role_update/                 ← calls PRB with (role, all_scopes), returns list[PolicyRule]
-└── policy_rules_builder/            ← shared; called by Service Policy Builder, Build, and Role sub-agent
+aiac/src/aiac/
+├── shared/                             ← project-level shared: run_upstream (upstream.py) — transport retry primitive
+└── agent/
+    ├── controller/
+    ├── shared/                         ← flatten_role (roles.py)
+    ├── uc/
+    │   ├── onboarding/
+    │   │   ├── orchestrator.py         ← sequences provision → policy_builder, returns list[PolicyRule]
+    │   │   ├── provision/              ← LLM sub-agent: classify, analyze, write to IdP; kube.py = retrying K8s seam
+    │   │   └── policy_builder/         ← IdP reader + PRB invoker: read IdP, call PRB, return list[PolicyRule]
+    │   ├── policy_update/
+    │   │   ├── build/                  ← calls PRB, returns list[PolicyRule]; TBD internals
+    │   │   └── rebuild/                ← delegates to Build; TBD internals
+    │   └── role_update/                ← calls PRB with (role, all_scopes), returns list[PolicyRule]
+    └── policy_rules_builder/           ← shared; called by Service Policy Builder, Build, and Role sub-agent
 ```
 
 Docker build command (run from repo root):

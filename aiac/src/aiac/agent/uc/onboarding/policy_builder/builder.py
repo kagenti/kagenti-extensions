@@ -20,7 +20,6 @@ from fastapi import HTTPException
 
 from aiac.agent.policy_rules_builder.graph import build_role_rules, build_scope_rules
 from aiac.agent.shared.roles import flatten_role
-from aiac.agent.shared.upstream import run_upstream
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import ServiceType
 from aiac.policy.model.models import PolicyRule
@@ -48,9 +47,9 @@ class ServicePolicyBuilder:
         config = _config()
 
         try:
-            service = run_upstream(lambda: config.get_service(service_id))
-            all_roles = run_upstream(config.get_roles)
-            all_scopes = run_upstream(config.get_scopes)
+            service = config.get_service(service_id)
+            all_roles = config.get_roles()
+            all_scopes = config.get_scopes()
         except Exception as e:
             raise HTTPException(
                 502, f"IdP Configuration Service unavailable for service {service_id!r}: {e}"

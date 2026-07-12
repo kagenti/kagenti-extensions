@@ -5,28 +5,26 @@ All nodes are **non-LLM**. Graph:
     START -> classify_service -> [analyze_agent | analyze_tool] -> provision_service -> END
 
 IdP access is via the **idp-library** `Configuration` (the `_config` seam), never the IdP
-service directly. Kubernetes access is via the `_core_v1` / `_custom_objects` seams, which
-unit tests patch. Any upstream failure surfaces as an `HTTPException(502, ...)` whose message
-names the workload and the specific missing/invalid label — actionable, never silent.
+service directly. Kubernetes access is via the `kube` seam module (`list_pods`,
+`read_service`, `list_agentcards`), which retries internally. Any upstream failure surfaces
+as an `HTTPException(502, ...)` whose message names the workload and the specific
+missing/invalid label — actionable, never silent.
 """
 
 import os
 
 from fastapi import HTTPException
-from kubernetes import client, config
 
-from aiac.agent.shared.upstream import run_upstream
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import ServiceType
+from aiac.shared.upstream import run_upstream
 
+from .kube import list_agentcards, list_pods, read_service
 from .state import OnboardingProvisionState
 from .types import RoleDefinition, ScopeDefinition, ServiceProvision
 
 _TYPE_LABEL = "kagenti.io/type"
 _MCP_LABEL = "protocol.kagenti.io/mcp"
-_AGENTCARD_GROUP = "agent.kagenti.dev"
-_AGENTCARD_VERSION = "v1alpha1"
-_AGENTCARD_PLURAL = "agentcards"
 
 
 # --------------------------------------------------------------------------- #
@@ -36,37 +34,22 @@ def _config() -> Configuration:
     return Configuration.for_realm(os.getenv("KEYCLOAK_REALM", ""))
 
 
-def _core_v1():
-    """CoreV1Api client (pods, services)."""
-    _load_kube_config()
-    return client.CoreV1Api()
-
-
-def _custom_objects():
-    """CustomObjectsApi client (AgentCard CRs)."""
-    _load_kube_config()
-    return client.CustomObjectsApi()
-
-
-def _load_kube_config() -> None:
-    try:
-        config.load_incluster_config()
-    except Exception:
-        config.load_kube_config()
-
-
 def _mcp_tools_list(endpoint: str) -> list[dict]:
     """POST a JSON-RPC `tools/list` to an MCP endpoint and return the tool manifest list.
-    Each tool is a dict with `name` and (optional) `description`."""
+    Each tool is a dict with `name` and (optional) `description`. Bounded transport retries
+    are applied here so callers just map the final failure to a 502."""
     import requests
 
-    resp = requests.post(
-        endpoint,
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-        headers={"Accept": "application/json"},
-    )
-    resp.raise_for_status()
-    return (resp.json().get("result") or {}).get("tools", [])
+    def _do():
+        resp = requests.post(
+            endpoint,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        return (resp.json().get("result") or {}).get("tools", [])
+
+    return run_upstream(_do)
 
 
 def _select_pod(pods, workload_name: str):
@@ -90,7 +73,7 @@ def classify_service(state: OnboardingProvisionState) -> dict:
     service_id = state.trigger.entity_id
 
     try:
-        service = run_upstream(lambda: _config().get_service(service_id))
+        service = _config().get_service(service_id)
     except Exception as e:
         raise HTTPException(502, f"IdP config unavailable resolving service {service_id!r}: {e}")
 
@@ -104,7 +87,7 @@ def classify_service(state: OnboardingProvisionState) -> dict:
     namespace, workload_name = name.split("/", 1)
 
     try:
-        pods = run_upstream(lambda: _core_v1().list_namespaced_pod(namespace).items)
+        pods = list_pods(namespace)
     except Exception as e:
         raise HTTPException(502, f"Kubernetes pod LIST failed in namespace {namespace!r}: {e}")
 
@@ -139,14 +122,7 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     role = RoleDefinition(name=f"{workload}.agent", description="Agent role")
 
     try:
-        resp = run_upstream(
-            lambda: _custom_objects().list_namespaced_custom_object(
-                group=_AGENTCARD_GROUP,
-                version=_AGENTCARD_VERSION,
-                namespace=namespace,
-                plural=_AGENTCARD_PLURAL,
-            )
-        )
+        resp = list_agentcards(namespace)
     except Exception as e:
         raise HTTPException(502, f"Kubernetes AgentCard LIST failed in namespace {namespace!r}: {e}")
 
@@ -182,7 +158,7 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     namespace, workload = state.namespace, state.workload_name
 
     try:
-        svc = run_upstream(lambda: _core_v1().read_namespaced_service(workload, namespace))
+        svc = read_service(workload, namespace)
     except Exception as e:
         raise HTTPException(
             502, f"Kubernetes Service GET failed for {workload!r} in namespace {namespace!r}: {e}"
@@ -200,7 +176,7 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     endpoint = f"http://{workload}.{namespace}.svc.cluster.local:{port}/mcp"
 
     try:
-        tools = run_upstream(lambda: _mcp_tools_list(endpoint))
+        tools = _mcp_tools_list(endpoint)
     except Exception as e:
         raise HTTPException(502, f"MCP tools/list failed at {endpoint}: {e}")
 
@@ -226,11 +202,11 @@ def provision_service(state: OnboardingProvisionState) -> dict:
 
     try:
         for role in provision.roles:
-            run_upstream(lambda role=role: config.create_service_role(service_id, role))
+            config.create_service_role(service_id, role)
         for scope in provision.scopes:
-            run_upstream(lambda scope=scope: config.create_service_scope(service_id, scope))
-        service = run_upstream(lambda: config.get_service(service_id))
-        run_upstream(lambda: config.set_service_type(service, state.service_type))
+            config.create_service_scope(service_id, scope)
+        service = config.get_service(service_id)
+        config.set_service_type(service, state.service_type)
     except HTTPException:
         raise
     except Exception as e:

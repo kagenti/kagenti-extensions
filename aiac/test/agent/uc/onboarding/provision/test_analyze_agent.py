@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from aiac.agent.uc.onboarding.provision import nodes
+from aiac.agent.uc.onboarding.provision import kube, nodes
 from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, Trigger
 
 NS = "team-a"
@@ -26,7 +26,7 @@ def _card(name=WORKLOAD, skills=None):
 
 
 def _run(items=None, list_exc=None):
-    with patch.object(nodes, "_custom_objects") as co:
+    with patch.object(kube, "_custom_objects") as co:
         client = MagicMock()
         if list_exc is not None:
             client.list_namespaced_custom_object.side_effect = list_exc

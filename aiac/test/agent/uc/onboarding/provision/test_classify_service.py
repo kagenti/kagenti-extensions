@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from aiac.agent.uc.onboarding.provision import nodes
+from aiac.agent.uc.onboarding.provision import kube, nodes
 from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, Trigger
 from aiac.idp.configuration.models import Service, ServiceType
 
@@ -41,7 +41,7 @@ def _core(pods):
 
 
 def _run(service=None, pods=None, get_service_exc=None, list_pods_exc=None):
-    with patch.object(nodes, "_config") as cfg, patch.object(nodes, "_core_v1") as core_v1:
+    with patch.object(nodes, "_config") as cfg, patch.object(kube, "_core_v1") as core_v1:
         if get_service_exc is not None:
             cfg.return_value.get_service.side_effect = get_service_exc
         else:

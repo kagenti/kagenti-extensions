@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
-from aiac.agent.uc.onboarding.provision import nodes
+from aiac.agent.uc.onboarding.provision import kube, nodes
 from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, Trigger
 
 NS = "team-a"
@@ -33,7 +33,7 @@ def _svc(labels, port=8080):
 
 def _run(svc=None, read_exc=None, tools=None, mcp_exc=None):
     with (
-        patch.object(nodes, "_core_v1") as core_v1,
+        patch.object(kube, "_core_v1") as core_v1,
         patch.object(nodes, "_mcp_tools_list") as mcp,
     ):
         core = MagicMock()

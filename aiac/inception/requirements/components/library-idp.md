@@ -125,11 +125,14 @@ HTTP client library that wraps the IdP Configuration Service REST API. Provides 
 
 All Keycloak interactions are consolidated here; the PDP Policy Writer (OPA) does not touch Keycloak directly.
 
+**Transport retries.** Every HTTP call is issued through a private `_request(method, path, **kwargs)` helper that wraps the request in the project-level `run_upstream` retry primitive (`aiac.shared.upstream`): transient failures are retried up to `UPSTREAM_MAX_RETRIES` times (default `3`) with exponential backoff before a non-2xx status is raised as `RuntimeError`. Retry lives inside the library (not in callers), and applies at the leaf request, so composite methods (`create_service_role` / `create_service_scope`) retry each sub-request without compounding.
+
 ### Dependencies
 ```
 requests
 pydantic
 python-dotenv
+tenacity
 ```
 
 ### Class: `Configuration`
