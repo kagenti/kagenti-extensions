@@ -122,11 +122,25 @@ class ScopeRulesState(_PRBWorking):  # roles: list[Role]; scope: Scope
 
 ### Prompts
 
-Lean + safety meta-rules only — task framing, the structured-output contract,
-**deny-by-default / policy-silence** (grant a pair only if the policy supports it), and
-**scope-strictly-to-focal**. No worked examples or domain heuristics; all substantive reasoning
-is deferred to the (user-authored) policy content. The auditor prompt mirrors this: approve
-only if every granted pair is policy-supported and nothing unsupported slipped in.
+Lean — task framing, the structured-output contract, and two **safety** meta-rules
+(**deny-by-default / policy-silence** — grant a pair only if the policy supports it — and
+**scope-strictly-to-focal**). On top of those, two shared **mapping** rules (`_MAPPING_RULES`)
+govern how evidence becomes a grant:
+
+- **Capability projection** — a scope names a *set* of operations; any one covered operation
+  established for a candidate (by the policy or by the focal/candidate descriptions) grants the
+  whole scope, so partial (e.g. read-only) access still earns it.
+- **Relationship scoping** — a policy may state several access relationships over the same
+  entities; each grant is judged only by evidence about *that* candidate and the focal entity, and
+  a statement about an entity that is neither the focal nor a candidate (even a same-theme one) is a
+  different relationship that never counts either way.
+
+No worked examples or domain heuristics; all substantive reasoning is deferred to the
+(user-authored) policy content and the entity descriptions. The **proposer and auditor share the
+same rule set** — both make the same grant decision, so a rule on only one side lets the two
+diverge (they did: see issue 3.20 *Follow-up: cross-variant convergence*). The auditor adds only
+its framing: approve only if every granted pair is policy-supported and nothing unsupported
+slipped in.
 
 ### LLM + retries
 

@@ -120,6 +120,15 @@ scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below
      (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS` in `scenario.py`), not from a second
      hand-maintained copy — a wrong LLM/PCE mapping therefore fails the test. A failing node names the
      exact `variant / subject / function_name` cell.
+8. **Assert grant-set equivalence (semantic, beyond the decision oracle).** The `opa eval` matrix in
+   step 7 is deliberately coarse: inbound `allow` only checks "reaches *some* agent scope," and the
+   agent→tool gate covers all four scopes so only the user gate discriminates — so a **verdict-neutral**
+   mapping error (a missing or spurious `(role, scope)` grant) passes step 7 unseen. To close that gap
+   the test also captures the PRB's `list[PolicyRule]` per variant and asserts, as order-independent
+   `(role, scope)` **sets** per gate, that **each variant equals the `scenario.py` truth table** and
+   **the two variants equal each other**. This compares grant *sets*, not Rego text (formatting/ordering
+   may differ; the grant set may not). This is what enforces the *both variants reproduce the same Rego*
+   intent stated in *Further Notes*.
 
 ## Expected output
 
@@ -266,9 +275,11 @@ Policy Store DB and the provisioned Keycloak realm.
   `finally`. Keycloak and the LLM are **external** (reached via env); `opa` is an external binary.
 - **LLM nondeterminism, contained.** The PRB LLM is pinned to `temperature=0`, and the **explicit**
   `policy.md` variant states each `(role, scope)` grant outright, so its mapping is stable. The
-  **abstract** variant is *also* asserted against the same truth table — accepting some flakiness, since
-  it leans on the LLM to expand prose into concrete scopes — because it is a valuable signal and the
-  test is `@pytest.mark.integration`, out of the default CI run.
+  **abstract** variant leans on the LLM to expand prose + descriptions into concrete scopes; both
+  variants are asserted not only cell-by-cell via `opa eval` (step 7) but at the **grant-set** level
+  (step 8) — each variant's `(role, scope)` set must equal the truth table *and* the other variant's.
+  Grant-set equivalence catches the verdict-neutral under/over-grants the decision oracle hides. Some
+  model-dependence remains, which is why the suite is `@pytest.mark.integration`, out of default CI.
 - **Prior art, shared not copied.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established
   the shape this test reuses — `uvicorn` subprocess spawn, `GET /health` poll, env-before-import
   ordering, and `finally` teardown. Rather than duplicate it, that machinery lives in the shared

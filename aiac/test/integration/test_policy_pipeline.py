@@ -247,15 +247,53 @@ def reformat_function_name(scope: str) -> str:
     return ".".join(part.capitalize() for part in scope.split("-"))
 
 
+# --- Grant-set extraction (semantic-equivalence oracle) -------------------------------------
+#
+# The two policy variants describe the SAME access model, so the PRB must derive the same set of
+# grants from each (Rego text/ordering may differ — the grant set may not). ``orchestrate_prb``
+# returns all three mappings concatenated; the four name spaces are disjoint, so each PolicyRule
+# is classified into its gate by ``(role.name, scope.name)`` membership.
+
+_USER_ROLE_NAMES = set(scn.USER_ROLES)
+_AGENT_ROLE_NAMES = set(scn.AGENT_ROLES)
+_AGENT_SCOPE_NAMES = set(scn.AGENT_SCOPES)
+_TOOL_SCOPE_NAMES = set(scn.TOOL_SCOPES)
+
+
+def grant_sets(rules: list[PolicyRule]) -> dict[str, set[tuple[str, str]]]:
+    """Classify a flat PRB rule list into the three gate grant sets, each a set of
+    ``(role_name, scope_name)`` pairs: ``inbound`` (user role -> agent scope),
+    ``outbound_subject`` (user role -> tool scope), ``outbound_target`` (agent role -> tool scope)."""
+    sets: dict[str, set[tuple[str, str]]] = {"inbound": set(), "outbound_subject": set(), "outbound_target": set()}
+    for r in rules:
+        pair = (r.role.name, r.scope.name)
+        if r.role.name in _USER_ROLE_NAMES and r.scope.name in _AGENT_SCOPE_NAMES:
+            sets["inbound"].add(pair)
+        elif r.role.name in _USER_ROLE_NAMES and r.scope.name in _TOOL_SCOPE_NAMES:
+            sets["outbound_subject"].add(pair)
+        elif r.role.name in _AGENT_ROLE_NAMES and r.scope.name in _TOOL_SCOPE_NAMES:
+            sets["outbound_target"].add(pair)
+    return sets
+
+
+_TRUTH: dict[str, set[tuple[str, str]]] = {
+    "inbound": set(scn.INBOUND_PAIRS),
+    "outbound_subject": set(scn.OUTBOUND_SUBJECT_PAIRS),
+    "outbound_target": set(scn.OUTBOUND_PAIRS),
+}
+
+
 # ======================================================================================
 # Session fixture — the one-time pipeline run (both policy variants)
 # ======================================================================================
 
 
 @pytest.fixture(scope="session")
-def pipeline() -> dict[str, Path]:
+def pipeline() -> dict[str, dict]:
     """Provision Keycloak once, then run the real PRB+PCE pipeline for each policy variant, leaving
-    ``.rego`` on disk under ``rego_out/<variant>/``. Returns ``{variant: rego_dir}``."""
+    ``.rego`` on disk under ``rego_out/<variant>/``. Returns
+    ``{variant: {"rego_dir": Path, "rules": list[PolicyRule]}}`` — the rules are the PRB's grant set,
+    captured so the equivalence/truth-table assertions can compare grants directly (not Rego text)."""
     require_env(
         "KEYCLOAK_URL",
         "KEYCLOAK_ADMIN_USERNAME",
@@ -273,7 +311,7 @@ def pipeline() -> dict[str, Path]:
     opa_host, opa_port = _host_port(os.environ["AIAC_PDP_POLICY_URL"], 7072)
 
     idp = Service("aiac.idp.service.configuration.keycloak.main:app", port=idp_port, host=idp_host)
-    results: dict[str, Path] = {}
+    results: dict[str, dict] = {}
 
     # IdP stays up across both variants; the store/opa pair is restarted per variant so each variant
     # writes into a fresh store (compute_and_apply merges onto the existing model with override=False).
@@ -304,7 +342,7 @@ def pipeline() -> dict[str, Path]:
             with running_services([store, opa], src=SRC):
                 rules = orchestrate_prb(roles, scopes)
                 compute_and_apply(rules, override=False)
-            results[variant] = rego_dir
+            results[variant] = {"rego_dir": rego_dir, "rules": rules}
 
     yield results
 
@@ -316,9 +354,9 @@ def pipeline() -> dict[str, Path]:
 
 @pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("subject", list(scn.USERS))
-def test_inbound(pipeline: dict[str, Path], variant: str, subject: str) -> None:
+def test_inbound(pipeline: dict[str, dict], variant: str, subject: str) -> None:
     """The generated inbound gate allows a user iff their role may reach some agent scope."""
-    rego = pipeline[variant] / "github_agent.inbound.rego"
+    rego = pipeline[variant]["rego_dir"] / "github_agent.inbound.rego"
     allowed = opa_eval([rego], "data.authz.github_agent.inbound.allow", {"subject": subject})
     assert allowed == expected_inbound(subject)
 
@@ -326,10 +364,10 @@ def test_inbound(pipeline: dict[str, Path], variant: str, subject: str) -> None:
 @pytest.mark.parametrize("variant", VARIANTS)
 @pytest.mark.parametrize("subject", list(scn.USERS))
 @pytest.mark.parametrize("scope", list(scn.TOOL_SCOPES))
-def test_outbound(pipeline: dict[str, Path], variant: str, subject: str, scope: str) -> None:
+def test_outbound(pipeline: dict[str, dict], variant: str, subject: str, scope: str) -> None:
     """The generated outbound gate (via the probe) allows a subject's call to a tool operation iff
     both the subject and some agent role are entitled to that operation's scope."""
-    rego = pipeline[variant] / "github_agent.outbound.rego"
+    rego = pipeline[variant]["rego_dir"] / "github_agent.outbound.rego"
     fn = reformat_function_name(scope)  # soft-match rendering, e.g. source-read -> Source.Read
     allowed = opa_eval(
         [rego, HERE / "probe.rego"],
@@ -340,9 +378,9 @@ def test_outbound(pipeline: dict[str, Path], variant: str, subject: str, scope: 
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
-def test_outbound_unknown_target_denied(pipeline: dict[str, Path], variant: str) -> None:
+def test_outbound_unknown_target_denied(pipeline: dict[str, dict], variant: str) -> None:
     """An otherwise-allowed call to an unknown target is denied (target not in target_scopes)."""
-    rego = pipeline[variant] / "github_agent.outbound.rego"
+    rego = pipeline[variant]["rego_dir"] / "github_agent.outbound.rego"
     allowed = opa_eval(
         [rego, HERE / "probe.rego"],
         "data.probe.outbound.allow",
@@ -352,12 +390,38 @@ def test_outbound_unknown_target_denied(pipeline: dict[str, Path], variant: str)
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
-def test_outbound_soft_match_not_overbroad(pipeline: dict[str, Path], variant: str) -> None:
+def test_outbound_soft_match_not_overbroad(pipeline: dict[str, dict], variant: str) -> None:
     """A function name whose tokens match no scope is denied — guards against soft-match over-match."""
-    rego = pipeline[variant] / "github_agent.outbound.rego"
+    rego = pipeline[variant]["rego_dir"] / "github_agent.outbound.rego"
     allowed = opa_eval(
         [rego, HERE / "probe.rego"],
         "data.probe.outbound.allow",
         {"subject": "dev-user", "target": scn.TOOL_ID, "function_name": "delete_everything"},
     )
     assert allowed is False
+
+
+# ======================================================================================
+# Semantic-equivalence tests — the two policy variants must yield the SAME grant set
+# ======================================================================================
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+@pytest.mark.parametrize("gate", list(_TRUTH))
+def test_grant_set_matches_truth_table(pipeline: dict[str, dict], variant: str, gate: str) -> None:
+    """Each variant's PRB grant set for each gate equals the scenario truth table. Catches both
+    under-grants (a missing pair) and over-grants (an unsupported pair) that the coarse allow/deny
+    oracle above cannot see."""
+    got = grant_sets(pipeline[variant]["rules"])[gate]
+    assert got == _TRUTH[gate], f"{variant} {gate}: missing={_TRUTH[gate] - got} extra={got - _TRUTH[gate]}"
+
+
+@pytest.mark.parametrize("gate", list(_TRUTH))
+def test_variants_are_semantically_equivalent(pipeline: dict[str, dict], gate: str) -> None:
+    """The explicit and abstract variants describe the same access model, so the PRB must derive the
+    same grant set from each. Compared as order-independent sets (Rego text/ordering may differ)."""
+    explicit = grant_sets(pipeline["explicit"]["rules"])[gate]
+    abstract = grant_sets(pipeline["abstract"]["rules"])[gate]
+    assert explicit == abstract, (
+        f"{gate}: variants diverge — only-explicit={explicit - abstract} only-abstract={abstract - explicit}"
+    )

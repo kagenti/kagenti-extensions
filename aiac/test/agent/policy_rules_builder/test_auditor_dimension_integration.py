@@ -1,4 +1,4 @@
-"""Integration regression for the auditor relationship-scoping rule (prompts._AUDITOR_DIMENSION).
+"""Integration regression for the relationship-scoping mapping rule (prompts._MAPPING_RULES, rule 4).
 
 Reproduces a field failure: a policy that grants a tool operation to exactly one subject AND names
 that same operation under a *different* relationship (agent-role -> tool operations) made the LLM
@@ -6,9 +6,11 @@ auditor conflate the two relationships and wrongly deny the subject's grant. The
 singular actor-noun agent role name ``issue-operator``, which the auditor read as competing with the
 ``tester`` subject; it rejected the valid ``(tester, issues-write)`` grant, aborting the whole PRB run.
 
-The fix is an auditor-only meta-rule: a policy statement about an entity that is NOT among the
+The fix is a relationship-scoping meta-rule: a policy statement about an entity that is NOT among the
 candidates describes a different relationship and is not evidence for or against a candidate's grant.
-This test pins the known-bad singular name so the collision cannot silently return.
+Originally auditor-only; now shared by the proposer and auditor (``_MAPPING_RULES``) so the two sides
+decide grants under the same reasoning. This test pins the known-bad singular name so the collision
+cannot silently return.
 
 Requires a live LLM (``@pytest.mark.integration``); skips when ``LLM_BASE_URL`` is unset. It does not
 touch Keycloak or any service — it calls ``build_scope_rules`` directly with a temp policy file.
