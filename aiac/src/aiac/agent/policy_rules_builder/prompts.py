@@ -13,8 +13,12 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 _SAFETY = (
     "Rules:\n"
-    "1) Deny by default: grant a pair only if the provided policy explicitly supports it; "
-    "if the policy is silent, do not grant.\n"
+    "1) Deny by default: grant a pair only when it is supported by evidence about the focal entity "
+    "itself — either the provided policy, OR the focal entity's and the candidate's own descriptions "
+    "establishing that the candidate performs an operation the scope covers (see rule 3). Policy "
+    "silence is not by itself a reason to deny a pair the descriptions already establish, nor a "
+    "license to grant one they do not; when neither the policy nor those descriptions support the "
+    "pair, do not grant. A statement about any OTHER entity is never support (see rule 4).\n"
     "2) Stay strictly scoped to the single focal entity described below; ignore anything else."
 )
 
