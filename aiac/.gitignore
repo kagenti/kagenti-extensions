@@ -5,3 +5,8 @@ inception/handoffs/
 
 # PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
 test/pdp/policy/rego_out/
+
+# policy-pipeline integration-test generated Rego (test/integration/test_policy_pipeline.py);
+# regenerated per run, left on disk for eyeballing — not source of truth. probe.rego is a
+# committed fixture and is not under rego_out/, so it stays tracked.
+test/integration/rego_out/
