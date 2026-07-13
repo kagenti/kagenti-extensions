@@ -43,6 +43,11 @@ RFC-8693 token exchange, and the `github-tool` MitM swaps the exchanged token fo
 - `github-tool` MCP tool catalog (44 tools): [`../../analysis/github-mcp-tools-summary.json`](../../analysis/github-mcp-tools-summary.json)
 - Reference agent: `agent-examples/a2a/git_issue_agent/`
 - Reference deployment: `kagenti-extensions/authbridge/demos/github-issue/k8s/`
+- **Sibling tool spec (UC-1 onboarding fixture):** [`github-tool.md`](github-tool.md) — a simplified
+  4-tool stub (`source-read`, `source-write`, `issues-read`, `issues-write`) deployed as Service
+  `github-tool`. **This is not the tool this agent connects to.** The agent connects to the production
+  44-tool server at `github-tool-mcp:9090/mcp`. Both coexist in namespace `team1` under different
+  Service names.
 
 ---
 
@@ -209,9 +214,11 @@ Manifests live under `aiac/demo/agents/github_agent/k8s/`, adapted from the gith
     target_audience: "github-tool"
     token_scopes: "openid github-tool-aud github-full-access"
   ```
-- **Prerequisite (reused, not created here):** the existing `github-tool` Deployment/Service
-  (`authbridge/demos/github-issue/k8s/github-tool-deployment.yaml`) + `github-tool-secrets`, a running
-  Kagenti cluster (Keycloak realm `kagenti`, namespace `team1`).
+- **Prerequisite (reused, not created here):** the existing **production** `github-tool` Deployment/Service
+  (`authbridge/demos/github-issue/k8s/github-tool-deployment.yaml`, Service name `github-tool-mcp`) +
+  `github-tool-secrets`, a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1`).
+  The sibling UC-1 stub at `demo/tools/github_tool/` (Service `github-tool`) is a separate deployment
+  for AIAC onboarding discovery and is **not** a runtime dependency of this agent.
 
 **Wiring invariant:** agent `MCP_URL` host (`github-tool-mcp`) == `authproxy-routes` host == tool
 Service name; exchanged audience (`github-tool`) == tool `AUDIENCE`.
