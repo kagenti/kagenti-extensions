@@ -50,7 +50,7 @@ spec:
     spec:
       containers:
         - name: aiac-pdp-config
-          image: aiac-pdp-config:latest
+          image: localhost/aiac-pdp-config:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7071
@@ -60,7 +60,7 @@ spec:
             - secretRef:
                 name: keycloak-admin-secret
         - name: aiac-pdp-policy-keycloak
-          image: aiac-pdp-policy-keycloak:latest
+          image: localhost/aiac-pdp-policy-keycloak:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7072

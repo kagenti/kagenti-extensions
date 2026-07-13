@@ -70,7 +70,7 @@ spec:
       serviceAccountName: aiac-agent
       initContainers:
         - name: aiac-init
-          image: aiac-agent:latest
+          image: localhost/aiac-agent:local
           imagePullPolicy: Never
           # Waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service
           # to be healthy, then creates the aiac-events JetStream stream idempotently.
@@ -80,7 +80,7 @@ spec:
                 name: aiac-pdp-config
       containers:
         - name: aiac-agent
-          image: aiac-agent:latest
+          image: localhost/aiac-agent:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7070
