@@ -1,0 +1,85 @@
+---
+# github-tool — simplified 4-scope MCP stub for UC-1 onboarding.
+#
+# DISTINCT from the production 44-tool github-tool-mcp used by the github-agent
+# for live GitHub operations. These two coexist under different Service names:
+#   github-tool     (this file, port 9090) — UC-1 discovery, client.name = "team1/github-tool"
+#   github-tool-mcp (authbridge/demos/github-issue/k8s/) — agent execution
+#
+# Naming invariants (do not rename):
+#   workload name == Service name == "github-tool"
+#   analyze_tool endpoint: http://github-tool.team1.svc.cluster.local:9090/mcp
+#
+# kagenti.io/type=tool is applied by the kagenti-operator when it reconciles
+# the AgentRuntime below; do not hand-set it here.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-tool
+  namespace: team1
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-tool
+  namespace: team1
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: github-tool
+  template:
+    metadata:
+      labels:
+        app: github-tool
+    spec:
+      serviceAccountName: github-tool
+      containers:
+        - name: github-tool
+          image: github-tool:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 9090
+          env:
+            - name: PORT
+              value: "9090"
+            - name: LOG_LEVEL
+              value: "INFO"
+---
+# Service — exposes /mcp as the first (and only) port.
+# The protocol.kagenti.io/mcp label is a deploy-time prerequisite:
+# analyze_tool returns 502 if this label is absent.
+# The operator does NOT stamp it; it must be set explicitly here.
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-tool
+  namespace: team1
+  labels:
+    protocol.kagenti.io/mcp: "true"
+spec:
+  selector:
+    app: github-tool
+  ports:
+    - name: mcp
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+---
+# AgentRuntime — enrolls the workload so the kagenti-operator:
+#   - applies kagenti.io/type=tool to the pod (read by classify_service), and
+#   - registers a Keycloak client with client.name = "team1/github-tool"
+#     (so analyze_tool derives scopes github-tool.{source-read,...}).
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: github-tool
+  namespace: team1
+spec:
+  type: tool
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: github-tool
