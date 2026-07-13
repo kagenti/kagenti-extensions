@@ -39,6 +39,23 @@ class TestBothStagesSucceed:
         # Orchestrator returns the builder's rules paired with the append flag
         assert result == (rules, False)
 
+    def test_provision_graph_invoked_with_service_id_in_trigger(self):
+        # The service_id must reach Provision as the trigger's entity_id (Keycloak
+        # client_id) — otherwise Provision classifies the wrong service. The other
+        # tests never inspect the graph's argument, so this guards that wiring.
+        graph = MagicMock()
+        graph.invoke.return_value = {"service_type": ServiceType.AGENT}
+
+        with (
+            patch.object(orchestrator, "build_provision_graph", return_value=graph),
+            patch.object(orchestrator, "ServicePolicyBuilder") as spb,
+        ):
+            spb.build.return_value = [object()]
+            orchestrator.onboard_service(SERVICE_ID)
+
+        (state,), _ = graph.invoke.call_args
+        assert state.trigger.entity_id == SERVICE_ID
+
 
 class TestProvisionFails:
     def test_builder_not_called_and_provision_error_propagates(self):
