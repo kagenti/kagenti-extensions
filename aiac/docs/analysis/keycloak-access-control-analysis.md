@@ -633,7 +633,6 @@ no AuthBridge changes required.
 | `authlib/auth/auth.go` | `HandleInbound`: the three JWT checks (signature, issuer, audience) |
 | `authlib/plugins/tokenexchange/exchange/client.go` | RFC 8693 exchange POST construction |
 | `authbridge/demos/token-exchange-routes/README.md` | `authproxy-routes` ConfigMap shape and troubleshooting |
-| `aiac/inception/keycloak-roles-vs-scopes.md` | Conceptual guide: roles vs scopes, hybrid vs pure PDP/PEP |
 
 ---
 

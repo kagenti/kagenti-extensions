@@ -1,7 +1,7 @@
 # Integration Test: policy-pipeline — `test_policy_pipeline.py`
 
 > **One spec among several.** This document specifies a **single** integration test.
-> Integration-test specs live **one spec per test** under `inception/requirements/integration-test/`
+> Integration-test specs live **one spec per test** under `docs/specs/integration-test/`
 > (a sibling of `components/`), and the master PRD's *Integration test specifications* section
 > ([../PRD.md](../PRD.md)) is the index of them. This is the **policy-pipeline** integration test —
 > the full identity→policy pipeline — not the definition of integration testing in general, and not

@@ -5,7 +5,7 @@ these names + role→access pair-sets; the 5.3 launcher (``test/integration/poli
 provisions the same entities into a live Keycloak realm and feeds the descriptions to the PRB.
 Keeping the scenario in one place is what the spec's *Further Notes* mandate — the role→access
 facts, the entity/role/scope descriptions, and both ``policy.md`` variants must stay mutually
-consistent (spec: ``inception/requirements/integration-test/policy-pipeline.md``, *Scenario* +
+consistent (spec: ``docs/specs/integration-test/policy-pipeline.md``, *Scenario* +
 *Scenario inputs*).
 
 Pure data: this module imports nothing (no aiac, no stdlib beyond the language) so a launcher can

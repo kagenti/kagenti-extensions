@@ -565,7 +565,7 @@ pytest aiac/ -m integration          # integration only
 
 ### Integration test specifications
 
-Beyond the marker-gated pytest tests above, individual integration tests are specified **one spec per test** under `inception/requirements/integration-test/` — a **sibling of `components/`**, following the same "one spec per unit" convention the component PRDs use. This section is the dedicated index of those specs (mirroring the Component Summary in §5) and grows as tests are added; each entry is a distinct integration test with its own spec.
+Beyond the marker-gated pytest tests above, individual integration tests are specified **one spec per test** under `docs/specs/integration-test/` — a **sibling of `components/`**, following the same "one spec per unit" convention the component PRDs use. This section is the dedicated index of those specs (mirroring the Component Summary in §5) and grows as tests are added; each entry is a distinct integration test with its own spec.
 
 | Integration test | Description | Spec |
 |---|---|---|

@@ -1,7 +1,7 @@
 """End-to-end policy-pipeline integration test — the generated Rego is the artifact under test.
 
 Parametrized pytest suite for the fixed ``github-agent`` scenario (spec:
-``inception/requirements/integration-test/policy-pipeline.md``). A single session fixture drives the
+``docs/specs/integration-test/policy-pipeline.md``). A single session fixture drives the
 whole identity->policy pipeline with nothing mocked: it provisions a live Keycloak realm, spawns the
 IdP Configuration, Policy Store, and OPA Policy Writer services as ``uvicorn`` subprocesses, runs the
 real Policy Rules Builder (real LLM) to map roles->scopes, then the real Policy Computation Engine to

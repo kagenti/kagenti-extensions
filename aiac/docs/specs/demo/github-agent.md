@@ -1,8 +1,8 @@
 # Demo Spec: `github-agent` (A2A) — source + issue operations over `github-tool`
 
 > **Status:** spec (design source of truth). Implementation is decomposed into
-> `inception/issues/demo/GA-*.md` and entry-pointed by
-> `inception/handoffs/handoff-github-agent-implementation.md`.
+> `docs/issues/demo/GA-*.md` and entry-pointed by
+> `docs/handoffs/handoff-github-agent-implementation.md`.
 >
 > **This is a demo/reference agent**, not part of the AIAC service tree (`src/aiac/`). It is a
 > self-contained, deployable A2A agent that realises the canonical `github-agent` used by the AIAC

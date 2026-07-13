@@ -1,7 +1,7 @@
 # Integration Test: uc1-onboarding-pipeline — `test_uc1_onboarding_pipeline.py`
 
 > **One spec among several.** This document specifies a **single** integration test. Integration-test
-> specs live **one spec per test** under `inception/requirements/integration-test/` (a sibling of
+> specs live **one spec per test** under `docs/specs/integration-test/` (a sibling of
 > `components/`), and the master PRD's *Integration test specifications* section ([../PRD.md](../PRD.md))
 > is the index of them. This is the **uc1-onboarding-pipeline** integration test — the phase-1
 > service-onboarding demo driven end-to-end through the **real UC-1 agent** against **really-deployed**

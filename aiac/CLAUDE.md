@@ -4,22 +4,22 @@ All paths below are relative to `kagenti-extensions/aiac/`.
 
 ## Requirements / PRD docs
 
-`inception/requirements/PRD.md` — master PRD.
-`inception/requirements/components/` — per-component specs.
+`docs/specs/PRD.md` — master PRD.
+`docs/specs/components/` — per-component specs.
 
-For current file list, `ls inception/requirements/` and `ls inception/requirements/components/`.
+For current file list, `ls docs/specs/` and `ls docs/specs/components/`.
 
 ## Requirements directory — link-following policy
 
-When a document under `inception/requirements/` contains a markdown link to another file, use the AskUserQuestion tool to ask before reading it — present "Yes" and "No" as clickable options. If the user picks Yes, read the file normally. If No, treat the link as a label and continue without reading it.
+When a document under `docs/specs/` contains a markdown link to another file, use the AskUserQuestion tool to ask before reading it — present "Yes" and "No" as clickable options. If the user picks Yes, read the file normally. If No, treat the link as a label and continue without reading it.
 
 ## Issue tracking
 
-Issues are tracked as local markdown files under `inception/issues/`, not on GitHub.
+Issues are tracked as local markdown files under `docs/issues/`, not on GitHub.
 Never use `gh` commands to create, update, or list issues — always read/write the local files directly.
 
-`inception/issues/implementation-plan.md` — overall implementation plan.
-For current issue list, `ls` the subdirectories under `inception/issues/`.
+`docs/issues/implementation-plan.md` — overall implementation plan.
+For current issue list, `ls` the subdirectories under `docs/issues/`.
 
 ## Issue tracking — codebase inspection policy
 
@@ -27,7 +27,7 @@ When working on an issue would benefit from inspecting the relevant source code,
 
 ## Handoffs
 
-Per-task handoff documents live under `inception/handoffs/` — one markdown file per task, numeric-prefixed (e.g. `01-update-issues.md`, `02-update-source-and-tests.md`). When asked to generate a handoff, write it here (not a scratch/temp path). Each handoff must be self-contained — background, task, exact files, and acceptance criteria — so a fresh session can execute it without the originating conversation.
+Per-task handoff documents live under `docs/handoffs/` — one markdown file per task, numeric-prefixed (e.g. `01-update-issues.md`, `02-update-source-and-tests.md`). When asked to generate a handoff, write it here (not a scratch/temp path). Each handoff must be self-contained — background, task, exact files, and acceptance criteria — so a fresh session can execute it without the originating conversation.
 
 ## Source code
 

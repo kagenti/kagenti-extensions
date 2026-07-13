@@ -160,7 +160,7 @@ kubectl rollout restart deployment/aiac-interface -n aiac-system
 
 Phase 2 replaces the mock PDP Policy Writer with the OPA implementation (`aiac-pdp-policy-opa`), which writes Rego packages to an `AuthorizationPolicy` Kubernetes CR. The ClusterIP Service name and port are unchanged — no Agent reconfiguration required.
 
-See issue [4.18 — K8s: OPA image swap + AuthorizationPolicy CR + RBAC](../inception/issues/deployment/4.18-k8s-opa-authorizationpolicy-rbac.md) for the full procedure (image swap, ServiceAccount, ClusterRole, ClusterRoleBinding, CR instance).
+See issue [4.18 — K8s: OPA image swap + AuthorizationPolicy CR + RBAC](../docs/issues/deployment/4.18-k8s-opa-authorizationpolicy-rbac.md) for the full procedure (image swap, ServiceAccount, ClusterRole, ClusterRoleBinding, CR instance).
 
 ```bash
 # Build Phase 2 PDP Policy Writer image
