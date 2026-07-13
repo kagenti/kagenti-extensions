@@ -1,0 +1,61 @@
+# DEV / ISOLATED TESTING ONLY
+#
+# This manifest deploys the IdP Configuration Service as a standalone Pod for
+# isolated development and testing.  It does NOT reflect the production topology.
+#
+# In production both interface services run as containers in a single Kagenti Interface Pod
+# defined in pdp-interface-deployment.yaml.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiac-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-pdp-config
+  namespace: aiac-system
+data:
+  KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+  KEYCLOAK_ADMIN_REALM: "master"
+
+---
+# Prerequisites: create this Secret before applying this manifest:
+#
+#   kubectl create secret generic keycloak-admin-secret \
+#     -n aiac-system \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin-secret
+  namespace: aiac-system
+type: Opaque
+stringData:
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_PASSWORD: "admin"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idp-configuration-keycloak-pod
+  namespace: aiac-system
+  labels:
+    app: idp-configuration-keycloak-pod
+spec:
+  containers:
+    - name: aiac-pdp-config
+      image: localhost/aiac-pdp-config:local
+      imagePullPolicy: Never
+      ports:
+        - containerPort: 7071
+      envFrom:
+        - configMapRef:
+            name: aiac-pdp-config
+        - secretRef:
+            name: keycloak-admin-secret

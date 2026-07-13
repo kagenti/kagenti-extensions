@@ -1,0 +1,45 @@
+[project]
+name = "github-agent"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13"
+description = "Github Agent module"
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "a2a-sdk>=1.1.0,<2",
+    # We use 1.6.1 instead of the latest because
+    # crewai requires openai>=2.30.0
+    # but litellm requires openai==2.24.0
+    "crewai[litellm]>=1.6.1",
+    "litellm>=1.90.2",          # Indirect, prevents CVE-2026-42271
+    "crewai-tools[mcp]>=1.6.1",
+    "urllib3>=2.7.0",   # Indirect; prevents CVE-2025-66418
+    "python-multipart>=0.0.32", # Indirect; prevents CVE-2026-24486
+    "cryptography>=48.0.0,<49", # Indirect; prevents CVE-2026-26007
+    "pyasn1>=0.6.3",            # Indirect; prevents CVE-2026-30922
+    "starlette>=1.3.1",        # Indirect; prevents CVE-2025-62727
+    "pillow>=12.3.0",           # Indirect; prevents CVE-2026-40192
+    "lxml>=6.1.1",              # Indirect; prevents CVE-2026-41066
+    "orjson>=3.11.6",           # Indirect; prevents CVE-2025-67221
+    # CVE-2026-45829 (chromadb): no fixed version published; crewai pins chromadb<1.2.
+    # Vulnerability requires running a chromadb HTTP server with trust_remote_code=true,
+    # which this agent does not do.
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[project.scripts]
+server = "a2a_agent:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]

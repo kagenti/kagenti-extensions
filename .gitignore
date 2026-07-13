@@ -57,6 +57,7 @@ secrets.json
 secrets.env
 kubeconfig
 *.kubeconfig
+llm_conf.yaml
 
 # Python
 __pycache__/
@@ -67,3 +68,6 @@ __pycache__/
 .mypy_cache/
 test-jwt-rotation.sh
 kagenti-webhook/bin/
+
+# Claude Code / AI assistant files
+docs/agents/

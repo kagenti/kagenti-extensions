@@ -1,0 +1,49 @@
+# Service configurations with roles
+# Each service can have multiple roles, each role gets its own audience scope
+# Optional 'secret' parameter: if not provided, Keycloak will auto-generate the service secret
+services:
+  - id: "kagenti"
+    type: "Agent"
+    secret: "demo-ui-secret"
+    direct_access_grants: true
+    roles:
+      - name: "demo-ui"
+        description: "Access to the demo UI interface"
+  - id: "spiffe://localtest.me/ns/team1/sa/git-issue-agent"
+    type: "Agent"
+    secret: "github-agent-secret"
+    direct_access_grants: true
+    roles:
+      - name: "github-agent"
+        description: "Provides access to GitHub services"
+  - id: "github-tool"
+    type: "Tool"
+    secret: "github-tool-secret"
+    roles:
+      - name: "github-tool-aud"
+        description: "Provides access to public GitHub repositories"
+      - name: "github-full-access"
+        description: "Provides access to private GitHub repositories"
+
+# Realm roles (can be composites of service roles)
+realm_roles:
+  - name: "developer"
+    description: "R&D team members"
+  - name: "tech-support"
+    description: "Technical support staff providing customer assistance"
+  - name: "sales"
+    description: "Sales team members managing customer relationships"
+
+# Subjects (users/workloads)
+subjects:
+  - username: "alice"
+    roles:
+      - "developer"
+
+  - username: "bob"
+    roles:
+      - "tech-support"
+
+  - username: "charlie"
+    roles:
+      - "sales"

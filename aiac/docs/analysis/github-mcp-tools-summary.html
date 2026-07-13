@@ -1,0 +1,218 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>GitHub MCP Tool Descriptions</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    color: #1f2328;
+    background: #ffffff;
+    padding: 32px 16px 48px;
+  }
+  .page { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 4px; }
+  .meta { font-size: 12px; color: #57606a; margin-bottom: 28px; }
+  .meta code { font-size: 11px; background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 3px; padding: 1px 5px; }
+
+  .category { margin-bottom: 28px; }
+  .category-header {
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    color: #57606a;
+    border-bottom: 1px solid #e5e7eb;
+    padding-bottom: 6px;
+    margin-bottom: 10px;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    background: #f7f8fa;
+    border: 1px solid #e5e7eb;
+    border-radius: 10px;
+    padding: 0 7px;
+    margin-left: 6px;
+    color: #57606a;
+    vertical-align: middle;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+  th { font-size: 11px; font-weight: 600; color: #57606a; text-align: left; padding: 5px 8px; border-bottom: 1px solid #e5e7eb; }
+  td { padding: 7px 8px; border-bottom: 1px solid #f0f1f3; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.name { white-space: nowrap; }
+  code.tool {
+    font-size: 12px;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    background: #f7f8fa;
+    border: 1px solid #e5e7eb;
+    border-radius: 3px;
+    padding: 1px 6px;
+    color: #3b82d4;
+  }
+  td.desc { color: #1f2328; font-size: 13px; }
+
+  .footer { margin-top: 40px; padding-top: 12px; border-top: 1px solid #e5e7eb; text-align: center; font-size: 12px; color: #57606a; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>GitHub MCP Tool Descriptions</h1>
+  <p class="meta">Endpoint: <code>http://github-tool-mcp.team1.svc.cluster.local:9090/mcp</code> &nbsp;·&nbsp; 44 tools &nbsp;·&nbsp; Server: MitM MCP Broker v0.0.1 &nbsp;·&nbsp; Upstream: api.githubcopilot.com/mcp/</p>
+
+  <!-- Issues -->
+  <div class="category">
+    <div class="category-header">Issues <span class="badge">7</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">issue_read</code></td><td class="desc">Get information about a specific issue in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">issue_write</code></td><td class="desc">Create a new or update an existing issue in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_issues</code></td><td class="desc">List issues in a GitHub repository. For pagination, use the <em>endCursor</em> from the previous response's <em>pageInfo</em> in the <em>after</em> parameter.</td></tr>
+        <tr><td class="name"><code class="tool">add_issue_comment</code></td><td class="desc">Add a comment and/or reaction to a specific issue or issue comment in a GitHub repository. Use with pull requests as well (pass pull request number as issue_number), but only if the user is not asking specifically to add or react to review comments. At least one of body or reaction is required.</td></tr>
+        <tr><td class="name"><code class="tool">list_issue_fields</code></td><td class="desc">List issue fields for a repository or organization. Returns field definitions including name, type (text, number, date, single_select), and for single_select fields the list of valid option names. When repo is omitted, returns org-level fields directly.</td></tr>
+        <tr><td class="name"><code class="tool">list_issue_types</code></td><td class="desc">List supported issue types for a repository or its owner organization. When repo is omitted, returns org-level issue types directly.</td></tr>
+        <tr><td class="name"><code class="tool">sub_issue_write</code></td><td class="desc">Add a sub-issue to a parent issue in a GitHub repository.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pull Requests -->
+  <div class="category">
+    <div class="category-header">Pull Requests <span class="badge">11</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">pull_request_read</code></td><td class="desc">Get information on a specific pull request in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_pull_requests</code></td><td class="desc">List pull requests in a GitHub repository. If the user specifies an author, use <em>search_pull_requests</em> instead.</td></tr>
+        <tr><td class="name"><code class="tool">create_pull_request</code></td><td class="desc">Create a new pull request in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">merge_pull_request</code></td><td class="desc">Merge a pull request in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">update_pull_request</code></td><td class="desc">Update an existing pull request in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">update_pull_request_branch</code></td><td class="desc">Update the branch of a pull request with the latest changes from the base branch.</td></tr>
+        <tr><td class="name"><code class="tool">pull_request_review_write</code></td><td class="desc">Create, submit, or delete a pull request review. Methods: <em>create</em>, <em>submit_pending</em>, <em>delete_pending</em>, <em>resolve_thread</em>, <em>unresolve_thread</em>.</td></tr>
+        <tr><td class="name"><code class="tool">add_comment_to_pending_review</code></td><td class="desc">Add a review comment to the requester's latest pending pull request review. A pending review needs to already exist.</td></tr>
+        <tr><td class="name"><code class="tool">add_reply_to_pull_request_comment</code></td><td class="desc">Add a reply and/or reaction to an existing pull request comment. At least one of body or reaction is required.</td></tr>
+        <tr><td class="name"><code class="tool">request_copilot_review</code></td><td class="desc">Request a GitHub Copilot code review for a pull request. Use for automated feedback before requesting a human reviewer.</td></tr>
+        <tr><td class="name"><code class="tool">search_pull_requests</code></td><td class="desc">Search for pull requests in GitHub repositories using issues search syntax already scoped to <em>is:pr</em>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Repositories -->
+  <div class="category">
+    <div class="category-header">Repositories <span class="badge">4</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">create_repository</code></td><td class="desc">Create a new GitHub repository in your account or specified organization.</td></tr>
+        <tr><td class="name"><code class="tool">fork_repository</code></td><td class="desc">Fork a GitHub repository to your account or specified organization.</td></tr>
+        <tr><td class="name"><code class="tool">list_repository_collaborators</code></td><td class="desc">List collaborators of a GitHub repository. Results are paginated; response includes nextPage, prevPage, firstPage, and lastPage fields.</td></tr>
+        <tr><td class="name"><code class="tool">search_repositories</code></td><td class="desc">Find GitHub repositories by name, description, readme, topics, or other metadata. Perfect for discovering projects or locating specific repositories.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Files -->
+  <div class="category">
+    <div class="category-header">Files <span class="badge">4</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">get_file_contents</code></td><td class="desc">Get the contents of a file or directory from a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">create_or_update_file</code></td><td class="desc">Create or update a single file in a GitHub repository. SHA must be provided for existing file updates. Use <em>git rev-parse &lt;branch&gt;:&lt;path&gt;</em> to obtain the SHA before updating.</td></tr>
+        <tr><td class="name"><code class="tool">delete_file</code></td><td class="desc">Delete a file from a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">push_files</code></td><td class="desc">Push multiple files to a GitHub repository in a single commit.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Branches & Tags -->
+  <div class="category">
+    <div class="category-header">Branches &amp; Tags <span class="badge">5</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">create_branch</code></td><td class="desc">Create a new branch in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_branches</code></td><td class="desc">List branches in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_tags</code></td><td class="desc">List git tags in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">get_tag</code></td><td class="desc">Get details about a specific git tag in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">get_label</code></td><td class="desc">Get a specific label from a repository.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Commits -->
+  <div class="category">
+    <div class="category-header">Commits <span class="badge">3</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">get_commit</code></td><td class="desc">Get details for a commit from a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_commits</code></td><td class="desc">Get list of commits of a branch in a GitHub repository. Returns at least 30 results per page (up to 100 with perPage parameter).</td></tr>
+        <tr><td class="name"><code class="tool">search_commits</code></td><td class="desc">Search for commits across GitHub repositories using GitHub's commit search syntax. Useful for finding specific changes, authors, or messages. Searches the default branch only.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Releases -->
+  <div class="category">
+    <div class="category-header">Releases <span class="badge">3</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">get_latest_release</code></td><td class="desc">Get the latest release in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">get_release_by_tag</code></td><td class="desc">Get a specific release by its tag name in a GitHub repository.</td></tr>
+        <tr><td class="name"><code class="tool">list_releases</code></td><td class="desc">List releases in a GitHub repository.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Search -->
+  <div class="category">
+    <div class="category-header">Search <span class="badge">4</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">search_code</code></td><td class="desc">Fast and precise code search across ALL GitHub repositories using GitHub's native search engine. Best for finding exact symbols, functions, classes, or specific code patterns.</td></tr>
+        <tr><td class="name"><code class="tool">search_issues</code></td><td class="desc">Search for issues in GitHub repositories using issues search syntax already scoped to <em>is:issue</em>.</td></tr>
+        <tr><td class="name"><code class="tool">search_pull_requests</code></td><td class="desc">Search for pull requests in GitHub repositories using issues search syntax already scoped to <em>is:pr</em>.</td></tr>
+        <tr><td class="name"><code class="tool">search_users</code></td><td class="desc">Find GitHub users by username, real name, or other profile information. Useful for locating developers, contributors, or team members.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Teams & Users -->
+  <div class="category">
+    <div class="category-header">Teams &amp; Users <span class="badge">3</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">get_me</code></td><td class="desc">Get details of the authenticated GitHub user. Use when a request is about the user's own GitHub profile, or when information is missing to build other tool calls.</td></tr>
+        <tr><td class="name"><code class="tool">get_team_members</code></td><td class="desc">Get member usernames of a specific team in an organization. Limited to organizations accessible with current credentials.</td></tr>
+        <tr><td class="name"><code class="tool">get_teams</code></td><td class="desc">Get details of the teams the user is a member of. Limited to organizations accessible with current credentials.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Security -->
+  <div class="category">
+    <div class="category-header">Security <span class="badge">1</span></div>
+    <table>
+      <thead><tr><th style="width:220px">Tool</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td class="name"><code class="tool">run_secret_scanning</code></td><td class="desc">Scan files, content, or recent changes for secrets such as API keys, passwords, tokens, and credentials. Accepts a single string or array of strings containing raw file contents or diff hunks. Content must not be empty. Only files within the codebase should be scanned; skip files in .gitignore.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p class="footer">Made with IBM Bob</p>
+</div>
+</body>
+</html>

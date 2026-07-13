@@ -1,0 +1,4 @@
+.venv
+
+# `expect` scripts
+test_startup.exp

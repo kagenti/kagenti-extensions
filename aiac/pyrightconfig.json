@@ -1,0 +1,20 @@
+{
+  "include": [
+    "src",
+    "test"
+  ],
+  "extraPaths": [
+    "src",
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic",
+  "executionEnvironments": [
+    {
+      "root": "src",
+      "pythonVersion": "3.12",
+      "extraPaths": [
+        "src"
+      ]
+    }
+  ]
+}

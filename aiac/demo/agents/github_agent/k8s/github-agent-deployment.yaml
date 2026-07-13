@@ -1,0 +1,174 @@
+# GitHub Agent Deployment with AuthBridge
+#
+# This deployment uses the kagenti-operator webhook to automatically inject
+# a single combined AuthBridge sidecar (post-kagenti-extensions#411). The exact
+# container shape depends on the resolved AuthBridge mode:
+# - proxy-sidecar (default): one container "authbridge-proxy" from the
+#   "authbridge" image. spiffe-helper is bundled inside; gated per-workload
+#   by SPIRE_ENABLED.
+# - envoy-sidecar: a "proxy-init" init container (iptables) plus one
+#   container "envoy-proxy" from the "authbridge-envoy" image (Envoy +
+#   ext_proc + bundled spiffe-helper).
+# Either way the sidecar handles inbound JWT validation, outbound token
+# exchange (HTTP), and HTTPS passthrough.
+#
+# Keycloak client registration is operator-managed (no in-pod sidecar);
+# the operator creates a kagenti-keycloak-client-credentials-<hash> Secret
+# and the webhook mounts it at /shared/client-{id,secret}.txt.
+#
+# The agent container:
+#   - Runs the A2A GitHub Agent on port 8000
+#   - Calls the GitHub MCP tool via HTTP (MCP_URL below)
+#   - Token exchange to the tool is handled transparently by the AuthBridge sidecar
+#
+# Labels (on Pod template):
+#   kagenti.io/inject: enabled  - Enables AuthBridge sidecar injection
+#   kagenti.io/spire: enabled   - Enables SPIRE-based identity (set to "disabled" if no SPIRE)
+#
+# kagenti.io/type is applied automatically by the operator when the
+# AgentRuntime CR (at the end of this file) is created.
+#
+# Prerequisites (NOT created by this file — must exist before applying):
+#   1. github-tool Deployment + Service named "github-tool-mcp" (the MCP tool server)
+#   2. github-tool-secrets Secret (GitHub token used by the tool)
+#   3. authbridge-config ConfigMap (apply configmaps.yaml first)
+#   4. authproxy-routes ConfigMap (apply configmaps.yaml first)
+#
+# Invariant: MCP_URL host ("github-tool-mcp") == authproxy-routes host entry
+# ("github-tool-mcp") == the Kubernetes Service name for the tool server.
+# All three must match or token exchange will not fire for tool calls.
+#
+# Usage:
+#   kubectl apply -f configmaps.yaml
+#   kubectl apply -f github-agent-deployment.yaml
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-agent
+  namespace: aiac-demo
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-agent
+  namespace: aiac-demo
+  labels:
+    app.kubernetes.io/name: github-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: github-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: github-agent
+        kagenti.io/inject: enabled
+        kagenti.io/spire: enabled
+    spec:
+      serviceAccountName: github-agent
+      containers:
+        - name: agent
+          image: localhost/github-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            # LLM configuration - Ollama (local LLM)
+            # Matches upstream .env.ollama from agent-examples repo
+            - name: TASK_MODEL_ID
+              value: "ollama/ibm/granite4:latest"
+            # Ollama API base URL. Required by litellm (used by crewai >=1.10).
+            # For Docker Desktop / Kind: http://host.docker.internal:11434
+            # For in-cluster Ollama:     http://ollama.ollama.svc:11434
+            - name: LLM_API_BASE
+              value: "http://host.docker.internal:11434"
+            - name: OLLAMA_API_BASE
+              value: "http://host.docker.internal:11434"
+            - name: LLM_API_KEY
+              value: "ollama"
+            - name: MODEL_TEMPERATURE
+              value: "0"
+            # For OpenAI (uncomment and set your key):
+            # - name: TASK_MODEL_ID
+            #   value: "gpt-4.1-nano"
+            # - name: LLM_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openai-secret
+            #       key: apikey
+            # - name: OPENAI_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openai-secret
+            #       key: apikey
+
+            # Agent service settings
+            # PORT tells the agent where to listen for A2A traffic.
+            # The kagenti operator may override this via proxy-sidecar
+            # port-stealing to relocate the agent to a free port.
+            - name: PORT
+              value: "8000"
+            - name: LOG_LEVEL
+              value: "DEBUG"
+
+            # MCP Tool endpoint - the GitHub tool service
+            # AuthBridge will exchange the token when the agent calls this URL.
+            # This hostname MUST match the authproxy-routes host entry and the
+            # Kubernetes Service name for the tool (see invariant in header above).
+            - name: MCP_URL
+              value: "http://github-tool-mcp:9090/mcp"
+
+            # JWKS URI for validating incoming tokens from Keycloak
+            - name: JWKS_URI
+              value: "http://keycloak-service.keycloak.svc:8080/realms/aiac-demo/protocol/openid-connect/certs"
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+          volumeMounts:
+            - name: shared-data
+              mountPath: /shared
+      volumes:
+        - name: shared-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: github-agent
+  namespace: aiac-demo
+spec:
+  selector:
+    app.kubernetes.io/name: github-agent
+  ports:
+    - port: 8080
+      targetPort: 8000
+      protocol: TCP
+  type: ClusterIP
+
+---
+# AgentRuntime triggers operator-managed Keycloak client registration
+# (creates kagenti-keycloak-client-credentials-<hash> Secret with
+# client-id.txt and client-secret.txt that the authbridge sidecar
+# mounts at /shared/). The operator also applies kagenti.io/type=agent
+# to the Deployment and Pod template, enabling webhook sidecar injection.
+apiVersion: agent.kagenti.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: github-agent
+  namespace: aiac-demo
+spec:
+  type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: github-agent

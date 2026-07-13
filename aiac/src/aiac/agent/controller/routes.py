@@ -1,0 +1,60 @@
+"""AIAC Agent Controller — FastAPI app factory + the four ``/apply/*`` routes.
+
+The Controller is stateless. Each route dispatches to its use-case handler
+(orchestrator or sub-agent), receives the ``(list[PolicyRule], override)`` tuple
+the handler returns, and makes the **single** ``compute_and_apply(rules, override)``
+call to the Policy Computation Engine. No per-use-case business logic, retry
+handling, or state assembly lives here.
+
+Responses are bare HTTP status codes: ``200 OK`` on success (no body). Upstream
+failures are raised as FastAPI ``HTTPException``s by the handlers; the status
+code is authoritative (the accompanying default JSON error body is incidental).
+"""
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import Response
+
+from aiac.agent.uc.onboarding.orchestrator import onboard_service
+from aiac.agent.uc.policy_update.build import build_policy
+from aiac.agent.uc.policy_update.rebuild import rebuild_policy
+from aiac.agent.uc.role_update.role import update_role
+from aiac.policy.computation import compute_and_apply
+
+app = FastAPI()
+
+
+@app.post("/apply/service/{service_id}")
+def apply_service(service_id: str) -> Response:
+    rules, override = onboard_service(service_id)
+    compute_and_apply(rules, override)
+    return Response(status_code=200)
+
+
+@app.post("/apply/policy/build")
+def apply_policy_build() -> Response:
+    rules, override = build_policy()
+    compute_and_apply(rules, override)
+    return Response(status_code=200)
+
+
+@app.post("/apply/policy/rebuild")
+def apply_policy_rebuild() -> Response:
+    rules, override = rebuild_policy()
+    compute_and_apply(rules, override)
+    return Response(status_code=200)
+
+
+@app.post("/apply/role/{role_id}")
+def apply_role(role_id: str) -> Response:
+    rules, override = update_role(role_id)
+    compute_and_apply(rules, override)
+    return Response(status_code=200)
+
+
+def main() -> None:
+    uvicorn.run(app, host="0.0.0.0", port=7070)
+
+
+if __name__ == "__main__":
+    main()
