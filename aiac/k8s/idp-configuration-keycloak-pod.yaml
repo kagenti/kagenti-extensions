@@ -1,10 +1,10 @@
 # DEV / ISOLATED TESTING ONLY
 #
-# This manifest deploys the PDP Configuration Service as a standalone Pod for
+# This manifest deploys the IdP Configuration Service as a standalone Pod for
 # isolated development and testing.  It does NOT reflect the production topology.
 #
-# In production both PDP services run as containers in a single PDP Interface Pod
-# defined in pdp-interface-deployment.yaml (issue 4.2).
+# In production both interface services run as containers in a single Kagenti Interface Pod
+# defined in pdp-interface-deployment.yaml.
 
 ---
 apiVersion: v1
@@ -16,7 +16,7 @@ metadata:
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aiac-pdp-configuration-keycloak-config
+  name: aiac-pdp-config
   namespace: aiac-system
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
@@ -43,19 +43,19 @@ stringData:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: pdp-configuration-keycloak-pod
+  name: idp-configuration-keycloak-pod
   namespace: aiac-system
   labels:
-    app: pdp-configuration-keycloak-pod
+    app: idp-configuration-keycloak-pod
 spec:
   containers:
-    - name: aiac-pdp-configuration-keycloak-service
-      image: localhost/aiac-pdp-configuration-keycloak-service:local
+    - name: aiac-pdp-config
+      image: localhost/aiac-pdp-config:local
       imagePullPolicy: Never
       ports:
         - containerPort: 7071
       envFrom:
         - configMapRef:
-            name: aiac-pdp-configuration-keycloak-config
+            name: aiac-pdp-config
         - secretRef:
             name: keycloak-admin-secret

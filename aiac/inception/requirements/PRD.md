@@ -454,9 +454,9 @@ Four separate manifest files:
 |------|----------|
 | `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + Kagenti Interface Pod Deployment (IdP Configuration Service container + PDP Policy Writer container) + two ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) |
 | `aiac/k8s/policy-store-statefulset.yaml` | `aiac-policy-store` StatefulSet (Policy Store container) + `volumeClaimTemplate` (1 Gi, `ReadWriteOnce`, mounted at `/data`) + headless Service + `aiac-policy-store-service:7074` ClusterIP Service |
-| `aiac/k8s/event-broker-deployment.yaml` | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
-| `aiac/k8s/rag-statefulset.yaml` | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 | `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (aiac-init container + AIAC Agent container) + ClusterIP Service |
+| `aiac/k8s/event-broker-deployment.yaml` _(pending)_ | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
+| `aiac/k8s/rag-statefulset.yaml` _(pending)_ | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 
 The two Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Writer uses `KEYCLOAK_REALM` as its default operating realm. The Policy Store container mounts `aiac-pdp-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
 

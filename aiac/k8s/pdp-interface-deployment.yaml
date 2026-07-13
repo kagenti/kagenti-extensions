@@ -1,0 +1,100 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-pdp-config
+  namespace: aiac-system
+data:
+  KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+  KEYCLOAK_REALM: "kagenti"
+  KEYCLOAK_ADMIN_REALM: "master"
+  AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
+  AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
+  AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
+  AGENTPOLICY_DB_PATH: "/data/state.db"
+  NATS_URL: "nats://aiac-event-broker-service:4222"
+  AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
+  AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
+
+---
+# Prerequisites: create this Secret before applying this manifest:
+#
+#   kubectl create secret generic keycloak-admin-secret \
+#     -n aiac-system \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin-secret
+  namespace: aiac-system
+type: Opaque
+stringData:
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_PASSWORD: "admin"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiac-interface
+  namespace: aiac-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiac-interface
+  template:
+    metadata:
+      labels:
+        app: aiac-interface
+    spec:
+      containers:
+        - name: aiac-pdp-config
+          image: aiac-pdp-config:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7071
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+            - secretRef:
+                name: keycloak-admin-secret
+        - name: aiac-pdp-policy-opa
+          image: aiac-pdp-policy-opa:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7072
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+            - secretRef:
+                name: keycloak-admin-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiac-pdp-config-service
+  namespace: aiac-system
+spec:
+  selector:
+    app: aiac-interface
+  ports:
+    - name: idp-config
+      port: 7071
+      targetPort: 7071
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiac-pdp-policy-service
+  namespace: aiac-system
+spec:
+  selector:
+    app: aiac-interface
+  ports:
+    - name: pdp-policy
+      port: 7072
+      targetPort: 7072

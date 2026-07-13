@@ -1,0 +1,107 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-agent-config
+  namespace: aiac-system
+data:
+  LLM_BASE_URL: "https://api.anthropic.com"
+  LLM_MODEL: "claude-sonnet-5"
+  AIAC_AC_MODEL: "RBAC"
+
+---
+# Prerequisites: create this Secret before applying this manifest:
+#
+#   kubectl create secret generic aiac-agent-secret \
+#     -n aiac-system \
+#     --from-literal=LLM_API_KEY=<your-api-key>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiac-agent
+  namespace: aiac-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiac-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  - apiGroups: ["agent.kagenti.dev"]
+    resources: ["agentcards"]
+    verbs: ["list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiac-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiac-agent
+subjects:
+  - kind: ServiceAccount
+    name: aiac-agent
+    namespace: aiac-system
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiac-agent
+  namespace: aiac-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiac-agent
+  template:
+    metadata:
+      labels:
+        app: aiac-agent
+    spec:
+      serviceAccountName: aiac-agent
+      initContainers:
+        - name: aiac-init
+          image: aiac-agent:latest
+          imagePullPolicy: Never
+          # Waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service
+          # to be healthy, then creates the aiac-events JetStream stream idempotently.
+          command: ["python", "-m", "aiac.agent.init"]
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+      containers:
+        - name: aiac-agent
+          image: aiac-agent:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7070
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+            - configMapRef:
+                name: aiac-agent-config
+            - secretRef:
+                name: aiac-agent-secret
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiac-agent-service
+  namespace: aiac-system
+spec:
+  selector:
+    app: aiac-agent
+  ports:
+    - name: agent
+      port: 7070
+      targetPort: 7070
