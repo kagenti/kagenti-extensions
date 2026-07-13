@@ -47,14 +47,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: github-agent
-  namespace: team1
+  namespace: aiac-demo
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: github-agent
-  namespace: team1
+  namespace: aiac-demo
   labels:
     app.kubernetes.io/name: github-agent
 spec:
@@ -72,7 +72,7 @@ spec:
       serviceAccountName: github-agent
       containers:
         - name: agent
-          image: github-agent:latest
+          image: localhost/github-agent:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8000
@@ -125,7 +125,7 @@ spec:
 
             # JWKS URI for validating incoming tokens from Keycloak
             - name: JWKS_URI
-              value: "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs"
+              value: "http://keycloak-service.keycloak.svc:8080/realms/aiac-demo/protocol/openid-connect/certs"
           resources:
             limits:
               cpu: 500m
@@ -145,7 +145,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: github-agent
-  namespace: team1
+  namespace: aiac-demo
 spec:
   selector:
     app.kubernetes.io/name: github-agent
@@ -165,7 +165,7 @@ apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentRuntime
 metadata:
   name: github-agent
-  namespace: team1
+  namespace: aiac-demo
 spec:
   type: agent
   targetRef:
