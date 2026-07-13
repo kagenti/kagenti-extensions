@@ -160,10 +160,4 @@ See [library-policy-store.md](library-policy-store.md) for the companion library
 - The K8s manifests issue must create the `aiac-policy-store` StatefulSet, its `volumeClaimTemplate` PVC (1 Gi, `ReadWriteOnce`), and a headless Service. No CRD or RBAC is needed — the service does not touch the Kubernetes API.
 - `spec` fields use snake_case (matching Pydantic's `model_dump()`) — consistent with the `AuthorizationPolicy` CR convention. The JSON column avoids a translation layer.
 - `agent_id` is the SQLite `PRIMARY KEY`. The `aiac.apply.service.{id}` naming convention (lowercase alphanumeric + hyphens) should be maintained for consistency with trigger events.
-- **K8s rename summary:**
-
-| Old | New |
-|-----|-----|
-| `aiac-pdp-state` StatefulSet | `aiac-policy-store` |
-| `aiac-pdp-state-service:7074` | `aiac-policy-store-service:7074` |
-| `AIAC_PDP_STATE_URL` env var (in clients) | `AIAC_POLICY_STORE_URL` |
+- K8s resource names: StatefulSet `aiac-policy-store`, ClusterIP Service `aiac-policy-store-service:7074`, env var `AIAC_POLICY_STORE_URL`.

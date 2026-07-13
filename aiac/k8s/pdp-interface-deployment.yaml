@@ -11,7 +11,6 @@ data:
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
-  AGENTPOLICY_DB_PATH: "/data/state.db"
   NATS_URL: "nats://aiac-event-broker-service:4222"
   AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
   AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
@@ -60,8 +59,8 @@ spec:
                 name: aiac-pdp-config
             - secretRef:
                 name: keycloak-admin-secret
-        - name: aiac-pdp-policy-opa
-          image: aiac-pdp-policy-opa:latest
+        - name: aiac-pdp-policy-keycloak
+          image: aiac-pdp-policy-keycloak:latest
           imagePullPolicy: Never
           ports:
             - containerPort: 7072

@@ -458,17 +458,20 @@ Four separate manifest files:
 | `aiac/k8s/event-broker-deployment.yaml` _(pending)_ | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
 | `aiac/k8s/rag-statefulset.yaml` _(pending)_ | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 
-The two Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Writer uses `KEYCLOAK_REALM` as its default operating realm. The Policy Store container mounts `aiac-pdp-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
+The two Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Writer uses `KEYCLOAK_REALM` as its default operating realm. The Policy Store container mounts `aiac-policy-store-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
 
 ### Docker images
 
 Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
-# Build IdP Configuration Service (deployed as a container in the Kagenti Interface Pod)
+# Build IdP Configuration Service (Kagenti Interface Pod container 1)
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
-# Build PDP Policy Writer — OPA implementation (deployed as a container in the Kagenti Interface Pod)
+# Build PDP Policy Writer — Phase 1 mock (Kagenti Interface Pod container 2; writes Rego to filesystem)
+docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
+
+# Build PDP Policy Writer — Phase 2 OPA (replaces mock via issue 4.18; writes to AuthorizationPolicy CR)
 docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-policy-opa:latest aiac/src/
 
 # Build Policy Store (deployed as StatefulSet aiac-policy-store)
@@ -497,10 +500,22 @@ data:
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
-  AGENTPOLICY_DB_PATH: "/data/state.db"
   NATS_URL: "nats://aiac-event-broker-service:4222"
   AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
   AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
+```
+
+`AGENTPOLICY_DB_PATH` is absent — it belongs to `aiac-policy-store-config` (defined in `policy-store-statefulset.yaml`), not to the shared ConfigMap.
+
+### `aiac-policy-store-config` ConfigMap template
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-policy-store-config
+data:
+  AGENTPOLICY_DB_PATH: "/data/state.db"
 ```
 
 Update `KEYCLOAK_URL` and `KEYCLOAK_REALM` for the target environment before applying.

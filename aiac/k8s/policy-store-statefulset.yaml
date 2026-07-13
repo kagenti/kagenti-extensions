@@ -1,4 +1,13 @@
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-policy-store-config
+  namespace: aiac-system
+data:
+  AGENTPOLICY_DB_PATH: "/data/state.db"
+
+---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -23,7 +32,7 @@ spec:
             - containerPort: 7074
           envFrom:
             - configMapRef:
-                name: aiac-pdp-config
+                name: aiac-policy-store-config
           volumeMounts:
             - name: policy-store-data
               mountPath: /data

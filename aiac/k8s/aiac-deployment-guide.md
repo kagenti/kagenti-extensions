@@ -6,7 +6,7 @@ This guide covers the full AIAC deployment in the `aiac-system` namespace.
 
 | Manifest | Contents | Port(s) |
 |---|---|---|
-| `pdp-interface-deployment.yaml` | Kagenti Interface Pod (IdP Configuration Service + PDP Policy Writer) + 2 ClusterIP Services | 7071, 7072 |
+| `pdp-interface-deployment.yaml` | Kagenti Interface Pod (IdP Configuration Service + PDP Policy Writer **Phase 1 mock** `aiac-pdp-policy-keycloak`) + 2 ClusterIP Services | 7071, 7072 |
 | `policy-store-statefulset.yaml` | Policy Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
 | `agent-deployment.yaml` | Agent Pod Deployment (init container + AIAC Agent) + ClusterIP Service | 7070 |
 
@@ -25,9 +25,9 @@ Run from the repo root (`kagenti-extensions/`):
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
   -t localhost/aiac-pdp-config:local aiac/src/
 
-# PDP Policy Writer — OPA (Interface Pod container 2)
-docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
-  -t localhost/aiac-pdp-policy-opa:local aiac/src/
+# PDP Policy Writer — Phase 1 mock (Interface Pod container 2, writes Rego to filesystem)
+docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile \
+  -t localhost/aiac-pdp-policy-keycloak:local aiac/src/
 
 # Policy Store
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile \
@@ -44,7 +44,7 @@ docker build -f aiac/src/aiac/agent/controller/Dockerfile \
 
 ```bash
 kind load docker-image localhost/aiac-pdp-config:local       --name <cluster-name>
-kind load docker-image localhost/aiac-pdp-policy-opa:local   --name <cluster-name>
+kind load docker-image localhost/aiac-pdp-policy-keycloak:local --name <cluster-name>
 kind load docker-image localhost/aiac-policy-store:local     --name <cluster-name>
 kind load docker-image localhost/aiac-agent:local            --name <cluster-name>
 ```
@@ -152,6 +152,21 @@ kind load docker-image localhost/aiac-pdp-config:local --name <cluster-name>
 
 # Restart the affected deployment:
 kubectl rollout restart deployment/aiac-interface -n aiac-system
+```
+
+---
+
+## Phase 2: Upgrading to the OPA PDP Policy Writer
+
+Phase 2 replaces the mock PDP Policy Writer with the OPA implementation (`aiac-pdp-policy-opa`), which writes Rego packages to an `AuthorizationPolicy` Kubernetes CR. The ClusterIP Service name and port are unchanged — no Agent reconfiguration required.
+
+See issue [4.18 — K8s: OPA image swap + AuthorizationPolicy CR + RBAC](../inception/issues/deployment/4.18-k8s-opa-authorizationpolicy-rbac.md) for the full procedure (image swap, ServiceAccount, ClusterRole, ClusterRoleBinding, CR instance).
+
+```bash
+# Build Phase 2 PDP Policy Writer image
+docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
+  -t localhost/aiac-pdp-policy-opa:local aiac/src/
+kind load docker-image localhost/aiac-pdp-policy-opa:local --name <cluster-name>
 ```
 
 ---
