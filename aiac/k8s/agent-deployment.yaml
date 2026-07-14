@@ -68,16 +68,9 @@ spec:
         app: aiac-agent
     spec:
       serviceAccountName: aiac-agent
-      initContainers:
-        - name: aiac-init
-          image: localhost/aiac-agent:local
-          imagePullPolicy: Never
-          # Waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service
-          # to be healthy, then creates the aiac-events JetStream stream idempotently.
-          command: ["python", "-m", "aiac.agent.init"]
-          envFrom:
-            - configMapRef:
-                name: aiac-pdp-config
+      # aiac-init init container is deferred to Phase 2 (issue 4.21).
+      # It will gate startup on NATS + IdP Config + PDP Policy + RAG Ingest health
+      # and provision the aiac-events JetStream stream.
       containers:
         - name: aiac-agent
           image: localhost/aiac-agent:local

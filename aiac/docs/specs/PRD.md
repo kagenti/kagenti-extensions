@@ -306,7 +306,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
 - **Agent HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
 - **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
-- **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently.
+- **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently. _(Deferred to Phase 2 — issue 4.21; the Phase 1 Agent pod runs without it.)_
 - **All `__init__.py` files under `aiac.*` are empty.** Callers use explicit submodule paths: `from aiac.idp.configuration.models import Subject`, `from aiac.policy.model.models import PolicyModel`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
 - **`user/{id}` trigger not implemented.** OPA rules are role-scoped; individual user creation/update does not require agent intervention — OPA rule evaluation resolves entitlements from the caller's role automatically.
@@ -454,7 +454,7 @@ Four separate manifest files:
 |------|----------|
 | `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + Kagenti Interface Pod Deployment (IdP Configuration Service container + PDP Policy Writer container) + two ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) |
 | `aiac/k8s/policy-store-statefulset.yaml` | `aiac-policy-store` StatefulSet (Policy Store container) + `volumeClaimTemplate` (1 Gi, `ReadWriteOnce`, mounted at `/data`) + headless Service + `aiac-policy-store-service:7074` ClusterIP Service |
-| `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (aiac-init container + AIAC Agent container) + ClusterIP Service |
+| `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent container) + ClusterIP Service _(Phase 1; `aiac-init` init container added in Phase 2, issue 4.21)_ |
 | `aiac/k8s/event-broker-deployment.yaml` _(pending)_ | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
 | `aiac/k8s/rag-statefulset.yaml` _(pending)_ | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 
@@ -477,7 +477,7 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-poli
 # Build Policy Store (deployed as StatefulSet aiac-policy-store)
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile -t aiac-policy-store:latest aiac/src/
 
-# Build Agent (includes aiac-init container)
+# Build Agent (aiac-init init container deferred to Phase 2, issue 4.21)
 docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest aiac/src/
 
 # Build RAG Ingest Service
@@ -500,7 +500,9 @@ data:
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
+  # Added in Phase 2 by issue 4.19 (Event Broker):
   NATS_URL: "nats://aiac-event-broker-service:4222"
+  # Added in Phase 3 by issue 4.20 (RAG Pod):
   AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
   AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
 ```

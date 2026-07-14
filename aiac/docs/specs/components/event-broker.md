@@ -84,7 +84,7 @@ No authentication credentials are required. The NATS server runs with no-auth co
 
 ## AIAC Init Container
 
-A dedicated `aiac-init` init container runs in the **Agent Pod** before the Agent container starts. It orchestrates the AIAC startup sequence:
+A dedicated `aiac-init` init container runs in the **Agent Pod** before the Agent container starts. It orchestrates the AIAC startup sequence. _Deployment of this container is deferred to Phase 2 (issue 4.21) — the Phase 1 Agent pod runs without it._
 
 1. **Wait for NATS** — poll `aiac-event-broker-service:4222` until TCP connection succeeds.
 2. **Wait for PDP Configuration Service** — poll `AIAC_PDP_CONFIG_URL/health` until HTTP 200.

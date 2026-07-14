@@ -78,9 +78,9 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
 | `AIAC_POLICY_STORE_URL` | `http://aiac-policy-store-service:7074` | Agent |
 | `AGENTPOLICY_DB_PATH` | `/data/state.db` | Policy Store |
-| `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent |
-| `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Agent |
-| `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent |
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
+| `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
+| `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |
 
 ## 5 — Deploy
 
