@@ -201,7 +201,7 @@ Manifests live under `aiac/demo/agents/github_agent/k8s/`, adapted from the gith
 - **`github-agent-deployment.yaml`** — `ServiceAccount` + `Deployment` + `Service` + `AgentRuntime`:
   - Pod labels `kagenti.io/inject: enabled`, `kagenti.io/spire: enabled`.
   - Container port `8000`; env `MCP_URL=http://github-tool-mcp:9090/mcp`,
-    `JWKS_URI=http://keycloak-service.keycloak.svc:8080/realms/aiac-demo/protocol/openid-connect/certs`,
+    `JWKS_URI=http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs`,
     LLM vars, `PORT`, `LOG_LEVEL`; `/shared` `emptyDir` for operator-mounted client creds.
   - `Service` `8080 → 8000` (ClusterIP).
   - `AgentRuntime{ type: agent, targetRef: this Deployment }` — enrolls the workload (operator applies
@@ -216,8 +216,8 @@ Manifests live under `aiac/demo/agents/github_agent/k8s/`, adapted from the gith
   ```
 - **Prerequisite (reused, not created here):** the existing **production** `github-tool` Deployment/Service
   (`authbridge/demos/github-issue/k8s/github-tool-deployment.yaml`, Service name `github-tool-mcp`) +
-  `github-tool-secrets`, a running Kagenti cluster with the dedicated `aiac-demo` Keycloak realm;
-  workloads deploy into namespace `team1` (installer-provided and enrolled for AuthBridge injection).
+  `github-tool-secrets`, a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1` —
+  installer-provided and enrolled for AuthBridge injection).
   The sibling UC-1 stub at `demo/tools/github_tool/` (Service `github-tool`) is a separate deployment
   for AIAC onboarding discovery and is **not** a runtime dependency of this agent.
 

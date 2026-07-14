@@ -14,8 +14,8 @@
 #   kubectl apply -f configmaps.yaml
 #
 # Note: These manifests are configured for namespace "team1" (installer-provided
-#       and enrolled for AuthBridge sidecar injection). The Keycloak realm remains
-#       "aiac-demo" (set via KEYCLOAK_REALM below); namespace and realm are independent.
+#       and enrolled for AuthBridge sidecar injection) and the installer's
+#       "kagenti" Keycloak realm (set via KEYCLOAK_REALM below).
 
 ---
 # authbridge-config ConfigMap - Unified config for both client-registration and envoy-proxy
@@ -35,12 +35,12 @@ metadata:
   namespace: team1
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
-  KEYCLOAK_REALM: "aiac-demo"
+  KEYCLOAK_REALM: "kagenti"
   # TOKEN_URL: Auto-derived from KEYCLOAK_URL + KEYCLOAK_REALM. Only set explicitly
   # when the token endpoint differs from the standard Keycloak path.
-  # TOKEN_URL: "http://keycloak-service.keycloak.svc:8080/realms/aiac-demo/protocol/openid-connect/token"
+  # TOKEN_URL: "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/token"
   # ISSUER: Set explicitly because the internal KEYCLOAK_URL differs from the frontend URL.
-  ISSUER: "http://keycloak.localtest.me:8080/realms/aiac-demo"
+  ISSUER: "http://keycloak.localtest.me:8080/realms/kagenti"
   # Audience validation is automatic — uses CLIENT_ID from /shared/client-id.txt
   # (written by client-registration or operator). No manual configuration needed.
 

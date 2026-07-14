@@ -125,7 +125,7 @@ spec:
 
             # JWKS URI for validating incoming tokens from Keycloak
             - name: JWKS_URI
-              value: "http://keycloak-service.keycloak.svc:8080/realms/aiac-demo/protocol/openid-connect/certs"
+              value: "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs"
           resources:
             limits:
               cpu: 500m
