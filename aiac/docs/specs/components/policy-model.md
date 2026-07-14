@@ -12,11 +12,26 @@ Keeping the canonical model definitions inside a PDP-namespaced module (`aiac.pd
 
 Additionally, the old `PolicyRule` used plain `str` for `role` and `scope`. The PCE algorithm requires typed `Role` and `Scope` objects (from `aiac.idp.configuration.models`) to invoke `Configuration.get_services_by_role` and `Configuration.get_services_by_scope`.
 
-Finally, the original `source_roles`, `subject_roles`, and `scope_targets` maps used pydantic model objects (`Service`, `Subject`, `Scope`) as dict keys. Model-object keys do not round-trip through `model_dump(mode="json")` / JSON without custom key handling, and they couple `aiac.policy.model` to the id-only `__hash__`/`__eq__` of the IdP models. The outbound map was also keyed by scope (`scope → targets`), whereas consumers need the inverse (`target → scopes`) to emit per-target authorization directly.
+The original `source_roles`, `subject_roles`, and `scope_targets` maps used pydantic model objects (`Service`, `Subject`, `Scope`) as dict keys. Model-object keys do not round-trip through `model_dump(mode="json")` / JSON without custom key handling, and they couple `aiac.policy.model` to the id-only `__hash__`/`__eq__` of the IdP models. The outbound map was also keyed by scope (`scope → targets`), whereas consumers need the inverse (`target → scopes`) to emit per-target authorization directly.
+
+### Order-dependence bug (the reason for the two-layer model)
+
+The Policy Computation Engine (PCE) merges `list[PolicyRule]` from onboarding sub-agents into per-agent policy. Historically `AgentPolicyModel` (APM) was the **only persisted entity** and stored rules **denormalised onto the agent**. That made policy **order-dependent**.
+
+Concretely, let `UR` be a user (realm) role mapped to agent `A`'s scope `AS` and tool `T`'s scope `TS`, and `AR` be agent `A`'s (client) role mapped to `TS`:
+
+- **A onboarded, then T:** at T-onboarding `A`'s model already exists, so the `(UR, TS)` rule attaches to `A`'s outbound-subject gate. Correct.
+- **T onboarded, then A:** at T-onboarding no agent targets `TS`, so `UR→TS` is **dropped**; A-onboarding never re-emits it, so **`UR→TS` is lost forever.**
+
+The fix is a **two-layer model**: a per-service persistent source of truth (`ServicePolicyModel`) that stores every inbound edge durably on the service that owns the scope — so `UR→TS` lands on `SPM(T)` at tool-onboarding, no agent required, and can never be lost — with `AgentPolicyModel` demoted to a **pure derived projection** that is no longer persisted.
 
 ## Solution
 
-A canonical, dependency-free model module at `aiac.policy.model` defines `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` with typed fields. No HTTP client, no service code — importable by any consumer without side effects. `PolicyRule.role` and `PolicyRule.scope` are typed `Role` and `Scope` objects from `aiac.idp.configuration.models`.
+A canonical, dependency-free model module at `aiac.policy.model` defines `ServicePolicyModel`, `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` with typed fields. No HTTP client, no service code — importable by any consumer without side effects. `PolicyRule.role` and `PolicyRule.scope` are typed `Role` and `Scope` objects from `aiac.idp.configuration.models`.
+
+**Two-layer model.** `ServicePolicyModel` (SPM) is the **persistent source of truth**, one per **service** (agent *and* tool). It holds the service's **inbound** rules plus its own identity (owned roles and scopes). `AgentPolicyModel` (APM) becomes a **pure derived projection** built from the relevant SPMs by the PCE — it is **no longer persisted**. Its shape is unchanged so existing consumers (PDP Policy Library, Policy Store readers) keep working.
+
+**Canonical form.** *Every rule is an inbound edge on the SPM of the service that owns the rule's scope.* An agent's outbound edge is the target's inbound edge — `AR→TS` is stored on `SPM(T)`, not on `A`. The routing key is `Scope.serviceId`: a rule `(role, scope)` routes to `SPM(scope.serviceId)`.
 
 The relationship maps (`source_roles`, `subject_roles`, `target_scopes`) are keyed by the string `id` of the referenced entity rather than by a typed object, so they serialize to JSON natively and carry no hashability requirement into `aiac.policy.model`. Typed `Role` / `Scope` objects are retained as the map *values* (and in `PolicyRule`), preserving the typing the PCE needs for IdP queries. The outbound map is `target_scopes` (`target service id → scopes permitted`), the inverse of the former `scope_targets`.
 
@@ -49,7 +64,7 @@ The relationship maps (`source_roles`, `subject_roles`, `target_scopes`) are key
 aiac/src/aiac/policy/
 └── model/
     ├── __init__.py    # empty
-    └── models.py      # PolicyRule, AgentPolicyModel, PolicyModel
+    └── models.py      # ServicePolicyModel, PolicyRule, AgentPolicyModel, PolicyModel
 ```
 
 ### Dependencies
@@ -57,13 +72,40 @@ aiac/src/aiac/policy/
 | Dependency | Purpose |
 |------------|---------|
 | `pydantic` | `BaseModel`, `ConfigDict` |
-| `aiac.idp.configuration.models` | Typed `Role`, `Scope` (as map values and in `PolicyRule`) |
+| `aiac.idp.configuration.models` | Typed `Role`, `Scope`, `ServiceType` (as map values, in `PolicyRule`, and in `ServicePolicyModel`) |
 
 No HTTP client dependency. No `requests`, no `python-dotenv`.
 
 ### Pydantic Models
 
 All models use `model_config = ConfigDict(extra='ignore')`.
+
+#### New `Role` / `Scope` fields (defined in `aiac.idp.configuration.models`)
+
+The two-layer model requires ownership and a user/agent distinction on the IdP types. These fields are **defined in `aiac.idp.configuration.models`** (the deep population from Keycloak is handoff 02's concern), but the policy model depends on them for SPM routing and APM derivation:
+
+- **`Scope.serviceId: str`** — the single owning service's `serviceId`. This is the SPM routing key: a rule `(role, scope)` routes to `SPM(scope.serviceId)`. See Assumption 2 (a scope has exactly one owner).
+- **`RoleKind(str, Enum)`** — `USER = "User"`, `AGENT = "Agent"` (mirrors `ServiceType`'s style).
+- **`Role.kind: RoleKind`** — whether the role is held by users or by agent service accounts.
+- **`Role.actorIds: list[str]`** — context-dependent on `kind`:
+  - `kind == AGENT` ⇔ a Keycloak **client role** on the agent's client; `actorIds` = the owning **agent `serviceId`(s)** (usually one).
+  - `kind == USER` ⇔ a Keycloak **realm role**; `actorIds` = the **holder usernames**.
+
+A `model_validator` on `Role` enforces what it can locally (`kind` present/valid; `actorIds` is a `list[str]`). The **cross-kind** invariant (Assumption 1) and the **client/realm ⇔ agent/user** invariant (Assumption 3) are enforced **upstream at construction** (the Keycloak IdP boundary), because the raw Keycloak facts are only visible there — see handoff 02 for that enforcement and field population.
+
+#### `ServicePolicyModel`
+
+The persistent source of truth — one per service (agent *and* tool), keyed by `service_id`. Holds the service's inbound rules plus its own identity.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `service_id` | `str` | The owning service's id. |
+| `service_type` | `ServiceType` | `Agent` or `Tool`. Drives derivation: only `Agent` services get an APM. |
+| `owned_roles` | `list[Role]` | This service's own client roles (`aiac.managed` marker only). |
+| `owned_scopes` | `list[Scope]` | This service's exposed scopes (`aiac.managed` marker only). |
+| `inbound_rules` | `list[PolicyRule]` | Canonical: every edge granting access to `owned_scopes`. |
+
+`owned_roles` / `owned_scopes` are the service's own identity, filtered to the `aiac.managed` marker (this is where the PCE's P2 identity now lives). They are seeded from the catalog by the PCE; this module only defines the shape. `ServicePolicyModel` round-trips through `model_dump(mode="json")` / `model_validate()` with string keys only.
 
 #### `PolicyRule`
 
@@ -77,6 +119,8 @@ A single access rule pairing a typed role with a typed scope. Used in both inbou
 #### `AgentPolicyModel`
 
 Complete policy definition for a single agent (service). Inbound and outbound rule sets are typed collections.
+
+> **Derived, not persisted.** `AgentPolicyModel` is now a **pure derived projection** built by the PCE from the relevant `ServicePolicyModel`s. It is **no longer a persisted entity** — the durable source of truth is `ServicePolicyModel`. Its shape is **unchanged** so existing consumers (PDP Policy Library, Policy Store readers) keep working; the docstring on the model states this explicitly.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -143,11 +187,23 @@ model = PolicyModel(agents=[agent_model])
 
 ---
 
+## Assumptions
+
+The two-layer model rests on three invariants. All three are **AIAC invariants**, not Keycloak guarantees, and the ones that require raw Keycloak facts are enforced upstream at the IdP boundary (handoff 02):
+
+1. **No role spans both kinds.** A role is held by users *or* by agent service accounts, never both. This is what lets `Role.actorIds` be a single list. Enforced upstream at construction (cross-kind invariant not visible to the local `Role` validator).
+2. **No scope shared across services.** A scope has exactly one owner → a single `Scope.serviceId`. This reconciles with the existing `get_services_by_scope(scope) -> list[Service]` (plural, because Keycloak client scopes are realm-level and assignable to many clients): for AIAC-managed scopes that list is always length 1.
+3. **Agent role ⇔ Keycloak client role; user role ⇔ Keycloak realm role.** The IdP config service sources agent roles from the agent's **client** roles (`Service.roles`), and `Role.kind` is populated from Keycloak's `clientRole` flag. Enforced upstream at construction.
+
+---
+
 ## Testing Decisions
 
 **Seam:** model instantiation and serialization — no HTTP boundary, no mocking required.
 
 Key behaviors to assert:
+- `Scope.serviceId` is present; `Role.kind` (a `RoleKind`) and `Role.actorIds` (a `list[str]`) are present; the `Role` `model_validator` accepts a valid `kind` + `list[str]` `actorIds` and rejects a malformed one.
+- `ServicePolicyModel` constructs with `service_id`, `service_type`, `owned_roles`, `owned_scopes`, `inbound_rules`, and round-trips via `model_dump(mode="json")` / `model_validate()` (string keys only) with typed `Role` / `Scope` / `PolicyRule` values preserved.
 - `PolicyRule` accepts typed `Role` and `Scope` objects; rejects plain `str` where `Role`/`Scope` is expected.
 - `AgentPolicyModel` with string-ID keys in `source_roles`, `subject_roles`, and `target_scopes` round-trips through `model_dump(mode="json")` / `model_validate()` with the typed `Role` / `Scope` list values preserved.
 - `target_scopes` maps a target service id to the list of `Scope` objects permitted on it (outbound direction is `target → scopes`, not `scope → targets`).

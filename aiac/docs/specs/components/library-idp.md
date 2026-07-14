@@ -56,7 +56,7 @@ Represents a user (Keycloak: `user`).
 
 #### `Role`
 
-Represents a role (Keycloak: realm role).
+Represents a role. Per Assumption 3 (policy-model spec), **user** roles are Keycloak realm roles and **agent** roles are Keycloak client roles on the agent's client; `kind` (a `RoleKind`) carries that distinction and is populated from Keycloak's `clientRole` flag at the IdP boundary.
 
 | Field | Type | Keycloak field | Default |
 |-------|------|----------------|---------|
@@ -66,8 +66,19 @@ Represents a role (Keycloak: realm role).
 | `composite` | `bool` | `composite` | |
 | `childRoles` | `list[Role]` | `composites.realm` | `[]` |
 | `attributes` | `dict[str, Any]` | `attributes` | `{}` |
+| `kind` | `RoleKind` | `clientRole` flag (user = realm role, agent = client role; resolved at the IdP boundary) | |
+| `actorIds` | `list[str]` | _(subject/user IDs holding a user-kind role; populated service-side from `get_subjects_by_role`, handoff 02)_ | `[]` |
+
+> **Field pass-through (handoff 03 audit).** `kind`, `actorIds`, and `Scope.serviceId` are declared
+> on the models by **handoff 01** and populated by the **IdP service** (handoff 02). The
+> `Configuration` library deserializes them **automatically** — `model_validate` picks up any declared
+> field present in the service JSON, and there is no hand-rolled field mapping that would omit them.
+> `kind` is **authoritative**: the library never re-derives a role's user/agent kind client-side
+> (e.g. by calling `get_services_by_role`). See the api-submodule audit note below.
 
 Roles also expose an `aiac_managed` property (`bool`): `True` when `attributes` carries the AIAC provisioning marker `aiac.managed` (realm-role attribute values are lists, so the marker appears as `["true"]`). See the naming convention in the idp-configuration-service spec.
+
+> **SPM/APM (service-side).** `Role.actorIds` is populated per kind at the IdP boundary: for an **agent** (client) role, the owning client's `serviceId`(s) (resolved from the role's `containerId`); for a **user** (realm) role, the role's member usernames (aligned with `get_subjects_by_role`). The IdP service also fails loud on cross-kind roles (Assumption 1) and multi-owner AIAC-managed scopes (Assumption 2). See "Agent roles are client roles, field population, and assumption enforcement" in idp-configuration-service.md.
 
 #### `Service`
 
@@ -104,6 +115,11 @@ Represents a service scope (Keycloak: `client scope`).
 | `name` | `str` | `name` |
 | `description` | `str \| None` | `description` |
 | `attributes` | `dict[str, Any]` | `attributes` |
+| `serviceId` | `str \| None` | _(the `serviceId`/`clientId` of the service that exposes this scope; declared by handoff 01, populated service-side by handoff 02)_ |
+
+> **Field pass-through (handoff 03 audit).** `Scope.serviceId` round-trips through the library's
+> deserialization automatically (same `model_validate` pass-through as `Role.kind`/`actorIds`). It makes
+> a scope's exposing service an explicit field read rather than something the client must infer.
 
 Scopes also expose an `aiac_managed` property (`bool`): `True` when `attributes` carries the AIAC provisioning marker `aiac.managed` (client-scope attribute values are plain strings, so the marker appears as `"true"`). See the naming convention in the idp-configuration-service spec.
 
@@ -124,6 +140,17 @@ subjects = [Subject.model_validate(s) for s in raw]
 HTTP client library that wraps the IdP Configuration Service REST API. Provides read and write access to IdP configuration entities (subjects, roles, services, scopes) and returns typed Pydantic model instances from `aiac.idp.configuration.models`.
 
 All Keycloak interactions are consolidated here; the PDP Policy Writer (OPA) does not touch Keycloak directly.
+
+> **Handoff 03 audit outcome — no library code change required.** Once handoff 01 declares
+> `Role.kind` / `Role.actorIds` / `Scope.serviceId` on the models and handoff 02 makes the IdP service
+> populate them, the `Configuration` library surfaces them faithfully **with no code change**: it is a
+> thin pass-through and pydantic `model_validate` picks up the declared fields automatically (no
+> hand-rolled field mapping omits them). The P1 client-side filter in `get_services_by_role` /
+> `get_services_by_scope` was already an `id`-membership field read (not an inference) and needs **no
+> simplification**; it still returns only genuine owners/exposers. No client-side re-derivation of role
+> kind exists or is introduced (`Role.kind` is authoritative); `get_services_by_role` is retained as a
+> method. `get_subjects_by_role` stays consistent with a role's `actorIds` (both come from the same
+> service-side source). See the per-method audit notes below.
 
 **Transport retries.** Every HTTP call is issued through a private `_request(method, path, **kwargs)` helper that wraps the request in the project-level `run_upstream` retry primitive (`aiac.shared.upstream`): transient failures are retried up to `UPSTREAM_MAX_RETRIES` times (default `3`) with exponential backoff before a non-2xx status is raised as `RuntimeError`. Retry lives inside the library (not in callers), and applies at the leaf request, so composite methods (`create_service_role` / `create_service_scope`) retry each sub-request without compounding.
 
@@ -220,12 +247,30 @@ class Configuration:
 
 > **Performance note:** because both methods delegate to `get_services()`, each call inherits its full fan-out cost (see the `get_services()` performance note above — `2N + 1 + roles` HTTP requests for N services). Acceptable for the low-frequency PCE resolution path. If it becomes a bottleneck, the right fix is a real server-side `role_id` / `scope_id` filter on `GET /services`.
 
+> **P1 client-side filter — handoff 03 audit (no change required).** With ownership now explicit on
+> the entities (`Role.kind`/`actorIds`, `Scope.serviceId`), the P1 client-side filter was audited for
+> possible simplification. **Outcome: the filter is retained as-is.** `get_services_by_role` /
+> `get_services_by_scope` already select owners/exposers by **`id`-membership** in each service's
+> enriched `.roles` / `.scopes` lists — that is a direct field read, **not an inference**, so there is
+> nothing to simplify away. Membership in the service's `.scopes` remains the authoritative
+> owner/exposer signal (consistent with the new `Scope.serviceId`); the two agree because both derive
+> from the service-side truth. The filter still returns **only** genuine owners/exposers and returns
+> `[]` for realm-level roles that no service owns. No client-side re-derivation of role kind is
+> introduced by these methods; `get_services_by_role` is **retained as a method** — the PCE still uses
+> it (e.g. its re-derivation trigger fallback) even though `Role.kind` is now the authoritative kind.
+
 `get_subjects_by_role(role: Role) -> list[Subject]`:
 1. `GET {AIAC_PDP_CONFIG_URL}/subjects?role_id={role.id}&realm=<self.realm>`
 2. Returns all subjects (users) that have this role directly assigned, enriched with their full realm role assignments (same enrichment as `get_subjects()`).
 3. Raises `RuntimeError` on non-2xx. Returns an empty list when no subject holds the role.
 
 > **Note:** This method returns only subjects with a **direct** assignment of the given role. Composite role traversal (resolving `childRoles` and querying each) is the caller's responsibility — see PCE algorithm in `aiac.policy.computation`.
+
+> **`actorIds` consistency — handoff 03 audit.** The subject/username set this method reports is the
+> same set the **IdP service** uses to populate a user-kind role's `Role.actorIds` (handoff 02). The
+> library surfaces both from the same service-side source, so there is **no divergence** between the
+> `actorIds` carried on a returned `Role` and the subjects `get_subjects_by_role(role)` reports. The
+> library does not recompute `actorIds` client-side.
 
 `create_scope`:
 1. Issues `POST {AIAC_PDP_CONFIG_URL}/scopes` with body `{"name": scope_name, "description": scope_description}`, appending `?realm=<self.realm>`.

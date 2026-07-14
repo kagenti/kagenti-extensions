@@ -17,7 +17,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | GET | `/services/{service_id}` | `GET /admin/realms/{realm}/clients/{service_id}` | Single service by ID |
 | POST | `/services/{service_id}/type` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"attributes": {...}})` | Set a service's type via the `client.type` client attribute |
 | GET | `/scopes` | `GET /admin/realms/{realm}/client-scopes` | All scopes |
-| GET | `/services/{service_id}/roles` | `admin.get_client_service_account_user(service_id)` → `admin.get_realm_roles_of_user(user_id)` | Realm roles assigned to a service's account |
+| GET | `/services/{service_id}/roles` | `admin.get_client_roles(service_id)` | **Client roles defined on this service's client** — an agent's own roles (`R_A`). See "Agent roles are client roles" below. |
 | GET | `/services/{service_id}/scopes` | `admin.get_client_default_client_scopes(service_id)` | Default client scopes assigned to a service |
 | GET | `/roles/{role_name}/composites` | `GET /admin/realms/{realm}/roles/{role-name}/composites` | Current composite permissions assigned to a role |
 | POST | `/scopes` | `POST /admin/realms/{realm}/client-scopes` | Create realm-level scope |
@@ -69,12 +69,13 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 `GET /services/{service_id}/roles`:
-1. Calls `admin.get_client_service_account_user(service_id)` to get the service account user.
-2. Extracts `user["id"]` from the result.
-3. Calls `admin.get_realm_roles_of_user(user_id)` to return the realm roles assigned to the service account.
-4. Returns `200 OK` with a JSON array of realm role objects.
-5. Returns `[]` (empty array) if `KeycloakError` has `response_code == 400` (service has no service account — not an error).
-6. Returns `502 Bad Gateway` with `{"error": ...}` on other `KeycloakError`.
+1. Calls `admin.get_client_roles(service_id)` to return the **client roles defined on this service's client** — an agent's own roles (`R_A` in the PCE derivation).
+2. Each returned `RoleRepresentation` carries `clientRole: true` and `containerId` = the client UUID, which the mapping layer uses to classify the role (`kind = Agent`) and resolve its owner (`actorIds` / `Scope.serviceId`). See "Agent roles are client roles, field population, and assumption enforcement" below.
+3. Returns `200 OK` with a JSON array of client role objects.
+4. Returns `[]` (empty array) if `KeycloakError` has `response_code == 400` (service has no client roles — not an error).
+5. Returns `502 Bad Gateway` with `{"error": ...}` on other `KeycloakError`.
+
+> **Redesign note (SPM/APM):** this endpoint previously sourced a service's roles from the **realm roles assigned to its service account** (`get_client_service_account_user` → `get_realm_roles_of_user`). Under the SPM/APM redesign an agent's role is a Keycloak **client role** on the agent's own client (Assumption 3), so the endpoint now reads the client's client roles directly via `admin.get_client_roles(service_id)`.
 
 `GET /services/{service_id}/scopes`:
 1. Calls `admin.get_client_default_client_scopes(service_id)` to return the realm-level client scopes assigned as defaults to the service.
@@ -96,6 +97,28 @@ All GET endpoints return `200 OK` with a JSON array on success, except `/subject
 ### AIAC provisioning marker (`aiac.managed`)
 
 Every role and client scope this service creates is stamped with the Keycloak attribute `aiac.managed` = `true` — the AIAC naming convention that distinguishes AIAC-provisioned entities from Keycloak's own built-ins (default client scopes, the `default-roles-<realm>` composite). Attribute value shape differs by entity: realm-role attribute values are lists (`{"aiac.managed": ["true"]}`), client-scope attribute values are plain strings (`{"aiac.managed": "true"}`). Because Keycloak's brief role representation omits attributes, `GET /roles` requests the full representation so the marker survives the read. Downstream consumers (the Policy Computation Engine's P2 embed) filter on this marker to keep only domain entities.
+
+### Agent roles are client roles, field population, and assumption enforcement (SPM/APM)
+
+Under the SPM/APM policy-model redesign the Policy Computation Engine (PCE) performs **no IdP lookup for routing or classification** — it relies on entities being self-describing (`Role.kind`, `Role.actorIds`, `Scope.serviceId`; the fields are defined in the models spec). The IdP Configuration Service is the **only** layer that sees Keycloak's raw facts, so it is where these fields are populated and where the underlying assumptions are validated. Field definitions live with the models (library) spec; this service **populates** them.
+
+**Assumption 3 — an agent's role is a Keycloak _client role_; a user's role is a Keycloak _realm role_.** In Keycloak a `RoleRepresentation` carries `clientRole: bool` and `containerId` (the client UUID for client roles, the realm id for realm roles). This service holds the invariant end-to-end:
+
+- **Agent roles are sourced from client roles.** `GET /services/{service_id}/roles` reads the client's client roles via `admin.get_client_roles(service_id)` (not the realm roles of the service account). These are `R_A` — an agent's own roles, used throughout the PCE derivation.
+- **User roles are realm roles.** `GET /roles` continues to read realm-level roles.
+
+**Field population** (in the Keycloak → generic-model mapping layer, from the raw facts above):
+
+- **`Role.kind` from the `clientRole` flag** — `clientRole == true` → `kind = Agent`; `false` (realm role) → `kind = User`. Kind is **never** inferred from role naming.
+- **`Role.actorIds` per kind:**
+  - `Agent`: the owning agent's `serviceId` — resolved from the role's `containerId` → client (`clientId`) — and/or the agent service account(s) that hold the role.
+  - `User`: the **member usernames** of the role. This aligns with `GET /subjects?role_id=` / `get_subjects_by_role`, which already resolves a role → its member subjects; the usernames it returns are exactly `actorIds` for a user (realm) role.
+- **`Scope.serviceId`** = the **owning client** — the client that defines/exposes the client scope.
+
+**Fail-loud enforcement at this boundary** (detectable here via membership queries; do not silently pick a side):
+
+- **Assumption 1 — no cross-kind role.** A role held by *both* human users and agent service accounts cannot be represented by a single `actorIds` list. On violation, **raise/log** rather than choosing one kind.
+- **Assumption 2 — single scope owner.** `get_services_by_scope` returns `list[Service]` (Keycloak client scopes are realm-level and assignable to many clients). For **AIAC-managed** scopes (see the `aiac.managed` marker above) that list must have length 1; if Keycloak reports multiple owners, that is an invariant violation → **raise/log**.
 
 ## Configuration
 
@@ -152,7 +175,7 @@ docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
 - `get_admin(realm: str = Query(...))` is a FastAPI dependency. On each call it checks the cache; on a miss it acquires the lock, double-checks, and constructs a new `KeycloakAdmin(realm_name=realm, user_realm_name=KEYCLOAK_ADMIN_REALM, ...)`. FastAPI returns `422` automatically if `realm` is absent.
 - All endpoints except `/health` declare `admin: KeycloakAdmin = Depends(get_admin)`. `/health` calls `_get_or_create_admin` directly with `os.environ["KEYCLOAK_ADMIN_REALM"]` — no FastAPI dependency, no realm query param.
 - Each GET endpoint calls the corresponding `python-keycloak` method and returns the result directly via `JSONResponse`.
-- `GET /services/{service_id}/roles`: call `admin.get_client_service_account_user(service_id)` → extract `user["id"]` → call `admin.get_realm_roles_of_user(user_id)`. Returns `[]` if `KeycloakError.response_code == 400` (service has no service account); `502` on other `KeycloakError`.
+- `GET /services/{service_id}/roles`: call `admin.get_client_roles(service_id)` to return the **client roles defined on this service's client** (agent roles, `kind = Agent`). Returns `[]` if `KeycloakError.response_code == 400` (service has no client roles); `502` on other `KeycloakError`.
 - `GET /services/{service_id}/scopes`: call `admin.get_client_default_client_scopes(service_id)`.
 - `GET /roles/{role_name}/composites`: call `admin.get_composite_realm_roles_of_role(role_name=role_name)`.
 - `POST /services/{service_id}/roles/{role_id}`: call `admin.get_client_service_account_user(service_id)` → extract `user["id"]` → call `admin.assign_realm_roles(user_id, [{"id": role_id}])`.
