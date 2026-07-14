@@ -13,7 +13,9 @@
 # Usage:
 #   kubectl apply -f configmaps.yaml
 #
-# Note: These manifests are configured for namespace "aiac-demo".
+# Note: These manifests are configured for namespace "team1" (installer-provided
+#       and enrolled for AuthBridge sidecar injection). The Keycloak realm remains
+#       "aiac-demo" (set via KEYCLOAK_REALM below); namespace and realm are independent.
 
 ---
 # authbridge-config ConfigMap - Unified config for both client-registration and envoy-proxy
@@ -30,7 +32,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: authbridge-config
-  namespace: aiac-demo
+  namespace: team1
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
   KEYCLOAK_REALM: "aiac-demo"
@@ -55,7 +57,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: authproxy-routes
-  namespace: aiac-demo
+  namespace: team1
 data:
   routes.yaml: |
     - host: "github-tool-mcp"

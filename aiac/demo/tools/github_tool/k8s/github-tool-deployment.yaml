@@ -8,7 +8,7 @@
 #
 # Naming invariants (do not rename):
 #   workload name == Service name == "github-tool"
-#   analyze_tool endpoint: http://github-tool.aiac-demo.svc.cluster.local:9090/mcp
+#   analyze_tool endpoint: http://github-tool.team1.svc.cluster.local:9090/mcp
 #
 # kagenti.io/type=tool is applied by the kagenti-operator when it reconciles
 # the AgentRuntime below; do not hand-set it here.
@@ -17,14 +17,14 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: github-tool
-  namespace: aiac-demo
+  namespace: team1
 
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: github-tool
-  namespace: aiac-demo
+  namespace: team1
 spec:
   replicas: 1
   selector:
@@ -56,7 +56,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: github-tool
-  namespace: aiac-demo
+  namespace: team1
   labels:
     protocol.kagenti.io/mcp: "true"
 spec:
@@ -70,13 +70,13 @@ spec:
 ---
 # AgentRuntime — enrolls the workload so the kagenti-operator:
 #   - applies kagenti.io/type=tool to the pod (read by classify_service), and
-#   - registers a Keycloak client with client.name = "aiac-demo/github-tool"
+#   - registers a Keycloak client with client.name = "team1/github-tool"
 #     (so analyze_tool derives scopes github-tool.{source-read,...}).
 apiVersion: agent.kagenti.dev/v1alpha1
 kind: AgentRuntime
 metadata:
   name: github-tool
-  namespace: aiac-demo
+  namespace: team1
 spec:
   type: tool
   targetRef:
