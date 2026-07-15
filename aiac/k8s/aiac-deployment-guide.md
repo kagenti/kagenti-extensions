@@ -22,12 +22,16 @@ Run from the repo root (`kagenti-extensions/`):
 
 ```bash
 # IdP Configuration Service (Interface Pod container 1)
+# Build context is the component directory (Dockerfile copies requirements.txt + main.py from there)
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
-  -t localhost/aiac-pdp-config:local aiac/src/
+  -t localhost/aiac-pdp-config:local \
+  aiac/src/aiac/idp/service/configuration/keycloak/
 
 # PDP Policy Writer — Phase 1 mock (Interface Pod container 2, writes Rego to filesystem)
+# Build context is the component directory (same pattern as aiac-pdp-config)
 docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile \
-  -t localhost/aiac-pdp-policy-keycloak:local aiac/src/
+  -t localhost/aiac-pdp-policy-keycloak:local \
+  aiac/src/aiac/pdp/service/policy/keycloak/
 
 # Policy Store
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile \
@@ -77,7 +81,7 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | Agent |
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
 | `AIAC_POLICY_STORE_URL` | `http://aiac-policy-store-service:7074` | Agent |
-| `AGENTPOLICY_DB_PATH` | `/data/state.db` | Policy Store |
+| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Store |
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
 | `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |

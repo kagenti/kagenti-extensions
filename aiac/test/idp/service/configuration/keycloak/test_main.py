@@ -140,17 +140,21 @@ class TestGetSubjectAssignments:
 
 
 class TestListServiceRoles:
-    def test_sources_client_roles_not_service_account_realm_roles(self):
-        # Handoff 02 (Assumption 3): an agent's role is a Keycloak *client role* on its own
-        # client, so this endpoint reads the client's client roles directly.
+    def test_sources_client_roles_and_service_account_realm_roles(self):
+        # The endpoint returns both client roles (kind=Agent via clientRole=true) and
+        # aiac-managed realm roles assigned to the service account (kind=Agent via the
+        # provisioning path used by the Configuration library).
         admin = MagicMock()
         admin.get_client_roles.return_value = [{"id": "cr1", "name": "invoke", "clientRole": True}]
         admin.get_client.return_value = {"id": "svc-uuid", "clientId": "github-agent"}
+        sa_user = {"id": "sa-uid"}
+        admin.get_client_service_account_user.return_value = sa_user
+        admin.get_realm_roles_of_user.return_value = []
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
         admin.get_client_roles.assert_called_once_with("svc-uuid")
-        # The realm-roles-of-service-account path is no longer used.
-        admin.get_realm_roles_of_user.assert_not_called()
+        admin.get_client_service_account_user.assert_called_once_with("svc-uuid")
+        admin.get_realm_roles_of_user.assert_called_once_with(sa_user["id"])
 
     def test_populates_agent_kind_and_owner_actor_ids(self):
         # clientRole == true -> kind=Agent; actorIds = the owning client's serviceId,
@@ -160,12 +164,13 @@ class TestListServiceRoles:
             {"id": "cr1", "name": "invoke", "clientRole": True, "containerId": "svc-uuid"},
         ]
         admin.get_client.return_value = {"id": "svc-uuid", "clientId": "github-agent"}
+        admin.get_client_service_account_user.return_value = {"id": "sa-uid"}
+        admin.get_realm_roles_of_user.return_value = []
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
         role = resp.json()[0]
         assert role["kind"] == "Agent"
         assert role["actorIds"] == ["github-agent"]
-        admin.get_client.assert_called_once_with("svc-uuid")
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()

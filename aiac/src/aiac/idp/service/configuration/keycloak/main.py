@@ -190,20 +190,43 @@ def set_service_type(
 @app.get("/services/{service_id}/roles")
 def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        # SPM/APM (Assumption 3): an agent's role is a Keycloak *client role* on the agent's
-        # own client, so source agent roles from the client's client roles (R_A) — not from
-        # the realm roles of its service account. Each returned RoleRepresentation carries
-        # clientRole=true and containerId (the client UUID), used to classify + resolve owner.
-        roles = admin.get_client_roles(service_id)
-        owners: dict[str, str] = {}  # containerId -> owning client's serviceId (clientId)
-        for role in roles:
+        client = admin.get_client(service_id)
+        service_client_id = client["clientId"]
+        roles: list[dict] = []
+
+        # Client roles on the agent's own client (original path): each carries
+        # clientRole=true and containerId, used to classify + resolve owner.
+        client_roles = admin.get_client_roles(service_id)
+        owners: dict[str, str] = {}
+        for role in client_roles:
             container_id = role.get("containerId") or service_id
             if container_id not in owners:
                 owners[container_id] = admin.get_client(container_id)["clientId"]
-            # clientRole == true -> kind=Agent; actorIds = the owning client's serviceId,
-            # resolved from the role's containerId.
             role["kind"] = "Agent"
             role["actorIds"] = [owners[container_id]]
+        roles.extend(client_roles)
+
+        # Realm roles assigned to the service account (provisioning path used by the
+        # Configuration library). These are aiac-managed realm roles mapped to the service
+        # via assign_realm_roles on the service-account user. Classify them as Agent roles
+        # owned by this service, so the PCE sees them as outbound-capable roles.
+        # NOTE: get_realm_roles_of_user returns role stubs without attributes, so re-fetch
+        # each role's full representation to check the aiac.managed marker.
+        try:
+            sa_user = admin.get_client_service_account_user(service_id)
+            sa_realm_roles = admin.get_realm_roles_of_user(sa_user["id"])
+            seen_ids = {r["id"] for r in client_roles}
+            for stub in sa_realm_roles:
+                if stub["id"] in seen_ids:
+                    continue
+                full_role = admin.get_realm_role_by_id(stub["id"])
+                if _is_aiac_managed(full_role.get("attributes")):
+                    full_role["kind"] = "Agent"
+                    full_role["actorIds"] = [service_client_id]
+                    roles.append(full_role)
+        except KeycloakError:
+            pass  # service has no service account — skip
+
         return roles
     except KeycloakError as e:
         if e.response_code == 400:

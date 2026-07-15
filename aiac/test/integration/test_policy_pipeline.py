@@ -114,7 +114,12 @@ def provision_keycloak_admin(admin: KeycloakAdmin, test_realm: str) -> None:
     admin.change_current_realm(test_realm)
 
     for name, description in scn.USER_ROLES.items():
-        admin.create_realm_role({"name": name, "description": description}, skip_exists=True)
+        # aiac.managed marker required: the IdP service only populates actorIds (member usernames)
+        # for managed roles, and the PCE needs actorIds to build the subject_roles map in the APM.
+        admin.create_realm_role(
+            {"name": name, "description": description, "attributes": {"aiac.managed": ["true"]}},
+            skip_exists=True,
+        )
 
     for username, role_name in scn.USERS.items():
         user_id = admin.create_user({"username": username, "enabled": True}, exist_ok=True)
@@ -167,9 +172,16 @@ def provision_via_config(config: Configuration) -> None:
 
 
 def _read_back(config: Configuration) -> tuple[dict[str, Role], dict[str, Scope]]:
-    """Read roles + scopes back through the IdP library (carrying real ids + descriptions)."""
+    """Read roles + scopes back through the IdP library (carrying real ids + descriptions).
+
+    Scopes are sourced from each service's scope list (not the standalone get_scopes()),
+    so that scope.serviceId is populated — a required input for the PCE's SPM routing.
+    """
     roles = {r.name: r for r in config.get_roles()}
-    scopes = {s.name: s for s in config.get_scopes()}
+    scopes: dict[str, Scope] = {}
+    for svc in config.get_services():
+        for s in svc.scopes:
+            scopes.setdefault(s.name, s)  # first owner wins; each scope has exactly one owner
     return roles, scopes
 
 
@@ -320,9 +332,14 @@ def pipeline() -> dict[str, dict]:
         provision_via_config(config)  # exactly once — not idempotent
         roles, scopes = _read_back(config)
 
+        agent_slug = scn.AGENT_ID.replace("-", "_")  # github-agent -> github_agent
         for variant in VARIANTS:
             rego_dir = HERE / "rego_out" / variant
             rego_dir.mkdir(parents=True, exist_ok=True)
+            # Clear any rego left by a previous run so the assertions below always verify freshly
+            # generated policy — never a stale artifact that would let a broken pipeline pass green.
+            for stale in rego_dir.glob("*.rego"):
+                stale.unlink()
             db_path = Path(tempfile.mkdtemp(prefix=f"aiac-store-{variant}-")) / "policy_model.db"
             os.environ["AIAC_POLICY_FILE"] = str(HERE / f"policy.{variant}.md")  # read per PRB call
             log.info("variant %s: policy=%s rego_dir=%s", variant, os.environ["AIAC_POLICY_FILE"], rego_dir)
@@ -342,6 +359,18 @@ def pipeline() -> dict[str, dict]:
             with running_services([store, opa], src=SRC):
                 rules = orchestrate_prb(roles, scopes)
                 compute_and_apply(rules, override=False)
+            # compute_and_apply is fire-and-forget: it swallows every dependency error and logs it,
+            # so a failed IdP/store/PDP interaction (or an empty derived agent set) silently writes no
+            # rego. Assert the agent's rego actually landed here at setup, so such a failure surfaces
+            # as one clear error instead of cryptic "no such file" OPA failures across every test.
+            expected = [rego_dir / f"{agent_slug}.inbound.rego", rego_dir / f"{agent_slug}.outbound.rego"]
+            missing = [p.name for p in expected if not p.is_file()]
+            if missing:
+                raise RuntimeError(
+                    f"variant {variant!r}: compute_and_apply produced no {missing} in {rego_dir} "
+                    f"(PRB returned {len(rules)} rule(s)); the pipeline failed silently — "
+                    f"check the compute_and_apply logs above for a swallowed exception."
+                )
             results[variant] = {"rego_dir": rego_dir, "rules": rules}
 
     yield results

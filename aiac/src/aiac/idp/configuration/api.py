@@ -92,10 +92,22 @@ class Configuration:
         scopes_resp = self._request(
             "GET", f"/services/{service_id}/scopes", params=self._params()
         )
-        service_role_ids = {r["id"] for r in roles_resp.json()}
-        roles = [r.model_dump() for r in all_roles.values() if r.id in service_role_ids]
+        # The per-service roles response carries the authoritative kind/actorIds for each role
+        # (e.g. kind=Agent + actorIds=[serviceId] for agent-owned roles). Merge those fields into
+        # the fully-validated all_roles objects (which carry composite/attributes/etc.) so Role
+        # validation succeeds and kind/actorIds are not reverted to their defaults.
+        service_roles_by_id = {r["id"]: r for r in roles_resp.json()}
+        roles = []
+        for role_id, svc_role in service_roles_by_id.items():
+            base = all_roles.get(role_id)
+            if base is not None:
+                merged = {**base.model_dump(), **{k: v for k, v in svc_role.items() if k in ("kind", "actorIds")}}
+            else:
+                merged = svc_role  # not in all_roles (e.g. client role not in realm roles)
+            roles.append(merged)
+        client_id = raw.get("clientId") or raw.get("serviceId") or service_id
         service_scope_ids = {s["id"] for s in scopes_resp.json()}
-        scopes = [s.model_dump() for s in all_scopes.values() if s.id in service_scope_ids]
+        scopes = [{**s.model_dump(), "serviceId": client_id} for s in all_scopes.values() if s.id in service_scope_ids]
         # Type resolution is handled entirely by Service._resolve_keycloak_fields
         # (client.type attribute → None); the library does not infer it here.
         return Service.model_validate({**raw, "roles": roles, "scopes": scopes})
