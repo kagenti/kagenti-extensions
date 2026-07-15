@@ -41,7 +41,8 @@ class TestGetRoles:
         admin.get_realm_roles.return_value = [{"id": "r1", "name": "admin"}]
         resp = _make_client(admin).get(f"/roles?realm={REALM}")
         assert resp.status_code == 200
-        assert resp.json() == [{"id": "r1", "name": "admin"}]
+        # Realm roles are user roles (clientRole == false) -> kind=User (handoff 02).
+        assert resp.json() == [{"id": "r1", "name": "admin", "kind": "User"}]
 
     def test_requests_full_representation_for_attributes(self):
         # The aiac.managed marker lives in role attributes, which Keycloak's brief
@@ -50,6 +51,40 @@ class TestGetRoles:
         admin.get_realm_roles.return_value = []
         _make_client(admin).get(f"/roles?realm={REALM}")
         admin.get_realm_roles.assert_called_once_with(brief_representation=False)
+
+    def test_populates_user_kind_on_all_realm_roles(self):
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [
+            {"id": "r1", "name": "reader"},
+            {"id": "r2", "name": "default-roles-kagenti"},
+        ]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        assert [r["kind"] for r in resp.json()] == ["User", "User"]
+
+    def test_aiac_managed_role_gets_member_usernames_as_actor_ids(self):
+        # For a user (realm) role, actorIds = the member usernames — resolved via the same
+        # get_realm_role_members call that GET /subjects?role_id= uses (SPM/APM alignment).
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [
+            {"id": "r1", "name": "invoicing", "attributes": {"aiac.managed": ["true"]}},
+        ]
+        admin.get_realm_role_members.return_value = [
+            {"id": "u1", "username": "alice"},
+            {"id": "u2", "username": "bob"},
+        ]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        role = resp.json()[0]
+        assert role["kind"] == "User"
+        assert role["actorIds"] == ["alice", "bob"]
+        admin.get_realm_role_members.assert_called_once_with("invoicing")
+
+    def test_non_managed_role_skips_member_query(self):
+        # Built-ins / non-AIAC roles are not enriched with actorIds (no member scan).
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [{"id": "r1", "name": "admin"}]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        assert "actorIds" not in resp.json()[0]
+        admin.get_realm_role_members.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -105,33 +140,88 @@ class TestGetSubjectAssignments:
 
 
 class TestListServiceRoles:
-    def test_returns_json_array(self):
+    def test_sources_client_roles_not_service_account_realm_roles(self):
+        # Handoff 02 (Assumption 3): an agent's role is a Keycloak *client role* on its own
+        # client, so this endpoint reads the client's client roles directly.
         admin = MagicMock()
-        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
-        admin.get_realm_roles_of_user.return_value = [{"id": "cr1", "name": "view-clients"}]
+        admin.get_client_roles.return_value = [{"id": "cr1", "name": "invoke", "clientRole": True}]
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "github-agent"}
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
-        assert resp.json() == [{"id": "cr1", "name": "view-clients"}]
-        admin.get_client_service_account_user.assert_called_once_with("svc-uuid")
-        admin.get_realm_roles_of_user.assert_called_once_with("sa-user-id")
+        admin.get_client_roles.assert_called_once_with("svc-uuid")
+        # The realm-roles-of-service-account path is no longer used.
+        admin.get_realm_roles_of_user.assert_not_called()
+
+    def test_populates_agent_kind_and_owner_actor_ids(self):
+        # clientRole == true -> kind=Agent; actorIds = the owning client's serviceId,
+        # resolved from the role's containerId -> client.
+        admin = MagicMock()
+        admin.get_client_roles.return_value = [
+            {"id": "cr1", "name": "invoke", "clientRole": True, "containerId": "svc-uuid"},
+        ]
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "github-agent"}
+        resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
+        assert resp.status_code == 200
+        role = resp.json()[0]
+        assert role["kind"] == "Agent"
+        assert role["actorIds"] == ["github-agent"]
+        admin.get_client.assert_called_once_with("svc-uuid")
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
-        admin.get_client_service_account_user.side_effect = KeycloakError(
+        admin.get_client_roles.side_effect = KeycloakError(
             error_message="not found", response_code=404
         )
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 502
         assert "error" in resp.json()
 
-    def test_returns_empty_list_when_client_has_no_service_account(self):
+    def test_returns_empty_list_when_client_has_no_client_roles(self):
         admin = MagicMock()
-        admin.get_client_service_account_user.side_effect = KeycloakError(
-            error_message="Client does not have a service account", response_code=400
+        admin.get_client_roles.side_effect = KeycloakError(
+            error_message="Client not found", response_code=400
         )
         resp = _make_client(admin).get(f"/services/svc-uuid/roles?realm={REALM}")
         assert resp.status_code == 200
         assert resp.json() == []
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Assumption 1 (no cross-kind role) — fail loud (handoff 02)
+# ---------------------------------------------------------------------------
+
+
+class TestCrossKindEnforcement:
+    def test_role_held_by_users_and_service_accounts_returns_409(self):
+        # A role held by *both* human users and agent service accounts cannot be represented
+        # by a single actorIds list — fail loud rather than silently picking a side.
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [
+            {"id": "r1", "name": "shared", "attributes": {"aiac.managed": ["true"]}},
+        ]
+        admin.get_realm_role_members.return_value = [
+            {"id": "u1", "username": "alice"},
+            {"id": "sa", "username": "service-account-github-agent"},
+        ]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        assert resp.status_code == 409
+        assert "error" in resp.json()
+
+    def test_role_held_only_by_users_is_ok(self):
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [
+            {"id": "r1", "name": "readers", "attributes": {"aiac.managed": ["true"]}},
+        ]
+        admin.get_realm_role_members.return_value = [
+            {"id": "u1", "username": "alice"},
+            {"id": "u2", "username": "bob"},
+        ]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json()[0]["actorIds"] == ["alice", "bob"]
 
     def teardown_method(self):
         app.dependency_overrides.clear()
@@ -143,15 +233,22 @@ class TestListServiceRoles:
 
 
 class TestListServiceScopes:
-    def test_returns_json_array(self):
+    def test_returns_json_array_with_owner_service_id(self):
+        # Scope.serviceId = the owning client (the service exposing the scope), resolved to the
+        # client's serviceId (clientId) — the single owner for a per-service scope listing.
         admin = MagicMock()
         admin.get_client_default_client_scopes.return_value = [
             {"id": "sc1", "name": "profile"},
             {"id": "sc2", "name": "email"},
         ]
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "github-agent"}
         resp = _make_client(admin).get(f"/services/svc-uuid/scopes?realm={REALM}")
         assert resp.status_code == 200
-        assert resp.json() == [{"id": "sc1", "name": "profile"}, {"id": "sc2", "name": "email"}]
+        assert resp.json() == [
+            {"id": "sc1", "name": "profile", "serviceId": "github-agent"},
+            {"id": "sc2", "name": "email", "serviceId": "github-agent"},
+        ]
+        admin.get_client.assert_called_once_with("svc-uuid")
 
     def test_verifies_get_client_default_client_scopes_called(self):
         admin = MagicMock()
@@ -167,6 +264,52 @@ class TestListServiceScopes:
         resp = _make_client(admin).get(f"/services/svc-uuid/scopes?realm={REALM}")
         assert resp.status_code == 502
         assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# Assumption 2 (single scope owner) — fail loud (handoff 02)
+# ---------------------------------------------------------------------------
+
+
+class TestSingleScopeOwnerEnforcement:
+    _MANAGED = {"id": "aud-1", "name": "svc-a-aud", "attributes": {"aiac.managed": "true"}}
+
+    def test_aiac_managed_scope_with_multiple_owners_returns_409(self):
+        # An AIAC-managed client scope must have exactly one owning client; if more than one
+        # client exposes it as a default scope, a single Scope.serviceId cannot represent it.
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.return_value = [self._MANAGED]
+        admin.get_client.return_value = {"id": "svc-a", "clientId": "svc-a"}
+        admin.get_clients.return_value = [{"id": "svc-a"}, {"id": "svc-b"}]
+        resp = _make_client(admin).get(f"/services/svc-a/scopes?realm={REALM}")
+        assert resp.status_code == 409
+        assert "error" in resp.json()
+
+    def test_aiac_managed_scope_with_single_owner_is_ok(self):
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-a", "clientId": "svc-a"}
+        admin.get_clients.return_value = [{"id": "svc-a"}, {"id": "svc-b"}]
+
+        def _defaults(client_id):
+            return [self._MANAGED] if client_id == "svc-a" else []
+
+        admin.get_client_default_client_scopes.side_effect = _defaults
+        resp = _make_client(admin).get(f"/services/svc-a/scopes?realm={REALM}")
+        assert resp.status_code == 200
+        assert resp.json()[0]["serviceId"] == "svc-a"
+
+    def test_non_managed_scope_skips_owner_scan(self):
+        # Built-in / non-AIAC scopes are not subject to the single-owner invariant (Keycloak
+        # ships them assigned to many clients) — no cross-client scan runs for them.
+        admin = MagicMock()
+        admin.get_client_default_client_scopes.return_value = [{"id": "sc1", "name": "profile"}]
+        admin.get_client.return_value = {"id": "svc-a", "clientId": "svc-a"}
+        resp = _make_client(admin).get(f"/services/svc-a/scopes?realm={REALM}")
+        assert resp.status_code == 200
+        admin.get_clients.assert_not_called()
 
     def teardown_method(self):
         app.dependency_overrides.clear()
@@ -705,6 +848,27 @@ class TestGetSubjectsByRole:
         assert "realmMappings" in body[0]
         assert body[0]["realmMappings"] == [{"id": "rid", "name": "viewer"}]
 
+    def test_actor_ids_align_with_subjects_by_role(self):
+        # SPM/APM alignment (1.12 / 2.14): the member usernames GET /subjects?role_id= returns
+        # for a user (realm) role are exactly the Role.actorIds GET /roles populates for that
+        # kind=User role — both resolve via admin.get_realm_role_members.
+        admin = MagicMock()
+        admin.get_realm_role_by_id.return_value = {"id": "rid", "name": "invoicing"}
+        members = [{"id": "u1", "username": "alice"}, {"id": "u2", "username": "bob"}]
+        admin.get_realm_role_members.return_value = members
+        admin.get_all_roles_of_user.return_value = {"realmMappings": [], "clientMappings": {}}
+        admin.get_realm_roles.return_value = [
+            {"id": "rid", "name": "invoicing", "attributes": {"aiac.managed": ["true"]}},
+        ]
+        client = _make_client(admin)
+
+        subjects = client.get(f"/subjects?realm={REALM}&role_id=rid").json()
+        roles = client.get(f"/roles?realm={REALM}").json()
+
+        subject_usernames = [s["username"] for s in subjects]
+        actor_ids = roles[0]["actorIds"]
+        assert subject_usernames == actor_ids == ["alice", "bob"]
+
     def test_missing_realm_returns_422(self):
         app.dependency_overrides.clear()
         resp = TestClient(app).get("/subjects?role_id=rid")
@@ -759,7 +923,7 @@ class TestKeycloakErrorProduces502:
 
     def test_get_service_permissions(self):
         admin = MagicMock()
-        admin.get_client_service_account_user.side_effect = _keycloak_error()
+        admin.get_client_roles.side_effect = _keycloak_error()
         assert _make_client(admin).get(f"/services/s1/roles?realm={REALM}").status_code == 502
 
     def test_get_service_scopes(self):

@@ -29,6 +29,53 @@ _AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
 _SERVICE_TYPE_ATTRIBUTE = "client.type"
 
 
+class _InvariantViolation(Exception):
+    """Raised when Keycloak facts violate an AIAC assumption the IdP boundary must hold
+    (e.g. Assumption 1 — no cross-kind role). Surfaced as HTTP 409, distinct from the 502
+    used for upstream KeycloakError, so callers can tell an invariant breach from an outage."""
+
+
+def _assert_single_kind(members: list[dict], role_name: str) -> None:
+    """Assumption 1 (no cross-kind role): a role must be held by human users *or* by agent
+    service accounts, never both — otherwise a single ``actorIds`` list cannot represent it.
+    Keycloak names an agent service account ``service-account-<clientId>``."""
+    has_agent = any(m.get("username", "").startswith("service-account-") for m in members)
+    has_user = any(not m.get("username", "").startswith("service-account-") for m in members)
+    if has_agent and has_user:
+        raise _InvariantViolation(
+            f"role '{role_name}' is held by both human users and agent service accounts "
+            f"(Assumption 1: no cross-kind role)"
+        )
+
+
+def _assert_single_owner(admin: "KeycloakAdmin", scope: dict) -> None:
+    """Assumption 2 (single scope owner): an AIAC-managed client scope must be exposed as a
+    default scope by exactly one client. Keycloak client scopes are realm-level and assignable
+    to many clients, so this is not a Keycloak guarantee — detect a multi-owner scope by scanning
+    clients' default scopes and fail loud, since a single ``Scope.serviceId`` cannot represent it."""
+    scope_id = scope["id"]
+    owners = [
+        client
+        for client in admin.get_clients()
+        if any(s["id"] == scope_id for s in admin.get_client_default_client_scopes(client["id"]))
+    ]
+    if len(owners) > 1:
+        raise _InvariantViolation(
+            f"AIAC-managed scope '{scope.get('name', scope_id)}' is exposed by {len(owners)} "
+            f"clients (Assumption 2: a scope has exactly one owner)"
+        )
+
+
+def _is_aiac_managed(attributes: dict | None) -> bool:
+    """True when a Keycloak role/scope carries the ``aiac.managed`` provisioning marker.
+    Realm-role attribute values are lists of strings; client-scope values are plain strings —
+    tolerate both (mirrors ``_is_aiac_managed`` in ``aiac.idp.configuration.models``)."""
+    value = (attributes or {}).get(_AIAC_MANAGED_ATTRIBUTE)
+    if isinstance(value, list):
+        return "true" in value
+    return value == "true"
+
+
 def _get_or_create_admin(realm: str) -> KeycloakAdmin:
     if realm not in _cache:
         with _lock:
@@ -143,9 +190,21 @@ def set_service_type(
 @app.get("/services/{service_id}/roles")
 def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        sa_user = admin.get_client_service_account_user(service_id)
-        user_id = sa_user["id"]
-        return admin.get_realm_roles_of_user(user_id)
+        # SPM/APM (Assumption 3): an agent's role is a Keycloak *client role* on the agent's
+        # own client, so source agent roles from the client's client roles (R_A) — not from
+        # the realm roles of its service account. Each returned RoleRepresentation carries
+        # clientRole=true and containerId (the client UUID), used to classify + resolve owner.
+        roles = admin.get_client_roles(service_id)
+        owners: dict[str, str] = {}  # containerId -> owning client's serviceId (clientId)
+        for role in roles:
+            container_id = role.get("containerId") or service_id
+            if container_id not in owners:
+                owners[container_id] = admin.get_client(container_id)["clientId"]
+            # clientRole == true -> kind=Agent; actorIds = the owning client's serviceId,
+            # resolved from the role's containerId.
+            role["kind"] = "Agent"
+            role["actorIds"] = [owners[container_id]]
+        return roles
     except KeycloakError as e:
         if e.response_code == 400:
             return []
@@ -171,7 +230,20 @@ def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin =
 @app.get("/services/{service_id}/scopes")
 def list_service_scopes(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
-        return admin.get_client_default_client_scopes(service_id)
+        scopes = admin.get_client_default_client_scopes(service_id)
+        if scopes:
+            # Scope.serviceId = the owning client. For a per-service listing the owner is this
+            # service; resolve its serviceId (clientId). AIAC-managed scopes must have exactly
+            # one owner (Assumption 2) — enforce fail-loud. Built-ins are shared by design, so
+            # they are exempt from the single-owner scan.
+            owner = admin.get_client(service_id)["clientId"]
+            for scope in scopes:
+                if _is_aiac_managed(scope.get("attributes")):
+                    _assert_single_owner(admin, scope)  # Assumption 2, fail loud
+                scope["serviceId"] = owner
+        return scopes
+    except _InvariantViolation as e:
+        return JSONResponse(status_code=409, content={"error": str(e)})
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
@@ -207,7 +279,20 @@ def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
     try:
         # brief_representation=False so realm-role attributes (incl. the aiac.managed marker)
         # are returned; the brief representation Keycloak returns by default omits them.
-        return admin.get_realm_roles(brief_representation=False)
+        roles = admin.get_realm_roles(brief_representation=False)
+        for role in roles:
+            # Realm roles are user roles (clientRole == false) -> kind=User (Assumption 3).
+            role["kind"] = "User"
+            # For AIAC-managed user roles, actorIds = the member usernames — the same values
+            # GET /subjects?role_id= returns for this role (SPM/APM alignment, 1.12). Built-ins
+            # are left unenriched (no member scan).
+            if _is_aiac_managed(role.get("attributes")):
+                members = admin.get_realm_role_members(role["name"])
+                _assert_single_kind(members, role["name"])  # Assumption 1, fail loud
+                role["actorIds"] = [m["username"] for m in members]
+        return roles
+    except _InvariantViolation as e:
+        return JSONResponse(status_code=409, content={"error": str(e)})
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
