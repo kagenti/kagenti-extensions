@@ -1,5 +1,5 @@
-"""The UC-1 (discovery-driven) ``github-agent`` scenario — the oracle for
-``test_uc1_onboarding_pipeline.py``.
+"""The UC-1 (discovery-driven) ``github-agent`` scenario — the oracle for the UC-1 onboarding
+integration-test ladder (``test_uc1_onboard_agent_only.py`` and its rung-2/3 siblings).
 
 Sibling of the hand-provisioned ``scenario.py`` (kept separate so 5.2/5.3 are untouched). Same
 *role -> access facts and truth tables*; the difference is **provenance and naming**. Here the
@@ -13,10 +13,11 @@ test's expected verdicts are *computed from* this module, never from the Rego un
 This module is **pure data**: it imports nothing (no ``aiac``, no stdlib beyond the language) so the
 test can import it before its env-before-import step, just like ``scenario.py``.
 
-Fact triad (spec ``docs/specs/integration-test/uc1-onboarding-pipeline.md`` -> *Further
-Notes*): the *Scenario* table, **both** ``policy.md`` variants (``POLICY_EXPLICIT`` /
-``POLICY_ABSTRACT`` below), and the pair-lists here must all agree. The generic entity/role/scope
-descriptions are functional and keyword-free and must not contradict the facts.
+Fact triad (spec ``docs/specs/integration-test/uc1-onboarding-pipeline.md``): the *Scenario* table,
+the single abstract ``policy.md`` (``POLICY_ABSTRACT`` below), and the pair-lists here must all
+agree. The generic entity/role/scope descriptions are functional and keyword-free and must not
+contradict the facts. (The prior explicit variant + cross-variant equivalence are deferred to the
+two-policy rung ``testing/5.4.4``; the two-stack topology that served both variants is discarded.)
 """
 
 from __future__ import annotations
@@ -130,33 +131,16 @@ OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
 # gate and is not probed.
 OUTBOUND_TARGET_PAIRS: list[tuple[str, str]] = []
 
-# --- The two policy.md variants (baked into the two AIAC stacks out of band) ----------------
+# --- The single abstract policy.md (baked into the AIAC stack out of band) ------------------
 #
-# The AIAC pods mount their own ``policy.md`` (via AIAC_POLICY_FILE); the test does not feed these
-# at runtime. They live here as the fact-triad anchor — verbatim from the spec's *Scenario inputs*.
-# Both are USER-INTENT-ONLY: neither names the agent role (naming it would populate ``target_ok``
-# and break both the user-gate-only decision and cross-variant equivalence). Both must yield the
-# SAME discovered grant set.
-
-# Version 1 (explicit): enumerates each (user-role -> discovered scope) pair by its full prefixed
-# name. No agent-role->tool-scope section. Deny by default.
-POLICY_EXPLICIT = """\
-# Access Control Policy — github-agent / github-tool
-
-Grant access on a least-privilege basis. Only grant a (role, scope) pair when this
-policy supports it; deny by default.
-
-## Users → agent capabilities (inbound; user may call the agent)
-- developer may use github-agent.source_operations and github-agent.issue_operations.
-- tester may use github-agent.issue_operations.
-
-## Users → tool operations (outbound subject; user may reach the tool)
-- developer may perform github-tool.source-read, github-tool.source-write, and github-tool.issues-read.
-- tester may perform github-tool.issues-read and github-tool.issues-write.
-"""
-
-# Version 2 (abstract): intent-only prose. Same facts; relies on the PRB/LLM to expand intent into
-# the discovered scopes via the entity/role descriptions.
+# The AIAC pod mounts its own ``policy.md`` (via AIAC_POLICY_FILE); the test does not feed it at
+# runtime. It lives here as the fact-triad anchor — verbatim from the spec's *Scenario inputs*. It
+# is USER-INTENT-ONLY: it does not name the agent role (naming it would populate ``target_ok`` and
+# break the user-gate-only decision). Intent-only prose; the PRB/LLM expands intent into the
+# discovered scopes via the entity/role descriptions.
+#
+# (The prior explicit enumerated variant and the cross-variant equivalence check are deferred to the
+# two-policy rung ``testing/5.4.4``; the two-stack topology that served both variants is discarded.)
 POLICY_ABSTRACT = """\
 Grant access on a least-privilege basis: allow only what this policy states; deny by default.
 

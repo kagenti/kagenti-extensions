@@ -69,7 +69,7 @@ class TestEndToEnd:
                 "items": [
                     {
                         "metadata": {"name": "weather"},
-                        "spec": {"skills": [{"name": "forecast", "description": "d"}]},
+                        "status": {"card": {"skills": [{"id": "forecast", "name": "F", "description": "d"}]}},
                     }
                 ]
             }

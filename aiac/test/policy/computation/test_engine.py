@@ -18,6 +18,8 @@ import os
 from contextlib import ExitStack, contextmanager
 from unittest.mock import patch
 
+import pytest
+
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import Role, RoleKind, Scope, Service, ServiceType
 from aiac.policy.model.models import PolicyModel, PolicyRule, ServicePolicyModel
@@ -132,7 +134,7 @@ class FakeStore:
 def engine_env(catalog, store):
     """Patch the engine boundary; yield ``compute_and_apply``. Multiple calls share the store."""
     with ExitStack() as stack:
-        stack.enter_context(patch.dict(os.environ, {"AIAC_REALM": "test-realm"}))
+        stack.enter_context(patch.dict(os.environ, {"KEYCLOAK_REALM": "test-realm"}))
         stack.enter_context(patch.object(Configuration, "get_services", return_value=list(catalog)))
         stack.enter_context(patch("aiac.policy.computation.engine.get_service_policy",
                                   side_effect=store.get_service_policy))
@@ -478,13 +480,14 @@ def test_absent_service_is_seeded_and_persisted():
 
 
 # --------------------------------------------------------------------------- #
-# Cycle 17 — fire-and-forget: any dependency failure is logged and swallowed;     #
-# compute_and_apply returns None and nothing is pushed to the PDP.               #
+# Cycle 17 — a dependency failure is logged and RE-RAISED (not swallowed), so the  #
+# caller (Controller) surfaces it as a real error instead of a silent 200 with     #
+# nothing applied; nothing is pushed to the PDP.                                 #
 # --------------------------------------------------------------------------- #
-def test_dependency_exception_is_swallowed():
+def test_dependency_exception_propagates(caplog):
     store = FakeStore()
     with ExitStack() as stack:
-        stack.enter_context(patch.dict(os.environ, {"AIAC_REALM": "test-realm"}))
+        stack.enter_context(patch.dict(os.environ, {"KEYCLOAK_REALM": "test-realm"}))
         stack.enter_context(patch.object(Configuration, "get_services", side_effect=RuntimeError("boom")))
         stack.enter_context(patch("aiac.policy.computation.engine.get_service_policy",
                                   side_effect=store.get_service_policy))
@@ -497,5 +500,7 @@ def test_dependency_exception_is_swallowed():
         from aiac.policy.computation.engine import compute_and_apply
 
         UR = _user_role("r-user", users=["u"])
-        assert compute_and_apply([_rule(UR, _scope("s-x", service_id="svc"))]) is None
+        with pytest.raises(RuntimeError, match="boom"):
+            compute_and_apply([_rule(UR, _scope("s-x", service_id="svc"))])
         assert store.apply_policy_count == 0
+        assert "compute_and_apply failed" in caplog.text  # still logged before re-raising

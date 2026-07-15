@@ -22,7 +22,9 @@ def _state():
 
 
 def _card(name=WORKLOAD, skills=None):
-    return {"metadata": {"name": name}, "spec": {"skills": skills or []}}
+    """An AgentCard CR as the operator syncs it: the fetched A2A card lives under ``status.card``,
+    and each skill carries a machine ``id`` (a stable identifier) plus a display ``name``."""
+    return {"metadata": {"name": name}, "status": {"card": {"skills": skills or []}}}
 
 
 def _run(items=None, list_exc=None):
@@ -38,9 +40,11 @@ def _run(items=None, list_exc=None):
 
 class TestAnalyzeAgentFound:
     def test_one_agent_role_and_one_scope_per_skill(self):
+        # Scope names come from each skill's machine ``id`` — not its display ``name`` (which may
+        # contain spaces) — so they are stable identifiers usable as Keycloak scope names.
         skills = [
-            {"name": "forecast", "description": "Get forecast"},
-            {"name": "history", "description": "Historical data"},
+            {"id": "forecast", "name": "Weather forecast operations", "description": "Get forecast"},
+            {"id": "history", "name": "Historical data operations", "description": "Historical data"},
         ]
         provision = _run(items=[_card(skills=skills)])["service_provision"]
 
@@ -49,6 +53,21 @@ class TestAnalyzeAgentFound:
         assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.forecast", f"{WORKLOAD}.history"]
         assert provision.scopes[0].description == "Get forecast"
         assert "derived from AgentCard: 2 skills" == provision.reasoning
+
+
+    def test_agentcard_matched_by_targetref_not_metadata_name(self):
+        # The operator names the card after the Deployment (e.g. "<workload>-deployment-card") and
+        # points spec.targetRef at the workload; provision must link the card by targetRef, not by
+        # metadata.name == workload.
+        card = {
+            "metadata": {"name": f"{WORKLOAD}-deployment-card"},
+            "spec": {"targetRef": {"kind": "Deployment", "name": WORKLOAD}},
+            "status": {"card": {"skills": [{"id": "forecast", "name": "F", "description": "d"}]}},
+        }
+        provision = _run(items=[card])["service_provision"]
+
+        assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.forecast"]
+        assert "derived from AgentCard: 1 skills" == provision.reasoning
 
 
 class TestAnalyzeAgentLegacyFallback:
@@ -61,11 +80,18 @@ class TestAnalyzeAgentLegacyFallback:
         assert "partial: no AgentCard found" in provision.reasoning
 
     def test_agentcard_present_but_no_name_match_is_legacy_fallback(self):
-        provision = _run(items=[_card(name="other-agent", skills=[{"name": "x", "description": "y"}])])[
-            "service_provision"
-        ]
+        provision = _run(
+            items=[_card(name="other-agent", skills=[{"id": "x", "name": "X", "description": "y"}])]
+        )["service_provision"]
         assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.access"]
         assert "partial: no AgentCard found" in provision.reasoning
+
+    def test_agentcard_present_but_no_synced_skills_is_fallback(self):
+        # The CR exists but its ``status.card`` has not synced any skills yet (e.g. the operator has
+        # not fetched the A2A card): fall back to a default access scope rather than provision none.
+        provision = _run(items=[_card(skills=[])])["service_provision"]
+        assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.access"]
+        assert "no synced skills" in provision.reasoning
 
 
 class TestAnalyzeAgent502:

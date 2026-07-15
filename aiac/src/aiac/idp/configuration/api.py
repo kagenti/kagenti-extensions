@@ -20,6 +20,12 @@ class _NamedDefinition(Protocol):
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
+# Single source of truth for the Keycloak realm the whole AIAC pipeline operates on. Provisioning,
+# the Service Policy Builder, and the Policy Computation Engine all resolve the realm through
+# ``Configuration.for_default_realm()`` so they can never diverge onto different env vars.
+REALM_ENV_VAR = "KEYCLOAK_REALM"
+
+
 class Configuration:
     def __init__(self, realm: str) -> None:
         self.realm = realm
@@ -27,6 +33,12 @@ class Configuration:
     @classmethod
     def for_realm(cls, realm: str) -> "Configuration":
         return cls(realm)
+
+    @classmethod
+    def for_default_realm(cls) -> "Configuration":
+        """Build a ``Configuration`` for the realm named by ``$KEYCLOAK_REALM`` — the single source
+        of truth shared by provisioning, the policy builder, and the computation engine."""
+        return cls.for_realm(os.getenv(REALM_ENV_VAR, ""))
 
     def _base_url(self) -> str:
         return os.getenv("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")

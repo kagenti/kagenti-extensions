@@ -54,7 +54,7 @@ from test.integration.launcher import (  # noqa: E402
 
 # --- Resolve config + set env BEFORE importing aiac (the libraries read env at import time) ---
 TEST_REALM = os.environ.setdefault("AIAC_TEST_REALM", scn.REALM_DEFAULT)
-os.environ["AIAC_REALM"] = TEST_REALM  # the PCE reads back the realm we provision
+os.environ["KEYCLOAK_REALM"] = TEST_REALM  # the PCE reads back the realm we provision (single source of truth)
 os.environ.setdefault("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")
 os.environ.setdefault("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
 os.environ.setdefault("AIAC_PDP_POLICY_URL", "http://127.0.0.1:7072")

@@ -5,8 +5,17 @@ metadata:
   name: aiac-agent-config
   namespace: aiac-system
 data:
-  LLM_BASE_URL: "https://api.anthropic.com"
-  LLM_MODEL: "claude-sonnet-5"
+  # OpenAI-compatible LLM endpoint for the Policy Rules Builder (ChatOpenAI:
+  # base_url=LLM_BASE_URL, model=LLM_MODEL, api_key from the aiac-agent-secret).
+  # These are PLACEHOLDERS — do not commit real endpoints/keys. Supply the real
+  # values per-environment on the LIVE objects at deploy time (guide step 4):
+  #   kubectl patch configmap aiac-agent-config -n aiac-system --type merge \
+  #     -p '{"data":{"LLM_BASE_URL":"https://<your-endpoint>/v1","LLM_MODEL":"<model>"}}'
+  #   kubectl create secret generic aiac-agent-secret -n aiac-system \
+  #     --from-literal=LLM_API_KEY=<key> --dry-run=client -o yaml | kubectl apply -f -
+  # then: kubectl rollout restart deployment/aiac-agent -n aiac-system
+  LLM_BASE_URL: "https://openai-compatible-endpoint.example.com/v1"
+  LLM_MODEL: "your-model-name"
   AIAC_AC_MODEL: "RBAC"
 
 ---

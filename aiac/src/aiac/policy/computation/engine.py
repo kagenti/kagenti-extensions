@@ -21,7 +21,6 @@ Fire-and-forget — ``compute_and_apply`` never raises.
 """
 
 import logging
-import os
 from typing import TypeVar
 
 from aiac.idp.configuration.api import Configuration
@@ -81,17 +80,19 @@ def compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None:
     purged from **every** SPM containing it, once, up-front, before the fresh rules are appended
     (role-level revocation).
 
-    Exceptions from any dependency (IdP, Policy Store, PDP) are logged and swallowed so a
-    transient failure never crashes the calling sub-agent.
+    Exceptions from any dependency (IdP, Policy Store, PDP) are logged and **re-raised** so the
+    caller (the Controller) surfaces the failure — e.g. as a 500 — instead of returning success
+    while silently applying nothing.
     """
     try:
         _run(rules, override)
     except Exception:
         logger.exception("compute_and_apply failed for %d rule(s)", len(rules))
+        raise
 
 
 def _run(rules: list[PolicyRule], override: bool) -> None:
-    config = Configuration.for_realm(os.environ["AIAC_REALM"])
+    config = Configuration.for_default_realm()
 
     # (1) Catalog once — the only runtime IdP read. Carries each service's type (agent vs tool,
     # for P4) and its own roles/scopes (embedded on the APM for P2, filtered to aiac.managed).

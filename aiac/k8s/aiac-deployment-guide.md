@@ -69,6 +69,34 @@ kubectl create secret generic keycloak-admin-secret \
 > `pdp-interface-deployment.yaml` contains placeholder credentials for reference only.
 > For any non-local environment, create the secret manually and remove the `stringData` block.
 
+## 3b — Configure the Agent LLM (ConfigMap + Secret)
+
+The AIAC Agent's Policy Rules Builder calls an **OpenAI-compatible** LLM endpoint
+(`ChatOpenAI(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)`). This configuration is
+split across two objects the Agent consumes via `envFrom`, and `agent-deployment.yaml` ships only
+**placeholders** — you must supply the real values per environment:
+
+| Key | Object | Notes |
+|-----|--------|-------|
+| `LLM_BASE_URL` | `aiac-agent-config` ConfigMap | OpenAI-compatible base URL (e.g. a litellm proxy). Placeholder in the manifest. |
+| `LLM_MODEL` | `aiac-agent-config` ConfigMap | Model the endpoint serves. Placeholder in the manifest. |
+| `LLM_API_KEY` | `aiac-agent-secret` Secret | **Not** defined in any manifest — the Deployment only references it. |
+
+```bash
+# API key — create the Secret BEFORE applying agent-deployment.yaml (step 5); the manifest only
+# references it. (To update an existing one, append: --dry-run=client -o yaml | kubectl apply -f -)
+kubectl create secret generic aiac-agent-secret -n aiac-system \
+  --from-literal=LLM_API_KEY=<your-api-key>
+
+# Endpoint + model — patch the LIVE ConfigMap AFTER step 5 (agent-deployment.yaml creates it with
+# placeholders). Do not commit real endpoints/keys to the manifest.
+kubectl patch configmap aiac-agent-config -n aiac-system --type merge \
+  -p '{"data":{"LLM_BASE_URL":"https://<your-openai-compatible-endpoint>/v1","LLM_MODEL":"<model>"}}'
+```
+
+Both are read by the Agent at startup, so a change to either takes effect on the next (re)start:
+`kubectl rollout restart deployment/aiac-agent -n aiac-system`.
+
 ## 4 — Configure the environment
 
 Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match your environment:

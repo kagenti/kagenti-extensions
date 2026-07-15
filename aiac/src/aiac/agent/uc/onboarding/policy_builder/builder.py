@@ -14,8 +14,6 @@ inputs and can be flattened; ``RoleDefinition``/``ScopeDefinition`` (no id) are 
 to the PRB.
 """
 
-import os
-
 from fastapi import HTTPException
 
 from aiac.agent.policy_rules_builder.graph import build_role_rules, build_scope_rules
@@ -26,7 +24,7 @@ from aiac.policy.model.models import PolicyRule
 
 
 def _config() -> Configuration:
-    return Configuration.for_realm(os.getenv("KEYCLOAK_REALM", ""))
+    return Configuration.for_default_realm()
 
 
 def _flatten_dedup(roles):

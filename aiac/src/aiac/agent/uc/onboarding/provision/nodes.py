@@ -11,8 +11,6 @@ as an `HTTPException(502, ...)` whose message names the workload and the specifi
 missing/invalid label — actionable, never silent.
 """
 
-import os
-
 from fastapi import HTTPException
 
 from aiac.idp.configuration.api import Configuration
@@ -31,7 +29,7 @@ _MCP_LABEL = "protocol.kagenti.io/mcp"
 # Seams (patched in unit tests)                                                #
 # --------------------------------------------------------------------------- #
 def _config() -> Configuration:
-    return Configuration.for_realm(os.getenv("KEYCLOAK_REALM", ""))
+    return Configuration.for_default_realm()
 
 
 def _mcp_tools_list(endpoint: str) -> list[dict]:
@@ -116,8 +114,13 @@ def classify_service(state: OnboardingProvisionState) -> dict:
 
 
 def analyze_agent(state: OnboardingProvisionState) -> dict:
-    """Derive an agent's roles + scopes from its AgentCard CR (non-LLM). Falls back to a
-    default access scope for legacy deployments with no AgentCard."""
+    """Derive an agent's roles + scopes from its AgentCard CR (non-LLM).
+
+    The operator fetches the agent's A2A card and syncs it onto the CR's ``status.card``; each skill
+    there carries a machine ``id`` (a stable identifier, e.g. ``source_operations``) plus a display
+    ``name`` (which may contain spaces). Scope names are built from the skill ``id`` so they are
+    usable Keycloak scope names. Falls back to a default access scope when there is no AgentCard CR
+    (legacy deployments) or the CR has no synced skills yet."""
     namespace, workload = state.namespace, state.workload_name
     role = RoleDefinition(name=f"{workload}.agent", description="Agent role")
 
@@ -126,21 +129,31 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     except Exception as e:
         raise HTTPException(502, f"Kubernetes AgentCard LIST failed in namespace {namespace!r}: {e}")
 
-    card = next(
-        (c for c in resp.get("items", []) if (c.get("metadata") or {}).get("name") == workload),
-        None,
-    )
-    if card is None:
+    # Link the card to the workload by its ``spec.targetRef`` (the Deployment it describes), since the
+    # operator names the CR after the Deployment (e.g. ``<workload>-deployment-card``), not the
+    # workload. Fall back to ``metadata.name == workload`` for hand-authored/legacy cards.
+    def _targets_workload(c: dict) -> bool:
+        target = ((c.get("spec") or {}).get("targetRef") or {}).get("name")
+        return target == workload or (c.get("metadata") or {}).get("name") == workload
+
+    card = next((c for c in resp.get("items", []) if _targets_workload(c)), None)
+    skills = (((card or {}).get("status") or {}).get("card") or {}).get("skills", [])
+    if not skills:
         provision = ServiceProvision(
             roles=[role],
             scopes=[ScopeDefinition(name=f"{workload}.access", description="Default access scope")],
-            reasoning="partial: no AgentCard found, default scope assigned",
+            reasoning=(
+                "partial: no AgentCard found, default scope assigned"
+                if card is None
+                else "partial: AgentCard has no synced skills, default scope assigned"
+            ),
         )
         return {"service_provision": provision}
 
-    skills = (card.get("spec") or {}).get("skills", [])
     scopes = [
-        ScopeDefinition(name=f"{workload}.{s['name']}", description=s.get("description", ""))
+        ScopeDefinition(
+            name=f"{workload}.{s.get('id') or s['name']}", description=s.get("description", "")
+        )
         for s in skills
     ]
     provision = ServiceProvision(
