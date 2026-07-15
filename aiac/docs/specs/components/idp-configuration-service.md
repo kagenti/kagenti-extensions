@@ -24,6 +24,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | POST | `/services/{service_id}/scopes/{scope_id}` | `PUT /admin/realms/{realm}/default-default-client-scopes/{scope_id}` | Assign existing scope as default scope to service |
 | POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
 | POST | `/services/{service_id}/roles/{role_id}` | `admin.get_client_service_account_user(service_id)` → `admin.assign_realm_roles(user_id, ...)` | Assign existing realm role to service account |
+| GET | `/services/{service_id}/discovery-token` | `admin.get_client(service_id)` → (idempotent) `add_mapper_to_client` → `KeycloakOpenID(...).token(grant_type="client_credentials")` | Mint a bearer token, minted **as the service's own client**, whose `aud` contains that client's client-id — for authenticating UC-1 tool discovery against the tool's AuthBridge sidecar |
 | GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
 
 `GET /subjects?role_id={role_id}` (filtered variant):
@@ -107,6 +108,24 @@ serviceId]`:
 4. Returns `201 Created` on success.
 5. Returns `409 Conflict` if the role is already assigned.
 6. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`GET /services/{service_id}/discovery-token`:
+1. Calls `admin.get_client(service_id)` to resolve `client_id = client["clientId"]`.
+2. Reads the client's **existing** secret (`client.get("secret")` or `admin.get_client_secrets(service_id)`)
+   — **never** calls `generate_client_secrets` (rotating the live secret would break the deployed
+   workload). Returns `502 Bad Gateway` if no secret is present (e.g. a public client).
+3. Idempotently ensures a self-audience `oidc-audience-mapper` named `aiac-discovery-audience` is
+   attached to the client (`get_mappers_from_client` then `add_mapper_to_client` only if absent), so the
+   minted token's `aud` includes `client_id`.
+4. Mints via `KeycloakOpenID(server_url=..., realm_name=realm, client_id=client_id,
+   client_secret_key=secret).token(grant_type="client_credentials")` — i.e. as the **service's own
+   client**, not the realm admin.
+5. Decodes the minted token's payload (no signature check needed — this endpoint trusts its own mint)
+   and asserts `client_id in aud`; if `AIAC_KEYCLOAK_ISSUER` is set, also asserts `iss` matches it.
+   Returns `502 Bad Gateway` if either assertion fails — this endpoint never returns a token the
+   consuming AuthBridge sidecar's `jwt-validation` plugin would reject.
+6. Returns `200 OK` with `{"access_token": ..., "client_id": ..., "issuer": ..., "audience": [...]}`.
+7. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
 All endpoints except `/health` require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent. `/health` accepts no realm parameter — it calls `_get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])` directly.
 

@@ -198,6 +198,11 @@ class Configuration:
     def create_service_scope(self, service_id: str, scope) -> Scope: ...
 
     def set_service_type(self, service: Service, service_type: ServiceType) -> Service: ...
+
+    # Mint a bearer token, minted as the service's own client, whose `aud` contains that
+    # client's client-id — for authenticating UC-1 tool discovery against the tool's
+    # AuthBridge sidecar. Returns the raw access_token string.
+    def mint_discovery_token(self, service_id: str) -> str: ...
 ```
 
 `get_scopes()` — simple read:
@@ -237,6 +242,13 @@ class Configuration:
 5. Return a single enriched `Service`.
 
 > **Note:** Callers that previously called `get_services()` and filtered by ID should be switched to `get_service(service_id)` to avoid fetching the full list.
+
+`mint_discovery_token(service_id)` — thin wrapper over the config service's minting endpoint:
+1. `GET {AIAC_PDP_CONFIG_URL}/services/{service_id}/discovery-token?realm=<self.realm>`.
+2. Raise `RuntimeError` on non-2xx HTTP status.
+3. Return `response.json()["access_token"]` — the raw bearer token string. The config service (which
+   holds the Keycloak admin) does the minting and the in-endpoint `iss`/`aud` verification; this method
+   does no decoding itself.
 
 `get_roles()` — enriched read:
 1. `GET {AIAC_PDP_CONFIG_URL}/roles?realm=<self.realm>` — fetch all realm roles.

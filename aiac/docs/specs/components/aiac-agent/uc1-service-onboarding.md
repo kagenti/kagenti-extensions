@@ -120,15 +120,23 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
      a. GET the K8s `Service` named `workload_name` in `namespace` (operator convention: Service name == workload name).
      b. Require the `protocol.kagenti.io/mcp` label present on that Service; `502` (actionable) if absent — the label is applied at deploy time, not stamped by the operator.
      c. Build `http://{workload_name}.{namespace}.svc.cluster.local:{port}/mcp`, where `port` is the Service's first port (not hardcoded).
-  2. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint.
-  3. Produce `ServiceProvision`:
+  2. Mint a discovery token via `Configuration.mint_discovery_token(service_id)` — the tool's MCP
+     endpoint sits behind its AuthBridge sidecar, whose inbound `jwt-validation` plugin enforces an
+     `aud` matching the tool's own Keycloak client-id; the config service mints the token as the tool's
+     own client (client-credentials + a self-audience mapper) so it passes that gate. `502` (actionable,
+     naming the service id) if minting fails.
+  3. Call `tools/list` (HTTP POST, MCP protocol) on the resolved endpoint, sending the minted token as
+     `Authorization: Bearer <token>`.
+  4. Produce `ServiceProvision`:
      - `roles`: `[]` (tools do not initiate further calls)
      - `scopes`: `[ScopeDefinition(name=f"{workload_name}.{tool.name}", description=tool.description) for tool in manifest.tools]`
      - `reasoning`: `f"derived from MCP manifest: {len(tools)} tools"`
-  4. Returns `502` on Service/label lookup failure or MCP call failure.
+  5. Returns `502` on Service/label lookup failure, discovery-token minting failure, or MCP call failure.
 
   > K8s access: `get` on `services` in the workload namespace (tool path). Identity is resolved by `classify_service` (config API).
   > MCP path convention: all MCP tool services must serve at `/mcp` and carry the `protocol.kagenti.io/mcp` label. This label is a **deploy-time prerequisite** — the kagenti-operator does not stamp it today; automatic stamping is requested upstream (`docs/gh-issues/kagenti-operator-mcp-label-stamping.md`). Until then it must be applied at deploy time; `analyze_tool` fails loud (`502`, naming the workload + missing label) if it is absent.
+  > Discovery auth: the tool's inbound `jwt-validation` plugin stays fully enforcing — there is no
+  > path bypass for `/mcp`. `analyze_tool` authenticates instead of relaxing the sidecar's auth.
 
 - **`provision_service`**: non-LLM node; calls `create_service_role` and `create_service_scope` from `aiac.idp.configuration.api` for each entry in `ServiceProvision`. Reads `service_id` from state. Writes are **idempotent** (create-or-get).
   - Also persists the discovered `service_type` onto the Keycloak client via `Configuration.set_service_type(service, service_type)`, which stores it as the **`client.type`** attribute. This is the **authoritative origin** of the attribute that the IdP library's `Service._resolve_keycloak_fields` reads back (see the IdP library spec's type-resolution precedence). No case mapping is needed here: `service_type` is a `ServiceType` (values `Agent`/`Tool`), already matching `client.type` and `Service.type`. Case normalization happens once, upstream, when `classify_service` reads the lowercase `kagenti.io/type` label.
