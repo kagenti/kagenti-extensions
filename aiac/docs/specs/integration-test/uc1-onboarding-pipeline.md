@@ -74,7 +74,9 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
   **Not** the superseded `aiac-pdp-policy-keycloak` composite writer, which manages Keycloak composite
   roles and emits **no Rego at all**, and is not deployed by any current manifest. The `.rego` files are
   the artifact under test; without the OPA writer there is nothing to capture.
-- **Rego capture.** `kubectl cp` the writer's `/rego` to a host temp dir, then run `opa eval` on the host.
+- **Rego capture.** `kubectl cp` the writer's `/rego` to a per-rung host dir (a `rung{1,2,3}` subfolder
+  under the gitignored `test/integration/rego_out/uc1/` tree, so artifacts stay in the project for
+  eyeballing but are never committed; each rung clears its dir first), then run `opa eval` on the host.
 
 ## Preconditions (assumed, not performed by the tests)
 
@@ -234,7 +236,7 @@ workloads.
 | `AIAC_CONTROLLER_URL` | Base URL of the in-cluster AIAC Controller (via port-forward) for `POST /apply/service/{id}` | `http://127.0.0.1:7070` |
 | `AIAC_OPA_POD` / `AIAC_OPA_SELECTOR` | OPA-writer pod (or label selector) to `kubectl cp` `.rego` from | — (resolved from labels) |
 | `AIAC_OPA_REGO_PATH` | Writer output dir inside the pod | `/rego` |
-| `REGO_OUTPUT_DIR` | Host dir the captured `.rego` is copied to | test temp dir |
+| `REGO_OUTPUT_DIR` | Base dir the captured `.rego` is copied to (one `rung{1,2,3}` subfolder per rung) | `test/integration/rego_out/uc1/` (gitignored) |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`); consumed by the in-cluster AIAC pod | — (required) |
 | `OPA_BIN` | Path to the standalone `opa` binary (oracle); else `PATH`, else `pytest.skip` | — (optional) |
 

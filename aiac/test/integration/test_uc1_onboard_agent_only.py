@@ -115,7 +115,7 @@ def onboarded() -> dict:
     """Onboard **only** the agent (the tool is deployed but not onboarded) via the shared harness,
     and yield the live ``admin`` handle + captured ``rego_dir`` (+ writer ``pod``). Keycloak cleanup
     runs before and after; the clients are left registered as before (spec § Per-rung flow)."""
-    with uc1.onboarded_stack([scn.AGENT_WORKLOAD], rego_prefix="aiac-uc1-rung1-rego-") as ctx:
+    with uc1.onboarded_stack([scn.AGENT_WORKLOAD], rego_subdir="rung1") as ctx:
         yield ctx
 
 

@@ -143,7 +143,7 @@ def onboarded() -> dict:
     clients are left registered as before (spec § Per-rung flow). No agent re-onboard, no
     intermediate validation — only the end state is asserted below."""
     with uc1.onboarded_stack(
-        [scn.AGENT_WORKLOAD, scn.TOOL_WORKLOAD], rego_prefix="aiac-uc1-rung2-rego-"
+        [scn.AGENT_WORKLOAD, scn.TOOL_WORKLOAD], rego_subdir="rung2"
     ) as ctx:
         yield ctx
 

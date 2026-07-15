@@ -30,7 +30,6 @@ import json
 import logging
 import os
 import sys
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -88,6 +87,11 @@ OPA_SELECTOR = os.environ.get("AIAC_OPA_SELECTOR", "app=aiac-interface")
 OPA_CONTAINER = os.environ.get("AIAC_OPA_CONTAINER", "aiac-pdp-policy-opa")
 OPA_POD = os.environ.get("AIAC_OPA_POD")
 OPA_REGO_PATH = os.environ.get("AIAC_OPA_REGO_PATH", "/rego")
+
+# Base dir the captured ``.rego`` is copied to, one subfolder per rung (see ``fresh_rego_dir``).
+# Defaults to the (gitignored) ``test/integration/rego_out/uc1/`` tree so artifacts stay in the
+# project for eyeballing but never get committed; ``$REGO_OUTPUT_DIR`` overrides the base.
+REGO_OUTPUT_BASE = Path(os.environ.get("REGO_OUTPUT_DIR") or (HERE / "rego_out" / "uc1"))
 
 AGENT_SLUG = f"{NAMESPACE}_{scn.AGENT_WORKLOAD}".replace("-", "_")  # team1/github-agent -> team1_github_agent
 INBOUND_REGO = f"{AGENT_SLUG}.inbound.rego"
@@ -279,13 +283,14 @@ def onboard(base_url: str, service_id: str) -> None:
     )
 
 
-def fresh_rego_dir(prefix: str) -> Path:
-    """Host dir the captured ``.rego`` is copied to: ``$REGO_OUTPUT_DIR`` if set, else a fresh test
-    temp dir named with ``prefix`` (spec § Configuration). A temp default keeps captured artifacts out
-    of the repo and lets each run verify freshly generated policy — never a stale artifact. Any stale
-    ``.rego`` in the dir is cleared so a broken pipeline can't pass green on leftovers."""
-    base = os.environ.get("REGO_OUTPUT_DIR")
-    path = Path(base) if base else Path(tempfile.mkdtemp(prefix=prefix))
+def fresh_rego_dir(subdir: str) -> Path:
+    """Host dir the captured ``.rego`` is copied to: a per-rung ``subdir`` under ``REGO_OUTPUT_BASE``
+    (``test/integration/rego_out/uc1/`` by default — gitignored, or ``$REGO_OUTPUT_DIR`` if set).
+
+    The artifacts live in the project tree so they can be eyeballed after a run, one folder per test
+    case. Every ``.rego`` in the dir is cleared at the start of each rung so a broken pipeline can't
+    pass green on leftovers, and each run verifies only freshly generated policy."""
+    path = REGO_OUTPUT_BASE / subdir
     path.mkdir(parents=True, exist_ok=True)
     for stale in path.glob("*.rego"):
         stale.unlink()
@@ -372,7 +377,7 @@ def inbound_grants(rego_dir: Path) -> set[tuple[str, str]]:
 
 
 @contextmanager
-def onboarded_stack(workloads: list[str], *, rego_prefix: str) -> Iterator[dict]:
+def onboarded_stack(workloads: list[str], *, rego_subdir: str) -> Iterator[dict]:
     """Run one rung's whole flow and yield ``{"admin", "rego_dir", "writer_pod"}``.
 
     Provision users/roles, onboard the given ``workloads`` **in order** through the real in-cluster
@@ -391,7 +396,7 @@ def onboarded_stack(workloads: list[str], *, rego_prefix: str) -> Iterator[dict]
     provision_realm_and_users(admin, TEST_REALM)  # BEFORE onboarding (PRB reads the role universe)
     ensure_agent_policy(CONTROLLER_NAMESPACE)  # mount the PRB's policy.md if the stack lacks it
 
-    rego_dir = fresh_rego_dir(rego_prefix)  # fresh host dir; stale .rego cleared
+    rego_dir = fresh_rego_dir(rego_subdir)  # fresh per-rung host dir; stale .rego cleared
     pod = writer_pod()
     clear_writer_rego(pod)  # clear stale .rego in the writer BEFORE onboarding
     try:
