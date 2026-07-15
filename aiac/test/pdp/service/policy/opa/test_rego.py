@@ -93,6 +93,27 @@ def test_slugify_lowercases_without_hyphens():
     assert slugify("WeatherAgent") == "weatheragent"
 
 
+def test_slugify_strips_slashes_and_colons_from_spiffe_uri():
+    slug = slugify("spiffe://localtest.me/ns/team1/sa/github-agent")
+    assert "/" not in slug
+    assert ":" not in slug
+    assert "." not in slug
+
+
+def test_slugify_spiffe_uri_extracts_namespace_and_name_short_id():
+    """The slug must be predictable from just {namespace}/{name}, not the trust domain."""
+    assert slugify("spiffe://localtest.me/ns/team1/sa/github-agent") == "team1_github_agent"
+    assert (
+        slugify("spiffe://other-trust-domain.example/ns/team1/sa/github-agent")
+        == "team1_github_agent"
+    )
+
+
+def test_slugify_plain_ns_workload_clientid_matches_spiffe_slug():
+    """Same {ns}/{workload} id, with or without SPIRE, must slugify identically."""
+    assert slugify("team1/github-agent") == "team1_github_agent"
+
+
 # --- generate_inbound_rego ---
 
 

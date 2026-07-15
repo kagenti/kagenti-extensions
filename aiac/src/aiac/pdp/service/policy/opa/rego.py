@@ -9,14 +9,33 @@ embedded in the package, and ``allow`` resolves IDs -> roles -> scopes
 internally.
 """
 
+import re
+
 from aiac.policy.model.models import AgentPolicyModel, PolicyRule
 
 __all__ = ["slugify", "generate_inbound_rego", "generate_outbound_rego"]
 
+_SPIFFE_RE = re.compile(r"^spiffe://[^/]+/ns/(?P<ns>[^/]+)/sa/(?P<name>[^/]+)$")
+
+
+def _short_id(agent_id: str) -> str:
+    """Reduce a clientId to ``{namespace}/{name}``, dropping the SPIFFE trust domain.
+
+    Under SPIRE, agent_id is a SPIFFE URI (``spiffe://host/ns/{ns}/sa/{name}``); without
+    SPIRE it's already ``{ns}/{name}``. Either way the trust domain/host is not part of a
+    stable identity, so the slug must not depend on it.
+    """
+    match = _SPIFFE_RE.match(agent_id)
+    return f"{match['ns']}/{match['name']}" if match else agent_id
+
 
 def slugify(agent_id: str) -> str:
-    """Turn an agent id into a valid Rego package name segment."""
-    return agent_id.replace("-", "_").lower()
+    """Turn an agent id into a valid Rego package name segment / filename.
+
+    Predictable regardless of whether SPIRE is enabled: derived from ``{ns}/{name}``,
+    not the full slash/colon-bearing clientId or SPIFFE URI.
+    """
+    return re.sub(r"[^a-z0-9]+", "_", _short_id(agent_id).lower()).strip("_")
 
 
 def _render_list(var: str, values: list[str]) -> str:

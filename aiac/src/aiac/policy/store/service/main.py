@@ -8,6 +8,7 @@ from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, Response
 
 from aiac.policy.model.models import ServicePolicyModel
+from aiac.policy.store.keying import decode_service_id
 
 DB_PATH = os.getenv("SERVICEPOLICY_DB_PATH", "/data/policy_model.db")
 
@@ -58,6 +59,7 @@ def list_service_policies_by_role(role: str) -> list[ServicePolicyModel]:
 
 @app.get("/policy/services/{service_id}", response_model=None)
 def get_service_policy(service_id: str):
+    service_id = decode_service_id(service_id)
     if service_id not in _cache:
         return JSONResponse(status_code=404, content={"error": f"service {service_id} not found"})
     return _cache[service_id]
@@ -69,6 +71,7 @@ def upsert_service_policy(
     body: ServicePolicyModel,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
+    service_id = decode_service_id(service_id)
     try:
         conn.execute(
             "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
@@ -85,6 +88,7 @@ def delete_service_policy(
     service_id: str,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
+    service_id = decode_service_id(service_id)
     try:
         conn.execute("DELETE FROM service_policies WHERE service_id = ?", (service_id,))
     except sqlite3.Error as e:

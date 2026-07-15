@@ -116,7 +116,7 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
       names/descriptions (via `KeycloakAdmin` / the IdP Configuration read API).
    2. **Generated Rego decisions.** `kubectl cp` the `/rego` files to the host and `opa eval`:
       - **`opa` discovery** — `$OPA_BIN` → `shutil.which("opa")` → `pytest.skip`.
-      - **Inbound** — per `subject`: `{"subject": <id>}` vs `data.authz.github_agent.inbound.allow`.
+      - **Inbound** — per `subject`: `{"subject": <id>}` vs `data.authz.team1_github_agent.inbound.allow`.
       - **Outbound (user gate only)** — per `(subject × function_name)`, `function_name` a full discovered
         tool-scope name, via the probe `data.probe.outbound.allow` in `probe_uc1.rego`, which binds
         `input.function_name` against the generated **user→tool** maps (`subject_ok`) **only**, by exact
@@ -140,7 +140,7 @@ Why it holds: `compute_and_apply` is **affected-agent** oriented and **additive*
 is onboarded, its Service Policy Builder pairs the tool's scopes against the rest of the role universe,
 producing `(agent-role, tool-scope)` and `(user-role, tool-scope)` rules; the PCE resolves those roles to
 the **agent** and merges them onto the agent's stored `AgentPolicyModel`, rewriting
-`github_agent.outbound.rego`. So:
+`team1_github_agent.outbound.rego`. So:
 
 - **Rung 2 (agent → tool):** agent onboarding leaves outbound empty; **tool onboarding fills it in**.
 - **Rung 3 (tool → agent):** the tool's scopes already exist, so **agent onboarding produces the full
@@ -158,7 +158,7 @@ rendering). They are **identical to policy-pipeline's** (only the scope-name str
 
 `USERS`: `dev-user`→`developer`, `test-user`→`tester`, `devops-user`→`devops`.
 
-**Inbound allow** (`data.authz.github_agent.inbound.allow`; all rungs):
+**Inbound allow** (`data.authz.team1_github_agent.inbound.allow`; all rungs):
 
 | Subject | Inbound |
 |---|---|
@@ -177,8 +177,13 @@ readability) — **rungs 2 and 3** (with a tool onboarded):
 
 **Rung 1 (agent only):** the outbound table is **entirely deny** (empty user gate — no tool scopes).
 
-Each rung leaves on disk exactly `github_agent.inbound.rego` + `github_agent.outbound.rego`; explicitly
+Each rung leaves on disk exactly `{AGENT_SLUG}.inbound.rego` + `{AGENT_SLUG}.outbound.rego`; explicitly
 **no** `github_tool.*.rego` (the tool is a pure target; "no rules written for the tool alone").
+`AGENT_SLUG` is the Rego-package slug derived from the agent's clientId (`{namespace}/{name}`,
+extracted from the SPIFFE URI under SPIRE) — `team1_github_agent` on the reference cluster's
+`team1`/`github-agent` scenario, not a literal `github_agent` (see
+[pdp-policy-writer-opa.md § Rego package structure](../components/pdp-policy-writer-opa.md#rego-package-structure)
+for the slugify rule).
 
 ### Semantic similarity, not byte-identity
 

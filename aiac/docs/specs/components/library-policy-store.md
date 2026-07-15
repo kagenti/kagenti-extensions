@@ -77,6 +77,12 @@ def delete_service_policy(service_id: str) -> None
     # No-op on the server if the service is absent (still 204).
 ```
 
+`service_id` is a plain string everywhere in this API (slashes and all) — callers never encode
+anything. Internally, the three functions above base64url-encode `service_id` into the URL path
+segment via `aiac.policy.store.keying.encode_service_id` before issuing the request (the clientId is
+slash-bearing and can't be a single path segment); the service decodes it back. `service_id` in every
+returned `ServicePolicyModel` is always the original, decoded form.
+
 **Removed** (APMs are no longer persisted): `get_agent_policy`, `apply_agent_policy`, and the
 prior whole-collection `get_policy` / `apply_policy` / `delete_policy` / `delete_agent_policy`
 functions. The only legitimate consumer is the Policy Computation Engine, which is migrated to the

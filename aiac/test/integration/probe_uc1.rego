@@ -15,7 +15,7 @@ import future.keywords
 #      `input.function_name` is matched to a subject scope by plain string equality. No 5.3-style
 #      prefix-stripping token-set soft match (that was 5.3's device for bare names; here both sides
 #      are already prefixed).
-gen := data.authz.github_agent.outbound
+gen := data.authz.team1_github_agent.outbound
 
 # Tool scopes the user (subject) is entitled to, via the generated user->tool data maps only.
 subject_scopes contains scope if {

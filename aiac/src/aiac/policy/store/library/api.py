@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 # Scope / Role / ServiceType are re-exported by aiac.policy.model.models (it imports them
 # from aiac.idp.configuration.models), so the whole model surface comes from one module.
 from aiac.policy.model.models import Role, Scope, ServicePolicyModel, ServiceType
+from aiac.policy.store.keying import encode_service_id
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -35,7 +36,7 @@ def _fresh_empty(service_id: str) -> ServicePolicyModel:
 
 
 def get_service_policy(service_id: str) -> ServicePolicyModel:
-    resp = requests.get(f"{_base_url()}/policy/services/{service_id}")
+    resp = requests.get(f"{_base_url()}/policy/services/{encode_service_id(service_id)}")
     if resp.status_code == 404:
         return _fresh_empty(service_id)
     _check(resp)
@@ -60,10 +61,10 @@ def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]:
 
 
 def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None:
-    resp = requests.post(f"{_base_url()}/policy/services/{service_id}", json=spm.model_dump())
+    resp = requests.post(f"{_base_url()}/policy/services/{encode_service_id(service_id)}", json=spm.model_dump())
     _check(resp)
 
 
 def delete_service_policy(service_id: str) -> None:
-    resp = requests.delete(f"{_base_url()}/policy/services/{service_id}")
+    resp = requests.delete(f"{_base_url()}/policy/services/{encode_service_id(service_id)}")
     _check(resp)

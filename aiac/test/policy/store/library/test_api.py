@@ -10,6 +10,7 @@ import pytest
 
 from aiac.idp.configuration.models import Role, Scope, ServiceType
 from aiac.policy.model.models import PolicyRule, ServicePolicyModel
+from aiac.policy.store.keying import encode_service_id
 
 BASE_URL = "http://127.0.0.1:7074"
 
@@ -50,7 +51,7 @@ class TestGetServicePolicy:
             from aiac.policy.store.library.api import get_service_policy
 
             result = get_service_policy("svc-1")
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1")
+            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}")
             assert isinstance(result, ServicePolicyModel)
             assert result.service_id == "svc-1"
 
@@ -74,6 +75,21 @@ class TestGetServicePolicy:
             with pytest.raises(RuntimeError):
                 get_service_policy("svc-1")
 
+    @pytest.mark.parametrize(
+        "service_id",
+        ["team1/github-agent", "spiffe://localtest.me/ns/team1/sa/github-agent"],
+    )
+    def test_slash_bearing_id_encoded_in_path(self, service_id):
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(200, _spm_dict(service_id))
+            from aiac.policy.store.library.api import get_service_policy
+
+            get_service_policy(service_id)
+            called_url = mock_get.call_args[0][0]
+            path_segment = called_url.rsplit("/", 1)[-1]
+            assert "/" not in path_segment
+            assert called_url == f"{BASE_URL}/policy/services/{encode_service_id(service_id)}"
+
 
 # ---------------------------------------------------------------------------
 # get_service_policy_by_scope
@@ -88,7 +104,7 @@ class TestGetServicePolicyByScope:
             from aiac.policy.store.library.api import get_service_policy_by_scope
 
             result = get_service_policy_by_scope(scope)
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/owning-svc")
+            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('owning-svc')}")
             assert result is not None
             assert result.service_id == "owning-svc"
 
@@ -167,7 +183,9 @@ class TestApplyServicePolicy:
             from aiac.policy.store.library.api import apply_service_policy
 
             result = apply_service_policy("svc-1", spm)
-            mock_post.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1", json=spm.model_dump())
+            mock_post.assert_called_once_with(
+                f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}", json=spm.model_dump()
+            )
             assert result is None
 
     def test_raises_on_error_response(self):
@@ -192,7 +210,7 @@ class TestDeleteServicePolicy:
             from aiac.policy.store.library.api import delete_service_policy
 
             result = delete_service_policy("svc-1")
-            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1")
+            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}")
             assert result is None
 
     def test_raises_on_error_response(self):
@@ -241,4 +259,4 @@ class TestUrlFallback:
 
                 get_service_policy("svc-1")
                 call_url = mock_get.call_args[0][0]
-                assert call_url == "http://127.0.0.1:7074/policy/services/svc-1"
+                assert call_url == f"http://127.0.0.1:7074/policy/services/{encode_service_id('svc-1')}"

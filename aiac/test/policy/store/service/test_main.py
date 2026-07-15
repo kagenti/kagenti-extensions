@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import aiac.policy.store.service.main as svc
 from aiac.idp.configuration.models import Role, Scope, ServiceType
 from aiac.policy.model.models import PolicyRule, ServicePolicyModel
+from aiac.policy.store.keying import encode_service_id
 from aiac.policy.store.service.main import app, get_db
 
 # ---------------------------------------------------------------------------
@@ -109,20 +110,32 @@ class TestStartup:
 class TestGetServicePolicy:
     def test_returns_spm_when_in_cache(self, client):
         _preload(_spm("weather-service"))
-        resp = client.get("/policy/services/weather-service")
+        resp = client.get(f"/policy/services/{encode_service_id('weather-service')}")
         assert resp.status_code == 200
         assert resp.json()["service_id"] == "weather-service"
 
     def test_returns_404_when_not_in_cache(self, client):
-        resp = client.get("/policy/services/missing-service")
+        resp = client.get(f"/policy/services/{encode_service_id('missing-service')}")
         assert resp.status_code == 404
         assert resp.json() == {"error": "service missing-service not found"}
 
     def test_get_after_post_returns_updated_value_from_cache(self, client):
-        client.post("/policy/services/svc-x", json=_spm("svc-x").model_dump())
-        resp = client.get("/policy/services/svc-x")
+        client.post(f"/policy/services/{encode_service_id('svc-x')}", json=_spm("svc-x").model_dump())
+        resp = client.get(f"/policy/services/{encode_service_id('svc-x')}")
         assert resp.status_code == 200
         assert resp.json()["service_id"] == "svc-x"
+
+    def test_slash_bearing_id_round_trips_via_encoded_path(self, client):
+        service_id = "team1/github-agent"
+        client.post(f"/policy/services/{encode_service_id(service_id)}", json=_spm(service_id).model_dump())
+        resp = client.get(f"/policy/services/{encode_service_id(service_id)}")
+        assert resp.status_code == 200
+        assert resp.json()["service_id"] == service_id
+        assert service_id in svc._cache
+        row = svc._db_conn.execute(
+            "SELECT service_id FROM service_policies WHERE service_id = ?", (service_id,)
+        ).fetchone()
+        assert row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -167,15 +180,16 @@ class TestGetServicePoliciesByRole:
 
 class TestUpsertServicePolicy:
     def test_writes_to_db_updates_cache_returns_204(self, client):
-        resp = client.post("/policy/services/svc-1", json=_spm("svc-1").model_dump())
+        resp = client.post(f"/policy/services/{encode_service_id('svc-1')}", json=_spm("svc-1").model_dump())
         assert resp.status_code == 204
         assert "svc-1" in svc._cache
         row = svc._db_conn.execute("SELECT spec FROM service_policies WHERE service_id = ?", ("svc-1",)).fetchone()
         assert row is not None
 
     def test_repeat_post_replaces_row_upsert_round_trip(self, client):
-        client.post("/policy/services/svc-1", json=_spm("svc-1", role_id="role-a").model_dump())
-        client.post("/policy/services/svc-1", json=_spm("svc-1", role_id="role-b").model_dump())
+        encoded = encode_service_id("svc-1")
+        client.post(f"/policy/services/{encoded}", json=_spm("svc-1", role_id="role-a").model_dump())
+        client.post(f"/policy/services/{encoded}", json=_spm("svc-1", role_id="role-b").model_dump())
 
         rows = svc._db_conn.execute(
             "SELECT service_id FROM service_policies WHERE service_id = ?", ("svc-1",)
@@ -183,7 +197,7 @@ class TestUpsertServicePolicy:
         assert len(rows) == 1  # replaced, not duplicated
 
         # The stored/cached SPM now carries the second write's rule.
-        resp = client.get("/policy/services/svc-1")
+        resp = client.get(f"/policy/services/{encoded}")
         rule_role_ids = [r["role"]["id"] for r in resp.json()["inbound_rules"]]
         assert rule_role_ids == ["role-b"]
 
@@ -191,7 +205,7 @@ class TestUpsertServicePolicy:
         bad_conn = MagicMock()
         bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
         app.dependency_overrides[get_db] = lambda: bad_conn
-        resp = client.post("/policy/services/svc-err", json=_spm("svc-err").model_dump())
+        resp = client.post(f"/policy/services/{encode_service_id('svc-err')}", json=_spm("svc-err").model_dump())
         assert resp.status_code == 502
         assert "error" in resp.json()
 
@@ -204,7 +218,7 @@ class TestUpsertServicePolicy:
 class TestDeleteServicePolicy:
     def test_removes_row_from_db_and_cache_returns_204(self, client):
         _preload(_spm("svc-1"))
-        resp = client.delete("/policy/services/svc-1")
+        resp = client.delete(f"/policy/services/{encode_service_id('svc-1')}")
         assert resp.status_code == 204
         assert "svc-1" not in svc._cache
         row = svc._db_conn.execute(
@@ -216,7 +230,7 @@ class TestDeleteServicePolicy:
         bad_conn = MagicMock()
         bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
         app.dependency_overrides[get_db] = lambda: bad_conn
-        resp = client.delete("/policy/services/svc-1")
+        resp = client.delete(f"/policy/services/{encode_service_id('svc-1')}")
         assert resp.status_code == 502
         assert "error" in resp.json()
 

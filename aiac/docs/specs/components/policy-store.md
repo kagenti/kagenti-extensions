@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS service_policies (
 
 The by-scope lookup has **no dedicated route** — it collapses to the by-id read via `scope.serviceId` and is implemented entirely in the library.
 
+`service_id` is the Keycloak clientId, which is slash-bearing (`{ns}/{workload}`, or a SPIFFE URI under
+SPIRE) and cannot be a single URL path segment as-is. The `{service_id}` path segment on the three
+per-id routes above is base64url-encoded on the wire (`aiac.policy.store.keying.encode_service_id` /
+`decode_service_id`); the service decodes it immediately on entry, and the cache/DB stays keyed by the
+decoded real id — every `service_id` in a request/response *body* (including the by-role list) is
+always the decoded, real form. The by-role query's `role={role_id}` param is unaffected (not a path
+segment).
+
 `DELETE /policy/services/{service_id}` removes a single SPM row (SQLite `DELETE` + cache eviction) so a service can be off-boarded when it is decommissioned. Deleting a service that is not present is a no-op (`204`). Override-purge still edits `inbound_rules` in place via the upsert; the delete route is for whole-service removal, not per-rule purging.
 
 **Error responses:**
