@@ -53,6 +53,12 @@ For current file list, `ls` or `find` under `src/aiac/`.
 .venv/bin/pytest test/ -m "not integration"
 ```
 
+The whole `test/` tree (including `test/policy/`) collects and runs green. The Policy
+Computation Engine (`aiac.policy.computation.engine`) was migrated to the SPM store surface in
+**Wave 3 / Handoff 05**, so the earlier PCE-chain collection failures (which required ignoring
+`test/policy/computation`, `test/agent/controller/test_routes.py`, and
+`test/integration/test_policy_pipeline.py`) are resolved — no `--ignore` flags are needed.
+
 Use `ls test/` to discover current test directories.
 
 **Integration tests** (`-m integration`) need live config — Keycloak + admin creds + an LLM
