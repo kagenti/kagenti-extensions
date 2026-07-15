@@ -58,16 +58,28 @@ spec:
                 name: aiac-pdp-config
             - secretRef:
                 name: keycloak-admin-secret
-        - name: aiac-pdp-policy-keycloak
-          image: localhost/aiac-pdp-policy-keycloak:local
+        # Phase 1 PDP Policy Writer: OPA rego-file mock. Generates Rego
+        # packages and writes them as .rego files to REGO_OUTPUT_DIR. It is a
+        # pure filesystem stub — no Keycloak, no k8s API — so it mounts neither
+        # keycloak-admin-secret nor any Keycloak credentials. The AuthorizationPolicy
+        # CR-backed variant (RBAC + env vars) is layered on later per issue 4.18.
+        - name: aiac-pdp-policy-opa
+          image: localhost/aiac-pdp-policy-opa:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7072
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config
-            - secretRef:
-                name: keycloak-admin-secret
+          env:
+            - name: REGO_OUTPUT_DIR
+              value: /rego
+          volumeMounts:
+            - name: rego-output
+              mountPath: /rego
+      volumes:
+        - name: rego-output
+          emptyDir: {}
 
 ---
 apiVersion: v1

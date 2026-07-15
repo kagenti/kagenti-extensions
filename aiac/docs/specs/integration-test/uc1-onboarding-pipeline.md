@@ -68,11 +68,12 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
   Store + **OPA Policy Writer (filesystem stub)**, mounting the **single abstract** `policy.md`. AIAC runs
   in-cluster so UC-1's `analyze_tool` can reach the tool's MCP endpoint at its cluster-internal DNS name
   (`github-tool.{ns}.svc.cluster.local`); the tests trigger over `kubectl port-forward`.
-- **OPA filesystem-stub writer, not the Keycloak composite writer.** The stack must run
+- **OPA filesystem-stub writer, not the legacy Keycloak composite writer.** The stack must run
   `aiac-pdp-policy-opa` (the filesystem stub: writes `{slug}.inbound.rego` + `{slug}.outbound.rego` to
-  `REGO_OUTPUT_DIR`, default `/rego`) — **not** the Phase-1 `aiac-pdp-policy-keycloak` composite writer,
-  which manages Keycloak composite roles and emits **no Rego at all**. The `.rego` files are the artifact
-  under test; without the OPA writer there is nothing to capture.
+  `REGO_OUTPUT_DIR`, default `/rego`) — this is what the K8s Phase 1 Interface Pod actually deploys.
+  **Not** the superseded `aiac-pdp-policy-keycloak` composite writer, which manages Keycloak composite
+  roles and emits **no Rego at all**, and is not deployed by any current manifest. The `.rego` files are
+  the artifact under test; without the OPA writer there is nothing to capture.
 - **Rego capture.** `kubectl cp` the writer's `/rego` to a host temp dir, then run `opa eval` on the host.
 
 ## Preconditions (assumed, not performed by the tests)

@@ -458,7 +458,7 @@ Four separate manifest files:
 | `aiac/k8s/event-broker-deployment.yaml` _(pending)_ | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
 | `aiac/k8s/rag-statefulset.yaml` _(pending)_ | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 
-The two Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Writer uses `KEYCLOAK_REALM` as its default operating realm. The Policy Store container mounts `aiac-policy-store-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
+Both Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) as env vars; only the IdP Configuration Service container also mounts `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) and uses `KEYCLOAK_ADMIN_REALM` (ignoring `KEYCLOAK_REALM`). The PDP Policy Writer (`aiac-pdp-policy-opa`, the Phase 1 rego-file mock) needs no Keycloak credentials — it writes `.rego` files to `REGO_OUTPUT_DIR` (default `/rego`, an `emptyDir` volume). The Policy Store container mounts `aiac-policy-store-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
 
 ### Docker images
 
@@ -468,11 +468,11 @@ Built independently. No entry in the repo's `build.yaml` CI matrix.
 # Build IdP Configuration Service (Kagenti Interface Pod container 1)
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
-# Build PDP Policy Writer — Phase 1 mock (Kagenti Interface Pod container 2; writes Rego to filesystem)
-docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
-
-# Build PDP Policy Writer — Phase 2 OPA (replaces mock via issue 4.18; writes to AuthorizationPolicy CR)
+# Build PDP Policy Writer — Phase 1 OPA rego-file mock (Kagenti Interface Pod container 2; writes .rego to filesystem)
 docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-policy-opa:latest aiac/src/
+
+# Legacy: PDP Policy Writer — Keycloak composite-role implementation, superseded, not deployed by any current manifest
+docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
 
 # Build Policy Store (deployed as StatefulSet aiac-policy-store)
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile -t aiac-policy-store:latest aiac/src/
