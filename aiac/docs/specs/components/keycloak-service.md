@@ -6,7 +6,7 @@
 >
 > The content below is retained for reference only.
 >
-> **SPM/APM note.** The active split already reads client roles for agents (`GET /clients/{client_id}/roles`, below). Under the SPM/APM redesign an agent's role is a Keycloak **client role** on the agent's own client and a user's role is a **realm role** (Assumption 3); the IdP Configuration Service populates `Role.kind` (from the `clientRole` flag), `Role.actorIds`, and `Scope.serviceId` from these facts and fails loud on cross-kind roles (Assumption 1) and multi-owner AIAC-managed scopes (Assumption 2). See [idp-configuration-service.md](idp-configuration-service.md).
+> **SPM/APM note.** Under the SPM/APM redesign a user's role is a Keycloak **realm role** and an agent's role is surfaced as `kind = Agent` — sourced from the agent client's **client roles** *and* from the `aiac.managed` **realm roles assigned to its service account** (the provisioning path the `Configuration` library uses); the IdP Configuration Service populates `Role.kind`, `Role.actorIds`, and `Scope.serviceId` and fails loud on cross-kind roles (Assumption 1) and multi-owner AIAC-managed scopes (Assumption 2). See [idp-configuration-service.md](idp-configuration-service.md) for the authoritative, current description.
 
 ## Location
 `aiac/src/aiac/keycloak/service/`

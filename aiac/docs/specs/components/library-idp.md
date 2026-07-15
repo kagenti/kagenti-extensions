@@ -141,16 +141,18 @@ HTTP client library that wraps the IdP Configuration Service REST API. Provides 
 
 All Keycloak interactions are consolidated here; the PDP Policy Writer (OPA) does not touch Keycloak directly.
 
-> **Handoff 03 audit outcome — no library code change required.** Once handoff 01 declares
-> `Role.kind` / `Role.actorIds` / `Scope.serviceId` on the models and handoff 02 makes the IdP service
-> populate them, the `Configuration` library surfaces them faithfully **with no code change**: it is a
-> thin pass-through and pydantic `model_validate` picks up the declared fields automatically (no
-> hand-rolled field mapping omits them). The P1 client-side filter in `get_services_by_role` /
-> `get_services_by_scope` was already an `id`-membership field read (not an inference) and needs **no
-> simplification**; it still returns only genuine owners/exposers. No client-side re-derivation of role
-> kind exists or is introduced (`Role.kind` is authoritative); `get_services_by_role` is retained as a
-> method. `get_subjects_by_role` stays consistent with a role's `actorIds` (both come from the same
-> service-side source). See the per-method audit notes below.
+> **Handoff 03 audit outcome (amended).** Most read paths surface `Role.kind` / `Role.actorIds` /
+> `Scope.serviceId` faithfully as a thin `model_validate` pass-through with no code change, and the P1
+> client-side filter in `get_services_by_role` / `get_services_by_scope` was already an `id`-membership
+> read (not an inference) needing no simplification. **Exception — `_build_service` (nested
+> service roles/scopes) is _not_ a plain pass-through and required a fix:** it looked service roles up
+> in the `all_roles` map (built from `GET /roles`, where every role is `kind = User`), discarding the
+> per-service endpoint's authoritative `kind = Agent` / `actorIds`, and it never stamped nested
+> `Scope.serviceId`. It now merges the endpoint's `kind`/`actorIds` and stamps `serviceId` (see
+> `get_services()` below). No client-side *re-derivation* of role kind is introduced — the merged
+> `kind` still comes from the service, which remains authoritative. `get_subjects_by_role` stays
+> consistent with a role's `actorIds` (both from the same service-side source). See the per-method
+> audit notes below.
 
 **Transport retries.** Every HTTP call is issued through a private `_request(method, path, **kwargs)` helper that wraps the request in the project-level `run_upstream` retry primitive (`aiac.shared.upstream`): transient failures are retried up to `UPSTREAM_MAX_RETRIES` times (default `3`) with exponential backoff before a non-2xx status is raised as `RuntimeError`. Retry lives inside the library (not in callers), and applies at the leaf request, so composite methods (`create_service_role` / `create_service_scope`) retry each sub-request without compounding.
 
@@ -213,8 +215,15 @@ class Configuration:
 1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch the base service list.
 2. Call `get_roles()` and `get_scopes()` once upfront to build `{id: Role}` and `{id: Scope}` lookup maps.
 3. For each service, delegate to `_build_service(raw, all_roles, all_scopes)` which issues:
-   - `GET /services/{id}/roles?realm=<self.realm>` → filter `all_roles` map → `Service.roles`
-   - `GET /services/{id}/scopes?realm=<self.realm>` → filter `all_scopes` map → `Service.scopes`
+   - `GET /services/{id}/roles?realm=<self.realm>` → for each returned role, **merge its authoritative
+     `kind`/`actorIds` onto the matching `all_roles` object** (the full representation, carrying
+     `composite`/`childRoles`/`attributes`) → `Service.roles`. Merging (not a plain `all_roles`
+     lookup) is required: the per-service endpoint is the only source of the agent-context
+     `kind = Agent` / `actorIds = [serviceId]`; taking the role from `all_roles` alone would revert it
+     to the realm-level `kind = User` / `actorIds = [members]`.
+   - `GET /services/{id}/scopes?realm=<self.realm>` → filter `all_scopes` map → `Service.scopes`, and
+     **stamp each scope's `serviceId` = this service's `clientId`** (the owning client — the PCE's SPM
+     routing key; `all_scopes` from `GET /scopes` carries no owner).
 4. Raise `RuntimeError` on any non-2xx response.
 5. Return `list[Service]` with fully-enriched `roles` (including `childRoles`) and `scopes` (including `description`).
 

@@ -68,14 +68,32 @@ Accepts JSON body `{"name": ..., "description": ...}`. It:
 3. Returns `409 Conflict` if a role with that name already exists.
 4. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
-`GET /services/{service_id}/roles`:
-1. Calls `admin.get_client_roles(service_id)` to return the **client roles defined on this service's client** — an agent's own roles (`R_A` in the PCE derivation).
-2. Each returned `RoleRepresentation` carries `clientRole: true` and `containerId` = the client UUID, which the mapping layer uses to classify the role (`kind = Agent`) and resolve its owner (`actorIds` / `Scope.serviceId`). See "Agent roles are client roles, field population, and assumption enforcement" below.
-3. Returns `200 OK` with a JSON array of client role objects.
-4. Returns `[]` (empty array) if `KeycloakError` has `response_code == 400` (service has no client roles — not an error).
+`GET /services/{service_id}/roles`: returns this service's agent roles (`R_A` in the PCE
+derivation) from **two** sources, both stamped `kind = Agent`, `actorIds = [this client's
+serviceId]`:
+1. **Client roles** on the service's own client — `admin.get_client_roles(service_id)`. Each
+   `RoleRepresentation` carries `clientRole: true` and `containerId` (the client UUID); the owner is
+   resolved from `containerId` → `get_client(containerId)["clientId"]`.
+2. **`aiac.managed` realm roles assigned to the service account** — `get_client_service_account_user(service_id)`
+   → `get_realm_roles_of_user(user_id)`. This is how the `Configuration` library provisions an agent's
+   roles (`POST /services/{id}/roles/{role_id}` → `assign_realm_roles` on the service account, below),
+   so without it a library-onboarded agent would expose no roles. The role-of-user stub omits
+   attributes, so each is re-fetched via `get_realm_role_by_id` to test the `aiac.managed` marker;
+   non-managed realm roles (e.g. `default-roles-<realm>`) are skipped. The owner is this service's own
+   `clientId`.
+3. Returns `200 OK` with the merged JSON array (client-role ids dedup against the realm-role set).
+4. Returns `[]` if `KeycloakError` has `response_code == 400` (service has no client roles — not an
+   error); a missing service account is caught and simply contributes no realm roles.
 5. Returns `502 Bad Gateway` with `{"error": ...}` on other `KeycloakError`.
 
-> **Redesign note (SPM/APM):** this endpoint previously sourced a service's roles from the **realm roles assigned to its service account** (`get_client_service_account_user` → `get_realm_roles_of_user`). Under the SPM/APM redesign an agent's role is a Keycloak **client role** on the agent's own client (Assumption 3), so the endpoint now reads the client's client roles directly via `admin.get_client_roles(service_id)`.
+> **Redesign note (SPM/APM + provisioning reconciliation).** Under the original SPM/APM redesign this
+> endpoint sourced roles **only** from the client's client roles (`admin.get_client_roles`), on the
+> premise that an agent's role is always a Keycloak client role (Assumption 3). In practice the write
+> path (`POST /services/{id}/roles/{role_id}`, used by the `Configuration` library) assigns a **realm
+> role to the service account**, not a client role — so the read and write paths did not meet, and a
+> library-provisioned agent exposed no roles (empty `agent_roles` → all-deny outbound Rego; surfaced by
+> the 5.3 live pipeline). The endpoint now returns **both** sources so the two paths reconcile. The
+> long-term option of making provisioning create true client roles instead is tracked with issue 1.7.
 
 `GET /services/{service_id}/scopes`:
 1. Calls `admin.get_client_default_client_scopes(service_id)` to return the realm-level client scopes assigned as defaults to the service.
@@ -104,12 +122,12 @@ Under the SPM/APM policy-model redesign the Policy Computation Engine (PCE) perf
 
 **Assumption 3 — an agent's role is a Keycloak _client role_; a user's role is a Keycloak _realm role_.** In Keycloak a `RoleRepresentation` carries `clientRole: bool` and `containerId` (the client UUID for client roles, the realm id for realm roles). This service holds the invariant end-to-end:
 
-- **Agent roles are sourced from client roles.** `GET /services/{service_id}/roles` reads the client's client roles via `admin.get_client_roles(service_id)` (not the realm roles of the service account). These are `R_A` — an agent's own roles, used throughout the PCE derivation.
-- **User roles are realm roles.** `GET /roles` continues to read realm-level roles.
+- **Agent roles.** `GET /services/{service_id}/roles` returns an agent's own roles (`R_A`) from two sources: the client's client roles (`admin.get_client_roles`, `clientRole == true`), **and** the `aiac.managed` realm roles assigned to the service account (the provisioning path the `Configuration` library uses). Both are surfaced as `kind = Agent` owned by this service — see the endpoint description and its Redesign note above.
+- **User roles are realm roles.** `GET /roles` continues to read realm-level roles (`kind = User`).
 
 **Field population** (in the Keycloak → generic-model mapping layer, from the raw facts above):
 
-- **`Role.kind` from the `clientRole` flag** — `clientRole == true` → `kind = Agent`; `false` (realm role) → `kind = User`. Kind is **never** inferred from role naming.
+- **`Role.kind`** — a role read via `GET /services/{service_id}/roles` is always `kind = Agent` (whether it came from the client's client roles or from an `aiac.managed` realm role on the service account); a realm role read via `GET /roles` is `kind = User`. Equivalently: agent-context (`clientRole == true`, or `aiac.managed` realm role held by a service account) → `Agent`; plain realm role → `User`. Kind is **never** inferred from role naming.
 - **`Role.actorIds` per kind:**
   - `Agent`: the owning agent's `serviceId` — resolved from the role's `containerId` → client (`clientId`) — and/or the agent service account(s) that hold the role.
   - `User`: the **member usernames** of the role. This aligns with `GET /subjects?role_id=` / `get_subjects_by_role`, which already resolves a role → its member subjects; the usernames it returns are exactly `actorIds` for a user (realm) role.
