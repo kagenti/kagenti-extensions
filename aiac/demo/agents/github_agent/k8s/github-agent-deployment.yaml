@@ -57,6 +57,7 @@ metadata:
   namespace: team1
   labels:
     app.kubernetes.io/name: github-agent
+    protocol.kagenti.io/a2a: ""
 spec:
   replicas: 1
   selector:
@@ -68,6 +69,7 @@ spec:
         app.kubernetes.io/name: github-agent
         kagenti.io/inject: enabled
         kagenti.io/spire: enabled
+        protocol.kagenti.io/a2a: ""
     spec:
       serviceAccountName: github-agent
       containers:
@@ -150,7 +152,15 @@ spec:
   selector:
     app.kubernetes.io/name: github-agent
   ports:
-    - port: 8080
+    # Port 8001 is the agent's direct port after authbridge port-stealing (8000→8001).
+    # Listed first so getServicePort() picks it up for AgentCard fetching.
+    - name: agent
+      port: 8001
+      targetPort: 8001
+      protocol: TCP
+    # Port 8080 is the public/proxy port (authbridge reverse proxy on 8000).
+    - name: proxy
+      port: 8080
       targetPort: 8000
       protocol: TCP
   type: ClusterIP
