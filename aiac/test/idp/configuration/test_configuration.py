@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from aiac.idp.configuration.api import Configuration
-from aiac.idp.configuration.models import Role, Scope, Service, ServiceType, Subject
+from aiac.idp.configuration.models import Role, RoleKind, Scope, Service, ServiceType, Subject
 
 REALM = "kagenti"
 BASE = "http://127.0.0.1:7071"
@@ -976,6 +976,41 @@ class TestGetSubjectsByRole:
             Configuration.for_realm(REALM).get_subjects_by_role(role)
         assert m.call_count == 1
 
+    # handoff 03 — actorIds consistency. The subject/username set this method
+    # reports is the same set the IdP service uses to populate a user-kind role's
+    # actorIds. Both come from the service, so they must agree and the library
+    # must not recompute actorIds client-side.
+    def test_subject_set_matches_user_role_actor_ids(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role(kind="User", actorIds=["alice", "bob"])
+        payload = [
+            {"id": "u1", "username": "alice", "enabled": True},
+            {"id": "u2", "username": "bob", "enabled": True},
+        ]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            result = Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert {s.username for s in result} == set(role.actorIds)
+        # The library surfaces the service's subject set as-is; it does not
+        # mutate/recompute the role's actorIds.
+        assert role.actorIds == ["alice", "bob"]
+
+    def test_subject_fields_pass_through_unchanged(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        role = self._make_role()
+        payload = [
+            {
+                "id": "u1",
+                "username": "alice",
+                "email": "alice@example.com",
+                "firstName": "Alice",
+                "enabled": True,
+            }
+        ]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            result = Configuration.for_realm(REALM).get_subjects_by_role(role)
+        assert result[0].email == "alice@example.com"
+        assert result[0].firstName == "Alice"
+
 
 # ---------------------------------------------------------------------------
 # get_services_by_scope (unchanged)
@@ -1022,3 +1057,93 @@ class TestGetServicesByScope:
         with patch.object(Configuration, "get_services", side_effect=RuntimeError("HTTP 500")):
             with pytest.raises(RuntimeError):
                 Configuration.for_realm(REALM).get_services_by_scope(scope)
+
+
+# ---------------------------------------------------------------------------
+# handoff 03 — SPM/APM field pass-through through the library deserialization
+#
+# handoff 01 declares Role.kind / Role.actorIds / Scope.serviceId; handoff 02
+# makes the IdP *service* populate them. The Configuration library is a thin
+# pass-through (model_validate), so these fields must survive onto the returned
+# models with no hand-rolled mapping dropping them and no client-side derivation.
+# These tests stub the HTTP layer with a service response carrying the new
+# fields and assert they round-trip through the real read paths.
+# ---------------------------------------------------------------------------
+
+
+class TestFieldPassThrough:
+    def test_get_roles_surfaces_role_kind(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "r1", "name": "agent-role", "composite": False, "kind": "Agent"}]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            roles = Configuration.for_realm(REALM).get_roles()
+        assert roles[0].kind == RoleKind.AGENT
+
+    def test_get_roles_surfaces_actor_ids(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [
+            {
+                "id": "r1",
+                "name": "viewer",
+                "composite": False,
+                "kind": "User",
+                "actorIds": ["alice", "bob"],
+            }
+        ]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            roles = Configuration.for_realm(REALM).get_roles()
+        assert roles[0].actorIds == ["alice", "bob"]
+
+    def test_get_scopes_surfaces_scope_service_id(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "s1", "name": "read:data", "serviceId": "mlflow"}]
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+            scopes = Configuration.for_realm(REALM).get_scopes()
+        assert scopes[0].serviceId == "mlflow"
+
+    def test_get_services_surfaces_new_fields_on_nested_role_and_scope(self, monkeypatch):
+        # get_services() enriches each service's roles/scopes from the get_roles()
+        # / get_scopes() maps, so the new fields must survive that join too.
+        # Call order: GET /services, GET /roles, GET /scopes, GET /services/{id}/roles,
+        # GET /services/{id}/scopes.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        services = [{"id": "c1", "clientId": "mlflow", "name": "mlflow", "enabled": True}]
+        all_roles = [
+            {
+                "id": "r1",
+                "name": "mlflow-agent",
+                "composite": False,
+                "kind": "Agent",
+                "actorIds": ["mlflow"],
+            }
+        ]
+        all_scopes = [{"id": "s1", "name": "read:data", "serviceId": "mlflow"}]
+        service_roles = [{"id": "r1", "name": "mlflow-agent"}]
+        service_scopes = [{"id": "s1", "name": "read:data"}]
+        with patch(
+            "aiac.idp.configuration.api.requests.get",
+            side_effect=[
+                _ok(services),
+                _ok(all_roles),
+                _ok(all_scopes),
+                _ok(service_roles),
+                _ok(service_scopes),
+            ],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].roles[0].kind == RoleKind.AGENT
+        assert result[0].roles[0].actorIds == ["mlflow"]
+        assert result[0].scopes[0].serviceId == "mlflow"
+
+    def test_role_kind_taken_from_response_not_rederived(self, monkeypatch):
+        # Role.kind is authoritative — the library must not re-derive it by
+        # classifying a role against the service list. Point get_services at a
+        # spy and assert get_roles never touches it.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = [{"id": "r1", "name": "agent-role", "composite": False, "kind": "Agent"}]
+        spy = MagicMock(side_effect=AssertionError("get_services must not be called to set Role.kind"))
+        with patch.object(Configuration, "get_services", spy):
+            with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)):
+                roles = Configuration.for_realm(REALM).get_roles()
+        assert roles[0].kind == RoleKind.AGENT
+        spy.assert_not_called()
