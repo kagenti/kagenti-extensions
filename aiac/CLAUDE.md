@@ -36,10 +36,16 @@ Per-task handoff documents live under `docs/handoffs/` — one markdown file per
 Key stable structure:
 - `idp/` — IdP configuration service and models
 - `pdp/` — PDP policy writer service and library
-- `agent/` — reset pending a fresh rebuild; currently only `__init__.py` plus the archived `onboarding.old/`. The prior controller/orchestrator/shared implementation was removed as stale (built on the superseded `ProposedDiff` model).
-  - `agent/onboarding.old/policy/` — archived prior implementation (was FROZEN); not part of the active build
-
-Pending namespaces (to be added per PRD): `policy/model/`, `policy/store/`, `policy/computation/`.
+- `agent/` — the AIAC Agent layer (rebuilt on the SPM/APM model):
+  - `agent/controller/` — FastAPI Controller (`routes.py` + Dockerfile); `/apply/*` routes dispatch to the UC sub-agents and make the single `compute_and_apply` (PCE) call
+  - `agent/uc/` — use-case sub-agents: `onboarding/` (provision + policy_builder + orchestrator), `policy_update/` (build/rebuild), `role_update/`
+  - `agent/policy_rules_builder/` — PRB: `build_role_rules` / `build_scope_rules` emit `list[PolicyRule]`
+  - `agent/shared/` — shared helpers (`roles.py`, e.g. `flatten_role`)
+  - `agent/onboarding.old/` — archived prior implementation (built on the superseded `ProposedDiff` model); not part of the active build
+- `policy/` — the two-layer policy stack (all implemented):
+  - `policy/model/` — `PolicyRule`, `ServicePolicyModel` (SPM), `AgentPolicyModel` (APM), `PolicyModel`
+  - `policy/store/` — Policy Store service + library (SPM CRUD)
+  - `policy/computation/` — Policy Computation Engine (`compute_and_apply`, SPM-based)
 
 For current file list, `ls` or `find` under `src/aiac/`.
 
@@ -96,9 +102,8 @@ Docker images:
 
 | Image | Dockerfile location |
 |-------|-------------------|
+| `aiac-agent` | `src/aiac/agent/controller/Dockerfile` (build context `src/`) |
 | `aiac-pdp-config` | `src/aiac/idp/service/configuration/keycloak/Dockerfile` |
 | `aiac-pdp-policy-opa` | `src/aiac/pdp/service/policy/opa/Dockerfile` |
 | `aiac-policy-store` | `src/aiac/policy/store/service/Dockerfile` |
 | `aiac-rag-ingest` | `rag-ingest/` (separate directory) |
-
-> `aiac-agent` (was `src/aiac/agent/controller/Dockerfile`) is temporarily removed — the agent layer was reset and will be rebuilt; the image and its Dockerfile will return with it.
