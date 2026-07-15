@@ -17,6 +17,9 @@ from __future__ import annotations
 
 # --- Realm + entity identifiers -------------------------------------------------------------
 
+# MUST be a throwaway realm: this suite's ``provision_keycloak_admin`` does ``delete_realm`` +
+# ``create_realm`` on it every run, so pointing it (via ``AIAC_TEST_REALM``) at a shared realm like
+# ``kagenti`` DESTROYS that realm's contents. UC-1 uses its own realm (``scenario_uc1.REALM_DEFAULT``).
 REALM_DEFAULT = "aiac-e2e"
 AGENT_ID = "github-agent"
 TOOL_ID = "github-tool"

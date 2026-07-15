@@ -18,7 +18,7 @@ inbound ``allow`` directly.
 This is the pytest replacement for the former write-only ``policy_pipeline.py`` launcher; its helpers
 were ported here verbatim.
 
-Run (needs KEYCLOAK_URL + admin creds + LLM_* exported, ``opa`` on PATH; realm defaults to kagenti):
+Run (needs KEYCLOAK_URL + admin creds + LLM_* exported, ``opa`` on PATH; realm defaults to aiac-e2e):
     .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
 Without ``-m integration`` the suite is skipped; without ``opa`` each node skips at runtime.
 """

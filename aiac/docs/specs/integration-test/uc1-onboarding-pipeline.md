@@ -215,7 +215,7 @@ workloads.
 
 | Element | Value |
 |---------|-------|
-| Realm | `AIAC_TEST_REALM` (dedicated; default `aiac-uc1-e2e`) |
+| Realm | `AIAC_TEST_REALM` (must match the deployed stack's `KEYCLOAK_REALM`; default `kagenti`) |
 | Agent | `github-agent` — **discovered** role `github-agent.agent`; scopes `github-agent.source_operations`, `github-agent.issue_operations` (from AgentCard skills) |
 | Tool | `github-tool` (simplified) — **discovered** scopes `github-tool.{source-read, source-write, issues-read, issues-write}` (from MCP `tools/list`) |
 | Users | `dev-user` (`developer`), `test-user` (`tester`), `devops-user` (`devops`) |
@@ -232,7 +232,7 @@ workloads.
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds (user/realm-role provisioning + cleanup) | — (required) |
-| `AIAC_TEST_REALM` | Dedicated realm the tests use (the demo namespace's clients are registered into it) | `aiac-uc1-e2e` |
+| `AIAC_TEST_REALM` | Realm the tests resolve/provision against. **Must match the deployed AIAC stack's `KEYCLOAK_REALM`** — the in-cluster Controller resolves the onboarding trigger in *its own* realm, so a harness on a different realm resolves a client UUID the Controller can't find (404 → onboard 502). The demo namespace's clients are registered into it. | `kagenti` |
 | `AIAC_CONTROLLER_URL` | Base URL of the in-cluster AIAC Controller (via port-forward) for `POST /apply/service/{id}` | `http://127.0.0.1:7070` |
 | `AIAC_OPA_POD` / `AIAC_OPA_SELECTOR` | OPA-writer pod (or label selector) to `kubectl cp` `.rego` from | — (resolved from labels) |
 | `AIAC_OPA_REGO_PATH` | Writer output dir inside the pod | `/rego` |
@@ -251,7 +251,7 @@ Runnable against a live Kagenti/Kind cluster (operator + Keycloak + SPIRE) with 
 `AIAC_TEST_REALM`, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 
 ```bash
-# env: KUBECONFIG + KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-uc1-e2e; opa on PATH or $OPA_BIN
+# env: KUBECONFIG + KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to kagenti (match the stack's KEYCLOAK_REALM); opa on PATH or $OPA_BIN
 .venv/bin/pytest test/integration/ -m integration -k uc1_onboard -v
 # A failing node names the exact cell, e.g.:
 #   test_outbound[test-user-github-tool.source-read] — expected deny, opa allowed
@@ -277,8 +277,11 @@ The suite `pytest.skip`s when no `opa` binary is found.
   `subject_ok` alone (phase-1's user-gating-only intent).
 - **Grant sets, semantic.** Equivalence is re-derived from the Rego data maps and compared as sets — the
   semantic-similarity guarantee, not byte-identity.
-- **Dedicated realm, leave-in-place; per-rung cleanup.** The realm/users/roles are never deleted; the
+- **Stack's realm, leave-in-place; per-rung cleanup.** UC-1 resolves/provisions against the deployed
+  stack's `KEYCLOAK_REALM` (default `kagenti`) and **never deletes** the realm/users/roles; only the
   provisioned agent/tool roles/scopes are cleaned up per rung so onboarding runs from a clean slate.
+  (Contrast `5.3 policy-pipeline`, which owns a **throwaway** realm it `delete_realm`s + recreates each
+  run — that suite must never point `AIAC_TEST_REALM` at `kagenti`, or it destroys the demo clients.)
 - **LLM nondeterminism, contained.** PRB LLM pinned `temperature=0`; both cell-level and grant-set
   assertions; `@pytest.mark.integration`, out of default CI.
 - **Prior art, shared not copied.** Reuses the `5.3` shape (`opa` discovery/skip, scenario-as-oracle,
