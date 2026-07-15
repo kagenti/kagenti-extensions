@@ -47,10 +47,10 @@ For current file list, `ls` or `find` under `src/aiac/`.
 
 `test/` — mirrors `src/aiac/` structure. For current file list, `ls` under `test/`.
 
-**Unit test command** (`test/policy/` excluded — frozen imports cause collection errors):
+**Unit test command:**
 
 ```bash
-.venv/bin/pytest test/ --ignore=test/policy/ -m "not integration"
+.venv/bin/pytest test/ -m "not integration"
 ```
 
 Use `ls test/` to discover current test directories.

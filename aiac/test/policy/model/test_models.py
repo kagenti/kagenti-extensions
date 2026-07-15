@@ -1,8 +1,20 @@
 import pytest
 from pydantic import ValidationError
 
-from aiac.idp.configuration.models import Role, Scope, Service, Subject
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel, PolicyRule
+from aiac.idp.configuration.models import (
+    Role,
+    RoleKind,
+    Scope,
+    Service,
+    ServiceType,
+    Subject,
+)
+from aiac.policy.model.models import (
+    AgentPolicyModel,
+    PolicyModel,
+    PolicyRule,
+    ServicePolicyModel,
+)
 
 
 def _role(id: str = "role-1", name: str = "admin") -> Role:
@@ -19,6 +31,119 @@ def _service(id: str = "svc-1", service_id: str = "my-service") -> Service:
 
 def _subject(id: str = "sub-1", username: str = "alice") -> Subject:
     return Subject(id=id, username=username, enabled=True)
+
+
+# --- RoleKind enum + Role.kind / Role.actorIds (SPM redesign) ---
+
+
+def test_role_kind_values_mirror_service_type_style():
+    assert RoleKind.USER == "User"
+    assert RoleKind.AGENT == "Agent"
+
+
+def test_role_accepts_kind_and_actor_ids():
+    role = Role(
+        id="r1",
+        name="weather-reader",
+        composite=False,
+        kind=RoleKind.AGENT,
+        actorIds=["weather-agent"],
+    )
+    assert role.kind == RoleKind.AGENT
+    assert role.actorIds == ["weather-agent"]
+
+
+def test_role_kind_and_actor_ids_round_trip():
+    role = Role(
+        id="r1",
+        name="reader",
+        composite=False,
+        kind=RoleKind.USER,
+        actorIds=["alice", "bob"],
+    )
+    restored = Role.model_validate(role.model_dump(mode="json"))
+    assert restored.kind == RoleKind.USER
+    assert restored.actorIds == ["alice", "bob"]
+
+
+def test_role_rejects_malformed_kind():
+    with pytest.raises(ValidationError):
+        Role(id="r1", name="reader", composite=False, kind="Bogus")
+
+
+def test_role_rejects_non_list_actor_ids():
+    with pytest.raises(ValidationError):
+        Role(
+            id="r1",
+            name="reader",
+            composite=False,
+            kind=RoleKind.USER,
+            actorIds="alice",
+        )
+
+
+# --- Scope.serviceId (SPM routing key) ---
+
+
+def test_scope_accepts_service_id():
+    scope = Scope(id="s1", name="read", serviceId="github-tool")
+    assert scope.serviceId == "github-tool"
+
+
+def test_scope_service_id_round_trip():
+    scope = Scope(id="s1", name="read", serviceId="github-tool")
+    restored = Scope.model_validate(scope.model_dump(mode="json"))
+    assert restored.serviceId == "github-tool"
+
+
+# --- ServicePolicyModel (persistent source of truth) ---
+
+
+def test_service_policy_model_constructs():
+    role = _role()
+    scope = _scope()
+    spm = ServicePolicyModel(
+        service_id="github-tool",
+        service_type=ServiceType.TOOL,
+        owned_roles=[role],
+        owned_scopes=[scope],
+        inbound_rules=[PolicyRule(role=role, scope=scope)],
+    )
+    assert spm.service_id == "github-tool"
+    assert spm.service_type == ServiceType.TOOL
+    assert spm.owned_roles == [role]
+    assert spm.owned_scopes == [scope]
+    assert spm.inbound_rules == [PolicyRule(role=role, scope=scope)]
+
+
+def test_service_policy_model_round_trip_string_keys_only():
+    role = _role()
+    scope = _scope()
+    spm = ServicePolicyModel(
+        service_id="weather-agent",
+        service_type=ServiceType.AGENT,
+        owned_roles=[role],
+        owned_scopes=[scope],
+        inbound_rules=[PolicyRule(role=role, scope=scope)],
+    )
+    dumped = spm.model_dump(mode="json")
+    assert all(isinstance(k, str) for k in dumped.keys())
+    restored = ServicePolicyModel.model_validate(dumped)
+    assert restored == spm
+
+
+def test_service_policy_model_ignores_extra_fields():
+    spm = ServicePolicyModel.model_validate(
+        {
+            "service_id": "svc",
+            "service_type": "Tool",
+            "owned_roles": [],
+            "owned_scopes": [],
+            "inbound_rules": [],
+            "unknown_field": "ignored",
+        }
+    )
+    assert not hasattr(spm, "unknown_field")
 
 
 # --- PolicyRule construction ---
@@ -160,9 +285,7 @@ def test_agent_policy_model_round_trip():
 def test_policy_rule_ignores_extra_fields():
     role = _role()
     scope = _scope()
-    rule = PolicyRule.model_validate(
-        {"role": role.model_dump(), "scope": scope.model_dump(), "unknown": "x"}
-    )
+    rule = PolicyRule.model_validate({"role": role.model_dump(), "scope": scope.model_dump(), "unknown": "x"})
     assert not hasattr(rule, "unknown")
 
 
