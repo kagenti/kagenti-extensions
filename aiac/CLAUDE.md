@@ -107,3 +107,7 @@ Docker images:
 | `aiac-pdp-policy-opa` | `src/aiac/pdp/service/policy/opa/Dockerfile` |
 | `aiac-policy-store` | `src/aiac/policy/store/service/Dockerfile` |
 | `aiac-rag-ingest` | `rag-ingest/` (separate directory) |
+
+## External references
+
+- [Kagenti Developer Guide](https://github.com/kagenti/kagenti/blob/main/docs/dev-guide.md) — upstream Kagenti dev guide: per-persona workflows (agent, tool, extensions developers, MCP gateway operators), Git/PR process, pre-commit hooks, feature flags, local Kagenti UI v2 development (React frontend + FastAPI backend, building/deploying images to Kubernetes), and HyperShift-based testing on ephemeral OpenShift clusters (cluster lifecycle, cost management, troubleshooting).
