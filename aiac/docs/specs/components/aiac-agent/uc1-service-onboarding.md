@@ -96,15 +96,22 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   > `kagenti.io/type` is authoritative — applied by the kagenti-operator (via the AgentRuntime CR) and propagated to pod labels; it is the operator's own agent/tool discriminator (`SkipReason`, kagenti-operator `internal/clientreg/names.go`). The operator only registers a Keycloak client for a workload that already carries this label, so it is effectively guaranteed for operator-registered clients; a missing/invalid value still fails loud (`502`, naming the workload + label). The `entity_id` format (SPIFFE vs plain) reflects whether SPIRE is enabled, **not** the service type, so it is not used for classification.
 
 - **`analyze_agent`**: non-LLM node; reads AgentCard CR.
-  1. LIST `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) in `namespace`; find the one matching `workload_name`.
-  2. **AgentCard found** → produce `ServiceProvision`:
+  1. LIST `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) in `namespace`; find the one whose
+     `spec.targetRef.name` is `workload_name` (the operator names the CR after the Deployment, e.g.
+     `{workload}-deployment-card`, **not** after the workload — so match by `targetRef`, falling back
+     to `metadata.name == workload_name` for hand-authored cards).
+  2. **AgentCard with synced skills found** → produce `ServiceProvision`:
      - `roles`: `[RoleDefinition(name=f"{workloadName}.agent", description="Agent role")]`
-     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{skill.name}", description=skill.description) for skill in card.skills]`
+     - `scopes`: `[ScopeDefinition(name=f"{workloadName}.{skill.id}", description=skill.description) for skill in card.status.card.skills]` —
+       the operator syncs the fetched A2A card onto `status.card`; each skill's machine `id`
+       (e.g. `source_operations`) is used for the scope name (a stable identifier), not the display
+       `name` (which may contain spaces).
      - `reasoning`: `f"derived from AgentCard: {len(skills)} skills"`
-  3. **AgentCard not found** (legacy deployment) → produce minimal `ServiceProvision`:
+  3. **No AgentCard, or its `status.card` has no synced skills yet** → produce minimal `ServiceProvision`:
      - `roles`: `[RoleDefinition(name=f"{workloadName}.agent", description="Agent role")]`
      - `scopes`: `[ScopeDefinition(name=f"{workloadName}.access", description="Default access scope")]`
-     - `reasoning`: `"partial: no AgentCard found, default scope assigned"`
+     - `reasoning`: `"partial: no AgentCard found, default scope assigned"` (no CR) or
+       `"partial: AgentCard has no synced skills, default scope assigned"` (CR present, unsynced).
 
   > K8s access: `list` on `agentcards.agent.kagenti.dev` in the target namespace.
 

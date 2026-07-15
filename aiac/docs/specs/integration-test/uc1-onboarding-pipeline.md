@@ -83,10 +83,13 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
   (`client.name = "{ns}/{workload}"`) into `AIAC_TEST_REALM`. The tests do **not** `kubectl apply`
   manifests or wait for operator registration / `kagenti.io/type` labels / AgentCard / `tools/list` — that
   is deployment's job.
-  > **Resolving `{service_id}`.** The trigger takes the Keycloak **client id**, which is **not** the string
-  > `github-tool`: the operator sets `client.name = "{ns}/{workload}"` but the client *id* is that string
-  > only when SPIRE is off — with `--spire-trust-domain` set it is a SPIFFE URI. Resolve the id by looking
-  > up the client whose **name** is `"{ns}/github-tool"` / `"{ns}/github-agent"`, then trigger with that id.
+  > **Resolving `{service_id}`.** The `POST /apply/service/{service_id}` route is a **single path
+  > segment**, and the Controller resolves the trigger via `admin.get_client(service_id)` — which keys
+  > on the Keycloak **internal client UUID** (a slash-free GUID). It is **not** the `clientId`: the
+  > operator sets `client.name = "{ns}/{workload}"`, and the `clientId` is slash-bearing either way
+  > (`"{ns}/{workload}"` with SPIRE off, a SPIFFE URI under `--spire-trust-domain`), so it cannot be a
+  > path segment. Resolve by looking up the client whose **name** is `"{ns}/github-tool"` /
+  > `"{ns}/github-agent"`, then trigger with that client's **`id`** (the UUID).
 - **Users + realm roles.** The fixture provisions them (UC-1 does not) — see
   *[Scenario](#scenario)* — via `KeycloakAdmin` into `AIAC_TEST_REALM`, **before** onboarding; idempotent;
   left in place.

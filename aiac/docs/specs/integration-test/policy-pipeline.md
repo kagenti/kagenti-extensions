@@ -53,9 +53,11 @@ The pipeline (provision → PRB → PCE → OPA) is driven **once per `policy.md
 scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
 
 1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
-   `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `AIAC_REALM` *before* importing the aiac
+   `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `KEYCLOAK_REALM` *before* importing the aiac
    libraries — the libraries read env at import time. This is the pattern
-   `test/pdp/policy/generate_rego.py` already follows.
+   `test/pdp/policy/generate_rego.py` already follows. (The PCE resolves its realm via
+   `Configuration.for_default_realm()`, the single source of truth reading `KEYCLOAK_REALM`; the
+   former `AIAC_REALM` is retired.)
 2. **Spawn the three services as `uvicorn` subprocesses** (no Docker) and poll each `GET /health`
    until ready, with a bounded timeout:
    - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
@@ -208,7 +210,7 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds | — (required) |
 | `AIAC_TEST_REALM` | Realm the test provisions | `aiac-e2e` |
-| `AIAC_REALM` | Realm the PCE reads back (= `AIAC_TEST_REALM`) | `aiac-e2e` |
+| `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-e2e` |
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
 | `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
