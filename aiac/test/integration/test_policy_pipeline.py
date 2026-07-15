@@ -7,7 +7,7 @@ IdP Configuration, Policy Store, and OPA Policy Writer services as ``uvicorn`` s
 real Policy Rules Builder (real LLM) to map roles->scopes, then the real Policy Computation Engine to
 build the ``PolicyModel`` and push ``.rego`` files to the OPA filesystem stub. It does this twice —
 once for the explicit ``policy.md`` and once for the abstract one — and leaves both Rego sets on disk
-under ``rego_out/<variant>/``.
+under ``rego_out/policy_pipeline/<variant>/`` (a sibling of the UC-1 ladder's ``rego_out/uc1/``).
 
 Each test then evaluates the generated Rego with the standalone ``opa`` binary and asserts the verdict
 against the scenario's role->access truth table (``scenario.py``). A wrong LLM/PCE mapping fails the
@@ -18,7 +18,7 @@ inbound ``allow`` directly.
 This is the pytest replacement for the former write-only ``policy_pipeline.py`` launcher; its helpers
 were ported here verbatim.
 
-Run (needs KEYCLOAK_URL + admin creds + LLM_* exported, ``opa`` on PATH; realm defaults to aiac-e2e):
+Run (needs KEYCLOAK_URL + admin creds + LLM_* exported, ``opa`` on PATH; realm defaults to kagenti):
     .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
 Without ``-m integration`` the suite is skipped; without ``opa`` each node skips at runtime.
 """
@@ -53,7 +53,7 @@ from test.integration.launcher import (  # noqa: E402
 )
 
 # --- Resolve config + set env BEFORE importing aiac (the libraries read env at import time) ---
-TEST_REALM = os.environ.setdefault("AIAC_TEST_REALM", scn.REALM_DEFAULT)
+TEST_REALM = os.environ.get("AIAC_TEST_REALM", scn.REALM_DEFAULT)
 os.environ["KEYCLOAK_REALM"] = TEST_REALM  # the PCE reads back the realm we provision (single source of truth)
 os.environ.setdefault("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")
 os.environ.setdefault("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
@@ -303,7 +303,7 @@ _TRUTH: dict[str, set[tuple[str, str]]] = {
 @pytest.fixture(scope="session")
 def pipeline() -> dict[str, dict]:
     """Provision Keycloak once, then run the real PRB+PCE pipeline for each policy variant, leaving
-    ``.rego`` on disk under ``rego_out/<variant>/``. Returns
+    ``.rego`` on disk under ``rego_out/policy_pipeline/<variant>/``. Returns
     ``{variant: {"rego_dir": Path, "rules": list[PolicyRule]}}`` — the rules are the PRB's grant set,
     captured so the equivalence/truth-table assertions can compare grants directly (not Rego text)."""
     require_env(
@@ -334,7 +334,7 @@ def pipeline() -> dict[str, dict]:
 
         agent_slug = scn.AGENT_ID.replace("-", "_")  # github-agent -> github_agent
         for variant in VARIANTS:
-            rego_dir = HERE / "rego_out" / variant
+            rego_dir = HERE / "rego_out" / "policy_pipeline" / variant
             rego_dir.mkdir(parents=True, exist_ok=True)
             # Clear any rego left by a previous run so the assertions below always verify freshly
             # generated policy — never a stale artifact that would let a broken pipeline pass green.

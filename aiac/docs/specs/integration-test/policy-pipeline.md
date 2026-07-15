@@ -49,7 +49,8 @@ found.
 ### What it does
 
 The pipeline (provision → PRB → PCE → OPA) is driven **once per `policy.md` variant** — `explicit` and
-`abstract` — each writing into its own `rego_out/<variant>/` directory. `opa eval` then asserts the
+`abstract` — each writing into its own `rego_out/policy_pipeline/<variant>/` directory (a sibling of
+the UC-1 ladder's `rego_out/uc1/`). `opa eval` then asserts the
 scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
 
 1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
@@ -63,7 +64,7 @@ scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below
    - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
    - Policy Store — its ASGI app on `7074`, with `AGENTPOLICY_DB_PATH` pointed at a fresh temp dir.
    - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR`
-     (pointed at the current variant's `rego_out/<variant>/`) and the Policy Store DB path in its env.
+     (pointed at the current variant's `rego_out/policy_pipeline/<variant>/`) and the Policy Store DB path in its env.
 3. **Provision Keycloak** (idempotent — delete-if-exists the realm first, then create):
    - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
      users `dev-user`, `test-user`, and `devops-user`; create realm roles `developer`, `tester`, and
@@ -159,7 +160,7 @@ user→tool; the agent→tool gate covers all four scopes, so the user gate disc
 | devops-user | ❌ | ❌ | ❌ | ❌ |
 
 Alongside the assertions, each variant leaves exactly **two** files on disk in its
-`rego_out/<variant>/` for eyeballing:
+`rego_out/policy_pipeline/<variant>/` for eyeballing:
 
 - `github_agent.inbound.rego` — package `authz.github_agent.inbound`; the **user→agent** gate.
   `subject_roles` = `{dev-user: [developer], test-user: [tester]}`; `agent_scopes` populated.
@@ -214,7 +215,7 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
 | `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
-| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
+| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/policy_pipeline/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
 | `AGENTPOLICY_DB_PATH` | Policy Store DB path for the subprocess (fresh temp dir) | temp |
 | `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant fed to the PRB; the test sets it per variant (`policy.explicit.md`, `policy.abstract.md`) | `/etc/aiac/policy.md` |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`) | — (required) |
@@ -237,8 +238,8 @@ Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 # A failing node names the exact cell, e.g.:
 #   test_outbound[abstract-test-user-source-read] — expected deny, opa allowed
 # The generated Rego is left on disk per variant for eyeballing:
-#   rego_out/explicit/github_agent.{inbound,outbound}.rego
-#   rego_out/abstract/github_agent.{inbound,outbound}.rego
+#   rego_out/policy_pipeline/explicit/github_agent.{inbound,outbound}.rego
+#   rego_out/policy_pipeline/abstract/github_agent.{inbound,outbound}.rego
 #   (no github_tool.*.rego in either)
 ```
 
