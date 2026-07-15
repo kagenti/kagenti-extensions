@@ -186,7 +186,7 @@ exercises the deny-by-default path.
 
 | Element | Value |
 |---------|-------|
-| Realm | `AIAC_TEST_REALM` (default `aiac-e2e`) |
+| Realm | `AIAC_TEST_REALM` (default `aiac-pp`) |
 | Agent | `github-agent` (client roles `source-operator`, `issues-operator`; scopes `source-access`, `issues-access`) |
 | Tool | `github-tool` (scopes `source-read`, `source-write`, `issues-read`, `issues-write`) |
 | Users | `dev-user` (role `developer`), `test-user` (role `tester`), `devops-user` (role `devops`) |
@@ -210,8 +210,8 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds | — (required) |
-| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-e2e` |
-| `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-e2e` |
+| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-pp` |
+| `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-pp` |
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
 | `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
@@ -232,7 +232,7 @@ Runnable only once the pipeline fixes (handoffs 01 + 02, P1–P5) have landed, a
 Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 
 ```bash
-# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-e2e; opa on PATH or $OPA_BIN
+# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-pp; opa on PATH or $OPA_BIN
 .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
 # ~30 parametrized nodes (variant × subject inbound; variant × subject × function_name outbound).
 # A failing node names the exact cell, e.g.:
