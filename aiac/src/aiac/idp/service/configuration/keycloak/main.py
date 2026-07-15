@@ -1,3 +1,5 @@
+import base64
+import json
 import os
 import threading
 from contextlib import asynccontextmanager
@@ -6,7 +8,7 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Query
-from keycloak import KeycloakAdmin
+from keycloak import KeycloakAdmin, KeycloakOpenID
 from keycloak.exceptions import KeycloakError
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
@@ -27,6 +29,18 @@ _AIAC_MANAGED_ATTRIBUTE = "aiac.managed"
 # string. Mirrors ``SERVICE_TYPE_ATTRIBUTE`` in ``aiac.idp.configuration.models`` (the aiac library
 # is not on this service image's path, so it is redefined locally).
 _SERVICE_TYPE_ATTRIBUTE = "client.type"
+
+# Name of the idempotent audience protocol-mapper AIAC adds to a tool's Keycloak client so the
+# client's own access tokens carry its clientId in ``aud``. UC-1 tool discovery mints such a token
+# and presents it to the tool's AuthBridge sidecar, whose jwt-validation plugin expects the tool's
+# own clientId as the audience (it defaults ``audience_file`` to ``/shared/client-id.txt``).
+_DISCOVERY_AUDIENCE_MAPPER = "aiac-discovery-audience"
+
+# Optional hard assertion of the public issuer the tool's sidecar validates against. When set, the
+# discovery-token endpoint refuses to emit a token whose ``iss`` differs (frontend-URL pinning is a
+# Keycloak deployment property, not something we can force here); when unset it only records the
+# observed ``iss`` for the caller / rollout gate.
+_EXPECTED_ISSUER_ENV = "AIAC_KEYCLOAK_ISSUER"
 
 
 class _InvariantViolation(Exception):
@@ -94,6 +108,39 @@ def get_admin(realm: str = Query(...)) -> KeycloakAdmin:
     return _get_or_create_admin(realm)
 
 
+def _decode_jwt_payload(token: str) -> dict:
+    """Decode a JWT's payload segment WITHOUT verifying its signature — AuthBridge verifies the
+    signature at the tool; here we only read ``iss``/``aud`` to assert the discovery-token invariants."""
+    segment = token.split(".")[1]
+    segment += "=" * (-len(segment) % 4)  # restore base64 padding
+    return json.loads(base64.urlsafe_b64decode(segment))
+
+
+def _ensure_audience_mapper(admin: KeycloakAdmin, service_id: str, client_id: str) -> None:
+    """Idempotently ensure the tool's client emits its own clientId in the access-token ``aud``.
+
+    A client's client-credentials token does not carry its own clientId in ``aud`` by default, but
+    AuthBridge's jwt-validation expects exactly that. Add an ``oidc-audience-mapper`` (named
+    ``_DISCOVERY_AUDIENCE_MAPPER``) once; a second call is a no-op.
+    """
+    mappers = admin.get_mappers_from_client(service_id)
+    if any(m.get("name") == _DISCOVERY_AUDIENCE_MAPPER for m in mappers):
+        return
+    admin.add_mapper_to_client(
+        service_id,
+        {
+            "name": _DISCOVERY_AUDIENCE_MAPPER,
+            "protocol": "openid-connect",
+            "protocolMapper": "oidc-audience-mapper",
+            "config": {
+                "included.client.audience": client_id,
+                "access.token.claim": "true",
+                "id.token.claim": "false",
+            },
+        },
+    )
+
+
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     load_dotenv(Path(__file__).parent / ".env")
@@ -115,6 +162,13 @@ class _RoleCreate(BaseModel):
 
 class _ServiceTypeUpdate(BaseModel):
     type: Literal["Agent", "Tool"]
+
+
+class _DiscoveryToken(BaseModel):
+    access_token: str
+    client_id: str  # the tool clientId placed in the token's aud
+    issuer: str  # observed iss (for the caller / rollout gate to verify)
+    audience: list[str]  # observed aud, normalized to a list
 
 
 @app.get("/subjects")
@@ -167,6 +221,67 @@ def list_services(admin: KeycloakAdmin = Depends(get_admin)):
 def get_service(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
         return admin.get_client(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.get("/services/{service_id}/discovery-token")
+def mint_discovery_token(
+    service_id: str,
+    realm: str = Query(...),
+    admin: KeycloakAdmin = Depends(get_admin),
+):
+    """Mint a bearer token for UC-1 tool discovery whose ``aud`` contains the tool's own clientId.
+
+    The tool's MCP endpoint sits behind an AuthBridge sidecar that validates inbound JWTs against
+    the tool's own clientId as the audience. Mint AS the tool's own client (client-credentials),
+    ensuring an idempotent self-audience mapper first, and refuse to emit a token the sidecar would
+    reject — ``aud`` missing the clientId, or (when ``AIAC_KEYCLOAK_ISSUER`` is set) a mismatched
+    ``iss`` — so discovery fails loud here rather than with an opaque 401 at the tool.
+    """
+    try:
+        client = admin.get_client(service_id)
+        client_id = client["clientId"]
+        secret = client.get("secret") or (admin.get_client_secrets(service_id) or {}).get("value")
+        if not secret:
+            return JSONResponse(
+                status_code=502,
+                content={
+                    "error": f"client {client_id!r} has no readable secret (a confidential client "
+                    "with service accounts enabled is required to mint a discovery token)"
+                },
+            )
+        _ensure_audience_mapper(admin, service_id, client_id)
+
+        oid = KeycloakOpenID(
+            server_url=os.environ["KEYCLOAK_URL"],
+            realm_name=realm,
+            client_id=client_id,
+            client_secret_key=secret,
+        )
+        access_token = oid.token(grant_type="client_credentials")["access_token"]
+
+        # Verification gate (Direction A invariant): the token must satisfy the sidecar or we do
+        # not hand it out. aud MUST contain the tool clientId; iss must match when pinned.
+        payload = _decode_jwt_payload(access_token)
+        aud = payload.get("aud")
+        aud_list = aud if isinstance(aud, list) else [aud] if aud else []
+        iss = payload.get("iss", "")
+        if client_id not in aud_list:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"minted token aud={aud_list} does not contain {client_id!r}"},
+            )
+        expected_iss = os.environ.get(_EXPECTED_ISSUER_ENV)
+        if expected_iss and iss != expected_iss:
+            return JSONResponse(
+                status_code=502,
+                content={"error": f"minted token iss={iss!r} != expected {expected_iss!r}"},
+            )
+
+        return _DiscoveryToken(
+            access_token=access_token, client_id=client_id, issuer=iss, audience=aud_list
+        ).model_dump()
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 

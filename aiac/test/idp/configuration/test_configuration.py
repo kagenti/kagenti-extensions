@@ -437,6 +437,29 @@ class TestGetService:
 
 
 # ---------------------------------------------------------------------------
+# mint_discovery_token — fetches a tool-audienced bearer token from the config service
+# ---------------------------------------------------------------------------
+
+
+class TestMintDiscoveryToken:
+    def test_returns_access_token(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        payload = {"access_token": "tok", "client_id": "github-tool", "audience": ["github-tool"]}
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_ok(payload)) as m:
+            result = Configuration.for_realm(REALM).mint_discovery_token("svc-uuid")
+        assert result == "tok"
+        m.assert_called_once_with(
+            f"{BASE}/services/svc-uuid/discovery-token", params={"realm": REALM}
+        )
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        with patch("aiac.idp.configuration.api.requests.get", return_value=_err(502)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).mint_discovery_token("svc-uuid")
+
+
+# ---------------------------------------------------------------------------
 # set_service_type — writes the client.type attribute
 # ---------------------------------------------------------------------------
 

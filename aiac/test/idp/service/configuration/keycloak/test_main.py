@@ -1,5 +1,7 @@
 """Unit tests for aiac/pdp/service/configuration/keycloak/main.py FastAPI application."""
 
+import base64
+import json
 import os
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +16,13 @@ REALM = "kagenti"
 def _make_client(admin_mock: MagicMock) -> TestClient:
     app.dependency_overrides[get_admin] = lambda realm=None: admin_mock
     return TestClient(app)
+
+
+def _make_jwt(payload: dict) -> str:
+    """Encode a payload into a `header.payload.sig` JWT shape (unsigned — the endpoint only
+    base64-decodes the payload to read iss/aud; it never verifies the signature)."""
+    seg = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=").decode()
+    return f"h.{seg}.s"
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +529,116 @@ class TestGetService:
 
 
 # ---------------------------------------------------------------------------
+# GET /services/{service_id}/discovery-token
+# ---------------------------------------------------------------------------
+
+
+class TestMintDiscoveryToken:
+    ISS = "http://keycloak.localtest.me:8080/realms/kagenti"
+
+    def _wire(self, admin, monkeypatch, *, aud, iss=None, mappers=None, secret="sek"):
+        monkeypatch.setenv("KEYCLOAK_URL", "http://kc-internal:8080")
+        monkeypatch.delenv("AIAC_KEYCLOAK_ISSUER", raising=False)
+        admin.get_client.return_value = {
+            "id": "svc-uuid", "clientId": "github-tool", "secret": secret
+        }
+        admin.get_mappers_from_client.return_value = mappers if mappers is not None else []
+        oid = MagicMock()
+        oid.token.return_value = {"access_token": _make_jwt({"aud": aud, "iss": iss or self.ISS})}
+        return oid
+
+    def test_returns_200_with_token_and_resolves_client_id(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(admin, monkeypatch, aud=["github-tool"])
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            resp = _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["access_token"]
+        assert body["client_id"] == "github-tool"
+        assert "github-tool" in body["audience"]
+        admin.get_client.assert_called_once_with("svc-uuid")
+        oid.token.assert_called_once_with(grant_type="client_credentials")
+
+    def test_adds_audience_mapper_when_absent(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(admin, monkeypatch, aud=["github-tool"], mappers=[])
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        admin.add_mapper_to_client.assert_called_once()
+
+    def test_idempotent_when_mapper_present(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(
+            admin, monkeypatch, aud=["github-tool"],
+            mappers=[{"name": "aiac-discovery-audience"}],
+        )
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        admin.add_mapper_to_client.assert_not_called()
+
+    def test_does_not_regenerate_secret(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(admin, monkeypatch, aud=["github-tool"])
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        admin.generate_client_secrets.assert_not_called()
+
+    def test_502_when_aud_missing_client_id(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(admin, monkeypatch, aud=["account"])
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            resp = _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        assert resp.status_code == 502
+        assert "does not contain" in resp.json()["error"]
+
+    def test_502_when_no_secret(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(admin, monkeypatch, aud=["github-tool"], secret=None)
+        admin.get_client_secrets.return_value = {}  # no secret available via the secrets endpoint
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            resp = _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        assert resp.status_code == 502
+        assert "no readable secret" in resp.json()["error"]
+
+    def test_hard_iss_assertion_when_env_set(self, monkeypatch):
+        admin = MagicMock()
+        oid = self._wire(
+            admin, monkeypatch, aud=["github-tool"], iss="http://kc-internal:8080/realms/kagenti"
+        )
+        monkeypatch.setenv("AIAC_KEYCLOAK_ISSUER", self.ISS)
+        with patch(
+            "aiac.idp.service.configuration.keycloak.main.KeycloakOpenID", return_value=oid
+        ):
+            resp = _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        assert resp.status_code == 502
+        assert "iss" in resp.json()["error"]
+
+    def test_502_on_keycloak_error(self, monkeypatch):
+        monkeypatch.setenv("KEYCLOAK_URL", "http://kc-internal:8080")
+        admin = MagicMock()
+        admin.get_client.side_effect = KeycloakError(error_message="not found", response_code=404)
+        resp = _make_client(admin).get(f"/services/svc-uuid/discovery-token?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
 # POST /services/{service_id}/type
 # ---------------------------------------------------------------------------
 
@@ -940,6 +1059,15 @@ class TestKeycloakErrorProduces502:
         admin = MagicMock()
         admin.get_composite_realm_roles_of_role.side_effect = _keycloak_error()
         assert _make_client(admin).get(f"/roles/admin/composites?realm={REALM}").status_code == 502
+
+    def test_mint_discovery_token(self, monkeypatch):
+        monkeypatch.setenv("KEYCLOAK_URL", "http://kc-internal:8080")
+        admin = MagicMock()
+        admin.get_client.side_effect = _keycloak_error()
+        assert (
+            _make_client(admin).get(f"/services/s1/discovery-token?realm={REALM}").status_code
+            == 502
+        )
 
     def teardown_method(self):
         app.dependency_overrides.clear()

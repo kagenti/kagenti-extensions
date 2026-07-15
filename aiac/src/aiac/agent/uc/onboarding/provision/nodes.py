@@ -32,17 +32,34 @@ def _config() -> Configuration:
     return Configuration.for_default_realm()
 
 
-def _mcp_tools_list(endpoint: str) -> list[dict]:
+def _discovery_token(service_id: str) -> str:
+    """Mint a tool-audienced discovery bearer token via the idp-library `Configuration` seam
+    (never Keycloak directly). The config service holds the admin creds and does the minting."""
+    return _config().mint_discovery_token(service_id)
+
+
+# (connect, read) timeouts for the MCP discovery probe — an unreachable/hanging tool must not
+# block the onboarding request indefinitely (there was previously no timeout).
+_MCP_TIMEOUT = (5, 30)
+
+
+def _mcp_tools_list(endpoint: str, token: str | None = None) -> list[dict]:
     """POST a JSON-RPC `tools/list` to an MCP endpoint and return the tool manifest list.
-    Each tool is a dict with `name` and (optional) `description`. Bounded transport retries
-    are applied here so callers just map the final failure to a 502."""
+    Each tool is a dict with `name` and (optional) `description`. When `token` is provided it is
+    sent as an `Authorization: Bearer` header (the tool's MCP endpoint is fronted by an AuthBridge
+    sidecar that validates inbound JWTs). Bounded transport retries are applied here so callers
+    just map the final failure to a 502."""
     import requests
 
     def _do():
+        headers = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         resp = requests.post(
             endpoint,
             json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
-            headers={"Accept": "application/json"},
+            headers=headers,
+            timeout=_MCP_TIMEOUT,
         )
         resp.raise_for_status()
         return (resp.json().get("result") or {}).get("tools", [])
@@ -188,8 +205,18 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     port = svc.spec.ports[0].port
     endpoint = f"http://{workload}.{namespace}.svc.cluster.local:{port}/mcp"
 
+    # The MCP endpoint is fronted by the tool's AuthBridge sidecar, which validates inbound JWTs
+    # against the tool's own clientId as the audience. Mint a tool-audienced discovery token first;
+    # a failure here surfaces as an actionable 502 rather than a downstream 401.
     try:
-        tools = _mcp_tools_list(endpoint)
+        token = _discovery_token(state.service_id)
+    except Exception as e:
+        raise HTTPException(
+            502, f"discovery token minting failed for service {state.service_id!r}: {e}"
+        )
+
+    try:
+        tools = _mcp_tools_list(endpoint, token=token)
     except Exception as e:
         raise HTTPException(502, f"MCP tools/list failed at {endpoint}: {e}")
 

@@ -140,6 +140,16 @@ class Configuration:
         resp = self._request("GET", f"/services/{service_id}", params=self._params())
         return self._build_service(resp.json(), self._all_roles_map(), self._all_scopes_map())
 
+    def mint_discovery_token(self, service_id: str) -> str:
+        """Mint a bearer token whose ``aud`` contains the tool's clientId, for authenticating UC-1
+        tool discovery against the tool's AuthBridge sidecar. The config service (which holds the
+        Keycloak admin) does the minting; this returns the raw ``access_token`` string. Raises
+        ``RuntimeError`` on a non-OK response (via ``_check``)."""
+        resp = self._request(
+            "GET", f"/services/{service_id}/discovery-token", params=self._params()
+        )
+        return resp.json()["access_token"]
+
     def get_services_by_role(self, role: Role) -> list[Service]:
         """Services whose service-account holds ``role`` (client-side filter of get_services)."""
         return [s for s in self.get_services() if any(r.id == role.id for r in s.roles)]

@@ -35,6 +35,7 @@ def _run(svc=None, read_exc=None, tools=None, mcp_exc=None):
     with (
         patch.object(kube, "_core_v1") as core_v1,
         patch.object(nodes, "_mcp_tools_list") as mcp,
+        patch.object(nodes, "_discovery_token", return_value="disco-tok") as disco,
     ):
         core = MagicMock()
         if read_exc is not None:
@@ -47,7 +48,7 @@ def _run(svc=None, read_exc=None, tools=None, mcp_exc=None):
         else:
             mcp.return_value = tools or []
         result = nodes.analyze_tool(_state())
-        return result, mcp
+        return result, mcp, disco
 
 
 class TestAnalyzeToolFound:
@@ -56,7 +57,7 @@ class TestAnalyzeToolFound:
             {"name": "create_issue", "description": "Open an issue"},
             {"name": "list_repos", "description": "List repos"},
         ]
-        result, mcp = _run(svc=_svc({MCP_LABEL: ""}), tools=tools)
+        result, mcp, disco = _run(svc=_svc({MCP_LABEL: ""}), tools=tools)
         provision = result["service_provision"]
 
         assert provision.roles == []
@@ -66,12 +67,21 @@ class TestAnalyzeToolFound:
         ]
         assert provision.scopes[0].description == "Open an issue"
         assert "derived from MCP manifest: 2 tools" == provision.reasoning
-        mcp.assert_called_once_with(f"http://{WORKLOAD}.{NS}.svc.cluster.local:8080/mcp")
+        mcp.assert_called_once_with(
+            f"http://{WORKLOAD}.{NS}.svc.cluster.local:8080/mcp", token="disco-tok"
+        )
 
     def test_endpoint_uses_services_first_port(self):
         _run(svc=_svc({MCP_LABEL: ""}, port=9000), tools=[])[1].assert_called_once_with(
-            f"http://{WORKLOAD}.{NS}.svc.cluster.local:9000/mcp"
+            f"http://{WORKLOAD}.{NS}.svc.cluster.local:9000/mcp", token="disco-tok"
         )
+
+    def test_authenticated_discovery_uses_minted_token(self):
+        # The token comes from the _discovery_token seam (config service mints it) and is threaded
+        # through to the MCP probe as the Bearer credential.
+        _, mcp, disco = _run(svc=_svc({MCP_LABEL: ""}), tools=[])
+        disco.assert_called_once()
+        assert mcp.call_args.kwargs["token"] == "disco-tok"
 
 
 class TestAnalyzeToolEmpty:
@@ -100,3 +110,49 @@ class TestAnalyzeTool502:
         with pytest.raises(HTTPException) as ei:
             _run(svc=_svc({MCP_LABEL: ""}), mcp_exc=RuntimeError("connection refused"))
         assert ei.value.status_code == 502
+
+    def test_discovery_token_failure_is_502_and_skips_tools_list(self, monkeypatch):
+        monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "1")
+        with (
+            patch.object(kube, "_core_v1") as core_v1,
+            patch.object(nodes, "_mcp_tools_list") as mcp,
+            patch.object(nodes, "_discovery_token", side_effect=RuntimeError("mint failed")),
+        ):
+            core = MagicMock()
+            core.read_namespaced_service.return_value = _svc({MCP_LABEL: ""})
+            core_v1.return_value = core
+            with pytest.raises(HTTPException) as ei:
+                nodes.analyze_tool(_state())
+        assert ei.value.status_code == 502
+        assert "discovery token minting failed" in ei.value.detail
+        mcp.assert_not_called()
+
+
+class TestMcpToolsList:
+    """Exercises the real `_mcp_tools_list` (not the seam) — the load-bearing auth change."""
+
+    def _resp(self, tools=None):
+        resp = MagicMock()
+        resp.json.return_value = {"result": {"tools": tools or []}}
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    def test_sends_bearer_and_timeout_when_token_present(self, monkeypatch):
+        monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "1")
+        with patch("requests.post", return_value=self._resp()) as post:
+            nodes._mcp_tools_list("http://x/mcp", token="abc")
+        kwargs = post.call_args.kwargs
+        assert kwargs["headers"]["Authorization"] == "Bearer abc"
+        assert kwargs["timeout"] == nodes._MCP_TIMEOUT
+
+    def test_no_auth_header_when_token_absent(self, monkeypatch):
+        monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "1")
+        with patch("requests.post", return_value=self._resp()) as post:
+            nodes._mcp_tools_list("http://x/mcp")
+        assert "Authorization" not in post.call_args.kwargs["headers"]
+
+    def test_returns_tools_from_result(self, monkeypatch):
+        monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "1")
+        tools = [{"name": "t1", "description": "d"}]
+        with patch("requests.post", return_value=self._resp(tools)):
+            assert nodes._mcp_tools_list("http://x/mcp", token="abc") == tools
