@@ -331,7 +331,7 @@ def pipeline() -> dict[str, dict]:
                 "aiac.policy.store.service.main:app",
                 port=store_port,
                 host=store_host,
-                env={"AGENTPOLICY_DB_PATH": str(db_path)},
+                env={"SERVICEPOLICY_DB_PATH": str(db_path)},
             )
             opa = Service(
                 "aiac.pdp.service.policy.opa.main:app",
