@@ -274,7 +274,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | IdP Configuration Service (in Kagenti Interface Pod) | `aiac.idp.configuration.api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
 | PDP Policy Writer — OPA (in Kagenti Interface Pod) | `aiac.pdp.policy.library` | Kubernetes CR (`AuthorizationPolicy`) | 204 on success |
 | Policy Store (StatefulSet `aiac-policy-store`) | `aiac.policy.store.library` | SQLite (`agent_policies` table, in-memory cache) | `AgentPolicyModel` / `PolicyModel` on read; 204 on write |
-| Policy Computation Engine (`aiac.policy.computation`) | AIAC Agent sub-UC agents | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` | None (fire-and-forget; logs exceptions) |
+| Policy Computation Engine (`aiac.policy.computation`) | AIAC Agent sub-UC agents | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` | `None` on success; exceptions logged and re-raised (propagate to the caller) |
 | `aiac.idp.configuration.models` | `aiac.idp.configuration.api`, `aiac.policy.model`, AIAC Agent | — | Pydantic model definitions for IdP entities (Subject, Role, Service, Scope) |
 | `aiac.idp.configuration.api` | AIAC Agent, Policy Computation Engine, Python scripts | IdP Configuration Service (HTTP) | Typed Pydantic instances (reads and writes IdP configuration entities) |
 | `aiac.policy.model` | `aiac.pdp.policy.library`, `aiac.policy.store.library`, `aiac.policy.computation`, AIAC Agent | — | Pydantic model definitions for policy entities (PolicyRule, AgentPolicyModel, PolicyModel) |
@@ -539,7 +539,7 @@ Tests live in `aiac/test/`.
 | `aiac.policy.model` | No mock needed | `extra='ignore'` drops unknown fields; relationship maps keyed by string `id` round-trip through `model_dump(mode="json")` / `model_validate` with typed `Role` / `Scope` values preserved |
 | `aiac.idp.configuration.api` functions | IdP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback; `get_services_by_role` and `get_services_by_scope` issue correct query params |
 | `aiac.pdp.policy.library` functions | PDP Policy Writer HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
-| `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged, not propagated |
+| `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged and re-raised (propagate to the caller) |
 | Event Broker NATS consumer | NATS message delivery (mock `nats-py` subscription) | Correct handler dispatched per subject; ack issued on success; no ack on handler exception |
 | Event Broker DLQ | NATS max redelivery exceeded | Message routed to `aiac.apply.dlq` after 5 failures |
 | Init container health-check | HTTP 4xx then 200 sequence; NATS TCP refused then connected | Exits 0 only after all four dependencies healthy; `add_stream` called with correct config |

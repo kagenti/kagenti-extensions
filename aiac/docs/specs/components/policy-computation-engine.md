@@ -45,12 +45,12 @@ These AIAC invariants (from the policy-model spec, handoff 01) are relied on by 
 ## User Stories
 
 1. As an AIAC Agent sub-UC agent, I want to submit a list of `PolicyRule` objects and have them durably recorded on the right service and reflected in every affected agent's policy, without implementing routing or storage merge logic myself.
-2. As an AIAC Agent sub-UC agent, I want the computation to be fire-and-forget, so my sub-agent is not blocked waiting for Rego generation.
+2. As an AIAC Agent sub-UC agent, I want to submit the rules and get no return value to unpack on success, so I stay decoupled from routing, storage, and derivation — while a failure still surfaces to me (US 7).
 3. As the Policy Computation Engine, I want each rule recorded on the SPM of the service that **owns the rule's scope**, so the fact survives regardless of which services already exist.
 4. As the Policy Computation Engine, I want to derive an affected agent's APM purely from the persisted SPMs, so the result is **independent of onboarding order**.
 5. As the Policy Computation Engine, I want to skip duplicate rules on append, so re-processing the same event does not create redundant entries.
 6. As the Policy Computation Engine, I want to partial-upsert only the affected agents' packages to the PDP, so unaffected agents are left untouched.
-7. As a developer, I want exceptions from the computation logged without propagating, so a transient IdP / store / PDP failure does not crash the calling sub-agent.
+7. As a developer, I want exceptions from the computation logged **and re-raised**, so a failed IdP / store / PDP interaction surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) instead of being silently dropped while nothing is applied.
 8. As a developer, I want a stable import path, so the calling convention does not change as the module grows.
 
 ---
@@ -80,7 +80,7 @@ Single entry point:
 def compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None
 ```
 
-- **Fire-and-forget:** the caller receives no return value. The function logs exceptions and does not propagate them — a transient failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push must not crash the calling sub-agent.
+- **No return value; failures propagate:** on success the caller receives no return value. The function logs exceptions and **re-raises** them — a failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) rather than being silently swallowed while nothing is applied.
 - **`override`:** selects the merge mode (see [Merge Semantics](#merge-semantics)). `False` (default) appends additively at the SPM layer; `True` authoritatively replaces every input role's mappings **across all SPMs** (role-level revocation). Set by the caller (the Controller) from the producing UC's choice — UC1 = `False`, UC3 = `True`, UC2 Rebuild = `True`, UC2 Build = TBD.
 - Import path: `from aiac.policy.computation.engine import compute_and_apply`
 
@@ -109,7 +109,7 @@ Given `rules: list[PolicyRule]` and an `override` flag, `compute_and_apply` exec
      - if `X` is an **Agent**, `X` is affected (its inbound changed); **and**
      - every agent **targeting** `s` is affected — namely the owners (`actorIds`) of the **Agent-kind** inbound rules on `SPM(X)` whose scope is `s`.
 
-6. **Derive** each affected agent's APM (see below), collect them into one `PolicyModel`, and **partial-upsert** via `aiac.pdp.policy.library.apply_policy` **exactly once**. Fire-and-forget: exceptions logged, never propagated. **Tools get an SPM but no APM** (P4).
+6. **Derive** each affected agent's APM (see below), collect them into one `PolicyModel`, and **partial-upsert** via `aiac.pdp.policy.library.apply_policy` **exactly once**. Exceptions are logged and re-raised (they propagate to the caller). **Tools get an SPM but no APM** (P4).
 
 ### Derivation of `APM(A)` — 100% from SPMs, zero IdP
 
@@ -207,7 +207,7 @@ Key behaviors to assert:
 - **Directional relevance — no false outbound edge.** A user role shared between `AS` and `TS` does **not** by itself make A "target" T; A's outbound edge to T appears only if one of A's **agent** roles maps to a T scope.
 - **Affected set from the batch, not a full scan.** The affected-agent set is computed from the batch roles/scopes; agents unrelated to the batch are never derived or upserted.
 - **`apply_policy` called exactly once** after all `apply_service_policy` writes complete (partial upsert of only the affected agents).
-- **Fire-and-forget.** An exception from any dependency is logged and does not propagate; `compute_and_apply` returns `None`.
+- **Failures propagate.** An exception from any dependency is logged and **re-raised** (it propagates to the caller, which surfaces it — e.g. the Controller returns HTTP 500); on success `compute_and_apply` returns `None`.
 
 **Prior art:** `3.14-unit-tests-write-api.md` (mock boundary pattern — apply the same approach at the library import boundary here).
 
