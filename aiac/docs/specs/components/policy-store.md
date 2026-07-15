@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS service_policies (
 
 **Transaction strategy:**
 - Per-service upsert (`POST /policy/services/{service_id}`): `INSERT OR REPLACE INTO service_policies VALUES (?, ?)`.
+- Per-service delete (`DELETE /policy/services/{service_id}`): `DELETE FROM service_policies WHERE service_id = ?`; evict the cache entry.
 
 **By-role query:** `GET /policy/services?role={role_id}` scans the cache and returns every SPM whose `inbound_rules` contains a rule referencing `role_id`. **Why a store query and not an IdP lookup:** the SPM is the source of truth, so this must return *stored* rows — including stale role→service mappings that the live IdP no longer reflects, which override-purge depends on to remove access that should no longer exist. It may start as a full scan; a `role.id -> {service_id}` index can be added later behind the same route/signature without changing callers.
 
@@ -78,19 +79,23 @@ CREATE TABLE IF NOT EXISTS service_policies (
 | `GET` | `/policy/services/{service_id}` | — | `ServicePolicyModel` (from cache) |
 | `GET` | `/policy/services?role={role_id}` | — | `list[ServicePolicyModel]` (SPMs referencing the role) |
 | `POST` | `/policy/services/{service_id}` | `ServicePolicyModel` | `204 No Content` (upsert) |
+| `DELETE` | `/policy/services/{service_id}` | — | `204 No Content` (off-board) |
 | `GET` | `/health` | — | `200` / `503` |
 
 The by-scope lookup has **no dedicated route** — it collapses to the by-id read via `scope.serviceId` and is implemented entirely in the library.
 
+`DELETE /policy/services/{service_id}` removes a single SPM row (SQLite `DELETE` + cache eviction) so a service can be off-boarded when it is decommissioned. Deleting a service that is not present is a no-op (`204`). Override-purge still edits `inbound_rules` in place via the upsert; the delete route is for whole-service removal, not per-rule purging.
+
 **Error responses:**
 - `404 Not Found` with `{"error": "service {id} not found"}` when `GET /policy/services/{service_id}` finds no entry in cache. The library's `get_service_policy` catches this and returns a fresh empty SPM (per the "engine creates a fresh model on 404" convention); the by-role query never 404s (empty list on no match).
-- `502 Bad Gateway` with `{"error": "..."}` on SQLite write error for the write endpoint.
+- `502 Bad Gateway` with `{"error": "..."}` on SQLite write error for the write and delete endpoints.
 - `503 Service Unavailable` if `GET /health` cannot open or query the SQLite file.
 
 **`main.py` functions:**
 
 - `_get_db() -> sqlite3.Connection` — open `SERVICEPOLICY_DB_PATH` with `check_same_thread=False`; run `CREATE TABLE IF NOT EXISTS` on first open.
 - `_upsert_service(service_id: str, model: ServicePolicyModel)` — `INSERT OR REPLACE INTO service_policies VALUES (?, ?)` with `model.model_dump_json()`; update cache.
+- `_delete_service(service_id: str)` — `DELETE FROM service_policies WHERE service_id = ?`; evict the cache entry (no-op if absent).
 - `_get_service(service_id: str) -> ServicePolicyModel` — read from in-memory cache; raise `404` if absent.
 - `_list_by_role(role_id: str) -> list[ServicePolicyModel]` — return every cached SPM whose `inbound_rules` references `role_id`.
 - `_load_cache()` — on startup, load all rows from SQLite into the in-memory cache.
@@ -135,7 +140,8 @@ Key behaviors to assert:
 - `GET /policy/services/{id}`: returns `ServicePolicyModel` deserialized from cache (hit); `404 {"error": "service {id} not found"}` when the service is not in cache (miss).
 - `GET /policy/services?role={role_id}`: returns every SPM whose `inbound_rules` references the role; `[]` when none match; multiple when several match.
 - `POST /policy/services/{id}`: `spec` stored in SQLite; cache updated; `204` returned. Upsert round-trip: a second `POST` for the same id replaces the row.
-- SQLite write error on the write endpoint → `502`.
+- `DELETE /policy/services/{id}`: row removed from SQLite; cache entry evicted; `204` returned. Deleting an absent service is a no-op (`204`).
+- SQLite write error on the write or delete endpoint → `502`.
 - SQLite file cannot be opened/queried on `GET /health` → `503`.
 
 See [library-policy-store.md](library-policy-store.md) for the companion library testing decisions.

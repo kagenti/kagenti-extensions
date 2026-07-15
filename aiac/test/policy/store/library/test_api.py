@@ -1,26 +1,35 @@
+"""Unit tests for aiac/policy/store/library/api.py.
+
+SPM-centric HTTP client. Mocks the ``requests`` layer — no live Policy Store. The store
+persists ``ServicePolicyModel`` only; there are no per-agent or whole-collection functions.
+"""
+
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel
+from aiac.idp.configuration.models import Role, Scope, ServiceType
+from aiac.policy.model.models import PolicyRule, ServicePolicyModel
 
 BASE_URL = "http://127.0.0.1:7074"
 
-# Minimal valid fixtures
-_AGENT_POLICY_DICT = {
-    "agent_id": "agent-1",
-    "agent_roles": [],
-    "agent_scopes": [],
-    "subject_roles": {},
-    "source_roles": {},
-    "target_scopes": {},
-    "inbound_rules": [],
-    "outbound_rules": [],
-}
-_POLICY_DICT = {"agents": [_AGENT_POLICY_DICT]}
+
+def _spm_dict(service_id: str = "svc-1", role_id: str = "role-1") -> dict:
+    return ServicePolicyModel(
+        service_id=service_id,
+        service_type=ServiceType.AGENT,
+        owned_roles=[],
+        owned_scopes=[],
+        inbound_rules=[
+            PolicyRule(
+                role=Role(id=role_id, name="admin", composite=False),
+                scope=Scope(id="scope-1", name="read", serviceId=service_id),
+            )
+        ],
+    ).model_dump(mode="json")
 
 
-def _mock_response(status_code: int, json_data: dict | None = None) -> MagicMock:
+def _mock_response(status_code: int, json_data=None) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
     resp.ok = 200 <= status_code < 300
@@ -30,153 +39,206 @@ def _mock_response(status_code: int, json_data: dict | None = None) -> MagicMock
 
 
 # ---------------------------------------------------------------------------
-# get_policy
+# get_service_policy  (by-id)
 # ---------------------------------------------------------------------------
 
-class TestGetPolicy:
-    def test_returns_policy_model(self):
+
+class TestGetServicePolicy:
+    def test_by_id_hit_returns_spm(self):
         with patch("requests.get") as mock_get:
-            mock_get.return_value = _mock_response(200, _POLICY_DICT)
-            from aiac.policy.store.library.api import get_policy
-            result = get_policy()
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy")
-            assert isinstance(result, PolicyModel)
+            mock_get.return_value = _mock_response(200, _spm_dict("svc-1"))
+            from aiac.policy.store.library.api import get_service_policy
 
-    def test_raises_on_error_response(self):
-        with patch("requests.get") as mock_get:
-            mock_get.return_value = _mock_response(500)
-            from aiac.policy.store.library.api import get_policy
-            with pytest.raises(RuntimeError):
-                get_policy()
+            result = get_service_policy("svc-1")
+            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1")
+            assert isinstance(result, ServicePolicyModel)
+            assert result.service_id == "svc-1"
 
-
-# ---------------------------------------------------------------------------
-# get_agent_policy
-# ---------------------------------------------------------------------------
-
-class TestGetAgentPolicy:
-    def test_returns_agent_policy_model(self):
-        with patch("requests.get") as mock_get:
-            mock_get.return_value = _mock_response(200, _AGENT_POLICY_DICT)
-            from aiac.policy.store.library.api import get_agent_policy
-            result = get_agent_policy("agent-1")
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/agents/agent-1")
-            assert isinstance(result, AgentPolicyModel)
-            assert result.agent_id == "agent-1"
-
-    def test_raises_on_error_response(self):
+    def test_by_id_miss_returns_fresh_empty_spm_no_raise(self):
         with patch("requests.get") as mock_get:
             mock_get.return_value = _mock_response(404)
-            from aiac.policy.store.library.api import get_agent_policy
+            from aiac.policy.store.library.api import get_service_policy
+
+            result = get_service_policy("brand-new")
+            assert isinstance(result, ServicePolicyModel)
+            assert result.service_id == "brand-new"
+            assert result.owned_roles == []
+            assert result.owned_scopes == []
+            assert result.inbound_rules == []
+
+    def test_raises_on_other_error_response(self):
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(500)
+            from aiac.policy.store.library.api import get_service_policy
+
             with pytest.raises(RuntimeError):
-                get_agent_policy("missing-agent")
+                get_service_policy("svc-1")
 
 
 # ---------------------------------------------------------------------------
-# apply_policy
+# get_service_policy_by_scope
 # ---------------------------------------------------------------------------
 
-class TestApplyPolicy:
-    def test_posts_serialized_model(self):
-        model = PolicyModel.model_validate(_POLICY_DICT)
+
+class TestGetServicePolicyByScope:
+    def test_resolves_via_scope_service_id(self):
+        scope = Scope(id="scope-1", name="read", serviceId="owning-svc")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(200, _spm_dict("owning-svc"))
+            from aiac.policy.store.library.api import get_service_policy_by_scope
+
+            result = get_service_policy_by_scope(scope)
+            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/owning-svc")
+            assert result is not None
+            assert result.service_id == "owning-svc"
+
+    def test_returns_none_when_scope_has_no_owner(self):
+        scope = Scope(id="scope-1", name="read")  # serviceId defaults to ""
+        with patch("requests.get") as mock_get:
+            from aiac.policy.store.library.api import get_service_policy_by_scope
+
+            result = get_service_policy_by_scope(scope)
+            assert result is None
+            mock_get.assert_not_called()
+
+    def test_raises_on_non_404_error(self):
+        scope = Scope(id="scope-1", name="read", serviceId="owning-svc")
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(500)
+            from aiac.policy.store.library.api import get_service_policy_by_scope
+
+            with pytest.raises(RuntimeError):
+                get_service_policy_by_scope(scope)
+
+
+# ---------------------------------------------------------------------------
+# get_service_policies_by_role
+# ---------------------------------------------------------------------------
+
+
+class TestGetServicePoliciesByRole:
+    def test_by_role_hit_returns_matching_spm(self):
+        role = Role(id="user-role", name="reader", composite=False)
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(200, [_spm_dict("svc-a", "user-role")])
+            from aiac.policy.store.library.api import get_service_policies_by_role
+
+            result = get_service_policies_by_role(role)
+            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services", params={"role": "user-role"})
+            assert [s.service_id for s in result] == ["svc-a"]
+
+    def test_by_role_multiple_returns_all(self):
+        role = Role(id="shared", name="reader", composite=False)
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(200, [_spm_dict("svc-a", "shared"), _spm_dict("svc-b", "shared")])
+            from aiac.policy.store.library.api import get_service_policies_by_role
+
+            result = get_service_policies_by_role(role)
+            assert sorted(s.service_id for s in result) == ["svc-a", "svc-b"]
+
+    def test_by_role_miss_returns_empty_list(self):
+        role = Role(id="nobody", name="reader", composite=False)
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(200, [])
+            from aiac.policy.store.library.api import get_service_policies_by_role
+
+            assert get_service_policies_by_role(role) == []
+
+    def test_raises_on_error_response(self):
+        role = Role(id="user-role", name="reader", composite=False)
+        with patch("requests.get") as mock_get:
+            mock_get.return_value = _mock_response(500)
+            from aiac.policy.store.library.api import get_service_policies_by_role
+
+            with pytest.raises(RuntimeError):
+                get_service_policies_by_role(role)
+
+
+# ---------------------------------------------------------------------------
+# apply_service_policy  (upsert)
+# ---------------------------------------------------------------------------
+
+
+class TestApplyServicePolicy:
+    def test_posts_serialized_spm_upsert(self):
+        spm = ServicePolicyModel.model_validate(_spm_dict("svc-1"))
         with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_response(200)
-            from aiac.policy.store.library.api import apply_policy
-            result = apply_policy(model)
-            mock_post.assert_called_once_with(
-                f"{BASE_URL}/policy", json=model.model_dump()
-            )
+            mock_post.return_value = _mock_response(204)
+            from aiac.policy.store.library.api import apply_service_policy
+
+            result = apply_service_policy("svc-1", spm)
+            mock_post.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1", json=spm.model_dump())
             assert result is None
 
     def test_raises_on_error_response(self):
-        model = PolicyModel.model_validate(_POLICY_DICT)
+        spm = ServicePolicyModel.model_validate(_spm_dict("svc-1"))
         with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_response(400)
-            from aiac.policy.store.library.api import apply_policy
+            mock_post.return_value = _mock_response(502)
+            from aiac.policy.store.library.api import apply_service_policy
+
             with pytest.raises(RuntimeError):
-                apply_policy(model)
+                apply_service_policy("svc-1", spm)
 
 
 # ---------------------------------------------------------------------------
-# apply_agent_policy
+# delete_service_policy
 # ---------------------------------------------------------------------------
 
-class TestApplyAgentPolicy:
-    def test_posts_serialized_agent_model(self):
-        model = AgentPolicyModel.model_validate(_AGENT_POLICY_DICT)
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_response(200)
-            from aiac.policy.store.library.api import apply_agent_policy
-            result = apply_agent_policy("agent-1", model)
-            mock_post.assert_called_once_with(
-                f"{BASE_URL}/policy/agents/agent-1", json=model.model_dump()
-            )
-            assert result is None
 
-    def test_raises_on_error_response(self):
-        model = AgentPolicyModel.model_validate(_AGENT_POLICY_DICT)
-        with patch("requests.post") as mock_post:
-            mock_post.return_value = _mock_response(500)
-            from aiac.policy.store.library.api import apply_agent_policy
-            with pytest.raises(RuntimeError):
-                apply_agent_policy("agent-1", model)
-
-
-# ---------------------------------------------------------------------------
-# delete_agent_policy
-# ---------------------------------------------------------------------------
-
-class TestDeleteAgentPolicy:
-    def test_deletes_agent_policy(self):
+class TestDeleteServicePolicy:
+    def test_deletes_service_policy(self):
         with patch("requests.delete") as mock_delete:
             mock_delete.return_value = _mock_response(204)
-            from aiac.policy.store.library.api import delete_agent_policy
-            result = delete_agent_policy("agent-1")
-            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/agents/agent-1")
+            from aiac.policy.store.library.api import delete_service_policy
+
+            result = delete_service_policy("svc-1")
+            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services/svc-1")
             assert result is None
 
     def test_raises_on_error_response(self):
         with patch("requests.delete") as mock_delete:
-            mock_delete.return_value = _mock_response(404)
-            from aiac.policy.store.library.api import delete_agent_policy
+            mock_delete.return_value = _mock_response(502)
+            from aiac.policy.store.library.api import delete_service_policy
+
             with pytest.raises(RuntimeError):
-                delete_agent_policy("missing-agent")
+                delete_service_policy("svc-1")
 
 
 # ---------------------------------------------------------------------------
-# delete_policy
+# Removed surface: no per-agent / whole-collection functions
 # ---------------------------------------------------------------------------
 
-class TestDeletePolicy:
-    def test_deletes_policy(self):
-        with patch("requests.delete") as mock_delete:
-            mock_delete.return_value = _mock_response(204)
-            from aiac.policy.store.library.api import delete_policy
-            result = delete_policy()
-            mock_delete.assert_called_once_with(f"{BASE_URL}/policy")
-            assert result is None
 
-    def test_raises_on_error_response(self):
-        with patch("requests.delete") as mock_delete:
-            mock_delete.return_value = _mock_response(500)
-            from aiac.policy.store.library.api import delete_policy
-            with pytest.raises(RuntimeError):
-                delete_policy()
+class TestRemovedFunctions:
+    def test_no_agent_or_collection_functions(self):
+        import aiac.policy.store.library.api as api
+
+        for removed in (
+            "get_policy",
+            "apply_policy",
+            "delete_policy",
+            "get_agent_policy",
+            "apply_agent_policy",
+            "delete_agent_policy",
+        ):
+            assert not hasattr(api, removed), f"{removed} should be removed"
 
 
 # ---------------------------------------------------------------------------
 # URL fallback
 # ---------------------------------------------------------------------------
 
+
 class TestUrlFallback:
     def test_defaults_to_localhost_7074_when_env_unset(self):
+        import os
+
         with patch.dict("os.environ", {}, clear=False):
-            # Remove the env var if present
-            import os
             os.environ.pop("AIAC_POLICY_STORE_URL", None)
             with patch("requests.get") as mock_get:
-                mock_get.return_value = _mock_response(200, _POLICY_DICT)
-                from aiac.policy.store.library.api import get_policy
-                get_policy()
+                mock_get.return_value = _mock_response(200, _spm_dict("svc-1"))
+                from aiac.policy.store.library.api import get_service_policy
+
+                get_service_policy("svc-1")
                 call_url = mock_get.call_args[0][0]
-                assert call_url == "http://127.0.0.1:7074/policy"
+                assert call_url == "http://127.0.0.1:7074/policy/services/svc-1"

@@ -3,7 +3,9 @@ import os
 import requests
 from dotenv import load_dotenv
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel
+# Scope / Role / ServiceType are re-exported by aiac.policy.model.models (it imports them
+# from aiac.idp.configuration.models), so the whole model surface comes from one module.
+from aiac.policy.model.models import Role, Scope, ServicePolicyModel, ServiceType
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -17,33 +19,51 @@ def _check(response: requests.Response) -> None:
         raise RuntimeError(f"Policy Store error {response.status_code}")
 
 
-def get_policy() -> PolicyModel:
-    resp = requests.get(f"{_base_url()}/policy")
+def _fresh_empty(service_id: str) -> ServicePolicyModel:
+    # The "engine creates a fresh model on 404" convention: the first time a service is
+    # seen the store has no row, so callers get an empty SPM to append to. ``service_type``
+    # is required by the model but genuinely unknown here; the PCE re-seeds it (along with
+    # ``owned_roles`` / ``owned_scopes``) from the IdP catalog before it is ever consulted,
+    # so the placeholder below never reaches a policy decision.
+    return ServicePolicyModel(
+        service_id=service_id,
+        service_type=ServiceType.AGENT,
+        owned_roles=[],
+        owned_scopes=[],
+        inbound_rules=[],
+    )
+
+
+def get_service_policy(service_id: str) -> ServicePolicyModel:
+    resp = requests.get(f"{_base_url()}/policy/services/{service_id}")
+    if resp.status_code == 404:
+        return _fresh_empty(service_id)
     _check(resp)
-    return PolicyModel.model_validate(resp.json())
+    return ServicePolicyModel.model_validate(resp.json())
 
 
-def get_agent_policy(agent_id: str) -> AgentPolicyModel:
-    resp = requests.get(f"{_base_url()}/policy/agents/{agent_id}")
+def get_service_policy_by_scope(scope: Scope) -> ServicePolicyModel | None:
+    # Singular: a scope has exactly one owning service (Assumption 2). Pure sugar over the
+    # by-id read — no dedicated HTTP route. A scope with no resolved owner has no SPM.
+    if not scope.serviceId:
+        return None
+    return get_service_policy(scope.serviceId)
+
+
+def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]:
+    # The one genuinely new route. Returns every SPM whose inbound_rules reference role.id —
+    # including stale role->service mappings the live IdP no longer reflects (which
+    # override-purge needs). [] when none match.
+    resp = requests.get(f"{_base_url()}/policy/services", params={"role": role.id})
     _check(resp)
-    return AgentPolicyModel.model_validate(resp.json())
+    return [ServicePolicyModel.model_validate(item) for item in resp.json()]
 
 
-def apply_policy(model: PolicyModel) -> None:
-    resp = requests.post(f"{_base_url()}/policy", json=model.model_dump())
+def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None:
+    resp = requests.post(f"{_base_url()}/policy/services/{service_id}", json=spm.model_dump())
     _check(resp)
 
 
-def apply_agent_policy(agent_id: str, model: AgentPolicyModel) -> None:
-    resp = requests.post(f"{_base_url()}/policy/agents/{agent_id}", json=model.model_dump())
-    _check(resp)
-
-
-def delete_agent_policy(agent_id: str) -> None:
-    resp = requests.delete(f"{_base_url()}/policy/agents/{agent_id}")
-    _check(resp)
-
-
-def delete_policy() -> None:
-    resp = requests.delete(f"{_base_url()}/policy")
+def delete_service_policy(service_id: str) -> None:
+    resp = requests.delete(f"{_base_url()}/policy/services/{service_id}")
     _check(resp)

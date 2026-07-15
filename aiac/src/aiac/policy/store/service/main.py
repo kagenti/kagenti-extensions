@@ -7,11 +7,13 @@ import uvicorn
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse, Response
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel
+from aiac.policy.model.models import ServicePolicyModel
 
-DB_PATH = os.getenv("AGENTPOLICY_DB_PATH", "/data/policy_model.db")
+DB_PATH = os.getenv("SERVICEPOLICY_DB_PATH", "/data/policy_model.db")
 
-_cache: dict[str, AgentPolicyModel] = {}
+# In-memory cache of ServicePolicyModel rows keyed by service_id — the authoritative
+# serving layer. All reads are served from here; SQLite is the durable write-through backend.
+_cache: dict[str, ServicePolicyModel] = {}
 _db_conn: sqlite3.Connection | None = None
 
 
@@ -21,19 +23,13 @@ def get_db() -> sqlite3.Connection:
 
 
 def _init_db(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS agent_policies "
-        "(agent_id TEXT PRIMARY KEY, spec TEXT NOT NULL)"
-    )
+    conn.execute("CREATE TABLE IF NOT EXISTS service_policies (service_id TEXT PRIMARY KEY, spec TEXT NOT NULL)")
 
 
 def _load_cache(conn: sqlite3.Connection) -> None:
     global _cache
-    rows = conn.execute("SELECT agent_id, spec FROM agent_policies").fetchall()
-    _cache = {
-        agent_id: AgentPolicyModel.model_validate_json(spec)
-        for agent_id, spec in rows
-    }
+    rows = conn.execute("SELECT service_id, spec FROM service_policies").fetchall()
+    _cache = {service_id: ServicePolicyModel.model_validate_json(spec) for service_id, spec in rows}
 
 
 @asynccontextmanager
@@ -51,85 +47,49 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-@app.get("/policy", response_model=None)
-def get_policy() -> PolicyModel:
-    return PolicyModel(agents=list(_cache.values()))
+@app.get("/policy/services", response_model=None)
+def list_service_policies_by_role(role: str) -> list[ServicePolicyModel]:
+    # Return every cached SPM whose inbound_rules reference the given role id. This must
+    # be answered from the store (not the IdP): the SPM is the source of truth, so stale
+    # role->service mappings the live IdP no longer reflects still show up here — which is
+    # exactly what override-purge needs. Never 404s; empty list on no match.
+    return [spm for spm in _cache.values() if any(rule.role.id == role for rule in spm.inbound_rules)]
 
 
-@app.get("/policy/agents/{agent_id}", response_model=None)
-def get_agent_policy(agent_id: str):
-    if agent_id not in _cache:
-        return JSONResponse(status_code=404, content={"error": f"agent {agent_id} not found"})
-    return _cache[agent_id]
+@app.get("/policy/services/{service_id}", response_model=None)
+def get_service_policy(service_id: str):
+    if service_id not in _cache:
+        return JSONResponse(status_code=404, content={"error": f"service {service_id} not found"})
+    return _cache[service_id]
 
 
-@app.post("/policy/agents/{agent_id}", response_model=None)
-def upsert_agent_policy(
-    agent_id: str,
-    body: AgentPolicyModel,
+@app.post("/policy/services/{service_id}", response_model=None)
+def upsert_service_policy(
+    service_id: str,
+    body: ServicePolicyModel,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
     try:
         conn.execute(
-            "INSERT OR REPLACE INTO agent_policies (agent_id, spec) VALUES (?, ?)",
-            (agent_id, body.model_dump_json()),
+            "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
+            (service_id, body.model_dump_json()),
         )
     except sqlite3.Error as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
-    _cache[agent_id] = body
+    _cache[service_id] = body
     return Response(status_code=204)
 
 
-@app.post("/policy", response_model=None)
-def replace_policy(
-    body: PolicyModel,
+@app.delete("/policy/services/{service_id}", response_model=None)
+def delete_service_policy(
+    service_id: str,
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
     try:
-        conn.execute("BEGIN")
-        conn.execute("DELETE FROM agent_policies")
-        for agent in body.agents:
-            conn.execute(
-                "INSERT INTO agent_policies (agent_id, spec) VALUES (?, ?)",
-                (agent.agent_id, agent.model_dump_json()),
-            )
-        conn.execute("COMMIT")
-    except sqlite3.Error as e:
-        try:
-            conn.execute("ROLLBACK")
-        except Exception:
-            pass
-        return JSONResponse(status_code=502, content={"error": str(e)})
-    global _cache
-    _cache = {agent.agent_id: agent for agent in body.agents}
-    return Response(status_code=204)
-
-
-@app.delete("/policy/agents/{agent_id}", response_model=None)
-def delete_agent_policy(
-    agent_id: str,
-    conn: Annotated[sqlite3.Connection, Depends(get_db)],
-) -> Response:
-    try:
-        conn.execute(
-            "DELETE FROM agent_policies WHERE agent_id = ?", (agent_id,)
-        )
+        conn.execute("DELETE FROM service_policies WHERE service_id = ?", (service_id,))
     except sqlite3.Error as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
-    _cache.pop(agent_id, None)
-    return Response(status_code=204)
-
-
-@app.delete("/policy", response_model=None)
-def delete_all_policies(
-    conn: Annotated[sqlite3.Connection, Depends(get_db)],
-) -> Response:
-    try:
-        conn.execute("DELETE FROM agent_policies")
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-    global _cache
-    _cache = {}
+    _cache.pop(service_id, None)
     return Response(status_code=204)
 
 

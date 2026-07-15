@@ -11,7 +11,7 @@ Companion library for the [AIAC Policy Store](policy-store.md). Follows the same
 aiac/src/aiac/policy/store/
 └── library/
     ├── __init__.py     # empty
-    └── api.py          # four module-level functions (SPM-centric surface)
+    └── api.py          # five module-level functions (SPM-centric surface)
 ```
 
 All `__init__.py` files are empty. Callers use explicit submodule paths:
@@ -22,6 +22,7 @@ from aiac.policy.store.library.api import (
     get_service_policy_by_scope,
     get_service_policies_by_role,
     apply_service_policy,
+    delete_service_policy,
 )
 from aiac.policy.model.models import ServicePolicyModel, Scope, Role
 ```
@@ -39,7 +40,7 @@ exposes any per-agent read/write functions. The library surface is entirely SPM-
 ## Submodule: `aiac.policy.store.library.api`
 
 ### Description
-HTTP client module wrapping the [AIAC Policy Store](policy-store.md) REST API. Exposes four module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
+HTTP client module wrapping the [AIAC Policy Store](policy-store.md) REST API. Exposes five module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
 
 ### Dependencies
 ```
@@ -70,12 +71,16 @@ def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]
 
 def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None
     # POST /policy/services/{service_id}  — upsert.
+
+def delete_service_policy(service_id: str) -> None
+    # DELETE /policy/services/{service_id}  — off-board a decommissioned service.
+    # No-op on the server if the service is absent (still 204).
 ```
 
 **Removed** (APMs are no longer persisted): `get_agent_policy`, `apply_agent_policy`, and the
 prior whole-collection `get_policy` / `apply_policy` / `delete_policy` / `delete_agent_policy`
 functions. The only legitimate consumer is the Policy Computation Engine, which is migrated to the
-four functions above.
+functions above.
 
 ### Why by-role must be a store query (not an IdP lookup)
 
@@ -102,6 +107,7 @@ from aiac.policy.store.library.api import (
     get_service_policy_by_scope,
     get_service_policies_by_role,
     apply_service_policy,
+    delete_service_policy,
 )
 from aiac.policy.model.models import ServicePolicyModel, Scope, Role
 
@@ -132,6 +138,7 @@ Key behaviors to assert:
 - `get_service_policy_by_scope(scope)` resolves via `scope.serviceId` (sugar over the by-id read).
 - `get_service_policies_by_role(role)` issues the by-role query; returns every SPM referencing `role.id`; returns `[]` when none match; returns multiple when several match.
 - `apply_service_policy(id, spm)` issues `POST /policy/services/{id}` with serialized `ServicePolicyModel`; upsert round-trip (write then read back the same SPM).
+- `delete_service_policy(id)` issues `DELETE /policy/services/{id}`; returns `None` on success.
 - Any unexpected non-2xx response raises `RuntimeError`.
 - `AIAC_POLICY_STORE_URL` is read from env; falls back to `http://127.0.0.1:7074`.
 </parameter>

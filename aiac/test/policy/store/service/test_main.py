@@ -1,4 +1,10 @@
-"""Unit tests for aiac/policy/store/service/main.py FastAPI application."""
+"""Unit tests for aiac/policy/store/service/main.py FastAPI application.
+
+SPM-centric surface: the store persists ``ServicePolicyModel`` rows keyed by
+``service_id``. ``AgentPolicyModel`` is derived and never persisted, so there are no
+per-agent or whole-collection endpoints. Seam: an in-memory SQLite connection is injected
+on startup instead of opening ``SERVICEPOLICY_DB_PATH``.
+"""
 
 import sqlite3
 from unittest.mock import MagicMock
@@ -7,8 +13,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 import aiac.policy.store.service.main as svc
-from aiac.idp.configuration.models import Role, Scope, Service, Subject
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel, PolicyRule
+from aiac.idp.configuration.models import Role, Scope, ServiceType
+from aiac.policy.model.models import PolicyRule, ServicePolicyModel
 from aiac.policy.store.service.main import app, get_db
 
 # ---------------------------------------------------------------------------
@@ -20,28 +26,21 @@ def _role(id: str = "role-1", name: str = "admin") -> Role:
     return Role(id=id, name=name, composite=False)
 
 
-def _scope(id: str = "scope-1", name: str = "read") -> Scope:
-    return Scope(id=id, name=name)
+def _scope(id: str = "scope-1", name: str = "read", service_id: str = "my-service") -> Scope:
+    return Scope(id=id, name=name, serviceId=service_id)
 
 
-def _service(id: str = "svc-1", service_id: str = "my-service") -> Service:
-    return Service(id=id, serviceId=service_id, enabled=True)
-
-
-def _subject(id: str = "sub-1", username: str = "alice") -> Subject:
-    return Subject(id=id, username=username, enabled=True)
-
-
-def _make_agent(agent_id: str = "agent-1") -> AgentPolicyModel:
-    return AgentPolicyModel(
-        agent_id=agent_id,
-        agent_roles=[_role()],
-        agent_scopes=[_scope()],
-        subject_roles={_subject().id: [_role()]},
-        source_roles={_service().id: [_role()]},
-        target_scopes={_service().id: [_scope()]},
-        inbound_rules=[PolicyRule(role=_role(), scope=_scope())],
-        outbound_rules=[],
+def _spm(
+    service_id: str = "my-service",
+    role_id: str = "role-1",
+    service_type: ServiceType = ServiceType.AGENT,
+) -> ServicePolicyModel:
+    return ServicePolicyModel(
+        service_id=service_id,
+        service_type=service_type,
+        owned_roles=[_role()],
+        owned_scopes=[_scope(service_id=service_id)],
+        inbound_rules=[PolicyRule(role=_role(id=role_id), scope=_scope(service_id=service_id))],
     )
 
 
@@ -60,21 +59,17 @@ def client():
     svc._cache = {}
 
 
-@pytest.fixture
-def client_with_agent(client):
-    """Client with one pre-loaded agent in DB and cache."""
-    agent = _make_agent("agent-1")
-    conn = svc._db_conn
-    conn.execute(
-        "INSERT INTO agent_policies (agent_id, spec) VALUES (?, ?)",
-        ("agent-1", agent.model_dump_json()),
+def _preload(spm: ServicePolicyModel) -> None:
+    """Insert an SPM directly into the current DB + cache (simulating prior state)."""
+    svc._db_conn.execute(
+        "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
+        (spm.service_id, spm.model_dump_json()),
     )
-    svc._cache["agent-1"] = agent
-    return client
+    svc._cache[spm.service_id] = spm
 
 
 # ---------------------------------------------------------------------------
-# Startup: cache population
+# Startup: cache population from SQLite
 # ---------------------------------------------------------------------------
 
 
@@ -82,16 +77,16 @@ class TestStartup:
     def test_load_cache_populates_from_db_rows(self):
         conn = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
         svc._init_db(conn)
-        agent = _make_agent("agent-1")
+        spm = _spm("weather-service")
         conn.execute(
-            "INSERT INTO agent_policies (agent_id, spec) VALUES (?, ?)",
-            ("agent-1", agent.model_dump_json()),
+            "INSERT INTO service_policies (service_id, spec) VALUES (?, ?)",
+            ("weather-service", spm.model_dump_json()),
         )
 
         svc._load_cache(conn)
 
-        assert "agent-1" in svc._cache
-        assert svc._cache["agent-1"].agent_id == "agent-1"
+        assert "weather-service" in svc._cache
+        assert svc._cache["weather-service"].service_id == "weather-service"
         conn.close()
         svc._cache = {}
 
@@ -103,124 +98,117 @@ class TestStartup:
 
         assert svc._cache == {}
         conn.close()
+        svc._cache = {}
 
 
 # ---------------------------------------------------------------------------
-# GET /policy
+# GET /policy/services/{service_id}  (by-id)
 # ---------------------------------------------------------------------------
 
 
-class TestGetPolicy:
-    def test_returns_empty_policy_model_when_cache_empty(self, client):
-        resp = client.get("/policy")
+class TestGetServicePolicy:
+    def test_returns_spm_when_in_cache(self, client):
+        _preload(_spm("weather-service"))
+        resp = client.get("/policy/services/weather-service")
         assert resp.status_code == 200
-        body = resp.json()
-        assert body["agents"] == []
+        assert resp.json()["service_id"] == "weather-service"
 
-    def test_returns_policy_model_with_agents_from_cache(self, client_with_agent):
-        resp = client_with_agent.get("/policy")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert len(body["agents"]) == 1
-        assert body["agents"][0]["agent_id"] == "agent-1"
-
-
-# ---------------------------------------------------------------------------
-# GET /policy/agents/{agent_id}
-# ---------------------------------------------------------------------------
-
-
-class TestGetAgentPolicy:
-    def test_returns_agent_policy_model_when_in_cache(self, client_with_agent):
-        resp = client_with_agent.get("/policy/agents/agent-1")
-        assert resp.status_code == 200
-        assert resp.json()["agent_id"] == "agent-1"
-
-    def test_returns_404_when_agent_not_in_cache(self, client):
-        resp = client.get("/policy/agents/missing-agent")
+    def test_returns_404_when_not_in_cache(self, client):
+        resp = client.get("/policy/services/missing-service")
         assert resp.status_code == 404
-        assert resp.json() == {"error": "agent missing-agent not found"}
+        assert resp.json() == {"error": "service missing-service not found"}
 
-    def test_get_after_post_returns_updated_value_from_cache_not_db(self, client):
-        agent = _make_agent("agent-x")
-        client.post("/policy/agents/agent-x", json=agent.model_dump())
-        resp = client.get("/policy/agents/agent-x")
+    def test_get_after_post_returns_updated_value_from_cache(self, client):
+        client.post("/policy/services/svc-x", json=_spm("svc-x").model_dump())
+        resp = client.get("/policy/services/svc-x")
         assert resp.status_code == 200
-        assert resp.json()["agent_id"] == "agent-x"
+        assert resp.json()["service_id"] == "svc-x"
 
 
 # ---------------------------------------------------------------------------
-# POST /policy/agents/{agent_id}
+# GET /policy/services?role={role_id}  (by-role)
 # ---------------------------------------------------------------------------
 
 
-class TestUpsertAgentPolicy:
+class TestGetServicePoliciesByRole:
+    def test_returns_single_spm_referencing_role(self, client):
+        _preload(_spm("svc-a", role_id="user-role"))
+        _preload(_spm("svc-b", role_id="other-role"))
+        resp = client.get("/policy/services", params={"role": "user-role"})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [s["service_id"] for s in body] == ["svc-a"]
+
+    def test_returns_all_spms_when_several_reference_role(self, client):
+        _preload(_spm("svc-a", role_id="shared-role"))
+        _preload(_spm("svc-b", role_id="shared-role"))
+        _preload(_spm("svc-c", role_id="other-role"))
+        resp = client.get("/policy/services", params={"role": "shared-role"})
+        assert resp.status_code == 200
+        ids = sorted(s["service_id"] for s in resp.json())
+        assert ids == ["svc-a", "svc-b"]
+
+    def test_returns_empty_list_when_no_spm_references_role(self, client):
+        _preload(_spm("svc-a", role_id="user-role"))
+        resp = client.get("/policy/services", params={"role": "nobody"})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_returns_empty_list_when_cache_empty(self, client):
+        resp = client.get("/policy/services", params={"role": "anything"})
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+
+# ---------------------------------------------------------------------------
+# POST /policy/services/{service_id}  (upsert)
+# ---------------------------------------------------------------------------
+
+
+class TestUpsertServicePolicy:
     def test_writes_to_db_updates_cache_returns_204(self, client):
-        agent = _make_agent("agent-2")
-        resp = client.post("/policy/agents/agent-2", json=agent.model_dump())
+        resp = client.post("/policy/services/svc-1", json=_spm("svc-1").model_dump())
         assert resp.status_code == 204
-        assert "agent-2" in svc._cache
-        row = svc._db_conn.execute(
-            "SELECT spec FROM agent_policies WHERE agent_id = ?", ("agent-2",)
-        ).fetchone()
+        assert "svc-1" in svc._cache
+        row = svc._db_conn.execute("SELECT spec FROM service_policies WHERE service_id = ?", ("svc-1",)).fetchone()
         assert row is not None
 
-    def test_returns_502_on_sqlite_error(self, client):
-        bad_conn = MagicMock()
-        bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
-        app.dependency_overrides[get_db] = lambda: bad_conn
-        agent = _make_agent("agent-err")
-        resp = client.post("/policy/agents/agent-err", json=agent.model_dump())
-        assert resp.status_code == 502
-        assert "error" in resp.json()
+    def test_repeat_post_replaces_row_upsert_round_trip(self, client):
+        client.post("/policy/services/svc-1", json=_spm("svc-1", role_id="role-a").model_dump())
+        client.post("/policy/services/svc-1", json=_spm("svc-1", role_id="role-b").model_dump())
 
-
-# ---------------------------------------------------------------------------
-# POST /policy (full rebuild)
-# ---------------------------------------------------------------------------
-
-
-class TestReplacePolicy:
-    def test_full_rebuild_replaces_cache_returns_204(self, client_with_agent):
-        new_agent = _make_agent("agent-new")
-        policy = PolicyModel(agents=[new_agent])
-        resp = client_with_agent.post("/policy", json=policy.model_dump())
-        assert resp.status_code == 204
-        assert "agent-1" not in svc._cache
-        assert "agent-new" in svc._cache
-
-    def test_deletes_all_rows_and_inserts_new_rows(self, client_with_agent):
-        new_agent = _make_agent("agent-new")
-        policy = PolicyModel(agents=[new_agent])
-        client_with_agent.post("/policy", json=policy.model_dump())
         rows = svc._db_conn.execute(
-            "SELECT agent_id FROM agent_policies"
+            "SELECT service_id FROM service_policies WHERE service_id = ?", ("svc-1",)
         ).fetchall()
-        agent_ids = {r[0] for r in rows}
-        assert agent_ids == {"agent-new"}
+        assert len(rows) == 1  # replaced, not duplicated
+
+        # The stored/cached SPM now carries the second write's rule.
+        resp = client.get("/policy/services/svc-1")
+        rule_role_ids = [r["role"]["id"] for r in resp.json()["inbound_rules"]]
+        assert rule_role_ids == ["role-b"]
 
     def test_returns_502_on_sqlite_error(self, client):
         bad_conn = MagicMock()
         bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
         app.dependency_overrides[get_db] = lambda: bad_conn
-        policy = PolicyModel(agents=[_make_agent()])
-        resp = client.post("/policy", json=policy.model_dump())
+        resp = client.post("/policy/services/svc-err", json=_spm("svc-err").model_dump())
         assert resp.status_code == 502
         assert "error" in resp.json()
 
 
 # ---------------------------------------------------------------------------
-# DELETE /policy/agents/{agent_id}
+# DELETE /policy/services/{service_id}
 # ---------------------------------------------------------------------------
 
 
-class TestDeleteAgentPolicy:
-    def test_removes_row_from_db_and_cache_returns_204(self, client_with_agent):
-        resp = client_with_agent.delete("/policy/agents/agent-1")
+class TestDeleteServicePolicy:
+    def test_removes_row_from_db_and_cache_returns_204(self, client):
+        _preload(_spm("svc-1"))
+        resp = client.delete("/policy/services/svc-1")
         assert resp.status_code == 204
-        assert "agent-1" not in svc._cache
+        assert "svc-1" not in svc._cache
         row = svc._db_conn.execute(
-            "SELECT agent_id FROM agent_policies WHERE agent_id = ?", ("agent-1",)
+            "SELECT service_id FROM service_policies WHERE service_id = ?", ("svc-1",)
         ).fetchone()
         assert row is None
 
@@ -228,29 +216,7 @@ class TestDeleteAgentPolicy:
         bad_conn = MagicMock()
         bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
         app.dependency_overrides[get_db] = lambda: bad_conn
-        resp = client.delete("/policy/agents/agent-1")
-        assert resp.status_code == 502
-        assert "error" in resp.json()
-
-
-# ---------------------------------------------------------------------------
-# DELETE /policy
-# ---------------------------------------------------------------------------
-
-
-class TestDeletePolicy:
-    def test_removes_all_rows_clears_cache_returns_204(self, client_with_agent):
-        resp = client_with_agent.delete("/policy")
-        assert resp.status_code == 204
-        assert svc._cache == {}
-        rows = svc._db_conn.execute("SELECT agent_id FROM agent_policies").fetchall()
-        assert rows == []
-
-    def test_returns_502_on_sqlite_error(self, client):
-        bad_conn = MagicMock()
-        bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
-        app.dependency_overrides[get_db] = lambda: bad_conn
-        resp = client.delete("/policy")
+        resp = client.delete("/policy/services/svc-1")
         assert resp.status_code == 502
         assert "error" in resp.json()
 
@@ -271,3 +237,16 @@ class TestHealth:
         app.dependency_overrides[get_db] = lambda: bad_conn
         resp = client.get("/health")
         assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Removed surface: no per-agent / whole-collection endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestRemovedEndpoints:
+    def test_whole_collection_get_policy_absent(self, client):
+        assert client.get("/policy").status_code == 404
+
+    def test_per_agent_get_absent(self, client):
+        assert client.get("/policy/agents/agent-1").status_code == 404
