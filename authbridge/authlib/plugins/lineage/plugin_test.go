@@ -352,7 +352,11 @@ func TestRequestFacts_MCPWithCapture(t *testing.T) {
 	checkAttr(t, req, "url.path", "/mcp")
 	checkAttr(t, req, "lineage.self.id", "weather-service")
 	checkAttr(t, req, "lineage.peer.host", "weather-tool-mcp.team1.svc:8000")
-	checkAttr(t, req, "lineage.peer.addr", "10.244.1.7:8000")
+	// peer.addr is inbound-only: on outbound, RemoteAddr is the app's own
+	// socket (or empty under ext_proc) — not the peer.
+	if _, ok := findAttr(req, "lineage.peer.addr"); ok {
+		t.Error("lineage.peer.addr emitted on outbound — it names the app there, not the peer")
+	}
 	checkAttr(t, req, "lineage.direction", "outbound")
 	checkAttr(t, req, "input.value", `{"city":"Tokyo"}`)
 	checkAttr(t, resp, "output.value", "sunny")
@@ -399,10 +403,13 @@ func TestPrincipalFacts_InboundRequestOnly(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	pctx := fakeContext(pipeline.Inbound, http.Header{})
 	pctx.Identity = fakeIdentity{sub: "alice", client: "weather-ui", user: "Alice"}
+	pctx.RemoteAddr = "10.244.2.5:47312"
 
 	run(t, p, pctx, allow(200))
 	req, resp := roleSplit(t, exp.GetSpans())
 
+	// Inbound: the direct TCP caller IS the peer — the fact is emitted here.
+	checkAttr(t, req, "lineage.peer.addr", "10.244.2.5:47312")
 	checkAttr(t, req, "lineage.principal.sub", "alice")
 	checkAttr(t, req, "lineage.principal.client", "weather-ui")
 	// Principal facts are request-only.
