@@ -12,13 +12,9 @@ type Config struct {
 	// Default: "localhost:4317"
 	OTelEndpoint string `json:"otel_endpoint"`
 
-	// EmitBodyHash when true adds a SHA-256 hash of the request body as a
-	// span attribute. Off by default to avoid accidental PII exposure.
-	EmitBodyHash bool `json:"emit_body_hash"`
-
 	// CaptureIO when true attaches parsed request/response content as
-	// OpenInference input.value and output.value span attributes, enabling
-	// Phoenix to display message content inline.
+	// input.value (request span) and output.value (response span)
+	// attributes, enabling Phoenix to display message content inline.
 	//
 	// For A2A (inbound agent calls): input = user message parts, output = artifact.
 	// For MCP tools/call: input = tool params JSON, output = tool result JSON.
@@ -40,15 +36,9 @@ type Config struct {
 	// Default: ["otel-collector", "jaeger", "zipkin", "prometheus"]
 	BypassHosts []string `json:"bypass_hosts"`
 
-	// IsPrincipal when true classifies outbound A2A hops as principal_to_agent
-	// instead of agent_to_agent. Set this for demo-driver or orchestrator agents
-	// (e.g. trip-demo) that act as the chain initiator / human-user proxy.
-	IsPrincipal bool `json:"is_principal"`
-
-	// SelfID is the agent's own stable identifier, used as the caller ID on
-	// outbound spans where no identity is available from the JWT or SPIFFE
-	// context. Typically the Keycloak client ID of this workload.
-	// If empty, SelfIDFile is consulted instead.
+	// SelfID is the agent's own stable identifier, emitted as the
+	// lineage.self.id fact on every span. Typically the Keycloak client ID
+	// of this workload. If empty, SelfIDFile is consulted instead.
 	SelfID string `json:"self_id"`
 
 	// SelfIDFile is the path to a file containing the agent's own client ID.
