@@ -115,7 +115,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 
   > K8s access: `list` on `agentcards.agent.kagenti.dev` in the target namespace.
 
-- **`analyze_tool`**: non-LLM node; discovers MCP tools. `namespace` + `workload_name` are already resolved by `classify_service` (from the `client.name` split). MCP endpoint lookup uses the **hybrid Keycloak→K8s strategy** decided in issue [`6.2`](../../issues/agent/service-onboarding/6.2-analyze-tool-lookup-strategy.md): the Keycloak client name supplied the key `{namespace, workload_name}`; K8s supplies the reachable endpoint.
+- **`analyze_tool`**: non-LLM node; discovers MCP tools. `namespace` + `workload_name` are already resolved by `classify_service` (from the `client.name` split). MCP endpoint lookup uses the **hybrid Keycloak→K8s strategy** decided in issue [`6.2`](../../../issues/agent/service-onboarding/6.2-analyze-tool-lookup-strategy.md): the Keycloak client name supplied the key `{namespace, workload_name}`; K8s supplies the reachable endpoint.
   1. Locate MCP endpoint:
      a. GET the K8s `Service` named `workload_name` in `namespace` (operator convention: Service name == workload name).
      b. Require the `protocol.kagenti.io/mcp` label present on that Service; `502` (actionable) if absent — the label is applied at deploy time, not stamped by the operator.
