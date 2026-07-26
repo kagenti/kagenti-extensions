@@ -162,7 +162,7 @@ The `override` flag (set by the caller from the producing UC's choice) selects t
 | Module | Purpose |
 |--------|---------|
 | `aiac.policy.model` | `PolicyRule`, `ServicePolicyModel`, `AgentPolicyModel`, `PolicyModel` |
-| `aiac.idp.configuration.library` | `Configuration.get_services` — the **only** runtime IdP read (catalog: `service_type` + own roles/scopes for the P2 seed) |
+| `aiac.idp.configuration` | `Configuration.get_services` — the **only** runtime IdP read (catalog: `service_type` + own roles/scopes for the P2 seed) |
 | `aiac.policy.store.library` | `get_service_policy` / `get_service_policy_by_scope` (fetch SPM), `get_service_policies_by_role` (SPMs containing a role — override purge + outbound derivation), `apply_service_policy` (persist SPM) |
 | `aiac.pdp.policy.library` | `apply_policy` — partial-upsert derived APMs to OPA |
 
@@ -188,7 +188,7 @@ Good tests assert external behavior — what the engine writes to the Policy Sto
 
 **Seam:** mock all downstream dependencies at their module-level import boundary:
 
-- `aiac.idp.configuration.library` — mock `Configuration.get_services` (the catalog: `service_type` + each service's own roles/scopes for the P2 seed).
+- `aiac.idp.configuration` — mock `Configuration.get_services` (the catalog: `service_type` + each service's own roles/scopes for the P2 seed).
 - `aiac.policy.store.library` — mock `get_service_policy` / `get_service_policy_by_scope`, `get_service_policies_by_role`, `apply_service_policy`.
 - `aiac.pdp.policy.library` — mock `apply_policy`.
 
@@ -217,7 +217,7 @@ Key behaviors to assert:
 
 - **Fine-grained rule revocation:** removing an individual `PolicyRule` without replacing its whole role. `override=True` covers role-level replace at the SPM layer (see [Merge Semantics](#merge-semantics)); single-rule revocation and agent decommission / package deletion are not yet designed — **TBD**.
 - **Full policy rebuild orchestration:** the PCE handles incremental updates; full rebuilds (clear + reapply all) are driven by higher-level orchestration outside this module.
-- **Direct Keycloak calls:** all IdP access goes through `aiac.idp.configuration.library.Configuration` (only `get_services()`). The PCE never calls Keycloak directly.
+- **Direct Keycloak calls:** all IdP access goes through `aiac.idp.configuration.Configuration` (only `get_services()`). The PCE never calls Keycloak directly.
 - **Persistence of `PolicyRule` inputs:** the PCE persists SPMs (source of truth); APMs are derived and pushed, never persisted as truth. The raw input rule list is not stored.
 - **Model field definitions** (handoff 01), **IdP service / library** (handoffs 02/03), **store CRUD** (handoff 04).
 

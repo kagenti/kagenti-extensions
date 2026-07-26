@@ -124,7 +124,7 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
         `input.function_name` against the generated **user→tool** maps (`subject_ok`) **only**, by exact
         string equality. The agent→tool gate (`target_ok`) is degenerate under UC-1's single generic
         `github-agent.agent` role and is **documented, not probed** (see
-        *[The agent→tool gate](#the-agent-tool-gate-degenerate-by-design)*).
+        *[The agent→tool gate](#the-agenttool-gate-degenerate-by-design)*).
       - **Grant sets** — re-derive the `(role, scope)` grant sets from the Rego data maps and compare, as
         order-independent sets, to the `scenario_uc1.py` truth table.
       - Verdicts are **computed from** `scenario_uc1.py`, never from the Rego. A failing node names the

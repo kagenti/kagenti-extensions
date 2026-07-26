@@ -176,7 +176,7 @@ Environment variables (injected via Kubernetes Deployment manifest):
 - Base image: `python:3.12-slim`
 - Kubernetes ClusterIP Service: `aiac-pdp-config-service:7071`
 - Deployment: co-located with PDP Policy Writer as a container in the **Kagenti Interface Pod** (`pdp-interface-deployment.yaml`)
-- Python library: `aiac.idp.library.configuration`
+- Python library: `aiac.idp.configuration`
 
 ## Dependencies (`requirements.txt`)
 
