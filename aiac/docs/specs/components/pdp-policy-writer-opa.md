@@ -6,9 +6,9 @@
 ## Description
 A FastAPI web service that translates a **Policy Model** into OPA Rego packages and writes them to an `AuthorizationPolicy` Kubernetes Custom Resource. The OPA plugin embedded in each AuthBridge instance fetches the Rego packages relevant to its pod from this CR at startup.
 
-The service is deployed as a container in the **Kagenti Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-writer-service:7072` ClusterIP.
+The service is deployed as a container in the **Kagenti Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP.
 
-The service has no dependency on Keycloak. All Keycloak operations (entity reads) are handled by the **IdP Configuration Service** and its library (`aiac.idp.library.configuration`).
+The service has no dependency on Keycloak. All Keycloak operations (entity reads) are handled by the **IdP Configuration Service** and its library (`aiac.idp.configuration`).
 
 ---
 
@@ -181,7 +181,7 @@ A worked example (agent `github-agent`, users `developer`/`tester`, tool `github
 
 ---
 
-## Library: `aiac.pdp.library.policy`
+## Library: `aiac.pdp.policy.library.api`
 
 HTTP client module wrapping the PDP Policy Writer REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
 
@@ -210,7 +210,7 @@ python-dotenv
 ### Usage
 
 ```python
-from aiac.pdp.library.policy import apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
+from aiac.pdp.policy.library.api import apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
 from aiac.policy.model.models import PolicyModel, AgentPolicyModel, PolicyRule
 
 apply_agent_policy("weather-agent", agent_model)
@@ -241,7 +241,7 @@ For local development, the `kubernetes` client falls back to `~/.kube/config` au
 - Server: uvicorn
 - Bind: `0.0.0.0:7072`
 - Base image: `python:3.12-slim`
-- Kubernetes ClusterIP Service: `aiac-pdp-policy-writer-service:7072`
+- Kubernetes ClusterIP Service: `aiac-pdp-policy-service:7072`
 - Deployment: co-located with IdP Configuration Service as a container in the **Kagenti Interface Pod** (`pdp-interface-deployment.yaml`)
 
 ---
