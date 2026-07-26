@@ -35,7 +35,7 @@ AIAC introduces a strict three-layer model that cleanly separates policy concern
 | Layer | Component | Responsibility |
 |---|---|---|
 | **Policy Management** | AIAC Agent | Translates natural-language policy into PDP configuration on every trigger |
-| **Policy Decision (PDP)** | OPA | Evaluates LLM-generated Rego rules; issues scoped tokens |
+| **Policy Decision (PDP)** | OPA | Evaluates LLM-generated Rego rules; returns the caller's entitlements/decision |
 | **Policy Enforcement (PEP)** | AuthBridge | Intercepts traffic; exchanges tokens; carries no policy knowledge |
 
 The AIAC Agent subscribes to an event stream (NATS JetStream) and reacts to entity lifecycle
@@ -43,7 +43,8 @@ events — new services, role changes, policy updates — by retrieving the curr
 knowledge base, querying live PDP state, and applying the minimal required diff via a dedicated
 PDP Policy Writer. AuthBridge performs RFC 8693 token exchanges sending only the target
 `audience` — no `scope` parameter. OPA evaluates the caller's role against the Rego rules and
-issues a token containing exactly the entitlements that role grants on the target service.
+returns the entitlements that role grants on the target service; the IdP (Keycloak, via
+AuthBridge) issues the exchanged token scoped to exactly those entitlements.
 **Policy intent lives entirely in OPA, kept current by AIAC.**
 
 ---
@@ -158,7 +159,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 **AIAC ↔ Kagenti platform**
 The AIAC Agent reads `AgentRuntime` and `AgentCard` custom resources from the Kubernetes API to
-extract service metadata during UC-1 service onboarding. The `aiac.idp.library` and
+extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration` and
 `aiac.pdp.library` Python packages are the integration surface for other Kagenti components
 needing typed access to IdP configuration and PDP policy state.
 
