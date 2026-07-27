@@ -38,7 +38,7 @@ a **CLI subprocess** (`claude_agent`) or a **local subprocess** such as git
 | `Dockerfile.otel-shim` | ONE shim image, `--build-arg BASE_IMAGE=<app>`. Bundles `opentelemetry-distro` + instrumentors `{starlette,asgi,fastapi,httpx,requests,aiohttp-client,threading}`, propagate-only. Same recipe for every app. |
 | `build-otel-shim.sh` | Builds the shim FROM an app image and kind-loads it. |
 | `attach-lineage.sh` | Emits (stdout) a full Deployment+Service+lineage-ConfigMap: OTEL-wrapped app container + `proxy-init` initContainer + `envoy-proxy` sidecar. Per-app: `NAME`, `IMAGE`, `SELF_ID`, `APP_ENTRYPOINT`, `ENV_VARS`. |
-| `concurrency-test.sh` (A2A) / `concurrency-test-mcp.sh` (MCP tool) | In-cluster driver: N concurrent requests, distinct traceparent + tag each; queries DG Postgres for inbound↔outbound pairing. Target **N/N**. |
+| `concurrency-test-interactions.sh` (A2A) / `concurrency-test-mcp-interactions.sh` (MCP tool) | In-cluster driver: N concurrent turns, distinct caller-minted traceparent each; asserts per-trace **interaction forests** in the DG Postgres (+ optional `EXPECT_KINDS`). Target **N/N**. |
 
 Prereqs already in the cluster (DESIGN §8.5): the sidecar images
 `docker.io/library/authbridge-envoy:latest` and `proxy-init:latest`, the
@@ -107,23 +107,33 @@ kubectl rollout status deploy/<k8s-name> -n team1
   `KAGENTI_TYPE=tool`), then point the agent's `MCP_URL` at its in-cluster
   Service (`http://<tool>.team1.svc.cluster.local:<port>/mcp`).
 
-### 5. Verify with the concurrency test
-A2A agent:
+### 5. Verify with the interaction-level concurrency test
+A2A-entry agent:
 ```bash
 SELF_ID=<self_id> TARGET=<name>.team1.svc.cluster.local:8080 \
   PROMPT='<a prompt that embeds {TOKEN}>' \
-  ./concurrency-test.sh
+  ./concurrency-test-interactions.sh
 ```
-MCP tool front (2-service):
+MCP-entry tool (streamable-http tools/call):
 ```bash
-FRONT=<front-self_id> BACKEND=<backend-self_id> \
-  MCP_URL=http://<front>.team1.svc.cluster.local:8000/mcp TOOL=<tool_name> \
+SELF_ID=<self_id> \
+  MCP_URL=http://<name>.team1.svc.cluster.local:8000/mcp TOOL=<tool_name> \
   DRIVER_IMAGE=docker.io/library/<name>-otel:latest \
-  ./concurrency-test-mcp.sh
+  ./concurrency-test-mcp-interactions.sh
 ```
-Expect **6/6**. (Drive from IN-cluster only — `kubectl port-forward` uses
+Expect **6/6 clean**. (Drive from IN-cluster only — `kubectl port-forward` uses
 pod-loopback, which the iptables rules exclude, so it bypasses the sidecar inbound
 listener — DESIGN §10.7.)
+
+For a per-app **validation run**, fill an expectation card BEFORE firing:
+copy `validation/TEMPLATE-expectation-card.md`, state the expected entities,
+per-turn interaction kinds/counts (including the lifecycle/discovery
+interactions the DG UI hides by default) and the TLS legs expected to produce
+NO interaction, then derive its `EXPECT_KINDS='kind=count,…'` line and pass it
+to either harness to also pin per-trace payload content_kind counts; record
+the outcome in the card's Results section. (The one-span-era
+`concurrency-test.sh` / `concurrency-test-mcp.sh` are retired — their
+assertions grep span attributes the two-span plugin no longer emits.)
 
 ---
 

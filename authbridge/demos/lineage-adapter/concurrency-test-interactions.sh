@@ -18,6 +18,8 @@
 #   * #interactions == #anchor interaction_spans, and no anchor span maps to
 #     more than one interaction  (no double-counted exchange / splice regression)
 #   * the N traces are all DISTINCT
+#   * optionally, when EXPECT_KINDS is set: per-trace payload content_kind
+#     counts match every listed kind exactly
 # Target: N/N clean forests.
 #
 # Usage:
@@ -35,6 +37,15 @@
 #   SETTLE    seconds to wait for spans to derive (default 25)
 #   DRIVER_POD in-cluster curl pod name (default lineage-driver2)
 #   DG_NS     data-governance namespace (default data-governance)
+#   EXPECT_KINDS optional "kind=count,kind=count" (e.g.
+#             "tool_call_arguments=1,mcp_lifecycle_request=2"). Per trace,
+#             count the payload rows referenced by the trace's interactions
+#             (request + response legs) grouped by content_kind, and require
+#             each LISTED kind to match EXACTLY. Unlisted kinds are ignored —
+#             leave nondeterministic ones (llm_*) unpinned. A bodyless
+#             exchange derives an interaction but no payload row, so it never
+#             counts here. Fill the value from the app's expectation card
+#             (validation/TEMPLATE-expectation-card.md).
 set -euo pipefail
 
 SELF_ID="${SELF_ID:?set SELF_ID}"
@@ -45,6 +56,7 @@ NAMESPACE="${NAMESPACE:-team1}"
 SETTLE="${SETTLE:-25}"
 DRIVER_POD="${DRIVER_POD:-lineage-driver2}"
 DG_NS="${DG_NS:-data-governance}"
+EXPECT_KINDS="${EXPECT_KINDS:-}"
 
 # ---- ensure an in-cluster driver pod exists (IfNotPresent: works offline) ----
 if ! kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" >/dev/null 2>&1; then
@@ -98,14 +110,31 @@ for i in $(seq 0 $((N-1))); do
       (SELECT ce.natural_key FROM t JOIN entities ce ON ce.id=t.callee_entity_id
          WHERE t.parent_interaction_id IS NULL LIMIT 1)
   " | tr '\t' ' ')"
+  # optional EXPECT_KINDS: exact per-trace payload content_kind counts
+  kmiss=""
+  if [ -n "$EXPECT_KINDS" ]; then
+    kcounts=$(psql "
+      SELECT p.content_kind || '=' || count(*)
+      FROM (SELECT request_payload_hash AS h FROM interactions WHERE trace_id='$tid'
+            UNION ALL
+            SELECT response_payload_hash FROM interactions WHERE trace_id='$tid') r
+      JOIN interaction_payloads p ON p.content_hash = r.h
+      GROUP BY p.content_kind")
+    for pair in ${EXPECT_KINDS//,/ }; do
+      kind="${pair%%=*}"; want="${pair#*=}"
+      have=$(printf '%s\n' "$kcounts" | awk -F= -v k="$kind" '$1==k{print $2}')
+      [ "${have:-0}" = "$want" ] || kmiss="$kmiss $kind=${have:-0}(want=$want)"
+    done
+  fi
   ok="FAIL"
   if [ "${nix:-0}" -ge 1 ] && [ "$roots" = "1" ] && [ "$orphans" = "0" ] \
      && [ "$nix" = "$nanchor" ] && [ "$dupanchor" = "0" ] \
-     && [ "$callee_root" = "agent:$SELF_ID" ]; then
+     && [ "$callee_root" = "agent:$SELF_ID" ] && [ -z "$kmiss" ]; then
     ok="OK"; pass=$((pass+1))
   fi
   printf '%-8s trace=%s ix=%-3s root=%s orphan=%s anchors=%-3s dup=%s callee=%-24s [%s]\n' \
     "$tok" "${tid:0:12}" "${nix:-0}" "${roots:-?}" "${orphans:-?}" "${nanchor:-?}" "${dupanchor:-?}" "${callee_root:-<none>}" "$ok"
+  if [ -n "$kmiss" ]; then echo "         kind mismatch:$kmiss"; fi
 done
 
 # distinct traces
