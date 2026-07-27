@@ -101,7 +101,8 @@ kubectl rollout status deploy/<k8s-name> -n team1
   `MARVIN_AGENT_MODEL`. Use any **non-placeholder** API key (`dummy` is rejected
   by some apps for non-localhost hosts).
 - `OUTBOUND_PORTS_EXCLUDE=<port>` only if the app runs its OWN OTLP exporter you
-  want to keep (rare — the shim already exports nothing).
+  want to keep (rare — the shim already exports nothing; see "What happens to
+  the app's own telemetry" below).
 - For a **cross-service** chain, deploy the downstream tool FIRST (same recipe,
   `KAGENTI_TYPE=tool`), then point the agent's `MCP_URL` at its in-cluster
   Service (`http://<tool>.team1.svc.cluster.local:<port>/mcp`).
@@ -126,6 +127,30 @@ listener — DESIGN §10.7.)
 
 ---
 
+## What happens to the app's own telemetry
+
+Nothing — by design (do no harm). `--traces_exporter none` silences only the
+shim's own auto-instrumentation: the shim never sets
+`OTEL_EXPORTER_OTLP_ENDPOINT`, so the SDK it bootstraps has nowhere to send —
+while an app that configures its own exporter in code keeps exporting. Kagenti
+apps gate that exporter on `OTEL_EXPORTER_OTLP_ENDPOINT` (the platform injects
+it into every deployed agent via the backend's `DEFAULT_ENV_VARS`) —
+weather-service under the sidecar still ships its 78 app spans per trace, live
+proof.
+
+To **keep** an app's own export when deploying with `attach-lineage.sh`, add
+both of:
+```bash
+ENV_VARS='... OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:<port>' \
+OUTBOUND_PORTS_EXCLUDE=<export port> \
+```
+— the endpoint re-supplies what the platform would have injected, and the port
+exclusion routes export traffic past the proxy so it flows untouched (and isn't
+observed as a lineage hop). Live pattern: weather-service excludes its export
+port `8335` (`lineage-sidecar/weather-service-sidecar-patch.yaml` in the
+umbrella workspace). The shim itself stays propagation-only — no exporter
+packages, no export modes.
+
 ## Troubleshooting (all seen in practice — DESIGN §10.10)
 
 | Symptom | Cause → fix |
@@ -136,7 +161,7 @@ listener — DESIGN §10.7.)
 | Inbound captured but **zero outbound LLM hops** | The app's LLM call is failing *before* the HTTP request (e.g. an upstream framework/version bug). Check `kubectl logs … -c agent`; fix the app's deps (a per-app image overlay), not the shim. (Contact_extractor: pin `pydantic-ai==1.20.0`.) |
 | Framework rejects the Ollama model name (strict allowlist) | Alias the model in Ollama to an accepted name: `ollama cp qwen2.5:7b <allowed-name>`, then point the app at it. (Marvin.) |
 | Tool pod won't start | Some tools require env to boot (slack_tool: `SLACK_BOT_TOKEN`; wiki: `JWT_SECRET_KEY`). Pass a (possibly fake) value. |
-| DG shows a duplicate `agent:(,authbridge)` entity / app spans polluting | Not an issue with this method: `--traces_exporter none` means the app exports nothing, so DG is sidecar-only (verified on the already-instrumented #5). Don't set `OTEL_EXPORTER_OTLP_ENDPOINT`. |
+| DG shows a duplicate `agent:(,authbridge)` entity / app spans polluting | Not an issue with this method: `--traces_exporter none` means the app exports nothing, so DG is sidecar-only (verified on the already-instrumented #5). Don't set `OTEL_EXPORTER_OTLP_ENDPOINT` — unless deliberately keeping app-owned export (see above). |
 
 ## Environment gotchas (macOS/podman/zsh)
 

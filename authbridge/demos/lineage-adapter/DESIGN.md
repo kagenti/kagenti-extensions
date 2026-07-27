@@ -98,6 +98,23 @@ being the documented git/CLI exceptions in §4).
 
 Same artifact solves both, and needs no OTEL knowledge from the app developer.
 
+### 3a. What happens to the app's own telemetry
+
+Nothing — the do-no-harm invariant. **`--traces_exporter none` silences only
+the shim's own auto-instrumentation; app-owned export is untouched.** The
+mechanism: the shim never sets `OTEL_EXPORTER_OTLP_ENDPOINT`, so
+instrumentation riding the shim-bootstrapped SDK has nowhere to send (§3's
+pollution case) — while an app that configures its **own** exporter in code
+keeps exporting exactly as before. Kagenti apps gate that exporter on
+`OTEL_EXPORTER_OTLP_ENDPOINT`, which the platform injects into every agent it
+deploys (kagenti backend `DEFAULT_ENV_VARS`); weather-service under the
+sidecar still ships its 78 app spans per trace — the live proof. Keeping such
+export flowing takes one routing step — `OUTBOUND_PORTS_EXCLUDE` on the export
+port — recipe in `RUNBOOK.md`. And by decision the shim stays
+**propagation-only**: no APP_TELEMETRY modes, no bundled exporters, no export
+management. Whether an app exports is the app's (and the platform env's)
+business; the shim guarantees only that it does not interfere.
+
 ## 4. Precondition and exceptions
 
 **Envelope:** the app uses a mainstream Python HTTP server (ASGI/Starlette/FastAPI)

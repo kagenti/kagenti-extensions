@@ -27,7 +27,8 @@
 #                      (default 'server'). Check the app image's Dockerfile CMD,
 #                      dropping any leading `uv run --no-sync`.
 #   ENV_VARS           space-separated KEY=VALUE app env (LLM_* etc). Values must
-#                      not contain spaces (fine for our URLs/models).
+#                      not contain spaces (fine for our URLs/models). May include
+#                      OTEL_SERVICE_NAME to override the default (SELF_ID).
 #   OUTBOUND_PORTS_EXCLUDE  iptables outbound excludes (default ''). Set to an
 #                      app's OWN OTLP export port (e.g. 8335/4318) for an app that
 #                      already exports spans, so that export keeps flowing
@@ -68,7 +69,6 @@ env_block=$(cat <<EOF
             - { name: OTEL_METRICS_EXPORTER, value: "none" }
             - { name: OTEL_LOGS_EXPORTER,    value: "none" }
             - { name: OTEL_PROPAGATORS,      value: "tracecontext,baggage" }
-            - { name: OTEL_SERVICE_NAME,     value: "${SELF_ID}" }
             - { name: PORT, value: "${APP_PORT}" }
             - { name: HOST, value: "0.0.0.0" }
             # HOME=/tmp + UV_NO_CACHE: uv run --no-sync execs from the existing
@@ -79,6 +79,13 @@ env_block=$(cat <<EOF
             - { name: UV_NO_CACHE, value: "1" }
 EOF
 )
+# OTEL_SERVICE_NAME defaults to SELF_ID; skip the default when the caller
+# supplies one via ENV_VARS so the caller's value wins (no duplicate entry).
+case " $ENV_VARS" in
+  *" OTEL_SERVICE_NAME="*) ;;
+  *) env_block="${env_block}
+            - { name: OTEL_SERVICE_NAME,     value: \"${SELF_ID}\" }" ;;
+esac
 for kv in $ENV_VARS; do
   k="${kv%%=*}"; v="${kv#*=}"
   env_block="${env_block}
