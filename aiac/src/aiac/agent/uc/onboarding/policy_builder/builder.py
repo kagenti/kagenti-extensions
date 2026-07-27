@@ -10,8 +10,10 @@ Orchestrator/Controller make the single ``compute_and_apply`` (PCE) call afterwa
 
 IdP access is via the **idp-library** ``Configuration`` (the ``_config`` seam), never the
 IdP Configuration Service directly. The focus service is resolved from ``get_services()``
-by ``serviceId`` (the same identity the PCE catalogs on), so its own roles/scopes are
-id-bearing ``Role``/``Scope`` usable as PRB inputs and flattenable.
+by ``id`` (the Keycloak internal client UUID the ``/apply/service/{id}`` route and
+``Trigger.entity_id`` carry — **not** ``serviceId``/clientId, which may be a slash-bearing
+SPIFFE URI), so its own roles/scopes are id-bearing ``Role``/``Scope`` usable as PRB inputs
+and flattenable.
 
 Candidates are excluded/included by **ownership** (role id / ``scope.serviceId``), never by
 name: the focus service's own ``aiac.managed`` roles/scopes are never candidates; other

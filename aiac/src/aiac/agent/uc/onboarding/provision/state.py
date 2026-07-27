@@ -18,7 +18,7 @@ class Trigger(BaseModel):
 class OnboardingProvisionState(BaseModel):
     trigger: Trigger
 
-    service_id: str | None = None          # Keycloak client_id = trigger.entity_id
+    service_id: str | None = None          # Keycloak internal client UUID (Service.id) = trigger.entity_id (not clientId)
     namespace: str | None = None           # from client.name split in classify_service
     workload_name: str | None = None       # from client.name split in classify_service
     service_type: ServiceType | None = None

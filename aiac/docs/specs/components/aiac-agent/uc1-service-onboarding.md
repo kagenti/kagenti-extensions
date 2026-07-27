@@ -54,7 +54,7 @@ flowchart TD
 
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
-2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-resolves the focus service from the IdP catalog by `service_id` (Provision has already persisted its roles/scopes), so it needs only the id, not the `ServiceProvision`.
+2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-resolves the focus service from the IdP catalog by its internal client UUID (`service_id`; Provision has already persisted its roles/scopes), so it needs only the id, not the `ServiceProvision`.
 3. Return `(list[PolicyRule], override=False)` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
@@ -82,7 +82,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
 ### Nodes
 
 - **`classify_service`**: resolves identity + determines service type from the operator's authoritative `kagenti.io/type` label (values `agent`/`tool`) — **not** from the `entity_id` format.
-  1. Store `service_id = trigger.entity_id` (Keycloak `client_id`).
+  1. Store `service_id = trigger.entity_id` (the Keycloak **internal client UUID** — `Service.id` — **not** the `clientId`/`serviceId`). The `/apply/service/{service_id}` route and every downstream lookup (`get_service` → `admin.get_client`, and the builder's focus resolution) are keyed on this UUID because a `clientId` can be a slash-bearing SPIFFE URI that a single path segment cannot carry.
   2. Resolve identity: call `get_service(service_id)` from `aiac.idp.configuration.api` → `client.name`, which the kagenti-operator sets to `"{namespace}/{workload_name}"` for every workload (agents and tools, SPIRE-enabled or not). Split on the first `/` → store `namespace` and `workload_name`. `502` if `client.name` has no `/` (namespace unrecoverable).
   3. LIST pods in `namespace`; select the pod owned by `workload_name` via `ownerReferences` (Deployment → ReplicaSet name prefix, or `StatefulSet`/`Sandbox` name match). `502` on Kubernetes API failure or no matching pod.
   4. Read the `kagenti.io/type` label on that pod and normalize it to a `ServiceType`
@@ -93,7 +93,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
      - Absent or any other value (normalization raises `ValueError`) → `502` (inconsistent deployment).
 
   > K8s access: `list` on `pods` in the target namespace (both paths).
-  > `kagenti.io/type` is authoritative — applied by the kagenti-operator (via the AgentRuntime CR) and propagated to pod labels; it is the operator's own agent/tool discriminator (`SkipReason`, kagenti-operator `internal/clientreg/names.go`). The operator only registers a Keycloak client for a workload that already carries this label, so it is effectively guaranteed for operator-registered clients; a missing/invalid value still fails loud (`502`, naming the workload + label). The `entity_id` format (SPIFFE vs plain) reflects whether SPIRE is enabled, **not** the service type, so it is not used for classification.
+  > `kagenti.io/type` is authoritative — applied by the kagenti-operator (via the AgentRuntime CR) and propagated to pod labels; it is the operator's own agent/tool discriminator (`SkipReason`, kagenti-operator `internal/clientreg/names.go`). The operator only registers a Keycloak client for a workload that already carries this label, so it is effectively guaranteed for operator-registered clients; a missing/invalid value still fails loud (`502`, naming the workload + label). The service's `clientId` format (SPIFFE vs plain) reflects whether SPIRE is enabled, **not** the service type, so it is not used for classification (and is why `service_id`/`entity_id` is the slash-free internal UUID, not the clientId).
 
 - **`analyze_agent`**: non-LLM node; reads AgentCard CR.
   1. LIST `AgentCard` CRs (`agent.kagenti.dev/v1alpha1`) in `namespace`; find the one whose
@@ -147,7 +147,7 @@ Extends `BaseAgentState` with:
 
 | Field | Type | Description |
 |---|---|---|
-| `service_id` | `str \| None` | Keycloak `client_id` = `trigger.entity_id` |
+| `service_id` | `str \| None` | Keycloak **internal client UUID** (`Service.id`) = `trigger.entity_id` — not the `clientId` |
 | `namespace` | `str \| None` | From the `client.name` split in `classify_service` (agents and tools) |
 | `workload_name` | `str \| None` | From the `client.name` split in `classify_service` (agents and tools) |
 | `service_type` | `ServiceType \| None` | `agent` or `tool`; routing field |
@@ -200,7 +200,7 @@ class ServiceProvision(BaseModel):
 **Why `service_id`, not `ServiceProvision`:** own roles/scopes must be id-bearing `Role`/`Scope` — `flatten_role` needs a `Role` (with `childRoles`) and the PRB builds `PolicyRule(role=Role, scope=Scope)`. The Provision-time `RoleDefinition`/`ScopeDefinition` carry only name+description (no Keycloak id), so they cannot be passed to the PRB. Provision has already persisted these entities, so resolving the focus service from `get_services()` returns them with ids and correct `kind`.
 
 **Terminology — own vs candidate (used throughout this section):**
-- **Own roles / own scopes** — the focus service's `aiac.managed` roles/scopes, found on the `Service` object returned by `get_services()` (matched by `serviceId == service_id`). These are exactly the entities Service Provision wrote.
+- **Own roles / own scopes** — the focus service's `aiac.managed` roles/scopes, found on the `Service` object returned by `get_services()` (matched by `id == service_id`, the internal client UUID). These are exactly the entities Service Provision wrote.
 - **Candidate roles** — every role eligible to be mapped onto an own scope: other services' `aiac.managed` roles (`kind=Agent`) plus membership-derived user roles (`kind=User`; realm roles held by at least one user, composite-expanded, and not owned by any service). Never includes the focus service's own roles.
 - **Other scopes** — every other service's `aiac.managed` scope (`scope.serviceId != service_id`). Never includes the focus service's own scopes.
 
@@ -217,7 +217,7 @@ Neither guard alone is sufficient — ownership-based exclusion keeps own entiti
 
 1. Receive `service_id: str` + `service_type: ServiceType` from the Orchestrator.
 2. Fetch `services = get_services()`, `all_scopes = get_scopes()`, `subjects = get_subjects()` from `aiac.idp.configuration.api`.
-3. Resolve the focus service: `focus = next(s for s in services if s.serviceId == service_id)` (the same identity the PCE catalogs its services by); a missing match is a clear `404`, not `StopIteration`.
+3. Resolve the focus service: `focus = next(s for s in services if s.id == service_id)` (the internal client UUID carried by the route/`Trigger.entity_id` — **not** `serviceId`/clientId, which may be a slash-bearing SPIFFE URI); a missing match is a clear `404`, not `StopIteration`.
 4. Compute candidate sets, all by ownership:
    - **own roles/scopes** — `focus.roles`/`focus.scopes` filtered to `aiac.managed` (drops Keycloak's built-in default client scopes, e.g. `profile`, which are stamped with this service's `serviceId` but are not `aiac.managed`).
    - **other-agent roles** — `aiac.managed` roles from every *other* service's `roles` (`kind=Agent`, ownership-excluded by `serviceId != focus.serviceId`).
