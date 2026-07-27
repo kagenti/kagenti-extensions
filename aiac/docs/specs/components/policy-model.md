@@ -138,7 +138,7 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 
 **Outbound rule semantics:** this agent acting as realm role `role` is permitted to request the target scope `scope`. The PDP Policy Writer consumes `outbound_rules` as an agent-role → target-scope map; its outbound gate requires both the subject and the agent to be authorized.
 
-**Outbound subject rule semantics:** `outbound_subject_rules` holds `(user role, tool scope)` pairs — the outbound subject gate; a user holding `role` may reach a tool exposing `scope`. It is the outbound counterpart of `inbound_rules` (which pairs a user role with an *agent* scope): where `inbound_rules` answers "may this user call the agent?", `outbound_subject_rules` answers "may this user reach the tool the agent targets?". The PDP Policy Writer groups it into `outbound_subject_role_scopes` (user role → tool-scope names) and matches against `target_scopes[input.target]`, not against `agent_scopes`.
+**Outbound subject rule semantics:** `outbound_subject_rules` holds `(user role, tool scope)` pairs — the outbound subject gate; a user holding `role` may reach a tool exposing `scope`. It is the outbound counterpart of `inbound_rules` (which pairs a user role with an *agent* scope): where `inbound_rules` answers "may this user call the agent?", `outbound_subject_rules` answers "may this user reach the tool the agent targets?". The PDP Policy Writer groups it into `subject_role_scopes` (user role → tool-scope names) and matches against `target_scopes[input.target]`, not against `agent_scopes`.
 
 #### `PolicyModel`
 

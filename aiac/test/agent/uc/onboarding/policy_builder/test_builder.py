@@ -4,11 +4,14 @@ The idp-library `Configuration` is mocked via the `_config` seam, and the PRB en
 points (`build_scope_rules` / `build_role_rules`) are patched on the builder module —
 no live services, no LLM. The sub-agent is deterministic and applies nothing.
 
-Candidates are sourced from `get_services()` / `get_scopes()` / `get_subjects()` — the
-same worldview as the Policy Computation Engine — and excluded/included by
-**ownership** (role id / `scope.serviceId`), never by name. Fixtures below always give
-non-focus services distinct `serviceId`s and mark AIAC-provisioned roles/scopes with the
-`aiac.managed` attribute, so ownership-based routing is exercised for real.
+Candidates are sourced from `get_services()` / `get_subjects()` — the same worldview as
+the Policy Computation Engine — and excluded/included by **ownership** (role id /
+`scope.serviceId`), never by name. Both roles AND scopes come from `get_services()`, so
+every scope carries its owning `serviceId` (the SPM routing key); the global `get_scopes()`
+catalog is not a candidate source (it returns scopes with an empty `serviceId`). Fixtures
+below always give non-focus services distinct `serviceId`s and mark AIAC-provisioned
+roles/scopes with the `aiac.managed` attribute, so ownership-based routing is exercised for
+real.
 """
 
 from unittest.mock import MagicMock, patch
@@ -80,16 +83,16 @@ def _invoke(
     scope_rules=None,
     role_rules=None,
     get_services_exc=None,
-    get_scopes_exc=None,
     get_subjects_exc=None,
 ):
     """Run ServicePolicyBuilder.build with all IdP + PRB calls mocked.
 
-    `services` / `all_scopes` / `subjects` back `get_services()` / `get_scopes()` /
-    `get_subjects()` respectively. `scope_rules` / `role_rules` are optional
-    side_effect callables; default to returning an empty list so calls are counted
-    without inventing rule content. `get_*_exc` injects an IdP-read failure on the
-    corresponding call.
+    `services` / `subjects` back `get_services()` / `get_subjects()` respectively. Both
+    candidate roles and scopes are sourced from `get_services()`; `all_scopes` is retained
+    only to describe the global scope catalog in each fixture and is not consulted by the
+    builder. `scope_rules` / `role_rules` are optional side_effect callables; default to
+    returning an empty list so calls are counted without inventing rule content. `get_*_exc`
+    injects an IdP-read failure on the corresponding call.
     """
     with (
         patch.object(builder, "_config") as cfg,
@@ -101,10 +104,6 @@ def _invoke(
             conf.get_services.side_effect = get_services_exc
         else:
             conf.get_services.return_value = services
-        if get_scopes_exc is not None:
-            conf.get_scopes.side_effect = get_scopes_exc
-        else:
-            conf.get_scopes.return_value = all_scopes
         if get_subjects_exc is not None:
             conf.get_subjects.side_effect = get_subjects_exc
         else:
@@ -456,18 +455,6 @@ class TestErrors:
                 all_scopes=[],
                 subjects=[],
                 get_services_exc=RuntimeError("HTTP 503"),
-            )
-        assert ei.value.status_code == 502
-
-    def test_get_scopes_unavailable_is_502(self):
-        focus = _service(FOCUS_ID)
-        with pytest.raises(HTTPException) as ei:
-            _invoke(
-                ServiceType.TOOL,
-                services=[focus],
-                all_scopes=[],
-                subjects=[],
-                get_scopes_exc=RuntimeError("HTTP 500"),
             )
         assert ei.value.status_code == 502
 

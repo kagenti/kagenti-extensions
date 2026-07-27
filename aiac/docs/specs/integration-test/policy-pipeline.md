@@ -168,7 +168,7 @@ Alongside the assertions, each variant leaves exactly **two** files on disk in i
   denied inbound.)
 - `github_agent.outbound.rego` — package `authz.github_agent.outbound`; `allow if { subject_ok;
   target_ok }`. Its **`subject_ok`** is the new **user→tool** gate (mapping (b), grouped from
-  `outbound_subject_rules` into `outbound_subject_role_scopes`, matched against
+  `outbound_subject_rules` into `subject_role_scopes`, matched against
   `target_scopes[input.target]`); its **`target_ok`** is the **agent→tool** gate (mapping (c), over
   `agent_roles` × `agent_role_scopes`). `agent_roles` and `target_scopes` are populated.
 

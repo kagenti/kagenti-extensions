@@ -77,7 +77,8 @@ class TestEndToEnd:
 
         assert _get(result, "service_type") is ServiceType.AGENT
         provision = _get(result, "service_provision")
-        assert [r.name for r in provision.roles] == ["weather.agent"]
+        # one per-skill operator role, mirroring the scope (no generic weather.agent role)
+        assert [r.name for r in provision.roles] == ["weather.forecast"]
         assert [s.name for s in provision.scopes] == ["weather.forecast"]
         cfg.return_value.set_service_type.assert_called_once()
 

@@ -54,7 +54,6 @@ class ServicePolicyBuilder:
 
         try:
             services = config.get_services()
-            all_scopes = config.get_scopes()
             subjects = config.get_subjects()
         except Exception as e:
             raise HTTPException(
@@ -94,7 +93,18 @@ class ServicePolicyBuilder:
                         user_roles_by_id[member.id] = member
         user_roles = list(user_roles_by_id.values())
 
-        other_scopes = [s for s in all_scopes if s.aiac_managed and s.serviceId != focus.serviceId]
+        # Other services' aiac.managed scopes, sourced from get_services() (mirroring
+        # other_agent_roles) so each scope carries its owning serviceId — the SPM routing key the
+        # PCE needs. The global get_scopes() endpoint returns scopes with an empty serviceId, which
+        # would both (a) fail to exclude the focus's own scopes (``"" != focus.serviceId`` is always
+        # true) and (b) route any resulting rule to ``SPM("")``, a 422 dead-end.
+        other_scopes = [
+            s
+            for other in services
+            if other.serviceId != focus.serviceId
+            for s in other.scopes
+            if s.aiac_managed
+        ]
 
         candidate_roles = _flatten_dedup(user_roles + other_agent_roles)
 

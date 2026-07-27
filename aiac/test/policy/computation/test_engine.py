@@ -442,6 +442,53 @@ def test_shared_user_role_creates_no_false_outbound_edge():
 
 
 # --------------------------------------------------------------------------- #
+# Cycle 13b — UC-1-shaped multi-role capability match: an agent owning TWO         #
+# operator roles reaching four tool scopes, with user edges on a subset, derives   #
+# BOTH outbound gates — the full agent->tool outbound_rules + target_scopes, and    #
+# the user->tool outbound_subject gate. This is what populates the per-scope AND.   #
+# --------------------------------------------------------------------------- #
+def test_multi_role_capability_match_populates_both_outbound_gates():
+    src_op = _agent_role("r-src-op", "source_operations", owner="github-agent")
+    issue_op = _agent_role("r-issue-op", "issue_operations", owner="github-agent")
+    developer = _user_role("r-developer", "developer", users=["dev-user"])
+    tester = _user_role("r-tester", "tester", users=["test-user"])
+    sr = _scope("s-source-read", service_id="github-tool")
+    sw = _scope("s-source-write", service_id="github-tool")
+    ir = _scope("s-issues-read", service_id="github-tool")
+    iw = _scope("s-issues-write", service_id="github-tool")
+    catalog = [
+        _agent("github-agent", roles=[src_op, issue_op],
+               scopes=[_scope("s-agent-inbound", service_id="github-agent")]),
+        _tool("github-tool", scopes=[sr, sw, ir, iw]),
+    ]
+    rules = [
+        # capability gate: each operator role -> its domain's tool scopes (capability-match)
+        _rule(src_op, sr), _rule(src_op, sw),
+        _rule(issue_op, ir), _rule(issue_op, iw),
+        # subject gate: user roles -> a subset of the tool scopes
+        _rule(developer, sr), _rule(developer, sw), _rule(developer, ir),
+        _rule(tester, ir), _rule(tester, iw),
+    ]
+    store = run_engine(rules, catalog=catalog)
+
+    apm = store.pushed_agent("github-agent")
+    # capability gate: all four agent->tool edges + target_scopes covering all four scopes
+    assert _pairs(apm.outbound_rules) == sorted([
+        ("r-src-op", "s-source-read"), ("r-src-op", "s-source-write"),
+        ("r-issue-op", "s-issues-read"), ("r-issue-op", "s-issues-write"),
+    ])
+    assert {k: sorted(s.id for s in v) for k, v in apm.target_scopes.items()} == {
+        "github-tool": ["s-issues-read", "s-issues-write", "s-source-read", "s-source-write"],
+    }
+    # subject gate: the user->tool grant set (developer: source rw + issues read; tester: issues rw)
+    assert _pairs(apm.outbound_subject_rules) == sorted([
+        ("r-developer", "s-source-read"), ("r-developer", "s-source-write"),
+        ("r-developer", "s-issues-read"),
+        ("r-tester", "s-issues-read"), ("r-tester", "s-issues-write"),
+    ])
+
+
+# --------------------------------------------------------------------------- #
 # Cycle 14 — affected set from the batch: an agent unrelated to the batch is      #
 # never derived or upserted, even though it exists in the catalog/store.          #
 # --------------------------------------------------------------------------- #

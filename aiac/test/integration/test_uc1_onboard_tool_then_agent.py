@@ -173,12 +173,17 @@ def onboarded() -> dict:
 
 
 def test_agent_role_and_scopes_provisioned(onboarded: dict) -> None:
-    """Keycloak holds the agent's realm role + the two AgentCard scopes with their descriptions."""
+    """Keycloak holds the agent's per-skill operator roles + the two AgentCard scopes, all with
+    their descriptions."""
     admin = onboarded["admin"]
     admin.change_current_realm(TEST_REALM)
 
-    role = admin.get_realm_role(scn.AGENT_ROLE)
-    assert role and role.get("name") == scn.AGENT_ROLE, f"missing realm role {scn.AGENT_ROLE!r}"
+    for name, description in scn.AGENT_ROLES.items():
+        role = admin.get_realm_role(name)
+        assert role and role.get("name") == name, f"missing realm role {name!r}"
+        assert (role.get("description") or "") == description, (
+            f"agent role {name!r} description mismatch: {role.get('description')!r} != {description!r}"
+        )
 
     scopes = {s["name"]: (s.get("description") or "") for s in admin.get_client_scopes()}
     for name, description in scn.AGENT_SCOPES.items():

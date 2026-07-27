@@ -136,10 +136,12 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     The operator fetches the agent's A2A card and syncs it onto the CR's ``status.card``; each skill
     there carries a machine ``id`` (a stable identifier, e.g. ``source_operations``) plus a display
     ``name`` (which may contain spaces). Scope names are built from the skill ``id`` so they are
-    usable Keycloak scope names. Falls back to a default access scope when there is no AgentCard CR
-    (legacy deployments) or the CR has no synced skills yet."""
+    usable Keycloak scope names, and each skill also gets a **per-skill operator role** mirroring the
+    scope (same name + description): the role's description is what the PRB capability-match reads to
+    confine and grant the agent's outbound access on a domain basis. Falls back to a default access
+    scope + a default operator role when there is no AgentCard CR (legacy deployments) or the CR has
+    no synced skills yet."""
     namespace, workload = state.namespace, state.workload_name
-    role = RoleDefinition(name=f"{workload}.agent", description="Agent role")
 
     try:
         resp = list_agentcards(namespace)
@@ -157,7 +159,7 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     skills = (((card or {}).get("status") or {}).get("card") or {}).get("skills", [])
     if not skills:
         provision = ServiceProvision(
-            roles=[role],
+            roles=[RoleDefinition(name=f"{workload}.access", description="Default access scope")],
             scopes=[ScopeDefinition(name=f"{workload}.access", description="Default access scope")],
             reasoning=(
                 "partial: no AgentCard found, default scope assigned"
@@ -167,14 +169,23 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
         )
         return {"service_provision": provision}
 
+    # One operator role per skill, mirroring the scope (same name + description). The role name ==
+    # scope name is fine — a realm role and a client scope are distinct Keycloak objects. The role's
+    # description drives the PRB capability-match (see generic_policy.md).
     scopes = [
         ScopeDefinition(
             name=f"{workload}.{s.get('id') or s['name']}", description=s.get("description", "")
         )
         for s in skills
     ]
+    roles = [
+        RoleDefinition(
+            name=f"{workload}.{s.get('id') or s['name']}", description=s.get("description", "")
+        )
+        for s in skills
+    ]
     provision = ServiceProvision(
-        roles=[role],
+        roles=roles,
         scopes=scopes,
         reasoning=f"derived from AgentCard: {len(skills)} skills",
     )

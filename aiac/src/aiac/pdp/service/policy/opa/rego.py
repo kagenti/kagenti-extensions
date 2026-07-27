@@ -115,13 +115,16 @@ def generate_inbound_rego(model: AgentPolicyModel) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-# The outbound subject gate is user->tool (distinct from inbound's user->agent):
-# the subject holds a role that grants at least one tool scope the target accepts.
+# The outbound decision is a per-scope two-gate AND, both keyed on the requested scope
+# ``input.function_name`` (user->target, where a target is a tool or another agent):
+#   subject gate  — the user (subject) is granted the requested scope
+#   capability gate — the agent reaches the requested scope on the requested target
+# Testing the SAME function_name in both gates makes ``allow`` a genuine per-scope intersection:
+# an A/B mismatch (user reaches A, agent reaches B) denies both A and B.
 _OUTBOUND_SUBJECT_OK = (
     "subject_ok if {\n"
     "    some role in subject_roles[input.subject]\n"
-    "    some scope in outbound_subject_role_scopes[role]\n"
-    "    scope in target_scopes[input.target]\n"
+    "    input.function_name in subject_role_scopes[role]\n"
     "}"
 )
 
@@ -129,11 +132,18 @@ _OUTBOUND_SUBJECT_OK = (
 def generate_outbound_rego(model: AgentPolicyModel) -> str:
     """Render the ``authz.{slug}.outbound`` Rego package for an agent.
 
-    Input is ``{subject, target}`` (ids only). Both must pass: the subject
-    holds a role granting >=1 tool scope the ``target`` accepts (user->tool, via
-    ``outbound_subject_role_scopes`` from ``outbound_subject_rules``), AND the
-    agent (via ``agent_roles``) is permitted >=1 scope the ``target`` accepts.
-    ``target_scopes`` is used directly (target id -> scopes) -- no inversion.
+    Input is ``{subject, target, function_name}`` (ids only). ``function_name`` is the
+    requested target scope. ``allow`` is a **per-scope AND** on that scope: the subject
+    gate passes iff the subject holds a role granted ``function_name`` (user->target, via
+    ``subject_role_scopes`` from ``outbound_subject_rules``), AND the capability
+    gate passes iff the agent reaches ``function_name`` on the requested ``target``
+    (``target_scopes[input.target]``, built from the agent's outbound rules). Because both
+    gates test the *same* ``function_name``, ``allow`` is a genuine per-scope intersection.
+
+    ``target_scopes`` is used directly (target id -> scopes) -- no inversion. A target is a
+    tool the agent calls or another agent it calls. ``agent_roles`` / ``agent_role_scopes``
+    are still emitted (informational / debugging) but are not referenced by ``allow`` --
+    ``target_scopes[input.target]`` already *is* the per-scope capability gate.
     """
     slug = slugify(model.agent_id)
     parts = [
@@ -141,16 +151,14 @@ def generate_outbound_rego(model: AgentPolicyModel) -> str:
         _render_list("agent_roles", _names(model.agent_roles)),
         _render_map("subject_roles", _name_map(model.subject_roles)),
         _render_map(
-            "outbound_subject_role_scopes", _group_rules(model.outbound_subject_rules)
+            "subject_role_scopes", _group_rules(model.outbound_subject_rules)
         ),
         _render_map("agent_role_scopes", _group_rules(model.outbound_rules)),
         _render_map("target_scopes", _name_map(model.target_scopes)),
         _OUTBOUND_SUBJECT_OK,
         (
             "target_ok if {\n"
-            "    some role in agent_roles\n"
-            "    some scope in agent_role_scopes[role]\n"
-            "    scope in target_scopes[input.target]\n"
+            "    input.function_name in target_scopes[input.target]\n"
             "}"
         ),
         "default allow := false\nallow if { subject_ok; target_ok }",

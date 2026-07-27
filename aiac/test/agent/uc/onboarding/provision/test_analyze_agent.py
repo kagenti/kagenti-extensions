@@ -39,19 +39,24 @@ def _run(items=None, list_exc=None):
 
 
 class TestAnalyzeAgentFound:
-    def test_one_agent_role_and_one_scope_per_skill(self):
+    def test_one_operator_role_and_one_scope_per_skill(self):
         # Scope names come from each skill's machine ``id`` — not its display ``name`` (which may
-        # contain spaces) — so they are stable identifiers usable as Keycloak scope names.
+        # contain spaces) — so they are stable identifiers usable as Keycloak scope names. Each skill
+        # also yields a per-skill operator role mirroring the scope (same name + description); the
+        # role's description drives the PRB capability-match. No generic ``{workload}.agent`` role.
         skills = [
             {"id": "forecast", "name": "Weather forecast operations", "description": "Get forecast"},
             {"id": "history", "name": "Historical data operations", "description": "Historical data"},
         ]
         provision = _run(items=[_card(skills=skills)])["service_provision"]
 
-        assert [r.name for r in provision.roles] == [f"{WORKLOAD}.agent"]
-        assert provision.roles[0].description == "Agent role"
+        assert [r.name for r in provision.roles] == [f"{WORKLOAD}.forecast", f"{WORKLOAD}.history"]
+        assert provision.roles[0].description == "Get forecast"
         assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.forecast", f"{WORKLOAD}.history"]
         assert provision.scopes[0].description == "Get forecast"
+        # role name == scope name per skill (distinct Keycloak objects: realm role vs client scope)
+        assert [r.name for r in provision.roles] == [s.name for s in provision.scopes]
+        assert f"{WORKLOAD}.agent" not in [r.name for r in provision.roles]
         assert "derived from AgentCard: 2 skills" == provision.reasoning
 
 
@@ -74,7 +79,9 @@ class TestAnalyzeAgentLegacyFallback:
     def test_no_agentcard_yields_default_access_scope_and_partial_reasoning(self):
         provision = _run(items=[])["service_provision"]
 
-        assert [r.name for r in provision.roles] == [f"{WORKLOAD}.agent"]
+        # No-skills fallback: a default operator role mirrors the default access scope.
+        assert [r.name for r in provision.roles] == [f"{WORKLOAD}.access"]
+        assert provision.roles[0].description == "Default access scope"
         assert [s.name for s in provision.scopes] == [f"{WORKLOAD}.access"]
         assert provision.scopes[0].description == "Default access scope"
         assert "partial: no AgentCard found" in provision.reasoning

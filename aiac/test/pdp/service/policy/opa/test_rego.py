@@ -1,5 +1,13 @@
 """Unit tests for aiac.pdp.service.policy.opa.rego (ID-only model)."""
 
+import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+import pytest
+
 from aiac.idp.configuration.models import Role, Scope
 from aiac.pdp.service.policy.opa.rego import (
     generate_inbound_rego,
@@ -212,21 +220,21 @@ def test_outbound_target_scopes_rendered_directly():
     assert "scope_targets" not in rego
 
 
-def test_outbound_subject_role_scopes_grouped_from_outbound_subject_rules():
+def test_subject_role_scopes_grouped_from_outbound_subject_rules():
     rego = generate_outbound_rego(_github_agent())
-    assert "outbound_subject_role_scopes := {" in rego
+    assert "subject_role_scopes := {" in rego
     assert '"developer": ["source-read", "source-write", "issues-read"]' in rego
     assert '"tester": ["issues-read", "issues-write"]' in rego
 
 
 def test_outbound_subject_ok_matches_target_scopes_not_agent_scopes():
     rego = generate_outbound_rego(_github_agent())
-    # The outbound subject gate is user->tool: it reads outbound_subject_role_scopes
-    # and matches against the tool's scopes, not the agent's own scopes.
+    # The outbound subject gate is user->target, keyed on the requested scope: it reads
+    # subject_role_scopes and tests input.function_name directly (per-scope AND),
+    # not the agent's own scopes.
     assert "subject_ok if {" in rego
     assert "some role in subject_roles[input.subject]" in rego
-    assert "some scope in outbound_subject_role_scopes[role]" in rego
-    assert "scope in target_scopes[input.target]" in rego
+    assert "input.function_name in subject_role_scopes[role]" in rego
     # The inbound-flavoured subject gate must NOT appear in the outbound package.
     assert "some scope in role_scopes[role]" not in rego
     assert "scope in agent_scopes" not in rego
@@ -235,19 +243,21 @@ def test_outbound_subject_ok_matches_target_scopes_not_agent_scopes():
 def test_outbound_does_not_embed_inbound_role_scopes():
     rego = generate_outbound_rego(_github_agent())
     # The inbound ``role_scopes`` map (from inbound_rules) must not leak into the
-    # outbound package. Line-anchored so it does not match outbound_subject_role_scopes.
+    # outbound package. Line-anchored so it does not match subject_role_scopes.
     assert "\nrole_scopes :=" not in rego
     assert not rego.startswith("role_scopes :=")
 
 
 def test_outbound_has_target_gate_and_allow():
     rego = generate_outbound_rego(_github_agent())
+    # The capability gate tests the requested scope against the target's scopes directly
+    # (target_scopes[input.target] IS the per-scope capability gate) — no agent_roles existential.
     assert "target_ok if {" in rego
-    assert "some role in agent_roles" in rego
-    assert "some scope in agent_role_scopes[role]" in rego
-    assert "scope in target_scopes[input.target]" in rego
+    assert "input.function_name in target_scopes[input.target]" in rego
     assert "default allow := false" in rego
     assert "allow if { subject_ok; target_ok }" in rego
+    # allow must not reference the informational agent_roles/agent_role_scopes existential.
+    assert "some role in agent_roles" not in rego
 
 
 def test_outbound_has_no_legacy_id_carrying_input():
@@ -261,8 +271,73 @@ def test_outbound_empty_model_renders_valid_empty_literals():
     rego = generate_outbound_rego(_model())
     assert "agent_roles := []" in rego
     assert "subject_roles := {}" in rego
-    assert "outbound_subject_role_scopes := {}" in rego
+    assert "subject_role_scopes := {}" in rego
     assert "agent_role_scopes := {}" in rego
     assert "target_scopes := {}" in rego
     assert "default allow := false" in rego
     assert "allow if { subject_ok; target_ok }" in rego
+
+
+# --- per-scope AND intersection semantics ---
+
+
+def _outbound_and_model() -> AgentPolicyModel:
+    """A fixture that pins the per-scope-AND intersection: the target owns {A, B, C}; the user
+    reaches {A, C} (subject gate) and the agent reaches {B, C} on the target (capability gate).
+    Only C is in both gates, so only C is allowed — A (user-only) and B (agent-only) are denied."""
+    user = _role("u-role")
+    operator = _role("op-role")
+    a, b, c = _scope("scope-a"), _scope("scope-b"), _scope("scope-c")
+    return _model(
+        agent_id="github-agent",
+        agent_roles=[operator],
+        subject_roles={"user1": [user]},
+        # target_scopes IS the capability gate: the agent reaches {B, C} on "T".
+        target_scopes={"T": [b, c]},
+        # user (subject gate) reaches {A, C}.
+        outbound_subject_rules=[PolicyRule(role=user, scope=a), PolicyRule(role=user, scope=c)],
+        # informational agent_role_scopes (not referenced by allow): the operator role reaches {B, C}.
+        outbound_rules=[PolicyRule(role=operator, scope=b), PolicyRule(role=operator, scope=c)],
+    )
+
+
+def test_outbound_per_scope_and_structural():
+    """Structural: the two gates read the same request scope from disjoint maps — the subject gate
+    grants {A, C} to the user, the capability gate grants {B, C} on the target — so allow is their
+    per-scope intersection."""
+    rego = generate_outbound_rego(_outbound_and_model())
+    assert '"u-role": ["scope-a", "scope-c"]' in rego  # subject gate: user reaches A, C
+    assert '"T": ["scope-b", "scope-c"]' in rego  # capability gate: agent reaches B, C on T
+    assert "input.function_name in subject_role_scopes[role]" in rego
+    assert "input.function_name in target_scopes[input.target]" in rego
+    assert "allow if { subject_ok; target_ok }" in rego
+
+
+@pytest.mark.skipif(not shutil.which("opa"), reason="opa binary not on PATH")
+@pytest.mark.parametrize(
+    "function_name, allowed",
+    [
+        ("scope-c", True),  # in BOTH gates -> allowed
+        ("scope-a", False),  # user-only (not in the agent's capability gate) -> denied
+        ("scope-b", False),  # agent-only (not in the user's subject gate) -> denied
+    ],
+)
+def test_outbound_per_scope_and_denies_mismatch(function_name: str, allowed: bool):
+    """Behavioural: evaluate the generated ``allow`` with ``opa eval``. The user-only scope (A) and
+    the agent-only scope (B) are both denied; only the scope in both gates (C) is allowed — pinning
+    the per-scope intersection (an A/B mismatch denies both)."""
+    rego = generate_outbound_rego(_outbound_and_model())
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "outbound.rego"
+        path.write_text(rego)
+        cmd = [
+            shutil.which("opa"), "eval", "-f", "json", "-d", str(path),
+            "--stdin-input", "data.authz.github_agent.outbound.allow",
+        ]
+        out = subprocess.run(
+            cmd,
+            input=json.dumps({"subject": "user1", "target": "T", "function_name": function_name}),
+            capture_output=True, text=True, check=True,
+        ).stdout
+        result = json.loads(out)["result"][0]["expressions"][0]["value"]
+    assert result is allowed, f"function_name={function_name!r}"

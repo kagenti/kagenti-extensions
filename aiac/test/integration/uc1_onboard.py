@@ -141,12 +141,21 @@ def expected_inbound(subject: str) -> bool:
 
 OUTBOUND_SUBJECT_GRANT_SET: set[tuple[str, str]] = set(scn.OUTBOUND_SUBJECT_PAIRS)
 
+# The agent-capability gate: the tool scopes the agent's per-skill operator roles reach (the
+# right-hand column of ``OUTBOUND_TARGET_PAIRS``). In UC-1 the agent reaches all four tool scopes,
+# so the per-scope AND reduces to the subject gate for the verdicts — but the oracle expresses the
+# AND explicitly so the two-gate decision is documented, not assumed.
+OUTBOUND_TARGET_GRANT_SET: set[str] = {fn for _, fn in scn.OUTBOUND_TARGET_PAIRS}
+
 
 def expected_outbound_with_tool(subject: str, function_name: str) -> bool:
-    """A user may reach a tool scope iff their realm role is granted it in the full user→tool gate
-    (``OUTBOUND_SUBJECT_PAIRS``) — the gate any tool onboarding fills in on the agent's model,
-    order-independently (rungs 2 & 3)."""
-    return (scn.USERS[subject], function_name) in OUTBOUND_SUBJECT_GRANT_SET
+    """A user may reach a tool scope iff **both** gates pass (per-scope AND): their realm role is
+    granted it in the user→tool subject gate (``OUTBOUND_SUBJECT_PAIRS``) **and** the agent's own
+    operator roles reach it in the capability gate (``OUTBOUND_TARGET_PAIRS``). Any tool onboarding
+    fills both gates on the agent's model, order-independently (rungs 2 & 3)."""
+    user_ok = (scn.USERS[subject], function_name) in OUTBOUND_SUBJECT_GRANT_SET
+    agent_ok = function_name in OUTBOUND_TARGET_GRANT_SET
+    return user_ok and agent_ok
 
 
 # ======================================================================================
@@ -384,11 +393,11 @@ def opa_dump(rego: Path, ref: str) -> object:
 
 
 def outbound_subject_grants(rego_dir: Path) -> set[tuple[str, str]]:
-    """User->tool grant set from the outbound Rego's ``outbound_subject_role_scopes`` map (``∅`` when
+    """User->tool grant set from the outbound Rego's ``subject_role_scopes`` map (``∅`` when
     no tool has been onboarded, the full ``OUTBOUND_SUBJECT_PAIRS`` once one has)."""
     m = opa_dump(
         rego_dir / OUTBOUND_REGO,
-        f"data.authz.{AGENT_SLUG}.outbound.outbound_subject_role_scopes",
+        f"data.authz.{AGENT_SLUG}.outbound.subject_role_scopes",
     )
     return {(role, scope) for role, scopes in (m or {}).items() for scope in scopes}
 
