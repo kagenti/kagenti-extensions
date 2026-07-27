@@ -291,7 +291,7 @@ func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pip
 		if !ok {
 			pluginNames := RegisteredPlugins()
 			if len(pluginNames) == 0 {
-				slog.Warn("No registered plugins -- Built with --tags or use `go run .` to enable")
+				slog.Warn("No registered plugins -- Build with --tags or use `go run .` to enable")
 			}
 			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
@@ -338,7 +338,7 @@ func BuildWithSPIFFE(entries []config.PluginEntry, p *spiffe.Provider, opts ...p
 		if !ok {
 			pluginNames := RegisteredPlugins()
 			if len(pluginNames) == 0 {
-				slog.Warn("No registered plugins -- Built with --tags or use `go run .` to enable")
+				slog.Warn("No registered plugins -- Build with --tags or use `go run .` to enable")
 			}
 			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}

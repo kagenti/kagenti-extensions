@@ -99,7 +99,7 @@ func main() {
 	startSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required and must be to a YAML file")
+		log.Fatal("--config is required and must point to a YAML file")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured.
@@ -121,7 +121,7 @@ func main() {
 	// instances.
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load failed to load %q: %v", *configPath, err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 	var provider *spiffe.Provider
 	if bootCfg.SPIFFE != nil {

@@ -147,7 +147,7 @@ func main() {
 	startSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required and must be to a YAML file")
+		log.Fatal("--config is required and must point to a YAML file")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The
@@ -162,7 +162,7 @@ func main() {
 	// freshly constructed plugin instances.
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load failed to load %q: %v", *configPath, err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 	// Build the SPIFFE Provider only when something actually consumes it —
 	// top-level mTLS (X509Source for the listeners) or a plugin whose identity
