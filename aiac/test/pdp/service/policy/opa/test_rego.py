@@ -188,10 +188,11 @@ def test_outbound_has_package_header_with_slug():
     assert "package authz.weather_agent.outbound" in rego
 
 
-def test_outbound_embeds_agent_roles_and_scopes_lists():
+def test_outbound_embeds_agent_roles_list():
     rego = generate_outbound_rego(_github_agent())
     assert 'agent_roles := ["source-helper", "issues-helper"]' in rego
-    assert 'agent_scopes := ["source-access", "issues-access"]' in rego
+    # agent_scopes is the inbound audience gate; the outbound package must not emit it.
+    assert "agent_scopes :=" not in rego
 
 
 def test_outbound_agent_role_scopes_grouped_from_outbound_rules():
@@ -259,7 +260,6 @@ def test_outbound_has_no_legacy_id_carrying_input():
 def test_outbound_empty_model_renders_valid_empty_literals():
     rego = generate_outbound_rego(_model())
     assert "agent_roles := []" in rego
-    assert "agent_scopes := []" in rego
     assert "subject_roles := {}" in rego
     assert "outbound_subject_role_scopes := {}" in rego
     assert "agent_role_scopes := {}" in rego

@@ -139,7 +139,6 @@ def generate_outbound_rego(model: AgentPolicyModel) -> str:
     parts = [
         f"package authz.{slug}.outbound",
         _render_list("agent_roles", _names(model.agent_roles)),
-        _render_list("agent_scopes", _names(model.agent_scopes)),
         _render_map("subject_roles", _name_map(model.subject_roles)),
         _render_map(
             "outbound_subject_role_scopes", _group_rules(model.outbound_subject_rules)

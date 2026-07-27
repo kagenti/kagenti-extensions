@@ -107,7 +107,7 @@ The generator embeds these symbols, derived from the `AgentPolicyModel`:
 |-------------|--------|-------|
 | `subject_roles` | `model.subject_roles` | subject id → `[role.name, …]` |
 | `source_roles` | `model.source_roles` | source id → `[role.name, …]` |
-| `agent_scopes` | `model.agent_scopes` | `[scope.name, …]` |
+| `agent_scopes` | `model.agent_scopes` | `[scope.name, …]` — **inbound package only** (the audience gate; outbound decisions do not consider the agent's own scopes) |
 | `agent_roles` | `model.agent_roles` | `[role.name, …]` |
 | `role_scopes` | grouped `model.inbound_rules` | role.name → `[scope.name, …]` (agent scopes granted per subject role) — **inbound package only** |
 | `outbound_subject_role_scopes` | grouped `model.outbound_subject_rules` | role.name → `[scope.name, …]` (tool scopes granted per user role) — **outbound package only** |
@@ -146,13 +146,12 @@ allow if { subject_ok; source_ok }
 
 ### Outbound package: `authz.{agent_slug}.outbound`
 
-Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target}` (IDs). The gate requires **both** the subject and the agent to pass, but the outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): the subject must hold a role granting at least one **tool** scope the `target` accepts (via `outbound_subject_role_scopes`, grouped from `outbound_subject_rules`), **and** the agent (via its own `agent_roles`) must be permitted at least one scope that the `target` accepts. Both gates match against `target_scopes[input.target]`; `target_scopes` is consumed **directly** (target id → scopes) — it is not inverted. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here.
+Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target}` (IDs). The gate requires **both** the subject and the agent to pass, but the outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): the subject must hold a role granting at least one **tool** scope the `target` accepts (via `outbound_subject_role_scopes`, grouped from `outbound_subject_rules`), **and** the agent (via its own `agent_roles`) must be permitted at least one scope that the `target` accepts. Both gates match against `target_scopes[input.target]`; `target_scopes` is consumed **directly** (target id → scopes) — it is not inverted. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here, and the outbound package does not emit `agent_scopes` at all: outbound decisions never consider the agent's own audience scopes, only its roles (`agent_roles`) and the target's accepted scopes.
 
 ```rego
 package authz.{agent_slug}.outbound
 
 agent_roles  := ["{role.name}", ...]                 # from agent_roles
-agent_scopes := ["{scope.name}", ...]                # from agent_scopes
 
 subject_roles := { "{subject_id}": ["{role.name}", ...], ... }
 
@@ -292,7 +291,7 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
 - Instantiate a `kubernetes.client.CustomObjectsApi` for all CR operations.
 - `_slugify(agent_id: str) -> str`: extract `{namespace}/{name}` from a SPIFFE URI (or use the plain `{ns}/{name}` clientId as-is), then collapse every non-alphanumeric run to `_` and lowercase — produces a valid Rego package name segment, short and SPIRE-independent.
 - `_generate_inbound_rego(model: AgentPolicyModel) -> str`: render the inbound Rego package string. Embeds `agent_scopes`, `subject_roles`, `source_roles`, and a `role_scopes` map (grouping `inbound_rules` by role → agent scope names); emits `subject_ok` (mandatory) and `source_ok` (optional — an absent `input.source` passes); `allow if { subject_ok; source_ok }`.
-- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string. Embeds `agent_roles`, `agent_scopes`, `subject_roles`, `outbound_subject_role_scopes` (from `outbound_subject_rules`), `agent_role_scopes` (from `outbound_rules`), and `target_scopes` (consumed directly, target id → scopes — **no inversion**); emits a user→tool `subject_ok` (matching `scope in target_scopes[input.target]`, **not** `role_scopes`/`agent_scopes`) and `target_ok`; `allow if { subject_ok; target_ok }`. The inbound `role_scopes` map is **not** embedded in the outbound package.
+- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string. Embeds `agent_roles`, `subject_roles`, `outbound_subject_role_scopes` (from `outbound_subject_rules`), `agent_role_scopes` (from `outbound_rules`), and `target_scopes` (consumed directly, target id → scopes — **no inversion**); emits a user→tool `subject_ok` (matching `scope in target_scopes[input.target]`, **not** `role_scopes`/`agent_scopes`) and `target_ok`; `allow if { subject_ok; target_ok }`. Neither the inbound `role_scopes` map nor `agent_scopes` is embedded in the outbound package — outbound decisions never consider the agent's own audience scopes.
 - `_upsert_agent(agent_id: str, inbound_rego: str, outbound_rego: str)`: patch the `AuthorizationPolicy` CR to upsert the two packages for `agent_id`. Schema TBD.
 - `_delete_agent(agent_id: str)`: patch the CR to remove all packages for `agent_id`.
 - `_delete_all()`: patch the CR to remove all packages.
