@@ -101,12 +101,12 @@ func main() {
 	startSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required")
+		log.Fatal("--config is required and must be to a YAML file")
 	}
 
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load: %v", err)
+		log.Fatalf("initial config load failed to load %q: %v", *configPath, err)
 	}
 	var provider *spiffe.Provider
 	if bootCfg.SPIFFE != nil {

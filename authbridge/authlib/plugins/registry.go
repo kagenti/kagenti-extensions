@@ -2,6 +2,7 @@ package plugins
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
@@ -288,7 +289,11 @@ func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pip
 		}
 		factory, ok := factoryFor(e.Name)
 		if !ok {
-			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, RegisteredPlugins())
+			pluginNames := RegisteredPlugins()
+			if len(pluginNames) == 0 {
+				slog.Warn("No registered plugins -- Built with --tags or use `go run .` to enable")
+			}
+			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
 		p := factory()
 		if c, ok := p.(pipeline.Configurable); ok {
@@ -331,7 +336,11 @@ func BuildWithSPIFFE(entries []config.PluginEntry, p *spiffe.Provider, opts ...p
 		}
 		factory, ok := factoryFor(e.Name)
 		if !ok {
-			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, RegisteredPlugins())
+			pluginNames := RegisteredPlugins()
+			if len(pluginNames) == 0 {
+				slog.Warn("No registered plugins -- Built with --tags or use `go run .` to enable")
+			}
+			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
 		plugin := factory()
 		// Inject the framework SPIFFE Provider BEFORE Configure runs so
