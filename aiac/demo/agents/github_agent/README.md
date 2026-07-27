@@ -2,7 +2,7 @@
 
 An autonomous A2A agent that acts on a user's behalf against GitHub **source repositories** and an **issue/PR tracker**, using the [`github-tool`](https://github.com/kagenti/kagenti-extensions) MCP server.
 
-This agent implements the canonical `github-agent` used by the AIAC policy-pipeline integration test — the two skills match the policy scenario's `source-operator` and `issues-operator` roles.
+This agent implements the canonical `github-agent` used by the AIAC policy-pipeline integration test — the two skills match the policy scenario's `source_operations` and `issue_operations` roles.
 
 ## Skills
 

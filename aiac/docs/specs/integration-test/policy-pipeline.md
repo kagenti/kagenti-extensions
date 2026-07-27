@@ -79,7 +79,7 @@ scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below
      **not** a list — a list fails the `in ("Agent","Tool")` check, resolves the type to `None`, and
      yields empty pipeline output.
    - via the **aiac IdP `Configuration` library** (the real product surface the PCE reads back): create
-     the client roles (`source-operator`, `issues-operator`) and scopes (`source-access`, `issues-access`,
+     the client roles (`source_operations`, `issue_operations`) and scopes (`source-access`, `issues-access`,
      `source-read`, `source-write`, `issues-read`, `issues-write`) with the descriptions in
      *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*, and map roles→services and
      scopes→services so `get_services_by_role` / `get_services_by_scope` and `get_service().roles` /
@@ -187,7 +187,7 @@ exercises the deny-by-default path.
 | Element | Value |
 |---------|-------|
 | Realm | `AIAC_TEST_REALM` (default `aiac-pp`) |
-| Agent | `github-agent` (client roles `source-operator`, `issues-operator`; scopes `source-access`, `issues-access`) |
+| Agent | `github-agent` (client roles `source_operations`, `issue_operations`; scopes `source-access`, `issues-access`) |
 | Tool | `github-tool` (scopes `source-read`, `source-write`, `issues-read`, `issues-write`) |
 | Users | `dev-user` (role `developer`), `test-user` (role `tester`), `devops-user` (role `devops`) |
 | `developer` | source read/write + issues read |
@@ -342,8 +342,8 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 - Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
   **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
   output on explicit vs. abstract policy text against the same expected Rego. The abstract variant
-  carries **no** agent-capability bullet; it relies on the elaborated `source-operator` /
-  `issues-operator` role descriptions (provisioned into Keycloak) for mapping (c), so it survives
+  carries **no** agent-capability bullet; it relies on the elaborated `source_operations` /
+  `issue_operations` role descriptions (provisioned into Keycloak) for mapping (c), so it survives
   deny-by-default and both variants reproduce the same Rego.
 - Descriptions are ≤255 characters and written **verbatim** into Keycloak; there is no shortened /
   verbatim split. (Keycloak caps role and client descriptions at 255 chars, and the generic descriptions
@@ -416,9 +416,9 @@ tags each client from the attribute without touching the TEMP description-keywor
 
 **Client roles (agent):**
 
-- `source-operator` — Covers read and write access to source repository contents — listing, reading,
+- `source_operations` — Covers read and write access to source repository contents — listing, reading,
   creating, and modifying files.
-- `issues-operator` — Covers read and write access to the issue tracker — reading, filing, updating,
+- `issue_operations` — Covers read and write access to the issue tracker — reading, filing, updating,
   and commenting on issues and their threads.
 
 **Agent scopes:**
@@ -455,15 +455,15 @@ policy supports it; deny by default.
 - tester may perform issues-read and issues-write.
 
 ## Agent roles → tool operations (outbound target; agent may reach the tool)
-- source-operator may perform source-read and source-write.
-- issues-operator may perform issues-read and issues-write.
+- source_operations may perform source-read and source-write.
+- issue_operations may perform issues-read and issues-write.
 ```
 
 ### `policy.md` — Version 2 (abstract)
 
 Relies on the PRB / LLM to expand "read and modify source" into the concrete scopes. Encodes the same
 role→access facts as Version 1. It carries **no** agent-capability bullet; mapping (c)
-(agent-role→tool-scope) is instead derived from the elaborated `source-operator` / `issues-operator`
+(agent-role→tool-scope) is instead derived from the elaborated `source_operations` / `issue_operations`
 role descriptions (see *Role & scope descriptions*), so it survives the PRB's deny-by-default-on-silence
 rule and both variants reproduce the same Rego.
 

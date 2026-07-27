@@ -72,21 +72,22 @@ USER_ROLES: dict[str, str] = {
     ),
 }
 
-# name -> description. The github-agent's client roles.
+# name -> description. The github-agent's client roles — the per-skill operator roles, named to
+# match exactly what UC-1 provisioning emits from the AgentCard skill ids
+# (``github-agent.source_operations`` / ``github-agent.issue_operations``; see scenario_uc1.py).
 #
-# NOTE: ``issues-operator`` is intentionally PLURAL. The singular ``issue-operator`` reads to the PRB
-# LLM auditor as an actor competing with the ``tester`` subject and makes it wrongly reject the valid
-# (tester, issues-write) grant in mapping (b), aborting the pipeline. Plural is also consistent with
-# every other issues-* name (issues-access / issues-read / issues-write). The PRB auditor was hardened
-# against this class of collision (see issues/agent/3.20-policy-rules-builder.md, "Follow-up: auditor
-# relationship-scoping"), but keep
-# the plural here regardless — do not "tidy" it to singular to match source-operator.
+# NOTE: the ``_operations`` suffix (not the actor-noun ``operator``) also sidesteps the PRB-auditor
+# actor-confusion that the former plural ``issues-operator`` was chosen to dodge: the singular
+# ``issue-operator`` read to the LLM auditor as an actor competing with the ``tester`` subject and
+# made it wrongly reject the valid (tester, issues-write) grant. ``issue_operations`` reads as a
+# category of actions, not a person, so that collision does not apply. (Historical detail:
+# issues/agent/3.20-policy-rules-builder.md, "Follow-up: auditor relationship-scoping".)
 AGENT_ROLES: dict[str, str] = {
-    "source-operator": (
+    "source_operations": (
         "Covers read and write access to source repository contents — listing, reading, creating, "
         "and modifying files."
     ),
-    "issues-operator": (
+    "issue_operations": (
         "Covers read and write access to the issue tracker — reading, filing, updating, and "
         "commenting on issues and their threads."
     ),
@@ -127,10 +128,10 @@ INBOUND_PAIRS: list[tuple[str, str]] = [
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("source-operator", "source-read"),
-    ("source-operator", "source-write"),
-    ("issues-operator", "issues-read"),
-    ("issues-operator", "issues-write"),
+    ("source_operations", "source-read"),
+    ("source_operations", "source-write"),
+    ("issue_operations", "issues-read"),
+    ("issue_operations", "issues-write"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [

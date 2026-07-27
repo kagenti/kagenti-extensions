@@ -27,8 +27,8 @@ This agent generalises it to the scenario's **two capability areas**.
 | Scenario element | This agent |
 |---|---|
 | Agent client `github-agent` (type **Agent**) | This A2A agent |
-| Agent role `source-operator` → agent scope `source-access` | **Skill 1** — Source repository operations |
-| Agent role `issues-operator` → agent scope `issues-access` | **Skill 2** — Issue & PR tracker operations |
+| Agent role `source_operations` → agent scope `source-access` | **Skill 1** — Source repository operations |
+| Agent role `issue_operations` → agent scope `issues-access` | **Skill 2** — Issue & PR tracker operations |
 | Tool `github-tool` scopes `source-read`/`source-write` | Source tool allow-list (see §5) |
 | Tool `github-tool` scopes `issues-read`/`issues-write` | Issue/PR tool allow-list (see §5) |
 
