@@ -120,9 +120,9 @@ Let `R_A = SPM(A).owned_roles` (A's client roles) and `S_A = SPM(A).owned_scopes
   - `User` → `subject_roles[username] += role` (usernames from `role.actorIds`);
   - `Agent` → `source_roles[serviceId] += role` (serviceIds from `role.actorIds`).
 - **Outbound:** for each `r ∈ R_A`, find the `r`-rules in `get_service_policies_by_role(r)`. For each such `(r → s)`: add to `outbound_rules` and `target_scopes[s.serviceId] += s`.
-- **Outbound subject gate:** for each target `(X, s)` in `target_scopes`, take the **User**-kind inbound rules `(u → s)` on `SPM(X)`, append them to `outbound_subject_rules`, and `subject_roles += u.actorIds`.
+- **Outbound subject gate:** for each target `(X, s)` in `target_scopes` — where `X` is the callee, a **tool or another agent** — take the **User**-kind inbound rules `(u → s)` on `SPM(X)`, append them to `outbound_subject_rules`, and `subject_roles += u.actorIds`. The gate's range is tool ∪ agent scopes.
 
-**Relevance is directional.** An SPM contributes to `A` **iff** it *is* `SPM(A)` (contributes inbound) **or** it contains a rule whose role is one of A's **agent** roles `R_A` (contributes outbound). A merely *shared user role* never confers relevance — this is what prevents a **false outbound edge** to a tool `A` does not actually target.
+**Relevance is directional.** An SPM contributes to `A` **iff** it *is* `SPM(A)` (contributes inbound) **or** it contains a rule whose role is one of A's **agent** roles `R_A` (contributes outbound). A merely *shared user role* never confers relevance — this is what prevents a **false outbound edge** to a target (a tool or another agent) `A` does not actually target. This is a **derivation-layer** relevance rule: it does **not** imply the outbound user gate is empty. When the agent holds a per-skill operator role that the PRB maps (by capability-match) to a target's scope, the agent *does* target that callee, and the nested derivation then surfaces the shared-user edges.
 
 ### P2 / P4 / P5b reconciliation
 

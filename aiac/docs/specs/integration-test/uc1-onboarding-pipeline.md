@@ -39,7 +39,8 @@ with one test per rung). They import two shared modules:
   `port_forward`, `resolve_pod`, `opa_eval`, `require_env`, …).
 
 They also ship `probe_uc1.rego` — the outbound verification query, matching `input.function_name` against
-the generated **user→tool** data maps by **exact string equality** on full discovered names.
+the generated data maps by **exact string equality** on full discovered names, binding **both** the user
+(subject) gate and the agent capability gate (the per-scope two-gate AND).
 
 ## Description
 
@@ -110,8 +111,9 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
      provisions scopes `github-tool.{source-read, source-write, issues-read, issues-write}`, sets
      `client.type=Tool`. **No rules are written for the tool directly.**
    - `POST /apply/service/{github-agent id}` → UC-1 classifies it an **Agent**, reads the AgentCard,
-     provisions role `github-agent.agent` + scopes `github-agent.{source_operations, issue_operations}`,
-     sets `client.type=Agent`; the Service Policy Builder maps roles→scopes via the real PRB (real LLM,
+     provisions **one operator role per skill** `github-agent.{source_operations, issue_operations}`
+     (mirroring the scopes) + scopes `github-agent.{source_operations, issue_operations}`, sets
+     `client.type=Agent`; the Service Policy Builder maps roles→scopes via the real PRB (real LLM,
      `temperature=0`) and the Controller calls `compute_and_apply(rules, override=False)`.
 3. **Validate two outcomes at the end** (no intermediate checks):
    1. **Keycloak provisioning.** The expected realm role(s) + client scopes exist with the expected
@@ -119,12 +121,11 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
    2. **Generated Rego decisions.** `kubectl cp` the `/rego` files to the host and `opa eval`:
       - **`opa` discovery** — `$OPA_BIN` → `shutil.which("opa")` → `pytest.skip`.
       - **Inbound** — per `subject`: `{"subject": <id>}` vs `data.authz.team1_github_agent.inbound.allow`.
-      - **Outbound (user gate only)** — per `(subject × function_name)`, `function_name` a full discovered
-        tool-scope name, via the probe `data.probe.outbound.allow` in `probe_uc1.rego`, which binds
-        `input.function_name` against the generated **user→tool** maps (`subject_ok`) **only**, by exact
-        string equality. The agent→tool gate (`target_ok`) is degenerate under UC-1's single generic
-        `github-agent.agent` role and is **documented, not probed** (see
-        *[The agent→tool gate](#the-agenttool-gate-degenerate-by-design)*).
+      - **Outbound (per-scope two-gate AND)** — per `(subject × function_name)`, `function_name` a full
+        discovered tool-scope name, via the probe `data.probe.outbound.allow` in `probe_uc1.rego`, which
+        binds `input.function_name` against **both** the user (subject) gate and the agent capability
+        gate by exact string equality — a request is allowed iff both reach the same scope (see
+        *[The agent→tool gate](#the-agenttool-gate-capability-matched)*).
       - **Grant sets** — re-derive the `(role, scope)` grant sets from the Rego data maps and compare, as
         order-independent sets, to the `scenario_uc1.py` truth table.
       - Verdicts are **computed from** `scenario_uc1.py`, never from the Rego. A failing node names the
@@ -168,8 +169,9 @@ rendering). They are **identical to policy-pipeline's** (only the scope-name str
 | test-user | ✅ |
 | devops-user | ❌ |
 
-**Outbound allow(subject, function)** (`data.probe.outbound.allow`, user→tool gate; suffixes shown for
-readability) — **rungs 2 and 3** (with a tool onboarded):
+**Outbound allow(subject, function)** (`data.probe.outbound.allow`, per-scope two-gate AND; the agent
+reaches all four tool scopes, so the user gate discriminates; suffixes shown for readability) —
+**rungs 2 and 3** (with a tool onboarded):
 
 | | github-tool.source-read | github-tool.source-write | github-tool.issues-read | github-tool.issues-write |
 |---|---|---|---|---|
@@ -190,23 +192,27 @@ for the slugify rule).
 ### Semantic similarity, not byte-identity
 
 This ladder's Rego is **semantically similar** to `policy-pipeline`'s but **not byte-identical**, for two
-baked-in reasons in (frozen) UC-1 provisioning:
+baked-in reasons in UC-1 provisioning:
 
 1. **Workload-prefixed names.** UC-1 names every scope `{workload}.{name}`, so the data maps hold
    `github-tool.source-read` / `github-agent.source_operations` where `policy-pipeline` holds bare names.
-2. **Degenerate `target_ok`.** UC-1 emits one generic `github-agent.agent` role, which the PRB cannot map
-   to specific tool scopes under deny-by-default, so the agent→tool gate is empty.
+2. **Capability-matched `target_ok`.** UC-1 provisions one **operator role per skill**
+   (`github-agent.source_operations` / `github-agent.issue_operations`), which the PRB maps to the tool
+   scopes by domain (capability-match), so the agent→tool gate is populated over all four tool scopes.
 
 The tests therefore assert **same file set + same decisions + equivalent grant sets**, not identical text.
 
-### The agent→tool gate (degenerate by design)
+### The agent→tool gate (capability-matched)
 
-Phase-1 states outbound access is the **intersection** of the user→tool gate and the agent→tool gate, but
-that "the agent holds all of `github-tool`'s scopes, so this demo exercises the **user-gating dimension
-only**." Under real UC-1 the single generic `github-agent.agent` role yields an **empty** `target_ok`, so
-the full `allow` (`subject_ok AND target_ok`) would deny everything. The probe therefore evaluates
-**`subject_ok` only** — the user-gating slice phase-1 validates. The empty `target_ok` is a documented
-UC-1 limitation, not a test failure.
+Phase-1 states outbound access is the **per-scope intersection** of the user→tool gate and the
+agent→tool gate. UC-1 provisions **one operator role per skill**
+(`github-agent.source_operations` / `github-agent.issue_operations`), and the PRB maps those operator
+roles to the tool scopes by domain (capability-match under `generic_policy.md`), so `target_ok` is
+**populated over all four tool scopes**. Because the agent reaches every tool scope, the **user gate
+discriminates** — the probe binds the real per-scope AND (`subject_ok AND target_ok` on the same
+`input.function_name`) and, for this scenario, its verdicts equal the user-gate slice. The AND is
+genuine, not degenerate: if the agent reached only a subset of the tool's scopes, the request would be
+denied for the scopes it does not reach.
 
 ## Scenario
 
@@ -216,7 +222,7 @@ workloads.
 | Element | Value |
 |---------|-------|
 | Realm | `AIAC_TEST_REALM` (must match the deployed stack's `KEYCLOAK_REALM`; default `kagenti`) |
-| Agent | `github-agent` — **discovered** role `github-agent.agent`; scopes `github-agent.source_operations`, `github-agent.issue_operations` (from AgentCard skills) |
+| Agent | `github-agent` — **discovered** per-skill operator roles `github-agent.source_operations`, `github-agent.issue_operations` (mirroring the scopes); scopes `github-agent.source_operations`, `github-agent.issue_operations` (from AgentCard skills) |
 | Tool | `github-tool` (simplified) — **discovered** scopes `github-tool.{source-read, source-write, issues-read, issues-write}` (from MCP `tools/list`) |
 | Users | `dev-user` (`developer`), `test-user` (`tester`), `devops-user` (`devops`) |
 | `developer` | source read/write + issues read |
@@ -273,8 +279,10 @@ The suite `pytest.skip`s when no `opa` binary is found.
   `/rego` output is what makes the pipeline observable. The Keycloak composite writer emits no Rego and is
   not used.
 - **Onboarding-order-independence is asserted, not assumed** (rungs 2 vs 3). A divergence is a bug.
-- **User gate only.** UC-1's generic agent role yields an empty `target_ok`; the outbound probe evaluates
-  `subject_ok` alone (phase-1's user-gating-only intent).
+- **Per-scope two-gate AND.** UC-1's per-skill operator roles are mapped to the tool scopes by
+  capability-match, so `target_ok` is populated; the outbound probe binds the real per-scope AND
+  (`subject_ok AND target_ok` on the same `input.function_name`). The agent reaches all four tool
+  scopes, so the user gate discriminates.
 - **Grant sets, semantic.** Equivalence is re-derived from the Rego data maps and compared as sets — the
   semantic-similarity guarantee, not byte-identity.
 - **Stack's realm, leave-in-place; per-rung cleanup.** UC-1 resolves/provisions against the deployed
@@ -306,8 +314,8 @@ Tracking issues: `testing/5.4-uc1-onboarding-integration-test.md` (epic) + `5.4.
 - **Writing the rung tests + `probe_uc1.rego` + `scenario_uc1.py` edits** — this spec *describes* them;
   they are written under the `5.4.x` issues.
 - **The UC-1 agent, PRB, PCE, OPA writer, and demo `github-agent`** — specified/tested by their own
-  components/issues. UC-1's discovery naming and single-generic-role behavior are **fixed**; these tests
-  observe them.
+  components/issues. UC-1's discovery naming and per-skill operator-role behavior are **fixed**; these
+  tests observe them.
 - **Deploying / registering the workloads** — a precondition, not part of the tests.
 - **Two-policy (rung 4)** — deferred; the two-stack topology is discarded and the in-cluster approach is
   TBD (`testing/5.4.4-uc1-onboard-two-policies.md`).
@@ -328,10 +336,14 @@ mappings. Descriptions are **generic and keyword-free**; client `type` is set by
   - `github-tool.source-write` — "Create, modify, or delete source repository contents; commit file changes."
   - `github-tool.issues-read` — "Read issues and their comment threads. Read-only."
   - `github-tool.issues-write` — "Create and update issues: open, edit, comment, and close."
-- **`github-agent`** (Agent) → role `github-agent.agent` (description "Agent role") + scopes from the
-  AgentCard skills:
+- **`github-agent`** (Agent) → **one operator role per skill** (name + description mirror each scope) +
+  scopes from the AgentCard skills:
   - `github-agent.source_operations` — "Browse and search code; read, create, and modify repository file contents, branches, and commits."
   - `github-agent.issue_operations` — "Read, search, create, and update issues, comments, sub-issues, and pull requests."
+
+  The operator roles `github-agent.source_operations` / `github-agent.issue_operations` carry the same
+  descriptions as the scopes they mirror; those descriptions drive the PRB capability-match. (This
+  replaces the prior single generic `github-agent.agent` role.)
 
 ### Realm roles (provisioned by the fixture)
 
@@ -342,7 +354,9 @@ mappings. Descriptions are **generic and keyword-free**; client `type` is set by
 ### `policy.md` — the single (abstract) variant
 
 Phase-1's intent-only prose. The PRB/LLM expands intent into the discovered scopes via the entity/role
-descriptions. It **does not name the agent role** (doing so would populate `target_ok`). Deny by default.
+descriptions. It stays **user-intent-only** and **does not name the agent's operator roles** — the
+agent's capability gate comes from the generic rubric (`generic_policy.md`) matching the operator-role
+descriptions to the tool-scope descriptions, not from the policy naming them. Deny by default.
 
 ```markdown
 Grant access on a least-privilege basis: allow only what this policy states; deny by default.
