@@ -68,7 +68,23 @@ class TestGetRoles:
             {"id": "r2", "name": "default-roles-kagenti"},
         ]
         resp = _make_client(admin).get(f"/roles?realm={REALM}")
-        assert [r["kind"] for r in resp.json()] == ["User", "User"]
+        # default-roles-kagenti is the Keycloak default composite for this realm -> excluded.
+        assert [r["kind"] for r in resp.json()] == ["User"]
+
+    def test_excludes_default_roles_composite_for_realm(self):
+        # The default composite (default-roles-{realm}) is the sole path to Keycloak's
+        # built-ins (offline_access, uma_authorization, view-profile, account roles) --
+        # it must never appear in the response, and its members must never be scanned.
+        admin = MagicMock()
+        admin.get_realm_roles.return_value = [
+            {"id": "r1", "name": "reader"},
+            {"id": "r2", "name": f"default-roles-{REALM}"},
+        ]
+        resp = _make_client(admin).get(f"/roles?realm={REALM}")
+        names = [r["name"] for r in resp.json()]
+        assert f"default-roles-{REALM}" not in names
+        assert names == ["reader"]
+        admin.get_realm_role_members.assert_not_called()
 
     def test_aiac_managed_role_gets_member_usernames_as_actor_ids(self):
         # For a user (realm) role, actorIds = the member usernames — resolved via the same

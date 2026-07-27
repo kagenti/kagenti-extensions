@@ -413,11 +413,16 @@ def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin
 
 
 @app.get("/roles")
-def list_roles(admin: KeycloakAdmin = Depends(get_admin)):
+def list_roles(realm: str = Query(...), admin: KeycloakAdmin = Depends(get_admin)):
     try:
         # brief_representation=False so realm-role attributes (incl. the aiac.managed marker)
         # are returned; the brief representation Keycloak returns by default omits them.
         roles = admin.get_realm_roles(brief_representation=False)
+        # Keycloak's auto-assigned default composite is the sole path to built-ins
+        # (offline_access, uma_authorization, view-profile, account roles) -- drop it so
+        # those built-ins never surface in AIAC policy (see handoff 01).
+        default_composite = f"default-roles-{realm}"
+        roles = [r for r in roles if r.get("name") != default_composite]
         for role in roles:
             # Realm roles are user roles (clientRole == false) -> kind=User (Assumption 3).
             role["kind"] = "User"

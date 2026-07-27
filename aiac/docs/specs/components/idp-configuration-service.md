@@ -142,7 +142,7 @@ Under the SPM/APM policy-model redesign the Policy Computation Engine (PCE) perf
 **Assumption 3 — an agent's role is a Keycloak _client role_; a user's role is a Keycloak _realm role_.** In Keycloak a `RoleRepresentation` carries `clientRole: bool` and `containerId` (the client UUID for client roles, the realm id for realm roles). This service holds the invariant end-to-end:
 
 - **Agent roles.** `GET /services/{service_id}/roles` returns an agent's own roles (`R_A`) from two sources: the client's client roles (`admin.get_client_roles`, `clientRole == true`), **and** the `aiac.managed` realm roles assigned to the service account (the provisioning path the `Configuration` library uses). Both are surfaced as `kind = Agent` owned by this service — see the endpoint description and its Redesign note above.
-- **User roles are realm roles.** `GET /roles` continues to read realm-level roles (`kind = User`).
+- **User roles are realm roles.** `GET /roles` continues to read realm-level roles (`kind = User`), excluding the Keycloak-generated `default-roles-<realm>` composite (exact-name match). That composite is the *only* path to Keycloak's built-ins (`offline_access`, `uma_authorization`, `view-profile`, the `account` client roles) — no user holds them directly — so dropping it keeps AIAC policy free of Keycloak built-ins without a per-name blocklist.
 
 **Field population** (in the Keycloak → generic-model mapping layer, from the raw facts above):
 
@@ -212,6 +212,7 @@ docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
 - `get_admin(realm: str = Query(...))` is a FastAPI dependency. On each call it checks the cache; on a miss it acquires the lock, double-checks, and constructs a new `KeycloakAdmin(realm_name=realm, user_realm_name=KEYCLOAK_ADMIN_REALM, ...)`. FastAPI returns `422` automatically if `realm` is absent.
 - All endpoints except `/health` declare `admin: KeycloakAdmin = Depends(get_admin)`. `/health` calls `_get_or_create_admin` directly with `os.environ["KEYCLOAK_ADMIN_REALM"]` — no FastAPI dependency, no realm query param.
 - Each GET endpoint calls the corresponding `python-keycloak` method and returns the result directly via `JSONResponse`.
+- `GET /roles`: call `admin.get_realm_roles(brief_representation=False)`, then drop the role named `default-roles-{realm}` (the Keycloak-generated default composite for the realm) before enrichment.
 - `GET /services/{service_id}/roles`: call `admin.get_client_roles(service_id)` to return the **client roles defined on this service's client** (agent roles, `kind = Agent`). Returns `[]` if `KeycloakError.response_code == 400` (service has no client roles); `502` on other `KeycloakError`.
 - `GET /services/{service_id}/scopes`: call `admin.get_client_default_client_scopes(service_id)`.
 - `GET /roles/{role_name}/composites`: call `admin.get_composite_realm_roles_of_role(role_name=role_name)`.
