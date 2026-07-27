@@ -54,7 +54,7 @@ flowchart TD
 
 **Sequence:**
 1. Call `ServiceProvisionGraph.invoke()` → get back `ServiceProvision { roles, scopes }` + `service_type`.
-2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-reads the service's own roles/scopes from the IdP by `service_id` (Provision has already persisted them), so it needs only the id, not the `ServiceProvision`.
+2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-resolves the focus service from the IdP catalog by `service_id` (Provision has already persisted its roles/scopes), so it needs only the id, not the `ServiceProvision`.
 3. Return `(list[PolicyRule], override=False)` to the Controller.
 
 No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
@@ -195,36 +195,41 @@ class ServiceProvision(BaseModel):
 
 **Nature:** deterministic IdP reader + PRB invoker.
 
-**Purpose:** given the just-provisioned service's `service_id`, fetch its own roles + scopes from the IdP (`get_service(service_id)`), read the full IdP universe **excluding the new service's own entities**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
+**Purpose:** given the just-provisioned service's `service_id`, source candidates from the same worldview as the Policy Computation Engine (PCE) — `get_services()` for correct `kind`/ownership, `get_subjects()` for membership-derived user roles — exclude the focus service's own entities **by ownership**, call the PRB for each applicable (roles, scope) or (role, scopes) pair, and return a merged `list[PolicyRule]` to the Orchestrator.
 
-**Why `service_id`, not `ServiceProvision`:** own roles/scopes must be id-bearing `Role`/`Scope` — `flatten_role` needs a `Role` (with `childRoles`) and the PRB builds `PolicyRule(role=Role, scope=Scope)`. The Provision-time `RoleDefinition`/`ScopeDefinition` carry only name+description (no Keycloak id), so they cannot be passed to the PRB. Provision has already persisted these entities, so `get_service(service_id).roles` / `.scopes` returns them with ids.
+**Why `service_id`, not `ServiceProvision`:** own roles/scopes must be id-bearing `Role`/`Scope` — `flatten_role` needs a `Role` (with `childRoles`) and the PRB builds `PolicyRule(role=Role, scope=Scope)`. The Provision-time `RoleDefinition`/`ScopeDefinition` carry only name+description (no Keycloak id), so they cannot be passed to the PRB. Provision has already persisted these entities, so resolving the focus service from `get_services()` returns them with ids and correct `kind`.
 
-**Terminology — own vs other (used throughout this section):**
-- **Own roles / own scopes** — the roles and scopes the just-provisioned service defines for *itself*, fetched from the IdP by `service_id`: `service.roles` / `service.scopes` (`get_service(service_id)`). These are exactly the entities Service Provision wrote.
-- **Other roles / other scopes** — every *pre-existing* role/scope in the IdP universe **minus** the new service's own entities. These belong to other services.
+**Terminology — own vs candidate (used throughout this section):**
+- **Own roles / own scopes** — the focus service's `aiac.managed` roles/scopes, found on the `Service` object returned by `get_services()` (matched by `serviceId == service_id`). These are exactly the entities Service Provision wrote.
+- **Candidate roles** — every role eligible to be mapped onto an own scope: other services' `aiac.managed` roles (`kind=Agent`) plus membership-derived user roles (`kind=User`; realm roles held by at least one user, composite-expanded, and not owned by any service). Never includes the focus service's own roles.
+- **Other scopes** — every other service's `aiac.managed` scope (`scope.serviceId != service_id`). Never includes the focus service's own scopes.
 
 **Self-mapping invariant (must hold):** the PRB must **never** be handed an *(own role, own scope)* pair — a service's own role must never be mapped to its own scope. Onboarding only ever grants **cross-service** access: *who else* may call this service, and (agents only) *what else* this service may call. A service's own role reaching its own scope is not something onboarding needs to author (that access is intrinsic and out of scope here) and would pollute the policy set. The Service Policy Builder sub-agent guarantees the invariant **by construction** through two complementary guards:
 
-1. **Exclusion (own entities never appear on the "other" side).** Own roles are removed from `other_roles` and own scopes from `other_scopes` before any PRB call (steps 3–4). Flattening runs *after* exclusion and cannot reintroduce an own role: the just-provisioned roles are brand new and are not yet referenced as `childRoles` by any existing role.
-2. **Call direction (each call's "self" side is one own entity of the *opposite* kind).** Each PRB call pairs a single own entity with the other-side universe, never own-with-own, and keeps the semantic intent crisp:
-   - `build_scope_rules(flattened_other_roles, own_scope)` = *who else may call this skill* (an **own scope** against **other roles**)
-   - `build_role_rules(own_role, other_scopes)` = *what else may this role call* (an **own role** against **other scopes**; agent path only)
+1. **Exclusion (own entities never appear on the candidate side), by ownership.** Own roles/scopes are identified by `role.id` / `scope.serviceId` matching the focus service — never by name — and are never added to `candidate_roles` / `other_scopes` (steps 3–4). This is immune to name collisions between services.
+2. **Call direction (each call's "self" side is one own entity of the *opposite* kind).** Each PRB call pairs a single own entity with the candidate-side universe, never own-with-own, and keeps the semantic intent crisp:
+   - `build_scope_rules(candidate_roles, own_scope)` = *who else may call this skill* (an **own scope** against candidate roles)
+   - `build_role_rules(own_role, other_scopes)` = *what else may this role call* (an **own role** against other scopes; agent path only)
 
-Neither guard alone is sufficient — exclusion keeps own entities off the other side, and the call direction keeps the self side and the other side of *opposite* kinds (a scope vs roles, or a role vs scopes). Together they make an *(own role, own scope)* pair unrepresentable in any PRB call.
+Neither guard alone is sufficient — ownership-based exclusion keeps own entities off the candidate side, and the call direction keeps the self side and the other side of *opposite* kinds (a scope vs roles, or a role vs scopes). Together they make an *(own role, own scope)* pair unrepresentable in any PRB call.
 
 ### Steps
 
 1. Receive `service_id: str` + `service_type: ServiceType` from the Orchestrator.
-2. Fetch the service's **own roles + scopes** from the IdP by `service_id` via `aiac.idp.configuration.api` (`get_service(service_id)` → `service.roles` / `service.scopes`, id-bearing `Role`/`Scope`).
-3. Read **all roles** from `aiac.idp.configuration.api`, **excluding** the service's own roles (i.e. exclude `role.name in {r.name for r in service.roles}`).
-4. Read **all scopes** from `aiac.idp.configuration.api`, **excluding** the service's own scopes (i.e. exclude `scope.name in {s.name for s in service.scopes}`).
-5. **Flatten roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): expand `other_roles` into the union of every role's closure, de-duplicated by `role.id` (call this `flattened_other_roles`); on the agent path, also expand each of the service's own roles.
+2. Fetch `services = get_services()`, `all_scopes = get_scopes()`, `subjects = get_subjects()` from `aiac.idp.configuration.api`.
+3. Resolve the focus service: `focus = next(s for s in services if s.serviceId == service_id)` (the same identity the PCE catalogs its services by); a missing match is a clear `404`, not `StopIteration`.
+4. Compute candidate sets, all by ownership:
+   - **own roles/scopes** — `focus.roles`/`focus.scopes` filtered to `aiac.managed` (drops Keycloak's built-in default client scopes, e.g. `profile`, which are stamped with this service's `serviceId` but are not `aiac.managed`).
+   - **other-agent roles** — `aiac.managed` roles from every *other* service's `roles` (`kind=Agent`, ownership-excluded by `serviceId != focus.serviceId`).
+   - **user roles** — realm roles linked to at least one subject (via `subjects[*].roles`, composite-expanded through `flatten_role`) and not owned by any service (`role.id` not in the union of every service's role ids). These carry `kind=User`.
+   - **other scopes** — `aiac.managed` scopes from `all_scopes` with `serviceId != focus.serviceId`.
+5. **Flatten candidate roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): union of other-agent roles + user roles, deduplicated by `role.id` (`candidate_roles`); on the agent path, also expand each of the focus service's own roles.
 6. Call PRB and merge:
-   - **`service_type = tool`:** call `build_scope_rules(flattened_other_roles, scope)` for each of the service's own scopes. Merge results into a single `list[PolicyRule]`.
-   - **`service_type = agent`:** call `build_scope_rules(flattened_other_roles, scope)` for each own scope; for each of the service's own roles, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
+   - **`service_type = tool`:** call `build_scope_rules(candidate_roles, scope)` for each of the focus service's own scopes. Merge results into a single `list[PolicyRule]`.
+   - **`service_type = agent`:** call `build_scope_rules(candidate_roles, scope)` for each own scope; for each of the focus service's own roles, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
 7. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
 
-**Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full excluded-self scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
+**Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full ownership-excluded scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
 
 ### Composite role flattening
 
