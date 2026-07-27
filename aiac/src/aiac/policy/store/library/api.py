@@ -68,3 +68,11 @@ def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None:
 def delete_service_policy(service_id: str) -> None:
     resp = requests.delete(f"{_base_url()}/policy/services/{encode_service_id(service_id)}")
     _check(resp)
+
+
+def clear_service_policies() -> None:
+    # Drop every SPM in the store. The collection-root DELETE (no service_id segment) —
+    # distinct from delete_service_policy's by-id path. Intended for test harnesses that
+    # need a clean slate before a run; clearing an already-empty store is a no-op.
+    resp = requests.delete(f"{_base_url()}/policy/services")
+    _check(resp)

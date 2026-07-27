@@ -223,6 +223,30 @@ class TestDeleteServicePolicy:
 
 
 # ---------------------------------------------------------------------------
+# clear_service_policies  (collection-root DELETE)
+# ---------------------------------------------------------------------------
+
+
+class TestClearServicePolicies:
+    def test_deletes_collection_root_no_id_segment(self):
+        with patch("requests.delete") as mock_delete:
+            mock_delete.return_value = _mock_response(204)
+            from aiac.policy.store.library.api import clear_service_policies
+
+            result = clear_service_policies()
+            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services")
+            assert result is None
+
+    def test_raises_on_error_response(self):
+        with patch("requests.delete") as mock_delete:
+            mock_delete.return_value = _mock_response(502)
+            from aiac.policy.store.library.api import clear_service_policies
+
+            with pytest.raises(RuntimeError):
+                clear_service_policies()
+
+
+# ---------------------------------------------------------------------------
 # Removed surface: no per-agent / whole-collection functions
 # ---------------------------------------------------------------------------
 

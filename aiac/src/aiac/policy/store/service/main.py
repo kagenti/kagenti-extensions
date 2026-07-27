@@ -57,6 +57,23 @@ def list_service_policies_by_role(role: str) -> list[ServicePolicyModel]:
     return [spm for spm in _cache.values() if any(rule.role.id == role for rule in spm.inbound_rules)]
 
 
+@app.delete("/policy/services", response_model=None)
+def clear_service_policies(
+    conn: Annotated[sqlite3.Connection, Depends(get_db)],
+) -> Response:
+    # Drop every SPM — durable row and cache entry alike. Distinct path from the by-id
+    # DELETE (``/policy/services`` vs ``/policy/services/{service_id}``), so FastAPI routes
+    # unambiguously. Intended for test harnesses that need a clean slate: without it the
+    # StatefulSet PV outlives image redeploys, so pre-fix cruft accumulates across runs
+    # (override=False appends). Never 404s; clearing an already-empty store is a no-op 204.
+    try:
+        conn.execute("DELETE FROM service_policies")
+    except sqlite3.Error as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+    _cache.clear()
+    return Response(status_code=204)
+
+
 @app.get("/policy/services/{service_id}", response_model=None)
 def get_service_policy(service_id: str):
     service_id = decode_service_id(service_id)

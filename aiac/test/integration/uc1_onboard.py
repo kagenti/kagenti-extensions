@@ -67,6 +67,15 @@ CONTROLLER_TARGET = os.environ.get("AIAC_CONTROLLER_TARGET", "svc/aiac-agent-ser
 CONTROLLER_LOCAL_PORT = int(os.environ.get("AIAC_CONTROLLER_LOCAL_PORT", "7070"))
 CONTROLLER_REMOTE_PORT = int(os.environ.get("AIAC_CONTROLLER_REMOTE_PORT", "7070"))
 
+# Policy Store (in-cluster) reached via ``kubectl port-forward`` to clear stale SPMs before a run.
+# The store's SQLite lives on a StatefulSet PV that survives image redeploys, so pre-fix cruft
+# would otherwise accumulate across runs (onboarding appends with override=False). Defaults match
+# the deployed stack (svc/aiac-policy-store-service:7074 in aiac-system).
+STORE_NAMESPACE = os.environ.get("AIAC_STORE_NAMESPACE", "aiac-system")
+STORE_TARGET = os.environ.get("AIAC_STORE_TARGET", "svc/aiac-policy-store-service")
+STORE_LOCAL_PORT = int(os.environ.get("AIAC_STORE_LOCAL_PORT", "7074"))
+STORE_REMOTE_PORT = int(os.environ.get("AIAC_STORE_REMOTE_PORT", "7074"))
+
 # The Controller Deployment + the abstract policy.md the PRB reads. The test mounts this policy on
 # the Controller pod as a precondition-fixup (see ``ensure_agent_policy``); it is NOT written into
 # any committed deployment manifest — the deployment stays free of test-specific config.
@@ -225,6 +234,33 @@ def cleanup_provisioned(admin, realm: str) -> None:
                 admin.delete_client_scope(scope["id"])
             except KeycloakError as exc:
                 log.warning("cleanup: delete client scope %r failed: %s", name, exc)
+
+
+def clear_policy_store() -> None:
+    """Drop every persisted SPM from the in-cluster Policy Store before a run — the store-side twin
+    of ``cleanup_provisioned``'s Keycloak reset.
+
+    The store's SQLite lives on a StatefulSet PV that outlives image redeploys, and onboarding
+    appends to each SPM with ``override=False``; without this the store accumulates pre-fix cruft
+    (stale role-id generations, retired ``*-aud`` edges, cross-run pollution) that the PCE replays
+    into every regenerated Rego — so a fixed pipeline still emits defective policy. Clearing here
+    guarantees each run derives its Rego from only the edges this run onboarded.
+
+    Hits ``DELETE /policy/services`` directly through a port-forward (the harness never imports
+    ``aiac``). Best-effort: a store that is unreachable or already empty must not fail the run."""
+    try:
+        with port_forward(
+            STORE_TARGET,
+            namespace=STORE_NAMESPACE,
+            local_port=STORE_LOCAL_PORT,
+            remote_port=STORE_REMOTE_PORT,
+            ready_url=f"http://127.0.0.1:{STORE_LOCAL_PORT}/health",
+        ) as base_url:
+            resp = requests.delete(f"{base_url}/policy/services", timeout=30)
+            resp.raise_for_status()
+            log.info("cleared Policy Store SPMs (HTTP %s)", resp.status_code)
+    except Exception as exc:  # noqa: BLE001 — best-effort; a store hiccup must not fail the run
+        log.warning("clear_policy_store: could not clear store (%s)", exc)
 
 
 # ======================================================================================
@@ -392,7 +428,8 @@ def onboarded_stack(workloads: list[str], *, rego_subdir: str) -> Iterator[dict]
     require_env("KEYCLOAK_URL", "KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD")
 
     admin = connect_admin()
-    cleanup_provisioned(admin, TEST_REALM)  # before — clean slate
+    cleanup_provisioned(admin, TEST_REALM)  # before — clean slate (Keycloak)
+    clear_policy_store()  # before — clean slate (Policy Store SPMs; PV survives redeploys)
     provision_realm_and_users(admin, TEST_REALM)  # BEFORE onboarding (PRB reads the role universe)
     ensure_agent_policy(CONTROLLER_NAMESPACE)  # mount the PRB's policy.md if the stack lacks it
 

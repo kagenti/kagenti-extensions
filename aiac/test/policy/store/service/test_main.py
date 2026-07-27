@@ -236,6 +236,41 @@ class TestDeleteServicePolicy:
 
 
 # ---------------------------------------------------------------------------
+# DELETE /policy/services  (clear-all)
+# ---------------------------------------------------------------------------
+
+
+class TestClearServicePolicies:
+    def test_clears_all_rows_from_db_and_cache_returns_204(self, client):
+        _preload(_spm("svc-a"))
+        _preload(_spm("svc-b"))
+        resp = client.delete("/policy/services")
+        assert resp.status_code == 204
+        assert svc._cache == {}
+        rows = svc._db_conn.execute("SELECT service_id FROM service_policies").fetchall()
+        assert rows == []
+
+    def test_clear_empty_store_is_noop_204(self, client):
+        resp = client.delete("/policy/services")
+        assert resp.status_code == 204
+        assert svc._cache == {}
+
+    def test_clear_then_get_by_id_404s(self, client):
+        _preload(_spm("svc-a"))
+        client.delete("/policy/services")
+        resp = client.get(f"/policy/services/{encode_service_id('svc-a')}")
+        assert resp.status_code == 404
+
+    def test_returns_502_on_sqlite_error(self, client):
+        bad_conn = MagicMock()
+        bad_conn.execute.side_effect = sqlite3.OperationalError("disk full")
+        app.dependency_overrides[get_db] = lambda: bad_conn
+        resp = client.delete("/policy/services")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+
+# ---------------------------------------------------------------------------
 # GET /health
 # ---------------------------------------------------------------------------
 
