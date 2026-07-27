@@ -48,10 +48,13 @@ def _scope(name, *, scope_id=None, service_id="", aiac_managed=True):
     )
 
 
-def _service(service_id, *, roles=None, scopes=None, service_type=ServiceType.TOOL):
+def _service(service_id, *, ref=None, roles=None, scopes=None, service_type=ServiceType.TOOL):
+    # `service_id` is the internal client UUID (Service.id — the /apply/service/{id} route key);
+    # `ref` is the human-readable clientId (Service.serviceId), which defaults to the UUID for the
+    # tests that don't care but is set distinctly where the id-shape distinction matters.
     return Service(
         id=service_id,
-        serviceId=service_id,
+        serviceId=ref or service_id,
         enabled=True,
         type=service_type,
         roles=roles or [],
@@ -364,6 +367,48 @@ class TestMissingFocus:
                 all_scopes=[],
                 subjects=[],
                 service_id="svc-does-not-exist",
+            )
+
+        assert ei.value.status_code == 404
+
+
+class TestFocusResolvedByInternalId:
+    """The trigger id handed to build() is the Keycloak internal client UUID (Service.id), not the
+    human-readable clientId (Service.serviceId) — the /apply/service/{id} route is keyed on the UUID
+    because a clientId can be a slash-bearing SPIFFE URI. Regression for the id-shape mismatch that
+    made every onboard 404 (focus matched on serviceId instead of id)."""
+
+    UUID = "f5592be1-uuid"
+    CLIENT_ID = "spiffe://localtest.me/ns/team1/sa/github-agent"
+
+    def test_focus_resolved_by_uuid_when_serviceid_differs(self):
+        own_scope = _scope("weather.forecast", service_id=self.UUID)
+        focus = _service(self.UUID, ref=self.CLIENT_ID, scopes=[own_scope])
+        other = _service(OTHER_ID, ref="svc-other-client")
+
+        result, bsr, _, _ = _invoke(
+            ServiceType.TOOL,
+            services=[focus, other],
+            all_scopes=[own_scope],
+            subjects=[],
+            service_id=self.UUID,  # the route/trigger id is the UUID, not the clientId
+        )
+
+        # resolved (no 404); the focus's own scope reached build_scope_rules
+        assert bsr.call_count == 1
+        assert bsr.call_args.args[1].name == "weather.forecast"
+
+    def test_passing_the_clientid_does_not_resolve_focus(self):
+        focus = _service(self.UUID, ref=self.CLIENT_ID)
+        other = _service(OTHER_ID, ref="svc-other-client")
+
+        with pytest.raises(HTTPException) as ei:
+            _invoke(
+                ServiceType.TOOL,
+                services=[focus, other],
+                all_scopes=[],
+                subjects=[],
+                service_id=self.CLIENT_ID,  # clientId is NOT the route key → not found
             )
 
         assert ei.value.status_code == 404

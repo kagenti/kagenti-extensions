@@ -59,7 +59,10 @@ class ServicePolicyBuilder:
                 502, f"IdP Configuration Service unavailable for service {service_id!r}: {e}"
             )
 
-        focus = next((s for s in services if s.serviceId == service_id), None)
+        # The trigger id is the Keycloak internal client UUID (Service.id), not the human-readable
+        # clientId (Service.serviceId): the /apply/service/{id} route is keyed on the UUID because a
+        # clientId can be a slash-bearing SPIFFE URI the single-segment route cannot carry.
+        focus = next((s for s in services if s.id == service_id), None)
         if focus is None:
             raise HTTPException(404, f"service {service_id!r} not found in IdP catalog")
 
