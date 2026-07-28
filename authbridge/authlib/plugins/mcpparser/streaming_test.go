@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 func TestMCPParser_OnResponseFrame_PerMessageRecording(t *testing.T) {
@@ -81,11 +81,15 @@ func TestMCPParser_OnResponseFrame_NoExtensionMeansNoOp(t *testing.T) {
 	}
 }
 
-func TestMCPParser_OnResponseFrame_EmptyStreamRecordsSkip(t *testing.T) {
+// A request (has an id) whose stream ends with zero data frames is an
+// anomalous empty response: mcp-parser records a Skip. Mirrors the buffered
+// path's no_response_body semantics via recordEmptyResponse.
+func TestMCPParser_OnResponseFrame_RequestEmptyStream_Skip(t *testing.T) {
 	p := NewMCPParser()
 	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
 		Extensions: pipeline.Extensions{
-			MCP: &pipeline.MCPExtension{Method: "tools/call"},
+			MCP: &pipeline.MCPExtension{Method: "tools/call", RPCID: float64(3)},
 		},
 	}
 	// Streaming response with zero data frames: only the last=true call.
@@ -94,6 +98,33 @@ func TestMCPParser_OnResponseFrame_EmptyStreamRecordsSkip(t *testing.T) {
 	pctx.ClearCurrentPlugin()
 	if pctx.Extensions.Invocations == nil {
 		t.Fatal("no invocation recorded")
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 1 || invs[0].Action != pipeline.ActionSkip || invs[0].Reason != "no_response_body" {
+		t.Fatalf("expected single skip/no_response_body, got %+v", invs)
+	}
+}
+
+// A notification (no id) whose stream ends with zero data frames is the
+// expected empty ack: mcp-parser records an Observe so abctl credits it
+// rather than rendering the paired response row as "—".
+func TestMCPParser_OnResponseFrame_NotificationAck_Observe(t *testing.T) {
+	p := NewMCPParser()
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Extensions: pipeline.Extensions{
+			MCP: &pipeline.MCPExtension{Method: "notifications/initialized"}, // no RPCID → notification
+		},
+	}
+	pctx.SetCurrentPlugin("mcp-parser", pipeline.InvocationPhaseResponse)
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+	pctx.ClearCurrentPlugin()
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("no invocation recorded")
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 1 || invs[0].Action != pipeline.ActionObserve || invs[0].Reason != "matched_notifications/initialized_ack" {
+		t.Fatalf("expected single observe/matched_notifications/initialized_ack, got %+v", invs)
 	}
 }
 

@@ -8,17 +8,19 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync/atomic"
+	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	fwspiffe "github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/placeholder"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/cache"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/exchange"
+	"github.com/rossoctl/cortex/authbridge/authlib/routing"
+	fwspiffe "github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 )
 
 // tokenExchangeConfig is the plugin's local config schema. See
@@ -48,7 +50,7 @@ type tokenExchangeConfig struct {
 	ProviderURL string `json:"provider_url" description:"IdP base URL for endpoint derivation. Interpretation varies by provider."`
 
 	// ProviderRealm is the IdP-specific namespace/tenant:
-	//   keycloak: realm name (e.g. kagenti)
+	//   keycloak: realm name (e.g. rossoctl)
 	//   entra-id: tenant ID or domain (e.g. contoso.onmicrosoft.com)
 	//   okta:     authorization server ID (optional, omit for org-level)
 	ProviderRealm string `json:"provider_realm" description:"IdP-specific realm/tenant/auth-server. Keycloak: realm name. Entra ID: tenant ID. Okta: auth server ID (optional)."`
@@ -174,7 +176,7 @@ func (c *tokenExchangeConfig) applyDefaults() {
 	if c.NoTokenPolicy == "" {
 		c.NoTokenPolicy = auth.NoTokenPolicyDeny
 	}
-	// Kagenti file-system conventions for credential sources. Each
+	// Rossoctl file-system conventions for credential sources. Each
 	// default kicks in only when the matching inline value is also
 	// empty, so operators who supply inline credentials are never
 	// surprised by a file read.
@@ -701,6 +703,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		return pipeline.DenyStatus(result.DenyStatus, code, result.DenyReason)
 	case auth.ActionReplaceToken:
 		pctx.Headers.Set("Authorization", "Bearer "+result.Token)
+		recordDelegationHop(pctx, result)
 		reason := "token_replaced"
 		if result.CacheHit {
 			reason = "cache_hit"
@@ -760,6 +763,49 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// recordDelegationHop appends a delegation hop to pctx.Extensions.Delegation
+// whenever token-exchange mints (or cache-serves) a downstream token. This
+// is AuthBridge's own auth plugin establishing delegation provenance — the
+// chain is then forwarded into policy context (CPEX's DelegationExtension)
+// and surfaced on the session API, giving downstream policy a record of
+// what audience the agent's token was exchanged for, with which scopes, and
+// whether it came from cache.
+//
+// SubjectID is best-effort: the forward-proxy outbound pctx generally has
+// no validated Identity (JWT validation runs on the separate inbound pass),
+// so it's populated only when an Identity happens to be present. The
+// audience / scopes / strategy / from-cache fields are always known from
+// the exchange result and carry the bulk of the signal regardless.
+func recordDelegationHop(pctx *pipeline.Context, result *auth.OutboundResult) {
+	if pctx.Extensions.Delegation == nil {
+		pctx.Extensions.Delegation = &pipeline.DelegationExtension{}
+	}
+	subject := ""
+	if pctx.Identity != nil {
+		subject = pctx.Identity.Subject()
+	}
+	pctx.Extensions.Delegation.AppendHop(pipeline.DelegationHop{
+		SubjectID: subject,
+		Scopes:    splitScopes(result.RequestedScopes),
+		Timestamp: time.Now(),
+		Audience:  result.TargetAudience,
+		Strategy:  "token-exchange",
+		FromCache: result.CacheHit,
+	})
+}
+
+// splitScopes splits a raw space-separated OAuth scope string into a
+// slice, dropping empty fields. Returns nil (not an empty slice) for an
+// unscoped exchange so the hop's ScopesGranted stays absent rather than
+// an empty list.
+func splitScopes(raw string) []string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 func (p *TokenExchange) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {

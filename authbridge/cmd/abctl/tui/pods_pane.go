@@ -6,7 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
 )
 
 // newPodsTable builds an empty pods picker table.

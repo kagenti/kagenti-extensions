@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/skiphost"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 // markerPlugin records one Invocation per OnRequest call. Tests use it to

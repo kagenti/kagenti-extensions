@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/internal/parsercommon"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/internal/parsercommon"
 )
 
 // InferenceParser parses outbound OpenAI-compatible LLM inference requests

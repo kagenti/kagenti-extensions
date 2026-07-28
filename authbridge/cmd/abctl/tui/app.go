@@ -18,11 +18,11 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/apiclient"
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 )
 
 // Pane identifiers.

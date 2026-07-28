@@ -10,11 +10,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
+	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/cache"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/exchange"
+	"github.com/rossoctl/cortex/authbridge/authlib/routing"
 )
 
 // IdentityConfig holds the agent's identity for audience validation and token exchange.

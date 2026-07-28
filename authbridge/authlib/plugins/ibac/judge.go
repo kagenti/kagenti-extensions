@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/llmclient"
+	"github.com/rossoctl/cortex/authbridge/authlib/llmclient"
 )
 
 // Judge evaluates whether a proposed agent action aligns with a recorded

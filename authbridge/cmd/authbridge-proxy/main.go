@@ -30,25 +30,25 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/observe"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
-	authtls "github.com/kagenti/kagenti-extensions/authbridge/authlib/tls"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/tlsbridge"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/observe"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
+	"github.com/rossoctl/cortex/authbridge/authlib/shared"
+	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
+	authtls "github.com/rossoctl/cortex/authbridge/authlib/tls"
+	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/forwardproxy"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/reverseproxy"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/skiphost"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/transparentproxy"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/forwardproxy"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/reverseproxy"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/transparentproxy"
 	// Plugins are wired via per-plugin plugins_<name>.go files, each gated
 	// by `//go:build !exclude_plugin_<name>`. main.go imports no plugin
 	// package directly, so every plugin can be dropped at build time. The
@@ -147,7 +147,7 @@ func main() {
 	startSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required")
+		log.Fatal("--config is required and must point to a YAML file")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The
@@ -162,7 +162,7 @@ func main() {
 	// freshly constructed plugin instances.
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load: %v", err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 	// Build the SPIFFE Provider only when something actually consumes it —
 	// top-level mTLS (X509Source for the listeners) or a plugin whose identity

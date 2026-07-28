@@ -21,12 +21,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/httpx"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/internal/sseframe"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/skiphost"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes

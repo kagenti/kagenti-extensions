@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/internal/parsercommon"
+	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/internal/parsercommon"
 )
 
 // Synthetic method names emitted on body-less MCP transport-layer
@@ -136,6 +137,32 @@ func isMCPAction(method string) bool {
 	return false
 }
 
+// isMCPMethod reports whether a JSON-RPC method name belongs to the MCP
+// protocol namespace (spec revision 2025-06-18, Streamable HTTP). MCP
+// methods are either the bare handshake verbs initialize/ping or are
+// slash-namespaced under notifications/, tools/, resources/, prompts/,
+// completion/, logging/, sampling/, roots/, and elicitation/. An empty
+// method (non-JSON-RPC body) matches nothing and is declined. Gating on
+// the namespace is what distinguishes MCP from A2A traffic, which also
+// rides JSON-RPC 2.0 but under message/, tasks/, and agent/. When a
+// future MCP revision adds a top-level namespace, extend this set (the
+// spec-revision string above is the audit anchor).
+func isMCPMethod(method string) bool {
+	switch method {
+	case "initialize", "ping":
+		return true
+	}
+	return strings.HasPrefix(method, "notifications/") ||
+		strings.HasPrefix(method, "tools/") ||
+		strings.HasPrefix(method, "resources/") ||
+		strings.HasPrefix(method, "prompts/") ||
+		strings.HasPrefix(method, "completion/") ||
+		strings.HasPrefix(method, "logging/") ||
+		strings.HasPrefix(method, "sampling/") ||
+		strings.HasPrefix(method, "roots/") ||
+		strings.HasPrefix(method, "elicitation/")
+}
+
 func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	// Body-less transport-layer detection. Scoped to the configured
 	// MCP-endpoint paths because there's no protocol payload to
@@ -187,13 +214,17 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 		slog.Debug("mcp-parser: body is not valid JSON-RPC", "error", err, "bodyLen", len(pctx.Body))
 		return pipeline.Action{Type: pipeline.Continue}
 	}
-	// Empty method → body parses as JSON but isn't a JSON-RPC request
-	// (e.g. an OpenAI chat/completions body also unmarshals into
-	// JSONRPCRequest with zero-value fields). Don't attach a useless
-	// MCPExtension to non-MCP traffic — downstream consumers shouldn't
-	// see a phantom "mcp: {}" on every inference event.
-	if rpc.Method == "" {
-		slog.Debug("mcp-parser: body is JSON but not JSON-RPC, skipping", "bodyLen", len(pctx.Body))
+	// Claim only MCP-namespace methods. Both MCP and A2A ride JSON-RPC 2.0
+	// over HTTP, so "the method is non-empty" cannot tell them apart — the
+	// method namespace is the only in-body signal that does. Gating here
+	// keeps mcp-parser from attaching an MCPExtension to A2A traffic
+	// (message/send, tasks/get, agent/*, ...) or to a non-JSON-RPC body
+	// such as an inference /v1/messages call (which unmarshals into
+	// JSONRPCRequest with an empty Method) — which would otherwise show a
+	// phantom "mcp: {}" on every such event. a2a-parser has the mirror
+	// guard for its own namespace.
+	if !isMCPMethod(rpc.Method) {
+		slog.Debug("mcp-parser: not an MCP-namespace method, skipping", "method", rpc.Method, "bodyLen", len(pctx.Body))
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -209,6 +240,30 @@ func (p *MCPParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipelin
 
 	pctx.Observe("matched_" + rpc.Method)
 	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// recordEmptyResponse records the terminal invocation for a response that
+// carried no body, distinguishing an expected ack from an anomaly:
+//
+//   - A JSON-RPC notification has no request id, so the transport acks it
+//     with an empty HTTP 202 and there is no response object to parse. That
+//     is the expected, complete end of the exchange — record an Observe so
+//     abctl credits mcp-parser (otherwise the paired response row renders as
+//     "—", which reads as if nothing handled it). Synthetic transport events
+//     ($transport/*) likewise carry no id and are handled MCP protocol events.
+//   - A request that DID carry an id but came back empty is anomalous (a
+//     truncated or failed upstream response). Keep it a Skip so it is not
+//     mistaken for a clean handling — a skip never credits the plugin in
+//     abctl, which is the right signal for a broken response.
+//
+// Either branch records an invocation, so abctl still pairs the response row
+// with the request row (pairing keys on plugin+method+direction).
+func recordEmptyResponse(pctx *pipeline.Context) {
+	if pctx.Extensions.MCP.RPCID == nil {
+		pctx.Observe("matched_" + pctx.Extensions.MCP.Method + "_ack")
+		return
+	}
+	pctx.Skip("no_response_body")
 }
 
 // OnResponse is the legacy buffered-path response hook. Because this
@@ -235,12 +290,13 @@ func (p *MCPParser) OnResponse(_ context.Context, pctx *pipeline.Context) pipeli
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 	// We DID process the request but the response has no body — typical
-	// for JSON-RPC notifications that ack with HTTP 202. Record a Skip
-	// so abctl can pair the response row with the request row in the
-	// timeline (pairing keys on plugin+method+direction; an empty
-	// invocation slot orphans both ends).
+	// for JSON-RPC notifications that ack with HTTP 202. recordEmptyResponse
+	// credits mcp-parser with an Observe for an expected notification ack
+	// (no request id) and keeps a Skip for an anomalous empty response to a
+	// request that carried an id. Either way an invocation is recorded so
+	// abctl pairs the response row with the request row.
 	if len(pctx.ResponseBody) == 0 {
-		pctx.Skip("no_response_body")
+		recordEmptyResponse(pctx)
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -286,16 +342,17 @@ func (p *MCPParser) OnResponseFrame(_ context.Context, pctx *pipeline.Context, f
 
 	state := getOrCreateMCPStreamState(pctx)
 
-	// End-of-stream call with no payload. If we never saw a frame with
-	// a result/error and the response body was empty, record a Skip
-	// (matches the buffered path's "no_response_body" semantics so
-	// abctl pairs request and response rows uniformly across shapes).
-	// If we observed too many frames, emit a single truncation row so
-	// operators see that records were dropped.
+	// End-of-stream call with no payload. If we never saw a frame with a
+	// result/error and the response body was empty, record the terminal
+	// invocation via recordEmptyResponse (matches the buffered path: an
+	// Observe for an expected notification ack, a Skip for an anomalous empty
+	// response to a request with an id) so abctl pairs request and response
+	// rows uniformly across shapes. If we observed too many frames, emit a
+	// single truncation row so operators see that records were dropped.
 	if len(frame) == 0 {
 		if last {
 			if pctx.Extensions.MCP.Result == nil && pctx.Extensions.MCP.Err == nil && state.observed == 0 {
-				pctx.Skip("no_response_body")
+				recordEmptyResponse(pctx)
 			}
 			if state.truncated {
 				pctx.Observe("matched_" + pctx.Extensions.MCP.Method + "_response_truncated")

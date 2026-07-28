@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/placeholder"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/placeholder"
+	"github.com/rossoctl/cortex/authbridge/authlib/shared"
 )
 
 func resolveTestPlugin(t *testing.T, exchangeURL string) *TokenExchange {

@@ -10,9 +10,9 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/cluster"
-	"github.com/kagenti/kagenti-extensions/authbridge/cmd/abctl/edit"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 )
 
 // newNamespacesTable builds an empty namespaces picker table.

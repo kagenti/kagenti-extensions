@@ -2,13 +2,14 @@ package plugins
 
 import (
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 )
 
 // PluginFactory returns a fresh plugin instance. Plugins take no
@@ -41,7 +42,7 @@ var (
 // registration, log/slog handler registration): plugins live in their
 // own package and advertise themselves by side-effect import:
 //
-//	import _ "github.com/acme/kagenti-rate-limiter/ratelimit"
+//	import _ "github.com/acme/rossoctl-rate-limiter/ratelimit"
 //
 // Double-registration under the same name panics. Silent last-write-
 // wins would let a version mismatch or deployment bug poison the
@@ -288,7 +289,11 @@ func Build(entries []config.PluginEntry, opts ...pipeline.Option) (*pipeline.Pip
 		}
 		factory, ok := factoryFor(e.Name)
 		if !ok {
-			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, RegisteredPlugins())
+			pluginNames := RegisteredPlugins()
+			if len(pluginNames) == 0 {
+				slog.Warn("No registered plugins -- Build with --tags or use `go run .` to enable")
+			}
+			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
 		p := factory()
 		if c, ok := p.(pipeline.Configurable); ok {
@@ -331,7 +336,11 @@ func BuildWithSPIFFE(entries []config.PluginEntry, p *spiffe.Provider, opts ...p
 		}
 		factory, ok := factoryFor(e.Name)
 		if !ok {
-			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, RegisteredPlugins())
+			pluginNames := RegisteredPlugins()
+			if len(pluginNames) == 0 {
+				slog.Warn("No registered plugins -- Build with --tags or use `go run .` to enable")
+			}
+			return nil, fmt.Errorf("unknown plugin %q (registered: %v)", e.Name, pluginNames)
 		}
 		plugin := factory()
 		// Inject the framework SPIFFE Provider BEFORE Configure runs so

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 func TestStore_AppendAndView(t *testing.T) {

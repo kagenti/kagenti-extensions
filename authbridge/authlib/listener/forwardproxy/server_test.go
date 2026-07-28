@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/cache"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/exchange"
+	"github.com/rossoctl/cortex/authbridge/authlib/routing"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 type mockVerifier struct {

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // configured returns an MCPParser with paths configured. Most existing
@@ -186,6 +186,49 @@ func TestMCPParser_SkipsJSONThatIsNotJSONRPC(t *testing.T) {
 	}
 }
 
+// MCP and A2A both ride JSON-RPC 2.0, so mcp-parser must NOT claim A2A
+// methods just because they carry a non-empty JSON-RPC method. Gating on
+// the MCP namespace makes it decline A2A traffic (message/*, tasks/*,
+// agent/*) — so an A2A request shows no mcp-parser row in abctl. Mirror
+// of a2a-parser's own-namespace guard.
+func TestMCPParser_ForeignNamespaceMethods_Declined(t *testing.T) {
+	a2aMethods := []string{
+		"message/send",
+		"message/stream",
+		"tasks/get",
+		"tasks/cancel",
+		"agent/getAuthenticatedExtendedCard",
+	}
+	for _, method := range a2aMethods {
+		t.Run(method, func(t *testing.T) {
+			p := NewMCPParser()
+			pctx := &pipeline.Context{
+				Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{}}`),
+			}
+			action := p.OnRequest(context.Background(), pctx)
+			if action.Type != pipeline.Continue {
+				t.Fatalf("expected Continue, got %v", action.Type)
+			}
+			if pctx.Extensions.MCP != nil {
+				t.Errorf("Extensions.MCP should be nil for non-MCP method %q, got %+v", method, pctx.Extensions.MCP)
+			}
+			if pctx.Extensions.Invocations != nil {
+				t.Errorf("expected no Invocation for non-MCP method %q, got %+v", method, pctx.Extensions.Invocations)
+			}
+			// Declining (no extension attached) means Classification() reports
+			// "unclassified" — (anyAction=false, anyBypass=false) — NOT a
+			// recorded bypass. IBAC then applies unclassified_policy (default
+			// passthrough). Locks the interaction raised in review: scoping the
+			// parser to its namespace moves out-of-namespace JSON-RPC from
+			// "bypass" to "unclassified".
+			if anyAction, anyBypass := pctx.Classification(); anyAction || anyBypass {
+				t.Errorf("Classification() = (action=%v, bypass=%v) for non-MCP method %q; want (false, false) unclassified",
+					anyAction, anyBypass, method)
+			}
+		})
+	}
+}
+
 func TestMCPParser_InvalidJSON(t *testing.T) {
 	p := NewMCPParser()
 	pctx := &pipeline.Context{Body: []byte("not json")}
@@ -243,15 +286,17 @@ func TestMCPParser_OnResponse_NoRequestContext(t *testing.T) {
 	}
 }
 
-// TestMCPParser_OnResponse_EmptyBody is the regression test for the
-// notifications/initialized pairing bug: when the request side parsed
-// the message (Extensions.MCP populated) but the response body is empty
-// (HTTP 202 ack), the parser must record a Skip so abctl can pair the
-// response row with the request row in the events timeline.
-func TestMCPParser_OnResponse_EmptyBody(t *testing.T) {
+// A JSON-RPC notification (no request id) is acked by the transport with an
+// empty HTTP 202 and gets no response object to parse — that's the expected,
+// complete end of the exchange. mcp-parser records an Observe so abctl credits
+// it (and pairs the response row with the request row) instead of rendering
+// the paired row as "—". Regression for the notification-ack observability
+// fix; supersedes the older skip-based pairing test.
+func TestMCPParser_OnResponse_NotificationAck_Observe(t *testing.T) {
 	p := NewMCPParser()
 	pctx := &pipeline.Context{
-		Direction:  pipeline.Outbound,
+		Direction: pipeline.Outbound,
+		// notifications/* carry no id → RPCID nil.
 		Extensions: pipeline.Extensions{MCP: &pipeline.MCPExtension{Method: "notifications/initialized"}},
 	}
 	action := p.OnResponse(context.Background(), pctx)
@@ -260,6 +305,36 @@ func TestMCPParser_OnResponse_EmptyBody(t *testing.T) {
 	}
 	if pctx.Extensions.MCP.Result != nil {
 		t.Error("Result should remain nil when response body is empty")
+	}
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("expected an Observe Invocation, got none")
+	}
+	invs := pctx.Extensions.Invocations.Outbound
+	if len(invs) != 1 {
+		t.Fatalf("expected 1 Invocation, got %d", len(invs))
+	}
+	if invs[0].Action != pipeline.ActionObserve {
+		t.Errorf("Action = %q, want observe", invs[0].Action)
+	}
+	if invs[0].Reason != "matched_notifications/initialized_ack" {
+		t.Errorf("Reason = %q, want matched_notifications/initialized_ack", invs[0].Reason)
+	}
+}
+
+// A request that carried an id but came back with an empty body is anomalous
+// (truncated / failed upstream response). mcp-parser keeps a Skip there — a
+// skip never credits the plugin in abctl, which is the correct signal for a
+// broken response, and it still pairs the response row with the request row.
+func TestMCPParser_OnResponse_RequestEmptyBody_Skip(t *testing.T) {
+	p := NewMCPParser()
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		// tools/call is a request and carries an id → RPCID non-nil.
+		Extensions: pipeline.Extensions{MCP: &pipeline.MCPExtension{Method: "tools/call", RPCID: float64(7)}},
+	}
+	action := p.OnResponse(context.Background(), pctx)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
 	}
 	if pctx.Extensions.Invocations == nil {
 		t.Fatal("expected a Skip Invocation, got none")

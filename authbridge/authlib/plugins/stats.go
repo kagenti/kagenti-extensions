@@ -1,8 +1,8 @@
 package plugins
 
 import (
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // StatsSource is an optional interface a plugin implements when it

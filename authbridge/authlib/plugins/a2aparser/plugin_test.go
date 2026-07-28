@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 func TestA2AParser_Capabilities(t *testing.T) {
@@ -85,7 +85,7 @@ func TestA2AParser_MessageStream(t *testing.T) {
 	}
 }
 
-// The A2A Python SDK (and the kagenti backend that wraps it) places contextId
+// The A2A Python SDK (and the rossoctl backend that wraps it) places contextId
 // inside params.message on established-conversation turns — not at the
 // top-level params that the earlier extraction path looked at. Without this
 // fallback, the listener's request-phase session lookup sees an empty
@@ -327,6 +327,90 @@ func TestA2AParser_InvalidJSON(t *testing.T) {
 	}
 	if pctx.Extensions.A2A != nil {
 		t.Error("Extensions.A2A should be nil for invalid JSON")
+	}
+}
+
+// A JSON body with no JSON-RPC "method" is not A2A traffic. Inference
+// payloads (Anthropic /v1/messages, OpenAI /v1/chat/completions) parse
+// cleanly into JSONRPCRequest with a zero-value Method, so the parser
+// must NOT attach an A2AExtension or record a "matched_" observe for
+// them — otherwise abctl shows a phantom a2a-parser match on every
+// inference call. Regression for the empty-method guard.
+func TestA2AParser_NonJSONRPCBody_NoMatch(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"anthropic messages", `{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"hello"}]}`},
+		{"openai chat completions", `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}],"stream":true}`},
+		{"empty object", `{}`},
+		{"explicit empty method", `{"jsonrpc":"2.0","id":1,"method":"","params":{}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewA2AParser()
+			pctx := &pipeline.Context{Body: []byte(tc.body)}
+
+			action := p.OnRequest(context.Background(), pctx)
+			if action.Type != pipeline.Continue {
+				t.Fatalf("expected Continue, got %v", action.Type)
+			}
+			if pctx.Extensions.A2A != nil {
+				t.Errorf("Extensions.A2A should be nil for non-JSON-RPC body, got %+v", pctx.Extensions.A2A)
+			}
+			// No Invocation should be recorded — the parser didn't claim
+			// this request, so abctl shows no a2a-parser row for it.
+			if pctx.Extensions.Invocations != nil {
+				t.Errorf("expected no Invocation recorded, got %+v", pctx.Extensions.Invocations)
+			}
+		})
+	}
+}
+
+// A2A and MCP both ride JSON-RPC 2.0, so a2a-parser must NOT claim MCP
+// methods just because they carry a non-empty JSON-RPC method. Gating on
+// the A2A namespace (message/, tasks/, agent/) makes it decline MCP
+// traffic (initialize, tools/list, notifications/*, ...) — which is why
+// an MCP request should show no a2a-parser row in abctl. Mirror of
+// mcp-parser's own-namespace guard.
+func TestA2AParser_ForeignNamespaceMethods_Declined(t *testing.T) {
+	mcpMethods := []string{
+		"initialize",
+		"ping",
+		"tools/list",
+		"tools/call",
+		"resources/read",
+		"prompts/get",
+		"notifications/initialized",
+	}
+	for _, method := range mcpMethods {
+		t.Run(method, func(t *testing.T) {
+			p := NewA2AParser()
+			pctx := &pipeline.Context{
+				Body: []byte(`{"jsonrpc":"2.0","id":1,"method":"` + method + `","params":{}}`),
+			}
+
+			action := p.OnRequest(context.Background(), pctx)
+			if action.Type != pipeline.Continue {
+				t.Fatalf("expected Continue, got %v", action.Type)
+			}
+			if pctx.Extensions.A2A != nil {
+				t.Errorf("Extensions.A2A should be nil for non-A2A method %q, got %+v", method, pctx.Extensions.A2A)
+			}
+			if pctx.Extensions.Invocations != nil {
+				t.Errorf("expected no Invocation for non-A2A method %q, got %+v", method, pctx.Extensions.Invocations)
+			}
+			// Declining (no extension attached) means Classification() reports
+			// "unclassified" — (anyAction=false, anyBypass=false) — NOT a
+			// recorded bypass. IBAC then applies unclassified_policy (default
+			// passthrough). Locks the interaction raised in review: scoping the
+			// parser to its namespace moves out-of-namespace JSON-RPC from
+			// "bypass" to "unclassified".
+			if anyAction, anyBypass := pctx.Classification(); anyAction || anyBypass {
+				t.Errorf("Classification() = (action=%v, bypass=%v) for non-A2A method %q; want (false, false) unclassified",
+					anyAction, anyBypass, method)
+			}
+		})
 	}
 }
 

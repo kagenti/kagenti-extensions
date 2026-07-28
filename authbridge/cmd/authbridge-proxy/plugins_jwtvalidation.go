@@ -2,4 +2,4 @@
 
 package main
 
-import _ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
+import _ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"

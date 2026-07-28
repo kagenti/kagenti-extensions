@@ -31,32 +31,32 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/observe"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/shared"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/observe"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
+	"github.com/rossoctl/cortex/authbridge/authlib/shared"
+	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 
 	// Only the ext_proc listener is compiled in (no ext_authz, no
 	// HTTP proxies).
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/extproc"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/skiphost"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/extproc"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
 
 	// Plugins. Auth gates first, then the protocol parsers that
 	// supply session-event context for abctl.
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/a2aparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/inferenceparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/mcpparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/opa"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/sparc"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/a2aparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/inferenceparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/mcpparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/opa"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/sparc"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenbroker"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
 
 var logLevel = new(slog.LevelVar)
@@ -99,7 +99,7 @@ func main() {
 	startSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required")
+		log.Fatal("--config is required and must point to a YAML file")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured.
@@ -121,7 +121,7 @@ func main() {
 	// instances.
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load: %v", err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 	var provider *spiffe.Provider
 	if bootCfg.SPIFFE != nil {
