@@ -87,6 +87,8 @@ class FakeStore:
         self.service_writes = []   # [(service_id, SPM)] captured from apply_service_policy
         self.by_role_calls = []    # [Role] captured from get_service_policies_by_role
         self.policy_pushes = []    # [PolicyModel] captured from apply_policy
+        self.service_deletes = []  # [service_id] captured from delete_service_policy
+        self.agent_deletes = []    # [agent_id] captured from delete_agent_policy
 
     def get_service_policy(self, service_id):
         if service_id in self.data:
@@ -107,6 +109,13 @@ class FakeStore:
 
     def apply_policy(self, model):
         self.policy_pushes.append(model.model_copy(deep=True))
+
+    def delete_service_policy(self, service_id):
+        self.service_deletes.append(service_id)
+        self.data.pop(service_id, None)
+
+    def delete_agent_policy(self, agent_id):
+        self.agent_deletes.append(agent_id)
 
     # ---- assertion helpers ------------------------------------------------ #
     @property
@@ -144,6 +153,10 @@ def engine_env(catalog, store):
                                   side_effect=store.apply_service_policy))
         stack.enter_context(patch("aiac.policy.computation.engine.apply_policy",
                                   side_effect=store.apply_policy))
+        stack.enter_context(patch("aiac.policy.computation.engine.delete_service_policy",
+                                  side_effect=store.delete_service_policy))
+        stack.enter_context(patch("aiac.policy.computation.engine.delete_agent_policy",
+                                  side_effect=store.delete_agent_policy))
         from aiac.policy.computation.engine import compute_and_apply
         yield compute_and_apply
 
@@ -551,3 +564,187 @@ def test_dependency_exception_propagates(caplog):
             compute_and_apply([_rule(UR, _scope("s-x", service_id="svc"))])
         assert store.apply_policy_count == 0
         assert "compute_and_apply failed" in caplog.text  # still logged before re-raising
+
+
+# --------------------------------------------------------------------------- #
+# Reconcile — drift GC (Handoff 10). Keycloak UUIDs churn on delete/recreate,   #
+# so an append-only merge would grow stale edges beside their superseded         #
+# generations (issue 6.3 / RC-A: SPM(github-agent) held 53 edges). On every      #
+# compute the engine reconciles each TOUCHED SPM against the current             #
+# get_services() catalog (no extra IdP read), dropping dangling edges. It        #
+# removes only edges whose entity is gone, so live edges / order-independence    #
+# are untouched.                                                                 #
+# --------------------------------------------------------------------------- #
+def test_reconcile_drops_retired_scope_edge():
+    # A pre-fix ``*-aud`` scope no longer in the catalog is pruned on re-onboarding; the current
+    # edge survives. Reconcile alone changes the SPM, so it is (re-)persisted.
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    aud = _scope("s-aud", "agent-team1-github-agent-aud", service_id="github-agent")
+    catalog = [_agent("github-agent", scopes=[AS])]  # ``aud`` no longer exists
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_rule(UR, aud), _rule(UR, AS)]
+        )
+    }
+    store = run_engine([_rule(UR, AS)], catalog=catalog, store_initial=initial)
+
+    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+
+
+def test_reconcile_drops_churned_scope_uuid_same_name():
+    # The scope was recreated with a fresh UUID (same name); the old-UUID edge is pruned.
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    as_v1 = _scope("s-as-v1", "agent-inbound", service_id="github-agent")
+    as_v2 = _scope("s-as-v2", "agent-inbound", service_id="github-agent")
+    catalog = [_agent("github-agent", scopes=[as_v2])]  # only the current generation
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[as_v1], inbound=[_rule(UR, as_v1)]
+        )
+    }
+    store = run_engine([_rule(UR, as_v2)], catalog=catalog, store_initial=initial)
+
+    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-as-v2")]
+
+
+def test_reconcile_collapses_churned_duplicate_user_role():
+    # Two same-name/different-id ``developer`` edges on one scope (Keycloak delete+recreate). The
+    # batch carries the current generation, so the old-generation edge is dropped; the derived APM's
+    # subject gate then names only the current role.
+    dev_old = _user_role("r-dev-v1", "developer", users=["dev-user"])
+    dev_new = _user_role("r-dev-v2", "developer", users=["dev-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    catalog = [_agent("github-agent", scopes=[AS])]
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_rule(dev_old, AS), _rule(dev_new, AS)]
+        )
+    }
+    store = run_engine([_rule(dev_new, AS)], catalog=catalog, store_initial=initial)
+
+    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-dev-v2", "s-agent-inbound")]
+    apm = store.pushed_agent("github-agent")
+    assert apm.subject_roles == {"dev-user": [dev_new]}
+
+
+def test_reconcile_drops_retired_agent_role_self_reference():
+    # An impossible focus-agent self-reference (an Agent-kind role the current builder can no longer
+    # emit) references a role id absent from the catalog — pruned.
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    AR = _agent_role("r-agent-src", "agent-source", owner="github-agent")  # current agent role
+    selfref = _agent_role("r-selfref", "github-agent.agent", owner="github-agent")  # retired
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    catalog = [_agent("github-agent", roles=[AR], scopes=[AS])]  # r-selfref not present
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_rule(selfref, AS), _rule(UR, AS)]
+        )
+    }
+    store = run_engine([_rule(UR, AS)], catalog=catalog, store_initial=initial)
+
+    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+
+
+def test_reconcile_preserves_live_edges_and_is_idempotent():
+    # Re-onboarding a service whose edges are all current prunes nothing (order-independence): the
+    # canonical repro's full edge set survives a second identical compute.
+    AR, UR, AS, TS, catalog = _repro()
+    initial = {
+        "github-agent": _spm("github-agent", owned_scopes=[AS], inbound=[_rule(UR, AS)]),
+        "github-tool": _spm(
+            "github-tool", type=ServiceType.TOOL, owned_scopes=[TS],
+            inbound=[_rule(AR, TS), _rule(UR, TS)],
+        ),
+    }
+    store = run_engine(
+        [_rule(UR, AS), _rule(AR, TS), _rule(UR, TS)], catalog=catalog, store_initial=initial
+    )
+
+    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(store.data["github-tool"].inbound_rules) == sorted(
+        [("r-agent-src", "s-tool-read"), ("r-user-dev", "s-tool-read")]
+    )
+
+
+def test_reconcile_skips_when_service_absent_from_catalog():
+    # A transient catalog miss (owning service not returned by get_services()) must never wipe an
+    # SPM — reconcile is skipped and the stale edge is left intact rather than dropped.
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    orphan_scope = _scope("s-orphan", "orphan", service_id="orphan")
+    initial = {
+        "orphan": _spm("orphan", owned_scopes=[orphan_scope], inbound=[_rule(UR, orphan_scope)])
+    }
+    store = run_engine([_rule(UR, orphan_scope)], catalog=[], store_initial=initial)
+
+    assert _pairs(store.data["orphan"].inbound_rules) == [("r-user-dev", "s-orphan")]
+
+
+# --------------------------------------------------------------------------- #
+# decommission (service offboard) — the onboard→offboard drift case (case 3).    #
+# Reconcile's catalog-anchored GC skips a decommissioned service (absent from    #
+# get_services()); decommission() is the authoritative teardown: delete SPM(X),  #
+# purge X's outbound footprint from other SPMs, delete APM(X) if X is an agent,   #
+# and re-derive every agent whose policy changed. Two-phase: onboard the repro    #
+# into a shared store, then decommission against a catalog with X removed.        #
+# --------------------------------------------------------------------------- #
+def _onboard_repro(store):
+    """Onboard the canonical repro into ``store`` (mutates it); return ``(AR, UR, AS, TS)``."""
+    AR, UR, AS, TS, catalog = _repro()
+    with engine_env(catalog, store) as compute_and_apply:
+        compute_and_apply([_rule(UR, AS), _rule(AR, TS), _rule(UR, TS)])
+    return AR, UR, AS, TS
+
+
+def run_decommission(service_id, *, catalog, store) -> FakeStore:
+    with engine_env(catalog, store):
+        from aiac.policy.computation.engine import decommission
+
+        decommission(service_id)
+    return store
+
+
+def test_decommission_tool_strands_no_edges_and_rederives_agent():
+    # Onboard agent A (targets tool T), then offboard T. SPM(T) is deleted (with its user→T and
+    # agent→T inbound edges); A is re-derived with its outbound to T dropped, its own inbound intact.
+    store = FakeStore()
+    _onboard_repro(store)
+    # sanity: onboarding gave A an outbound edge to the tool.
+    assert _pairs(store.pushed_agent("github-agent").outbound_rules) == [("r-agent-src", "s-tool-read")]
+
+    # Phase 2: the tool is gone from the catalog (its Keycloak client was deleted).
+    run_decommission("github-tool", catalog=[_agent("github-agent", scopes=[])], store=store)
+
+    # SPM(T) deleted; a tool has no APM, so no PDP agent-delete.
+    assert "github-tool" in store.service_deletes
+    assert "github-tool" not in store.data
+    assert store.agent_deletes == []
+
+    # A re-derived: outbound to the tool is stranded (edge lived on SPM(T)); inbound UR→AS survives.
+    apm = store.pushed_agent("github-agent")
+    assert apm.outbound_rules == []
+    assert apm.target_scopes == {}
+    assert apm.outbound_subject_rules == []
+    assert _pairs(apm.inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+
+
+def test_decommission_agent_deletes_apm_and_purges_outbound_footprint():
+    # Offboard the agent A itself. SPM(A) is deleted, APM(A) is deleted from the PDP, and A's
+    # outbound footprint (AR→TS stored on SPM(T)) is purged while the tool keeps its user grant.
+    store = FakeStore()
+    _onboard_repro(store)
+    pushes_before = len(store.policy_pushes)
+
+    # Phase 2: the agent is gone from the catalog.
+    run_decommission("github-agent", catalog=[_tool("github-tool", scopes=[])], store=store)
+
+    # SPM(A) deleted and APM(A) removed from the PDP.
+    assert "github-agent" in store.service_deletes
+    assert "github-agent" not in store.data
+    assert store.agent_deletes == ["github-agent"]
+
+    # A's outbound footprint purged from the tool; the tool keeps its user→TS grant.
+    assert _pairs(store.data["github-tool"].inbound_rules) == [("r-user-dev", "s-tool-read")]
+
+    # No APM re-derived for the deleted agent (nothing targeted it) — no new push.
+    assert len(store.policy_pushes) == pushes_before

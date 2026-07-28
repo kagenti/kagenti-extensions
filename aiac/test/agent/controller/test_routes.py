@@ -71,6 +71,35 @@ def test_apply_role_dispatches_to_role_subagent_with_role_id():
     pce.assert_called_once_with([], True)
 
 
+def test_apply_offboard_dispatches_to_decommission_with_client_id():
+    # Offboard resolves the service key through the UC stub then calls decommission directly
+    # (no compute_and_apply — it is a whole-service teardown, not a rule fold).
+    with (
+        patch("aiac.agent.controller.routes.offboard_service", side_effect=lambda s: s) as off,
+        patch("aiac.agent.controller.routes.decommission") as dec,
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/offboard/github-tool")
+
+    assert resp.status_code == 200
+    off.assert_called_once_with("github-tool")
+    dec.assert_called_once_with("github-tool")
+    pce.assert_not_called()
+
+
+def test_apply_offboard_carries_slash_bearing_spiffe_client_id():
+    # The {service_id:path} converter must pass a slash-bearing SPIFFE-URI clientId through intact.
+    spiffe_id = "spiffe://cluster.local/ns/team1/sa/github-tool"
+    with (
+        patch("aiac.agent.controller.routes.offboard_service", side_effect=lambda s: s),
+        patch("aiac.agent.controller.routes.decommission") as dec,
+    ):
+        resp = client.post(f"/apply/offboard/{spiffe_id}")
+
+    assert resp.status_code == 200
+    dec.assert_called_once_with(spiffe_id)
+
+
 def test_controller_forwards_handler_rules_and_override_verbatim():
     rules = [_rule("r-a"), _rule("r-b")]
     with (
@@ -120,3 +149,14 @@ def test_update_role_stub_returns_no_rules_and_override_true():
     from aiac.agent.uc.role_update.role import update_role
 
     assert update_role("role-1") == ([], True)
+
+
+def test_offboard_service_stub_returns_client_id_unchanged():
+    from aiac.agent.uc.offboarding.offboard import offboard_service
+
+    # Keyed by the clientId (SPM key), returned verbatim — including slash-bearing SPIFFE URIs.
+    assert offboard_service("github-tool") == "github-tool"
+    assert (
+        offboard_service("spiffe://cluster.local/ns/team1/sa/github-tool")
+        == "spiffe://cluster.local/ns/team1/sa/github-tool"
+    )

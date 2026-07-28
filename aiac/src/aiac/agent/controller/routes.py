@@ -15,11 +15,12 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import Response
 
+from aiac.agent.uc.offboarding.offboard import offboard_service
 from aiac.agent.uc.onboarding.orchestrator import onboard_service
 from aiac.agent.uc.policy_update.build import build_policy
 from aiac.agent.uc.policy_update.rebuild import rebuild_policy
 from aiac.agent.uc.role_update.role import update_role
-from aiac.policy.computation import compute_and_apply
+from aiac.policy.computation import compute_and_apply, decommission
 
 app = FastAPI()
 
@@ -49,6 +50,17 @@ def apply_policy_rebuild() -> Response:
 def apply_role(role_id: str) -> Response:
     rules, override = update_role(role_id)
     compute_and_apply(rules, override)
+    return Response(status_code=200)
+
+
+# Offboard is keyed by the clientId (the SPM key), NOT the Keycloak internal UUID that
+# /apply/service/{service_id} carries: an offboarded client is gone from get_services(), so
+# UUID→clientId resolution is impossible. The {service_id:path} converter carries slash-bearing
+# SPIFFE-URI clientIds. Decommission is a whole-service teardown, so it bypasses the
+# (rules, override) → compute_and_apply path and calls the PCE's decommission directly.
+@app.post("/apply/offboard/{service_id:path}")
+def apply_offboard(service_id: str) -> Response:
+    decommission(offboard_service(service_id))
     return Response(status_code=200)
 
 

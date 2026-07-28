@@ -74,15 +74,17 @@ No FastAPI. No Kubernetes deployment. No container image. Imported as a library 
 
 ### Public API
 
-Single entry point:
+Two entry points — an incremental fold and an authoritative offboard:
 
 ```python
 def compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None
+def decommission(service_id: str) -> None   # service_id = clientId (SPM key), not the Keycloak UUID
 ```
 
-- **No return value; failures propagate:** on success the caller receives no return value. The function logs exceptions and **re-raises** them — a failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) rather than being silently swallowed while nothing is applied.
+- **No return value; failures propagate:** on success the caller receives no return value. Both functions log exceptions and **re-raise** them — a failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) rather than being silently swallowed while nothing is applied.
 - **`override`:** selects the merge mode (see [Merge Semantics](#merge-semantics)). `False` (default) appends additively at the SPM layer; `True` authoritatively replaces every input role's mappings **across all SPMs** (role-level revocation). Set by the caller (the Controller) from the producing UC's choice — UC1 = `False`, UC3 = `True`, UC2 Rebuild = `True`, UC2 Build = TBD.
-- Import path: `from aiac.policy.computation.engine import compute_and_apply`
+- **`decommission`:** the authoritative service **offboard** — tears down a decommissioned service's entire policy footprint (see [Decommission (service offboard)](#decommission-service-offboard)). Keyed by the **clientId (SPM key)**, since an offboarded client is gone from `get_services()` and its UUID can no longer be resolved.
+- Import path: `from aiac.policy.computation.engine import compute_and_apply, decommission`
 
 ### Rule-builder input contract (upstream)
 
@@ -100,6 +102,8 @@ Given `rules: list[PolicyRule]` and an `override` flag, `compute_and_apply` exec
 2. **Route each rule to its owning service's SPM.** For each rule `(role, scope)`, append it to `SPM(scope.serviceId).inbound_rules` — fetch the SPM via `get_service_policy_by_scope` / `get_service_policy`. **Append-dedup by `role.id + scope.id`.** There is **no** write-time 3-way P5b classification (the old (user,agent-scope)/(user,tool-scope)/(agent,tool-scope) routing table is gone) — a rule always lands on the SPM of the service that owns its scope, whatever the kinds.
 
 3. **Override (`override=True`) — role-level revocation.** *Before* appending, purge the **distinct input-role set** from **every** SPM that contains any of them: one up-front pass using `get_service_policies_by_role` per distinct input role, removing every stored rule whose `role.id` matches. Then append the fresh rules. Purging once, up-front, ensures a role shared across the input is not wiped after being added. The old algorithm's `target_scopes` reconciliation is **deleted** — `target_scopes` is a derived, never-stored quantity.
+
+3b. **Reconcile (drift GC) — after routing/override, before persist.** Prune each **touched** SPM against the step-1 `get_services()` catalog (no additional IdP read) so drift cannot accumulate across re-onboarding. Runs under **both** merge modes and is order-independent (drops only edges whose entity no longer exists). See [Reconcile (drift GC)](#reconcile-drift-gc) under Merge Semantics for the keep rules.
 
 4. **Persist** each changed SPM via `apply_service_policy`.
 
@@ -157,14 +161,45 @@ The `override` flag (set by the caller from the producing UC's choice) selects t
 
 `override=True` provides **role-level** revocation. Finer-grained single-rule revocation (removing one `PolicyRule` without replacing its whole role) is still **TBD**.
 
+#### Reconcile (drift GC)
+
+SPM identity keys on Keycloak UUIDs, which **churn on delete/recreate**. Because append-dedup keys on `role.id + scope.id`, a re-onboarded service whose Keycloak roles/scopes were recreated presents *new* UUIDs, so its edges are treated as new and pile up **beside** the superseded generations — nothing removes the old ones. (`override=True` does not close this: it purges by the *input* role's id, so a role whose UUID already churned out of the batch is never matched.) A live diagnostic once found a single agent SPM carrying 53 inbound edges across two role-id generations, retired `*-aud` scopes, an impossible self-reference, and duplicate same-name roles — all replayed into every regenerated APM/Rego.
+
+**Reconcile** closes this. After routing (step 2) and any override purge (step 3), and **before** persist (step 4), each **touched** SPM is pruned against the step-1 catalog. It **reuses that same `get_services()` result** — no additional IdP read, so the *only-runtime-IdP-read-is-`get_services()`* invariant holds. It runs under **both** merge modes and is **order-independent** — it removes *only* edges whose entity genuinely no longer exists, never a live edge, so both onboarding orders still converge. "Touched SPMs only": at that point the SPM cache holds exactly the routed + override-purged SPMs (agent-derive SPMs aren't loaded yet).
+
+For each touched `SPM(X)` whose owner `X` **is present in the catalog** (a catalog **miss ⇒ skip pruning**, never wipe on a transient outage), an inbound edge is kept iff:
+
+1. **Scope still exists** — `edge.scope.id ∈ {s.id for s in owned_scopes}` (X's current `aiac.managed` scopes, seeded from the catalog). Drops retired/churned scopes (kills the `*-aud` species and scope-model cruft).
+2. **Agent role still exists** — for `role.kind == Agent`, `edge.role.id ∈` the catalog's `aiac.managed` role ids (all services). Drops retired/churned agent client roles (kills self-references and agent-role UUID churn).
+3. **User-role churn collapse** — user realm roles are membership-derived, absent from the catalog, and the PCE must not read `get_subjects()`; so among surviving `User` edges grouped by `(scope.id, role.name)`, a stale edge is dropped only when **this batch** carries a *different* id for that same `(scope, name)` (the fresh id supersedes the old generation). Two *co-existing* same-name realm roles both currently held are both kept (realm hygiene, not accumulation — out of scope).
+
+#### Decommission (service offboard)
+
+Reconcile is passive and catalog-anchored: it prunes only **touched** SPMs and skips any whose owner is absent from `get_services()`. That leaves the **onboard→offboard** drift species uncovered — once a service `X` is decommissioned (its Keycloak client + roles/scopes deleted), `X` is gone from the catalog forever, so (1) `SPM(X)`'s own inbound edges linger; (2) `X`'s **outbound footprint** (`X_role → other_scope` edges on *other* SPMs) is never pruned; (3) if `X` was an agent, its **APM/Rego stays in the PDP**. `decommission(service_id)` is the **authoritative** teardown for exactly this — it acts on an explicit offboard signal, not the catalog-miss guard.
+
+**Keyed by the clientId, not the UUID.** An offboarded client is gone from `get_services()`, so UUID→clientId resolution is impossible; the offboard contract carries the clientId (`Service.serviceId`, the SPM key) directly. This is the documented asymmetry with onboard's `/apply/service/{uuid}`.
+
+Steps:
+
+1. **Catalog once** (`get_services()` — the same single allowed IdP read; `X` is absent, used only to seed/classify the still-live agents re-derived in step 8).
+2. **Load `SPM(X)`.** **Content guard:** a 404 fresh-empty SPM (never onboarded / already removed) is a **no-op** — no spurious PDP delete.
+3. **Targeters** — agents whose *outbound* loses `X`: the `actorIds` of every **Agent**-kind inbound edge on `SPM(X)` (they held `their_role → X_scope` on `SPM(X)`, deleted in step 5).
+4. **Purge `X`'s outbound footprint.** For each `r ∈ SPM(X).owned_roles`, find the SPMs referencing it via `get_service_policies_by_role(r)`; on each such SPM `B` (skip `X`), drop edges where `edge.role.id == r.id`; mark `B` changed and, if `B` is an agent, affected (its inbound `source_roles[X]` vanished).
+5. **Delete `SPM(X)`** (`delete_service_policy`) — removes every user→X and agent→X inbound edge at once — and evict it from the SPM cache so re-derive can't resurrect it.
+6. **Persist** each changed (footprint-purged) SPM (`apply_service_policy`).
+7. **Delete `APM(X)`** (`delete_agent_policy`) iff `SPM(X).service_type == Agent` (tools have an SPM but no APM).
+8. **Re-derive** `affected = (targeters ∪ purged-agent-owners) − {X}`, filtered to agents; `apply_policy(PolicyModel(agents=…))` **once** if non-empty. Derivation is reused unchanged — it reads the freshly-persisted, `X`-deleted store, so `outbound` / `target_scopes` / `source_roles` referencing `X` drop automatically.
+
+**Invariants preserved:** still exactly one IdP read (`get_services()`); still a per-agent partial upsert. **Not covered** (follow-ups): NATS `aiac.apply.offboard.{id}` consumer wiring; dropped-target GC where the source service survives (via `override=True` re-onboard); batch offboard.
+
 ### Dependencies
 
 | Module | Purpose |
 |--------|---------|
 | `aiac.policy.model` | `PolicyRule`, `ServicePolicyModel`, `AgentPolicyModel`, `PolicyModel` |
 | `aiac.idp.configuration` | `Configuration.get_services` — the **only** runtime IdP read (catalog: `service_type` + own roles/scopes for the P2 seed) |
-| `aiac.policy.store.library` | `get_service_policy` / `get_service_policy_by_scope` (fetch SPM), `get_service_policies_by_role` (SPMs containing a role — override purge + outbound derivation), `apply_service_policy` (persist SPM) |
-| `aiac.pdp.policy.library` | `apply_policy` — partial-upsert derived APMs to OPA |
+| `aiac.policy.store.library` | `get_service_policy` / `get_service_policy_by_scope` (fetch SPM), `get_service_policies_by_role` (SPMs containing a role — override purge + outbound derivation), `apply_service_policy` (persist SPM), `delete_service_policy` (offboard) |
+| `aiac.pdp.policy.library` | `apply_policy` — partial-upsert derived APMs to OPA; `delete_agent_policy` — remove an offboarded agent's APM/Rego |
 
 Note: the PCE no longer calls `get_services_by_role` / `get_services_by_scope` / `get_subjects_by_role` at routing or classification time — those facts arrive on the rules (input contract) and derivation reads SPMs. The single IdP read is `get_services()` for the identity seed.
 
@@ -189,8 +224,8 @@ Good tests assert external behavior — what the engine writes to the Policy Sto
 **Seam:** mock all downstream dependencies at their module-level import boundary:
 
 - `aiac.idp.configuration` — mock `Configuration.get_services` (the catalog: `service_type` + each service's own roles/scopes for the P2 seed).
-- `aiac.policy.store.library` — mock `get_service_policy` / `get_service_policy_by_scope`, `get_service_policies_by_role`, `apply_service_policy`.
-- `aiac.pdp.policy.library` — mock `apply_policy`.
+- `aiac.policy.store.library` — mock `get_service_policy` / `get_service_policy_by_scope`, `get_service_policies_by_role`, `apply_service_policy`, `delete_service_policy`.
+- `aiac.pdp.policy.library` — mock `apply_policy`, `delete_agent_policy`.
 
 **Un-freeze `test/policy/computation/`.** These tests were excluded (frozen imports caused collection errors). With the SPM redesign landed, un-freeze the directory so the suite runs under `pytest test/ -m "not integration"`.
 
@@ -207,7 +242,9 @@ Key behaviors to assert:
 - **Directional relevance — no false outbound edge.** A user role shared between `AS` and `TS` does **not** by itself make A "target" T; A's outbound edge to T appears only if one of A's **agent** roles maps to a T scope.
 - **Affected set from the batch, not a full scan.** The affected-agent set is computed from the batch roles/scopes; agents unrelated to the batch are never derived or upserted.
 - **`apply_policy` called exactly once** after all `apply_service_policy` writes complete (partial upsert of only the affected agents).
-- **Failures propagate.** An exception from any dependency is logged and **re-raised** (it propagates to the caller, which surfaces it — e.g. the Controller returns HTTP 500); on success `compute_and_apply` returns `None`.
+- **Reconcile (drift GC).** A touched SPM carrying dangling edges (retired scope, churned scope UUID, churned/duplicate user role, retired agent-role self-reference) is pruned against the catalog on re-onboarding; live edges survive and the pass is idempotent; a catalog miss (owner absent) leaves the SPM untouched.
+- **Decommission (service offboard).** Onboard an agent A targeting tool T, then `decommission(T)`: `SPM(T)` is deleted, no `delete_agent_policy` (tool has no APM), and A is re-derived with an empty outbound while its inbound survives. `decommission(A)`: `SPM(A)` deleted, `delete_agent_policy(A)` called, A's outbound footprint (`AR→TS` on `SPM(T)`) purged while T keeps its user grant, and no APM re-derived for the deleted agent. A never-onboarded / 404 service is a no-op.
+- **Failures propagate.** An exception from any dependency is logged and **re-raised** (it propagates to the caller, which surfaces it — e.g. the Controller returns HTTP 500); on success `compute_and_apply` / `decommission` return `None`.
 
 **Prior art:** `3.14-unit-tests-write-api.md` (mock boundary pattern — apply the same approach at the library import boundary here).
 
@@ -215,7 +252,7 @@ Key behaviors to assert:
 
 ## Out of Scope
 
-- **Fine-grained rule revocation:** removing an individual `PolicyRule` without replacing its whole role. `override=True` covers role-level replace at the SPM layer (see [Merge Semantics](#merge-semantics)); single-rule revocation and agent decommission / package deletion are not yet designed — **TBD**.
+- **Fine-grained rule revocation:** removing an individual `PolicyRule` without replacing its whole role. `override=True` covers role-level replace at the SPM layer (see [Merge Semantics](#merge-semantics)); single-rule revocation is not yet designed — **TBD**. (Full-service **decommission / package deletion** *is* now designed and implemented — see [Decommission (service offboard)](#decommission-service-offboard).)
 - **Full policy rebuild orchestration:** the PCE handles incremental updates; full rebuilds (clear + reapply all) are driven by higher-level orchestration outside this module.
 - **Direct Keycloak calls:** all IdP access goes through `aiac.idp.configuration.Configuration` (only `get_services()`). The PCE never calls Keycloak directly.
 - **Persistence of `PolicyRule` inputs:** the PCE persists SPMs (source of truth); APMs are derived and pushed, never persisted as truth. The raw input rule list is not stored.
