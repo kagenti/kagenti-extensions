@@ -161,7 +161,7 @@ Eight components across five Kubernetes Pods plus a Python library layer, all im
 │  Policy / Domain Knowledge RAG Pod  │                   │       (𝗞𝗲𝘆𝗰𝗹𝗼𝗮𝗸 𝗦𝗣𝗜)  (𝗥𝗔𝗚 𝗜𝗻𝗴𝗲𝘀𝘁)
 │                                     ▼                   │
 │  ┌─────────────────────┐   ┌─────────────────────────┐  │
-│  │ RAG Ingest Service  │──►│ ChromaDB (vector store) │  │  
+│  │ RAG Ingest Service  │──►│ ChromaDB (vector store) │  │
 │  └─────────────────────┘   └─────────────────────────┘  │
 └─────────────────────────────────────────────────────────┘
 ```
