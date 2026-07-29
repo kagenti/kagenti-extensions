@@ -38,10 +38,12 @@ AIAC introduces a strict three-layer model that cleanly separates policy concern
 | **Policy Decision (PDP)** | OPA | Evaluates LLM-generated Rego rules; returns the caller's entitlements/decision |
 | **Policy Enforcement (PEP)** | AuthBridge | Intercepts traffic; exchanges tokens; carries no policy knowledge |
 
-The AIAC Agent subscribes to an event stream (NATS JetStream) and reacts to entity lifecycle
-events — new services, role changes, policy updates — by retrieving the current policy from a RAG
-knowledge base, querying live PDP state, and applying the minimal required diff via a dedicated
-PDP Policy Writer. AuthBridge performs RFC 8693 token exchanges sending only the target
+The AIAC Agent reacts to entity lifecycle events — new services, role changes, policy updates —
+by retrieving the current policy from a RAG knowledge base, querying live PDP state, and applying
+the minimal required diff via a dedicated PDP Policy Writer. _(**Phase status:** in **Phase 1** the
+Agent is triggered by **direct invocation of the Controller `/apply/*` routes** — by the operator or
+the integration harness. The event-driven path — a NATS JetStream subscription fed by the Keycloak
+SPI listener — is **Phase 2** (Event Broker, issue 4.19), consistent with [`event-broker.md`](components/event-broker.md).)_ AuthBridge performs RFC 8693 token exchanges sending only the target
 `audience` — no `scope` parameter. OPA evaluates the caller's role against the Rego rules and
 returns the entitlements that role grants on the target service; the IdP (Keycloak, via
 AuthBridge) issues the exchanged token scoped to exactly those entitlements.
@@ -55,8 +57,9 @@ AuthBridge) issues the exchanged token scoped to exactly those entitlements.
 
 **Trigger:** A Role or Keycloak Client is created, updated, or removed.
 
-The Keycloak SPI listener publishes a scoped event to the Event Broker. The AIAC Agent retrieves
-relevant context from the RAG store, reads the current OPA policy state, and asks the LLM to
+The trigger reaches the AIAC Agent — in Phase 1 by direct Controller `/apply/*` invocation; in
+Phase 2 via a Keycloak SPI listener that publishes a scoped event to the Event Broker. The AIAC
+Agent retrieves relevant context from the RAG store, reads the current OPA policy state, and asks the LLM to
 compute the minimal permission diff scoped to the affected entity. The diff is validated by a
 second LLM pass and applied to OPA as updated Rego rules. Supports both **auto-apply** (fully
 automated, least-privilege) and **recommendation + human review** modes.
@@ -99,8 +102,8 @@ Eight components across five Kubernetes Pods plus a Python library layer, all im
 | 3 | **Policy Store** | REST service that owns an in-memory `PolicyModel` cache backed by SQLite as the authoritative structured policy store. Enables the Policy Computation Engine to read current `AgentPolicyModel` state for additive merging. Deployed as a dedicated single-replica StatefulSet (`aiac-policy-store`) at `:7074`. Python library: `aiac.policy.store.library`. |
 | 4 | **Policy Computation Engine** | Pure Python library module (`aiac.policy.computation`). No service, no Kubernetes deployment. Receives `list[PolicyRule]` from AIAC Agent sub-agents, queries IdP to resolve owning services, additively merges rules into `AgentPolicyModel` objects in the Policy Store, and pushes the updated `PolicyModel` to the PDP Policy Writer. Single entry point: `compute_and_apply(rules)`. |
 | 5 | **Policy and Domain Knowledge RAG** | ChromaDB vector store holding the access control policy and domain knowledge in persistent, queryable form, populated via a co-located RAG Ingest Service. |
-| 6 | **Event Broker** | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. |
-| 7 | **AIAC Agent** | LangGraph-based AI agent triggered by Event Broker subscriptions (`aiac.apply.>` subjects) and directly by the operator (`rebuild` only). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
+| 6 | **Event Broker** _(Phase 2)_ | NATS JetStream pod that decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides durable, at-least-once delivery with automatic replay on Agent pod restart. Competing consumer model ensures each event is processed exactly once. **Deferred to Phase 2 (issue 4.19); not deployed in Phase 1** — see [`event-broker.md`](components/event-broker.md). |
+| 7 | **AIAC Agent** | LangGraph-based AI agent. **Phase 1:** triggered by **direct Controller `/apply/*` invocation** (operator / integration harness). **Phase 2:** additionally triggered by Event Broker subscriptions (`aiac.apply.>` subjects). Retrieves the current policy from the RAG store, interprets it against live PDP state, and applies the required policy changes immediately. |
 | 8 | **Python library** | Python API library provides typed access to IdP and policy services via `aiac.idp.configuration`, `aiac.policy.model`, `aiac.policy.store.library`, `aiac.pdp.policy.library`, and `aiac.policy.computation` modules backed by generic Pydantic models. |
 
 ```
@@ -159,9 +162,10 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 **AIAC ↔ Kagenti platform**
 The AIAC Agent reads `AgentRuntime` and `AgentCard` custom resources from the Kubernetes API to
-extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration` and
-`aiac.pdp.policy.library` Python packages are the integration surface for other Kagenti components
-needing typed access to IdP configuration and PDP policy state.
+extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration.api` and
+`aiac.pdp.policy.library.api` Python modules are the integration surface for other Kagenti components
+needing typed access to IdP configuration and PDP policy state. (Each library package keeps an
+empty `__init__.py`; the public functions live in its `.api` submodule.)
 
 **AIAC ↔ Keycloak**
 The IdP Configuration Service proxies Keycloak Admin REST endpoints under generic IdP entity

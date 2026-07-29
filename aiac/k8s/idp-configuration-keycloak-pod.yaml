@@ -13,10 +13,15 @@ metadata:
   name: aiac-system
 
 ---
+# NOTE: standalone-specific ConfigMap name. It deliberately does NOT reuse
+# `aiac-pdp-config` (the name used by pdp-interface-deployment.yaml), which
+# carries additional keys (KEYCLOAK_REALM, AIAC_PDP_*_URL). Sharing the name in
+# the same namespace would let `kubectl apply` of this isolated manifest clobber
+# the interface ConfigMap and break a running interface Pod on its next restart.
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aiac-pdp-config
+  name: aiac-pdp-config-standalone
   namespace: aiac-system
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
@@ -47,6 +52,6 @@ spec:
         - containerPort: 7071
       envFrom:
         - configMapRef:
-            name: aiac-pdp-config
+            name: aiac-pdp-config-standalone
         - secretRef:
             name: keycloak-admin-secret

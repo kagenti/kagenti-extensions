@@ -1,3 +1,11 @@
+# PHASE 1 LOCAL / KIND DEV TOPOLOGY
+#
+# This manifest uses node-local images (`localhost/...:local` +
+# `imagePullPolicy: Never`), so it only runs on a cluster where every target
+# node has been preloaded with those images (e.g. `kind load` / `podman save`).
+# A production deployment must publish immutable, versioned images to the
+# deployment registry and use `imagePullPolicy: IfNotPresent` — layer that in
+# via a separate production overlay rather than editing this dev manifest.
 ---
 apiVersion: v1
 kind: ConfigMap

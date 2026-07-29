@@ -217,7 +217,7 @@ Neither guard alone is sufficient — ownership-based exclusion keeps own entiti
 
 1. Receive `service_id: str` + `service_type: ServiceType` from the Orchestrator.
 2. Fetch `services = get_services()`, `all_scopes = get_scopes()`, `subjects = get_subjects()` from `aiac.idp.configuration.api`.
-3. Resolve the focus service: `focus = next(s for s in services if s.id == service_id)` (the internal client UUID carried by the route/`Trigger.entity_id` — **not** `serviceId`/clientId, which may be a slash-bearing SPIFFE URI); a missing match is a clear `404`, not `StopIteration`.
+3. Resolve the focus service: `focus = next((s for s in services if s.id == service_id), None)` (matching on `id`, the internal client UUID carried by the route/`Trigger.entity_id` — **not** `serviceId`/clientId, which may be a slash-bearing SPIFFE URI); if `focus is None`, raise a clear `404` rather than letting `next(...)` raise `StopIteration`.
 4. Compute candidate sets, all by ownership:
    - **own roles/scopes** — `focus.roles`/`focus.scopes` filtered to `aiac.managed` (drops Keycloak's built-in default client scopes, e.g. `profile`, which are stamped with this service's `serviceId` but are not `aiac.managed`).
    - **other-agent roles** — `aiac.managed` roles from every *other* service's `roles` (`kind=Agent`, ownership-excluded by `serviceId != focus.serviceId`).
