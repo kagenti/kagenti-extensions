@@ -18,7 +18,7 @@
 #   * #interactions == #anchor interaction_spans, and no anchor span maps to
 #     more than one interaction  (no double-counted exchange / splice regression)
 #   * the N traces are all DISTINCT
-#   * optionally, when EXPECT_KINDS is set: per-trace payload content_kind
+#   * optionally, when EXPECT_KINDS is set: per-trace DERIVED content-kind
 #     counts match every listed kind exactly
 # Target: N/N clean forests.
 #
@@ -38,13 +38,14 @@
 #   DRIVER_POD in-cluster curl pod name (default lineage-driver2)
 #   DG_NS     data-governance namespace (default data-governance)
 #   EXPECT_KINDS optional "kind=count,kind=count" (e.g.
-#             "tool_call_arguments=1,mcp_lifecycle_request=2"). Per trace,
-#             count the payload rows referenced by the trace's interactions
-#             (request + response legs) grouped by content_kind, and require
-#             each LISTED kind to match EXACTLY. Unlisted kinds are ignored —
-#             leave nondeterministic ones (llm_*) unpinned. A bodyless
-#             exchange derives an interaction but no payload row, so it never
-#             counts here. Fill the value from the app's expectation card
+#             "tool_call_arguments=1,mcp_lifecycle_request=2"). Per trace, read
+#             the derived kinds from the interactions API and count one entry
+#             per interaction LEG (request + response), then require each
+#             LISTED kind to match EXACTLY. Unlisted kinds are ignored — leave
+#             nondeterministic ones (llm_*) unpinned. Counts are leg counts, so
+#             a bodyless exchange (SSE open / teardown) DOES count: it derives
+#             an interaction and a kind even though it stores no payload. Fill
+#             the value from the app's expectation card
 #             (validation/TEMPLATE-expectation-card.md).
 set -euo pipefail
 
@@ -91,6 +92,10 @@ sleep "$SETTLE"
 psql() { kubectl exec -n "$DG_NS" data-governance-postgres-0 -- \
   psql -U data_governance -d data_governance -tAF $'\t' -c "$1"; }
 
+# Derived content kinds come from the interactions API — see dg-api.sh for why
+# `interaction_payloads.content_kind` is not a sound substitute.
+. "$(dirname "${BASH_SOURCE[0]}")/dg-api.sh"
+
 echo ""
 echo "=== per-turn interaction forest (self_id=$SELF_ID, N=$N) ==="
 pass=0
@@ -110,16 +115,10 @@ for i in $(seq 0 $((N-1))); do
       (SELECT ce.natural_key FROM t JOIN entities ce ON ce.id=t.callee_entity_id
          WHERE t.parent_interaction_id IS NULL LIMIT 1)
   " | tr '\t' ' ')"
-  # optional EXPECT_KINDS: exact per-trace payload content_kind counts
+  # optional EXPECT_KINDS: exact per-trace derived content-kind counts
   kmiss=""
   if [ -n "$EXPECT_KINDS" ]; then
-    kcounts=$(psql "
-      SELECT p.content_kind || '=' || count(*)
-      FROM (SELECT request_payload_hash AS h FROM interactions WHERE trace_id='$tid'
-            UNION ALL
-            SELECT response_payload_hash FROM interactions WHERE trace_id='$tid') r
-      JOIN interaction_payloads p ON p.content_hash = r.h
-      GROUP BY p.content_kind")
+    kcounts=$(api_kinds "$tid")
     for pair in ${EXPECT_KINDS//,/ }; do
       kind="${pair%%=*}"; want="${pair#*=}"
       have=$(printf '%s\n' "$kcounts" | awk -F= -v k="$kind" '$1==k{print $2}')

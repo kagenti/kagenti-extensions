@@ -54,12 +54,18 @@ see the harness header).
 
 Totals per turn: `<T>` interactions = `<V>` visible + `<H>` hidden.
 
-### `EXPECT_KINDS` line (payload-kind counts)
+### `EXPECT_KINDS` line (derived content-kind counts)
 
-Payload rows ≠ interactions: a bodyless exchange (SSE stream open, session
-teardown, unparsed/streamed body) derives an interaction but **no payload
-row** — count only legs with a body, and leave nondeterministic kinds
-(`llm_*` when the agent loops) unlisted.
+Counts are **interaction legs**, read from the interactions API — the same
+derivation the DG UI shows. So a bodyless exchange (SSE stream open, session
+teardown) **does** count: it derives an interaction and a kind even though it
+stores no payload. Count one entry per request leg and one per response leg,
+and leave nondeterministic kinds (`llm_*` when the agent loops) unlisted.
+
+Do not assert against `interaction_payloads.content_kind`: payloads are
+content-addressed, so an agent that relays a body verbatim collapses two legs
+into one row with one kind (see `dg-api.sh`, and the trivia card for live
+evidence).
 
 ```bash
 EXPECT_KINDS='tool_call_arguments=1,tool_call_result=1,mcp_lifecycle_request=2'

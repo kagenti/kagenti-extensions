@@ -17,13 +17,13 @@
 # interaction (the derivation never guesses parents; wire contract). Asserting
 # roots==1 is structurally impossible here. Per trace this harness asserts:
 #   * the trace derived at least one interaction  (turn was observed)
-#   * EXACTLY ONE root is the tools/call — request payload content_kind
+#   * EXACTLY ONE root is the tools/call — derived request content kind
 #     'tool_call_arguments' — and ITS callee is tool:<SELF_ID>
 #   * ZERO orphans — every non-root interaction's parent is in the same trace
 #   * #interactions == #anchor interaction_spans, and no anchor span maps to
 #     more than one interaction  (no double-counted exchange / splice regression)
 #   * the N traces are all DISTINCT
-#   * optionally, when EXPECT_KINDS is set: per-trace payload content_kind
+#   * optionally, when EXPECT_KINDS is set: per-trace DERIVED content-kind
 #     counts match every listed kind exactly
 # The TOTAL root count per trace is reported, not asserted — record it on the
 # app's expectation card; lifecycle/discovery volume is pinned via EXPECT_KINDS.
@@ -51,10 +51,12 @@
 #   DRIVER_POD in-cluster driver pod name (default mcp-lineage-driver)
 #   DG_NS     data-governance namespace (default data-governance)
 #   EXPECT_KINDS optional "kind=count,kind=count" — same semantics as in
-#             concurrency-test-interactions.sh: exact per-trace payload
-#             content_kind counts for the LISTED kinds only (bodyless
-#             exchanges have no payload rows and never count). Fill from the
-#             app's expectation card (validation/TEMPLATE-expectation-card.md).
+#             concurrency-test-interactions.sh: exact per-trace DERIVED
+#             content-kind counts for the LISTED kinds only, one entry per
+#             interaction leg. Bodyless exchanges (SSE open / teardown) DO
+#             count — they derive an interaction and a kind, just no payload.
+#             Fill from the app's expectation card
+#             (validation/TEMPLATE-expectation-card.md).
 set -euo pipefail
 
 SELF_ID="${SELF_ID:?set SELF_ID}"
@@ -123,12 +125,16 @@ sleep "$SETTLE"
 psql() { kubectl exec -n "$DG_NS" data-governance-postgres-0 -- \
   psql -U data_governance -d data_governance -tAF $'\t' -c "$1"; }
 
+# Derived content kinds come from the interactions API — see dg-api.sh for why
+# `interaction_payloads.content_kind` is not a sound substitute.
+. "$(dirname "${BASH_SOURCE[0]}")/dg-api.sh"
+
 echo ""
 echo "=== per-turn interaction forest, MCP entry (self_id=$SELF_ID, N=$N) ==="
 pass=0
 for i in $(seq 0 $((N-1))); do
   tid="${TIDS[$i]}"; tok="${TOKS[$i]}"
-  read -r nix roots orphans nanchor dupanchor callroots callee_call <<<"$(psql "
+  read -r nix roots orphans nanchor dupanchor <<<"$(psql "
     WITH t AS (SELECT * FROM interactions WHERE trace_id='$tid')
     SELECT
       (SELECT count(*) FROM t),
@@ -138,27 +144,15 @@ for i in $(seq 0 $((N-1))); do
       (SELECT count(*) FROM interaction_spans WHERE trace_id='$tid' AND role='anchor'),
       (SELECT count(*) FROM (SELECT span_id FROM interaction_spans
          WHERE trace_id='$tid' AND role='anchor'
-         GROUP BY span_id HAVING count(DISTINCT interaction_id)>1) d),
-      (SELECT count(*) FROM t
-         JOIN interaction_payloads p ON p.content_hash=t.request_payload_hash
-         WHERE t.parent_interaction_id IS NULL
-           AND p.content_kind='tool_call_arguments'),
-      (SELECT ce.natural_key FROM t
-         JOIN interaction_payloads p ON p.content_hash=t.request_payload_hash
-         JOIN entities ce ON ce.id=t.callee_entity_id
-         WHERE t.parent_interaction_id IS NULL
-           AND p.content_kind='tool_call_arguments' LIMIT 1)
+         GROUP BY span_id HAVING count(DISTINCT interaction_id)>1) d)
   " | tr '\t' ' ')"
-  # optional EXPECT_KINDS: exact per-trace payload content_kind counts
+  # the tools/call root is identified by its DERIVED request kind, not by a
+  # payload row (dg-api.sh explains why payload kinds are not 1:1 with legs)
+  read -r callroots callee_call <<<"$(api_roots_of_kind "$tid" tool_call_arguments)"
+  # optional EXPECT_KINDS: exact per-trace derived content-kind counts
   kmiss=""
   if [ -n "$EXPECT_KINDS" ]; then
-    kcounts=$(psql "
-      SELECT p.content_kind || '=' || count(*)
-      FROM (SELECT request_payload_hash AS h FROM interactions WHERE trace_id='$tid'
-            UNION ALL
-            SELECT response_payload_hash FROM interactions WHERE trace_id='$tid') r
-      JOIN interaction_payloads p ON p.content_hash = r.h
-      GROUP BY p.content_kind")
+    kcounts=$(api_kinds "$tid")
     for pair in ${EXPECT_KINDS//,/ }; do
       kind="${pair%%=*}"; want="${pair#*=}"
       have=$(printf '%s\n' "$kcounts" | awk -F= -v k="$kind" '$1==k{print $2}')
