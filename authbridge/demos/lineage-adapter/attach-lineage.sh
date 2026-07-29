@@ -112,10 +112,24 @@ metadata:
 data:
   config.yaml: |
     mode: envoy-sidecar
+    # SAME parser chain in both directions. An app's entry protocol is not
+    # knowable from the attach side: an A2A agent receives a2a and calls mcp,
+    # an MCP tool receives mcp, and either may call an inference endpoint. A
+    # direction-specific chain silently mislabels whatever it wasn't given —
+    # an MCP-entry tool with an a2a-only inbound chain records its tools/call
+    # as anonymous http, which the DG UI then hides as infrastructure.
+    #
+    # Uniform is safe because every parser is content-gated and the three are
+    # mutually exclusive: a2a-parser claims only the A2A JSON-RPC prefixes
+    # (message/*, tasks/*), mcp-parser claims other JSON-RPC methods,
+    # inference-parser matches only /v1/chat/completions|/v1/completions.
+    # Non-matching traffic falls through untouched.
     pipeline:
       inbound:
         plugins:
           - name: a2a-parser
+          - name: mcp-parser
+          - name: inference-parser
           - name: lineage-telemetry
             config:
               otel_endpoint: "otel-collector.kagenti-system.svc.cluster.local:4317"
@@ -123,8 +137,9 @@ data:
               self_id: "${SELF_ID}"
       outbound:
         plugins:
-          - name: inference-parser
+          - name: a2a-parser
           - name: mcp-parser
+          - name: inference-parser
           - name: lineage-telemetry
             config:
               otel_endpoint: "otel-collector.kagenti-system.svc.cluster.local:4317"
