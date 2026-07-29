@@ -25,8 +25,9 @@
 #   * the N traces are all DISTINCT
 #   * optionally, when EXPECT_KINDS is set: per-trace DERIVED content-kind
 #     counts match every listed kind exactly
-# The TOTAL root count per trace is reported, not asserted — record it on the
-# app's expectation card; lifecycle/discovery volume is pinned via EXPECT_KINDS.
+# The TOTAL root count per trace is asserted against EXPECT_ROOTS when set
+# (fill from the app's expectation card), only reported when unset;
+# lifecycle/discovery volume is pinned via EXPECT_KINDS.
 # Target: N/N clean.
 #
 # Usage:
@@ -57,6 +58,8 @@
 #             count — they derive an interaction and a kind, just no payload.
 #             Fill from the app's expectation card
 #             (validation/TEMPLATE-expectation-card.md).
+#   EXPECT_ROOTS optional exact per-trace root count (from the app's
+#             expectation card). Asserted when set; only reported when unset.
 set -euo pipefail
 
 SELF_ID="${SELF_ID:?set SELF_ID}"
@@ -72,6 +75,7 @@ SETTLE="${SETTLE:-25}"
 DRIVER_POD="${DRIVER_POD:-mcp-lineage-driver}"
 DG_NS="${DG_NS:-data-governance}"
 EXPECT_KINDS="${EXPECT_KINDS:-}"
+EXPECT_ROOTS="${EXPECT_ROOTS:-}"
 
 # ---- ensure a driver pod with the mcp SDK exists (IfNotPresent: works offline) ----
 if ! kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" >/dev/null 2>&1; then
@@ -159,16 +163,24 @@ for i in $(seq 0 $((N-1))); do
       [ "${have:-0}" = "$want" ] || kmiss="$kmiss $kind=${have:-0}(want=$want)"
     done
   fi
+  # optional EXPECT_ROOTS: exact per-trace root count from the expectation
+  # card. No collapse guard here — a sidecar-less driver means every tool
+  # inbound legitimately roots itself (roots==ix is this harness's shape).
+  rmiss=""
+  if [ -n "$EXPECT_ROOTS" ] && [ "${roots:-0}" != "$EXPECT_ROOTS" ]; then
+    rmiss=" roots=${roots:-?}(want=$EXPECT_ROOTS)"
+  fi
   ok="FAIL"
   if [ "${nix:-0}" -ge 1 ] && [ "$orphans" = "0" ] \
      && [ "$nix" = "$nanchor" ] && [ "$dupanchor" = "0" ] \
      && [ "$callroots" = "1" ] && [ "$callee_call" = "tool:$SELF_ID" ] \
-     && [ -z "$kmiss" ]; then
+     && [ -z "$kmiss" ] && [ -z "$rmiss" ]; then
     ok="OK"; pass=$((pass+1))
   fi
   printf '%-8s trace=%s ix=%-3s roots=%-2s callroots=%s orphan=%s anchors=%-3s dup=%s callee=%-20s [%s]\n' \
     "$tok" "${tid:0:12}" "${nix:-0}" "${roots:-?}" "${callroots:-?}" "${orphans:-?}" "${nanchor:-?}" "${dupanchor:-?}" "${callee_call:-<none>}" "$ok"
   if [ -n "$kmiss" ]; then echo "         kind mismatch:$kmiss"; fi
+  if [ -n "$rmiss" ]; then echo "         root mismatch:$rmiss"; fi
 done
 
 # distinct traces

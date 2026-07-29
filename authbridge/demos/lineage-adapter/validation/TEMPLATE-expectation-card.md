@@ -54,6 +54,28 @@ see the harness header).
 
 Totals per turn: `<T>` interactions = `<V>` visible + `<H>` hidden.
 
+### `EXPECT_ROOTS` (per-trace root count)
+
+Pin the exact number of per-trace roots and pass it to the harness as
+`EXPECT_ROOTS=<n>` — asserted, not just reported. A2A entry with all callees
+unsidecarred: 1. Each sidecarred callee service adds its own dangling-parent
+roots (phantom-root design; see the harness header). MCP entry: one root per
+session exchange (initialize, notifications, tools/call, stream open/teardown)
+— derive it from the interaction table above. Without this pin the harness has
+no sensitivity to a collapsed forest beyond the roots==ix guard (A2A only):
+zero surviving parent links otherwise still yields 0 orphans and a PASS.
+
+Pin ONLY when the count is deterministic. A loop-variable app with sidecarred
+callees roots one interaction per callee inbound, so its total moves with LLM
+loop depth — reservation has produced both 22 ix / 11 roots and 32 ix / 16
+roots on the same images. For such apps leave `EXPECT_ROOTS` unset (the A2A
+collapse guard still fires on a fully-flat forest) and record the observed
+range here instead.
+
+```bash
+EXPECT_ROOTS='1'
+```
+
 ### `EXPECT_KINDS` line (derived content-kind counts)
 
 Counts are **interaction legs**, read from the interactions API — the same
@@ -90,6 +112,7 @@ EXPECT_KINDS='tool_call_arguments=1,tool_call_result=1,mcp_lifecycle_request=2'
 | Date / operator | |
 | Harness + N | `concurrency-test-interactions.sh` \| `concurrency-test-mcp-interactions.sh`, N=6 |
 | Trace ids | |
-| Harness summary | `CLEAN FORESTS: ?/N   DISTINCT TRACES: ?/N` (+ root counts for MCP entry) |
+| Harness summary | `CLEAN FORESTS: ?/N   DISTINCT TRACES: ?/N` |
+| `EXPECT_ROOTS` / observed roots | `<n>` / `<n>` per trace |
 | Deviations | each deviation: observed vs expected, and why |
 | Verdict | **PASS** \| **FAIL** |

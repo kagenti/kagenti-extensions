@@ -23,9 +23,14 @@
 #     design, wire contract — the derivation never guesses parents). Verified
 #     against pre-WS-1 data: on 2026-07-21 a reservation turn observed by one
 #     sidecar derived 33 interactions / 1 root, while a turn observed by both
-#     service and tool derived 22 / 11. The total root count is REPORTED for
-#     the expectation card, not asserted — same acceptance model as
-#     concurrency-test-mcp-interactions.sh.
+#     service and tool derived 22 / 11. The total root count is asserted
+#     against EXPECT_ROOTS when set (fill it from the app's expectation card);
+#     without it the count is only reported — plus one unconditional guard:
+#   * the forest never COLLAPSES — a multi-interaction trace where EVERY
+#     interaction is a root means zero parent links survived, i.e. the splice
+#     is broken end-to-end. The 89cfbedf relaxation (dropping roots==1) left
+#     this failure mode invisible: orphans counts only NON-root rows with
+#     missing parents, so total collapse was vacuously "0 orphans" and passed.
 #   * ZERO orphans — every non-root interaction's parent is in the same trace
 #   * #interactions == #anchor interaction_spans, and no anchor span maps to
 #     more than one interaction  (no double-counted exchange / splice regression)
@@ -59,6 +64,8 @@
 #             an interaction and a kind even though it stores no payload. Fill
 #             the value from the app's expectation card
 #             (validation/TEMPLATE-expectation-card.md).
+#   EXPECT_ROOTS optional exact per-trace root count (from the app's
+#             expectation card). Asserted when set; only reported when unset.
 set -euo pipefail
 
 SELF_ID="${SELF_ID:?set SELF_ID}"
@@ -70,6 +77,7 @@ SETTLE="${SETTLE:-25}"
 DRIVER_POD="${DRIVER_POD:-lineage-driver2}"
 DG_NS="${DG_NS:-data-governance}"
 EXPECT_KINDS="${EXPECT_KINDS:-}"
+EXPECT_ROOTS="${EXPECT_ROOTS:-}"
 
 # ---- ensure an in-cluster driver pod exists (IfNotPresent: works offline) ----
 if ! kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" >/dev/null 2>&1; then
@@ -139,15 +147,26 @@ for i in $(seq 0 $((N-1))); do
       [ "${have:-0}" = "$want" ] || kmiss="$kmiss $kind=${have:-0}(want=$want)"
     done
   fi
+  # Roots: exact when the card pins it; always guard against total collapse
+  # (nix>1 with every interaction a root = zero parent links = broken splice —
+  # invisible to the orphans count, which only sees non-root rows).
+  rmiss=""
+  if [ -n "$EXPECT_ROOTS" ] && [ "${roots:-0}" != "$EXPECT_ROOTS" ]; then
+    rmiss=" roots=${roots:-?}(want=$EXPECT_ROOTS)"
+  fi
+  if [ "${nix:-0}" -gt 1 ] && [ "${roots:-0}" = "${nix:-0}" ]; then
+    rmiss="$rmiss forest-collapsed(roots==ix==$nix)"
+  fi
   ok="FAIL"
   if [ "${nix:-0}" -ge 1 ] && [ "$entryroots" = "1" ] && [ "$orphans" = "0" ] \
      && [ "$nix" = "$nanchor" ] && [ "$dupanchor" = "0" ] \
-     && [ "$callee_root" = "agent:$SELF_ID" ] && [ -z "$kmiss" ]; then
+     && [ "$callee_root" = "agent:$SELF_ID" ] && [ -z "$kmiss" ] && [ -z "$rmiss" ]; then
     ok="OK"; pass=$((pass+1))
   fi
   printf '%-8s trace=%s ix=%-3s entry=%s roots=%-3s orphan=%s anchors=%-3s dup=%s callee=%-24s [%s]\n' \
     "$tok" "${tid:0:12}" "${nix:-0}" "${entryroots:-?}" "${roots:-?}" "${orphans:-?}" "${nanchor:-?}" "${dupanchor:-?}" "${callee_root:-<none>}" "$ok"
   if [ -n "$kmiss" ]; then echo "         kind mismatch:$kmiss"; fi
+  if [ -n "$rmiss" ]; then echo "         root mismatch:$rmiss"; fi
 done
 
 # distinct traces
