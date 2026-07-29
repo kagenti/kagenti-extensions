@@ -14,12 +14,20 @@ func ApplyPreset(cfg *Config) {
 		setDefault(&cfg.Listener.ForwardProxyAddr, ":8080")
 
 	case ModeProxySidecar:
-		setDefault(&cfg.Listener.ReverseProxyAddr, ":8080")
-		setDefault(&cfg.Listener.ForwardProxyAddr, ":8081")
-		// Outbound transparent listener for enforce-redirect mode. Binding it
-		// is harmless when nothing is redirected here (cooperative HTTP_PROXY
-		// deployments simply never receive connections on it).
-		setDefault(&cfg.Listener.TransparentProxyAddr, ":8082")
+		// Fill an addr default only for an active role (empty Roles => both),
+		// so a forward-only or reverse-only deployment doesn't bind the proxy
+		// it didn't ask for. main.go starts a proxy iff its role is active.
+		roles := cfg.Listener.ActiveRoles()
+		if roles[RoleReverse] {
+			setDefault(&cfg.Listener.ReverseProxyAddr, ":8080")
+		}
+		if roles[RoleForward] {
+			setDefault(&cfg.Listener.ForwardProxyAddr, ":8081")
+			// Outbound transparent listener for enforce-redirect mode. Binding it
+			// is harmless when nothing is redirected here (cooperative HTTP_PROXY
+			// deployments simply never receive connections on it).
+			setDefault(&cfg.Listener.TransparentProxyAddr, ":8082")
+		}
 	}
 
 	// Session events API is default-on for every mode. Operators who

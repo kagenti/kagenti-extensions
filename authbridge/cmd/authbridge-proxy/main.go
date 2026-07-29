@@ -317,11 +317,18 @@ func main() {
 	// A nil *Engine leaves today's blind-tunnel behavior intact.
 	var bridge *tlsbridge.Engine
 	if cfg.TLSBridge != nil && cfg.TLSBridge.Mode == "enabled" {
-		// CA is always the operator-mounted cert-manager Secret (tls.crt/tls.key
-		// under ca_dir). EphemeralSource exists only for in-process tests.
-		src, cerr := tlsbridge.NewFileSource(cfg.TLSBridge.CADir+"/tls.crt", cfg.TLSBridge.CADir+"/tls.key")
+		// CA is normally the operator-mounted cert-manager Secret (tls.crt/tls.key
+		// under ca_dir). For standalone/demo use, generate_ca mints and persists a
+		// self-signed CA into ca_dir when those files are absent (default false, so
+		// in-cluster a missing Secret still fails loudly).
+		src, generated, cerr := tlsbridge.EnsureFileSource(cfg.TLSBridge.CADir, cfg.TLSBridge.GenerateCA)
 		if cerr != nil {
 			log.Fatalf("tls-bridge CA init failed: %v", cerr)
+		}
+		if generated {
+			slog.Warn("tls-bridge: generated self-signed CA (generate_ca=true; standalone/demo)",
+				"ca_dir", cfg.TLSBridge.CADir,
+				"hint", "clients must trust it, e.g. NODE_EXTRA_CA_CERTS="+cfg.TLSBridge.CADir+"/ca.crt")
 		}
 		var extra []byte
 		if cfg.TLSBridge.UpstreamCABundle != "" {
@@ -353,38 +360,49 @@ func main() {
 		slog.Info("tls-bridge enabled", "ca_dir", cfg.TLSBridge.CADir)
 	}
 
-	// Proxy-sidecar: reverse proxy on the inbound path + forward proxy
-	// on the outbound path.
-	rpSrv, err := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
-	if err != nil {
-		log.Fatalf("creating reverse proxy: %v", err)
-	}
-	fpSrv, err := forwardproxy.NewServer(outboundH, sessions, fpMTLS)
-	if err != nil {
-		log.Fatalf("creating forward proxy: %v", err)
-	}
-	// SkipHosts: outbound destinations that bypass the pipeline AND
-	// session recording entirely. See ListenerConfig.SkipHosts for the
-	// motivating case (chatty observability sidecars evicting the
-	// inbound A2A user intent from the session FIFO).
-	skipHosts, err := skiphost.New(cfg.Listener.SkipHosts)
-	if err != nil {
-		log.Fatalf("listener.skip_hosts: %v", err)
-	}
-	fpSrv.SkipHosts = skipHosts
-	fpSrv.TLSBridge = bridge
+	// Proxy-sidecar: reverse proxy (inbound) and/or forward proxy (outbound),
+	// selected by listener.roles (empty => both). sharedStore is created up
+	// front so whichever proxies run share one session store.
+	roles := cfg.Listener.ActiveRoles()
 	sharedStore := shared.New()
 	defer sharedStore.Close() // stop the TTL janitor on normal main return
-	rpSrv.Shared = sharedStore
-	fpSrv.Shared = sharedStore
-	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
-	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
 
-	// Outbound transparent listener (enforce-redirect mode). It shares the
-	// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
-	// HTTP_PROXY egress and iptables-REDIRECTed bypass egress are gated and
-	// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
-	transparentLn := startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+	if roles[config.RoleReverse] {
+		rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
+		if rerr != nil {
+			log.Fatalf("creating reverse proxy: %v", rerr)
+		}
+		rpSrv.Shared = sharedStore
+		httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
+	}
+
+	// The transparent (enforce-redirect) listener rides with the forward proxy;
+	// declared here so shutdown can close it whether or not the forward role ran.
+	var transparentLn *net.TCPListener
+	if roles[config.RoleForward] {
+		fpSrv, ferr := forwardproxy.NewServer(outboundH, sessions, fpMTLS)
+		if ferr != nil {
+			log.Fatalf("creating forward proxy: %v", ferr)
+		}
+		// SkipHosts: outbound destinations that bypass the pipeline AND
+		// session recording entirely. See ListenerConfig.SkipHosts for the
+		// motivating case (chatty observability sidecars evicting the
+		// inbound A2A user intent from the session FIFO).
+		skipHosts, serr := skiphost.New(cfg.Listener.SkipHosts)
+		if serr != nil {
+			log.Fatalf("listener.skip_hosts: %v", serr)
+		}
+		fpSrv.SkipHosts = skipHosts
+		fpSrv.TLSBridge = bridge
+		fpSrv.Shared = sharedStore
+		httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+
+		// Outbound transparent listener (enforce-redirect mode). It shares the
+		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
+		// HTTP_PROXY egress and iptables-REDIRECTed bypass egress are gated and
+		// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
+		transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+	}
 
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
 

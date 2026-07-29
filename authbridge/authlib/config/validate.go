@@ -49,8 +49,22 @@ func validateListeners(cfg *Config) error {
 		if cfg.Listener.ExtAuthzAddr != "" {
 			return fmt.Errorf("proxy-sidecar mode does not support ext_authz_addr (use waypoint mode)")
 		}
-		if cfg.Listener.ReverseProxyBackend == "" {
-			return fmt.Errorf("proxy-sidecar mode requires listener.reverse_proxy_backend")
+		for _, r := range cfg.Listener.Roles {
+			if r != RoleReverse && r != RoleForward {
+				return fmt.Errorf("listener.roles: %q is not a valid role (use %q and/or %q)", r, RoleReverse, RoleForward)
+			}
+		}
+		roles := cfg.Listener.ActiveRoles()
+		// The reverse proxy forwards inbound traffic to reverse_proxy_backend,
+		// so it's required only when the reverse role is active. A forward-only
+		// deployment needs no backend.
+		if roles[RoleReverse] && cfg.Listener.ReverseProxyBackend == "" {
+			return fmt.Errorf("proxy-sidecar mode with the reverse role requires listener.reverse_proxy_backend")
+		}
+		// The TLS bridge only rewrites outbound (forward-proxy) traffic; enabling
+		// it without the forward role would be a silent no-op.
+		if cfg.TLSBridge != nil && cfg.TLSBridge.Mode == "enabled" && !roles[RoleForward] {
+			return fmt.Errorf("tls_bridge requires the forward role (it only affects outbound traffic)")
 		}
 	}
 	return nil

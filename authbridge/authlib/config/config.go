@@ -55,6 +55,15 @@ type TLSBridgeConfig struct {
 	// ca.crt is the trust cert handed to the agent. cert-manager Secret key
 	// conventions, so only the directory is configured.
 	CADir string `yaml:"ca_dir" json:"ca_dir"`
+	// GenerateCA, when true, makes the bridge mint and persist a self-signed CA
+	// into CADir (tls.crt/tls.key/ca.crt) if those files are absent, instead of
+	// failing at startup. For standalone / demo use only — in-cluster the CA is
+	// a mounted cert-manager Secret and this stays false so a missing Secret
+	// fails loudly rather than silently forging leaves under an untrusted CA.
+	// CADir should persist across restarts: on ephemeral storage (e.g. an
+	// emptyDir) a fresh CA is minted each boot, so clients must re-trust the
+	// new ca.crt.
+	GenerateCA bool `yaml:"generate_ca" json:"generate_ca"`
 	// UpstreamCABundle is an extra-roots PEM file for re-origination (private-CA
 	// origins the agent trusts); empty == system roots only.
 	UpstreamCABundle string `yaml:"upstream_ca_bundle" json:"upstream_ca_bundle"`
@@ -363,6 +372,17 @@ type ListenerConfig struct {
 	ReverseProxyAddr    string `yaml:"reverse_proxy_addr" json:"reverse_proxy_addr"`
 	ReverseProxyBackend string `yaml:"reverse_proxy_backend" json:"reverse_proxy_backend"`
 
+	// Roles selects which proxies run in proxy-sidecar mode. Empty (the
+	// default) runs BOTH the reverse proxy (inbound) and the forward proxy
+	// (outbound) — the full pod deployment, so existing configs are unchanged.
+	// Set a subset to run a single shape:
+	//   roles: [forward]   # egress-only (e.g. a laptop TLS-bridge demo)
+	//   roles: [reverse]   # inbound-only JWT validation
+	// Valid values: "reverse", "forward". The preset fills an addr default
+	// only for an active role, and reverse_proxy_backend is required only when
+	// the reverse role is active. Ignored outside proxy-sidecar mode.
+	Roles []string `yaml:"roles" json:"roles"`
+
 	// TransparentProxyAddr is the bind address for the outbound transparent
 	// listener used by proxy-sidecar enforce-redirect mode: iptables REDIRECTs
 	// the agent's bypass egress here, and the listener recovers the original
@@ -441,6 +461,27 @@ type ListenerConfig struct {
 	// enforcement. Mirrors the bypass-pattern guard added to ibac
 	// in #496.
 	SkipHosts []string `yaml:"skip_hosts" json:"skip_hosts"`
+}
+
+// Proxy roles selectable via ListenerConfig.Roles in proxy-sidecar mode.
+const (
+	RoleReverse = "reverse" // inbound reverse proxy
+	RoleForward = "forward" // outbound forward proxy
+)
+
+// ActiveRoles returns the set of proxy roles to run in proxy-sidecar mode. An
+// empty Roles list defaults to BOTH roles (the full pod deployment), so
+// existing configs and the operator path are unchanged; a non-empty list runs
+// exactly the roles named. Unknown values are surfaced by Validate, not here.
+func (l ListenerConfig) ActiveRoles() map[string]bool {
+	if len(l.Roles) == 0 {
+		return map[string]bool{RoleReverse: true, RoleForward: true}
+	}
+	set := make(map[string]bool, len(l.Roles))
+	for _, r := range l.Roles {
+		set[r] = true
+	}
+	return set
 }
 
 // StatsConfig represents the configuration for reporting config and statistics

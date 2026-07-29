@@ -46,6 +46,49 @@ func TestApplyPreset_ProxySidecar(t *testing.T) {
 	}
 }
 
+func TestListenerConfig_ActiveRoles(t *testing.T) {
+	both := ListenerConfig{}.ActiveRoles()
+	if !both[RoleReverse] || !both[RoleForward] {
+		t.Errorf("empty Roles should default to both, got %v", both)
+	}
+	fwd := ListenerConfig{Roles: []string{RoleForward}}.ActiveRoles()
+	if fwd[RoleReverse] || !fwd[RoleForward] {
+		t.Errorf("roles=[forward] should be forward-only, got %v", fwd)
+	}
+	rev := ListenerConfig{Roles: []string{RoleReverse}}.ActiveRoles()
+	if !rev[RoleReverse] || rev[RoleForward] {
+		t.Errorf("roles=[reverse] should be reverse-only, got %v", rev)
+	}
+}
+
+func TestApplyPreset_ProxySidecar_ForwardOnly(t *testing.T) {
+	cfg := &Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleForward}}}
+	ApplyPreset(cfg)
+	if cfg.Listener.ReverseProxyAddr != "" {
+		t.Errorf("forward-only must not fill reverse_proxy_addr, got %q", cfg.Listener.ReverseProxyAddr)
+	}
+	if cfg.Listener.ForwardProxyAddr != ":8081" {
+		t.Errorf("forward_proxy_addr = %q, want :8081", cfg.Listener.ForwardProxyAddr)
+	}
+	if cfg.Listener.TransparentProxyAddr != ":8082" {
+		t.Errorf("transparent_proxy_addr = %q, want :8082", cfg.Listener.TransparentProxyAddr)
+	}
+}
+
+func TestApplyPreset_ProxySidecar_ReverseOnly(t *testing.T) {
+	cfg := &Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}}}
+	ApplyPreset(cfg)
+	if cfg.Listener.ReverseProxyAddr != ":8080" {
+		t.Errorf("reverse_proxy_addr = %q, want :8080", cfg.Listener.ReverseProxyAddr)
+	}
+	if cfg.Listener.ForwardProxyAddr != "" {
+		t.Errorf("reverse-only must not fill forward_proxy_addr, got %q", cfg.Listener.ForwardProxyAddr)
+	}
+	if cfg.Listener.TransparentProxyAddr != "" {
+		t.Errorf("reverse-only must not fill transparent_proxy_addr, got %q", cfg.Listener.TransparentProxyAddr)
+	}
+}
+
 func TestApplyPreset_UserOverride(t *testing.T) {
 	cfg := &Config{
 		Mode:     ModeEnvoySidecar,
@@ -97,6 +140,41 @@ func TestValidate_ProxySidecarRequiresBackend(t *testing.T) {
 	cfg := &Config{Mode: ModeProxySidecar}
 	if err := Validate(cfg); err == nil {
 		t.Error("expected error for proxy-sidecar without backend")
+	}
+}
+
+func TestValidate_ProxySidecarRoles(t *testing.T) {
+	// forward-only: reverse_proxy_backend is NOT required.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleForward}}}); err != nil {
+		t.Errorf("forward-only should not require reverse_proxy_backend: %v", err)
+	}
+	// reverse role without backend: error.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}}}); err == nil {
+		t.Error("reverse role without reverse_proxy_backend should error")
+	}
+	// reverse-only with backend: ok.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}, ReverseProxyBackend: "http://app"}}); err != nil {
+		t.Errorf("reverse-only with backend should be valid: %v", err)
+	}
+	// unknown role: error.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{"sideways"}, ReverseProxyBackend: "http://app"}}); err == nil {
+		t.Error("unknown role should error")
+	}
+	// tls_bridge enabled without the forward role: error (it only affects outbound).
+	if err := Validate(&Config{
+		Mode:      ModeProxySidecar,
+		Listener:  ListenerConfig{Roles: []string{RoleReverse}, ReverseProxyBackend: "http://app"},
+		TLSBridge: &TLSBridgeConfig{Mode: "enabled", CADir: "/tmp/ca"},
+	}); err == nil {
+		t.Error("tls_bridge enabled without forward role should error")
+	}
+	// tls_bridge enabled WITH the forward role: ok.
+	if err := Validate(&Config{
+		Mode:      ModeProxySidecar,
+		Listener:  ListenerConfig{Roles: []string{RoleForward}},
+		TLSBridge: &TLSBridgeConfig{Mode: "enabled", CADir: "/tmp/ca"},
+	}); err != nil {
+		t.Errorf("tls_bridge with forward role should be valid: %v", err)
 	}
 }
 
