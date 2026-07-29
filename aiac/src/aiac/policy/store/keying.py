@@ -6,10 +6,19 @@ under SPIRE) and cannot be a single path segment. The library encodes it with UR
 The decoded id stays the cache/DB key and the ``service_id`` in every SPM body.
 """
 import base64
+import re
+
+# URL-safe base64 (minus ``=`` padding) yields only these characters. Asserting it before the
+# value is spliced into a request URL proves the encoded id is a single, inert path segment —
+# no scheme, host, ``/``, ``.`` or ``..`` can be injected (closes the partial-SSRF vector).
+_SEGMENT_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 
 def encode_service_id(service_id: str) -> str:
-    return base64.urlsafe_b64encode(service_id.encode("utf-8")).decode("ascii").rstrip("=")
+    encoded = base64.urlsafe_b64encode(service_id.encode("utf-8")).decode("ascii").rstrip("=")
+    if not _SEGMENT_RE.fullmatch(encoded):  # unreachable given the alphabet above; defends the invariant
+        raise ValueError("encoded service_id is not a safe URL path segment")
+    return encoded
 
 
 def decode_service_id(encoded: str) -> str:

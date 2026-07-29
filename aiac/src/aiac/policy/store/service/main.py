@@ -1,3 +1,4 @@
+import logging
 import os
 import sqlite3
 import threading
@@ -11,7 +12,14 @@ from fastapi.responses import JSONResponse, Response
 from aiac.policy.model.models import ServicePolicyModel
 from aiac.policy.store.keying import decode_service_id
 
+logger = logging.getLogger(__name__)
+
 DB_PATH = os.getenv("SERVICEPOLICY_DB_PATH", "/data/policy_model.db")
+
+# Returned to the client on any SQLite failure. The concrete exception (which can carry
+# schema/path internals) is logged server-side instead of echoed in the response body —
+# never expose stack-trace / driver detail to an external caller.
+_DB_ERROR_BODY = {"error": "database error"}
 
 # In-memory cache of ServicePolicyModel rows keyed by service_id — the authoritative
 # serving layer. All reads are served from here; SQLite is the durable write-through backend.
@@ -77,8 +85,9 @@ def clear_service_policies(
     with _write_lock:
         try:
             conn.execute("DELETE FROM service_policies")
-        except sqlite3.Error as e:
-            return JSONResponse(status_code=502, content={"error": str(e)})
+        except sqlite3.Error:
+            logger.exception("clear_service_policies: SQLite error")
+            return JSONResponse(status_code=502, content=_DB_ERROR_BODY)
         _cache.clear()
     return Response(status_code=204)
 
@@ -111,8 +120,9 @@ def upsert_service_policy(
                 "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
                 (service_id, body.model_dump_json()),
             )
-        except sqlite3.Error as e:
-            return JSONResponse(status_code=502, content={"error": str(e)})
+        except sqlite3.Error:
+            logger.exception("upsert_service_policy: SQLite error")
+            return JSONResponse(status_code=502, content=_DB_ERROR_BODY)
         _cache[service_id] = body
     return Response(status_code=204)
 
@@ -126,8 +136,9 @@ def delete_service_policy(
     with _write_lock:
         try:
             conn.execute("DELETE FROM service_policies WHERE service_id = ?", (service_id,))
-        except sqlite3.Error as e:
-            return JSONResponse(status_code=502, content={"error": str(e)})
+        except sqlite3.Error:
+            logger.exception("delete_service_policy: SQLite error")
+            return JSONResponse(status_code=502, content=_DB_ERROR_BODY)
         _cache.pop(service_id, None)
     return Response(status_code=204)
 

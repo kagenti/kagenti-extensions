@@ -18,6 +18,9 @@ __all__ = ["slugify", "generate_inbound_rego", "generate_outbound_rego"]
 
 _SPIFFE_RE = re.compile(r"^spiffe://[^/]+/ns/(?P<ns>[^/]+)/sa/(?P<name>[^/]+)$")
 
+# A valid slug is a single filename/package segment: only [a-z0-9_], non-empty.
+_SLUG_RE = re.compile(r"[a-z0-9_]+")
+
 
 def _short_id(agent_id: str) -> str:
     """Reduce a clientId to ``{namespace}/{name}``, dropping the SPIFFE trust domain.
@@ -36,7 +39,13 @@ def slugify(agent_id: str) -> str:
     Predictable regardless of whether SPIRE is enabled: derived from ``{ns}/{name}``,
     not the full slash/colon-bearing clientId or SPIFFE URI.
     """
-    return re.sub(r"[^a-z0-9]+", "_", _short_id(agent_id).lower()).strip("_")
+    slug = re.sub(r"[^a-z0-9]+", "_", _short_id(agent_id).lower()).strip("_")
+    # The slug becomes a filename in the PDP Policy Writer's output dir, so it must be a single
+    # inert segment: reject anything that isn't [a-z0-9_] (blocks ``/`` / ``..`` path traversal
+    # from a hostile agent_id) or that collapses to empty (would yield ``.inbound.rego``).
+    if not _SLUG_RE.fullmatch(slug):
+        raise ValueError(f"agent_id {agent_id!r} does not yield a valid slug")
+    return slug
 
 
 def _render_list(var: str, values: list[str]) -> str:

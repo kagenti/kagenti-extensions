@@ -228,7 +228,9 @@ def decommission(service_id: str) -> None:
     try:
         _decommission(service_id)
     except Exception:
-        logger.exception("decommission failed for service %r", service_id)
+        # Strip CR/LF before logging so a hostile service_id cannot forge log records.
+        safe_id = service_id.replace("\r", "").replace("\n", "")
+        logger.exception("decommission failed for service %r", safe_id)
         raise
 
 
