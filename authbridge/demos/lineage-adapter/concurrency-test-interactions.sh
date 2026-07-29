@@ -13,7 +13,19 @@
 # DISTINCT caller-minted W3C traceparent (so the driver owns each turn's
 # trace_id), then asserts per trace_id in the DG Postgres:
 #   * the trace derived at least one interaction  (turn was observed)
-#   * EXACTLY ONE root interaction, callee = the agent  (rooted forest)
+#   * EXACTLY ONE root is the ENTRY exchange — derived request kind
+#     `agent_request` — and ITS callee is agent:<SELF_ID>
+#
+#     NOT `roots == 1`: that holds only when a single sidecar observes the
+#     turn. When callee services are sidecarred too, each of their inbound
+#     exchanges derives its OWN dangling-parent root, because apps propagate
+#     their own OTel context rather than the sidecar's span (phantom-root
+#     design, wire contract — the derivation never guesses parents). Verified
+#     against pre-WS-1 data: on 2026-07-21 a reservation turn observed by one
+#     sidecar derived 33 interactions / 1 root, while a turn observed by both
+#     service and tool derived 22 / 11. The total root count is REPORTED for
+#     the expectation card, not asserted — same acceptance model as
+#     concurrency-test-mcp-interactions.sh.
 #   * ZERO orphans — every non-root interaction's parent is in the same trace
 #   * #interactions == #anchor interaction_spans, and no anchor span maps to
 #     more than one interaction  (no double-counted exchange / splice regression)
@@ -101,7 +113,7 @@ echo "=== per-turn interaction forest (self_id=$SELF_ID, N=$N) ==="
 pass=0
 for i in $(seq 0 $((N-1))); do
   tid="${TIDS[$i]}"; tok="${TOKS[$i]}"
-  read -r nix roots orphans nanchor dupanchor callee_root <<<"$(psql "
+  read -r nix roots orphans nanchor dupanchor <<<"$(psql "
     WITH t AS (SELECT * FROM interactions WHERE trace_id='$tid')
     SELECT
       (SELECT count(*) FROM t),
@@ -111,10 +123,12 @@ for i in $(seq 0 $((N-1))); do
       (SELECT count(*) FROM interaction_spans WHERE trace_id='$tid' AND role='anchor'),
       (SELECT count(*) FROM (SELECT span_id FROM interaction_spans
          WHERE trace_id='$tid' AND role='anchor'
-         GROUP BY span_id HAVING count(DISTINCT interaction_id)>1) d),
-      (SELECT ce.natural_key FROM t JOIN entities ce ON ce.id=t.callee_entity_id
-         WHERE t.parent_interaction_id IS NULL LIMIT 1)
+         GROUP BY span_id HAVING count(DISTINCT interaction_id)>1) d)
   " | tr '\t' ' ')"
+  # The ENTRY exchange is identified by its derived request kind, and the total
+  # root count is reported rather than asserted — see the header for why
+  # roots==1 is a single-sidecar assumption, not an invariant.
+  read -r entryroots callee_root <<<"$(api_roots_of_kind "$tid" agent_request)"
   # optional EXPECT_KINDS: exact per-trace derived content-kind counts
   kmiss=""
   if [ -n "$EXPECT_KINDS" ]; then
@@ -126,13 +140,13 @@ for i in $(seq 0 $((N-1))); do
     done
   fi
   ok="FAIL"
-  if [ "${nix:-0}" -ge 1 ] && [ "$roots" = "1" ] && [ "$orphans" = "0" ] \
+  if [ "${nix:-0}" -ge 1 ] && [ "$entryroots" = "1" ] && [ "$orphans" = "0" ] \
      && [ "$nix" = "$nanchor" ] && [ "$dupanchor" = "0" ] \
      && [ "$callee_root" = "agent:$SELF_ID" ] && [ -z "$kmiss" ]; then
     ok="OK"; pass=$((pass+1))
   fi
-  printf '%-8s trace=%s ix=%-3s root=%s orphan=%s anchors=%-3s dup=%s callee=%-24s [%s]\n' \
-    "$tok" "${tid:0:12}" "${nix:-0}" "${roots:-?}" "${orphans:-?}" "${nanchor:-?}" "${dupanchor:-?}" "${callee_root:-<none>}" "$ok"
+  printf '%-8s trace=%s ix=%-3s entry=%s roots=%-3s orphan=%s anchors=%-3s dup=%s callee=%-24s [%s]\n' \
+    "$tok" "${tid:0:12}" "${nix:-0}" "${entryroots:-?}" "${roots:-?}" "${orphans:-?}" "${nanchor:-?}" "${dupanchor:-?}" "${callee_root:-<none>}" "$ok"
   if [ -n "$kmiss" ]; then echo "         kind mismatch:$kmiss"; fi
 done
 
