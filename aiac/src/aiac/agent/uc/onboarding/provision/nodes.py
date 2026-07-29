@@ -172,16 +172,22 @@ def analyze_agent(state: OnboardingProvisionState) -> dict:
     # One operator role per skill, mirroring the scope (same name + description). The role name ==
     # scope name is fine — a realm role and a client scope are distinct Keycloak objects. The role's
     # description drives the PRB capability-match (see generic_policy.md).
+    def _skill_key(s: dict) -> str:
+        key = s.get("id") or s.get("name")
+        if not key:
+            raise HTTPException(
+                502,
+                f"AgentCard for workload {workload!r} in namespace {namespace!r} has a skill "
+                f"with neither 'id' nor 'name'; cannot derive a scope/role name (skill: {s!r})",
+            )
+        return key
+
     scopes = [
-        ScopeDefinition(
-            name=f"{workload}.{s.get('id') or s['name']}", description=s.get("description", "")
-        )
+        ScopeDefinition(name=f"{workload}.{_skill_key(s)}", description=s.get("description", ""))
         for s in skills
     ]
     roles = [
-        RoleDefinition(
-            name=f"{workload}.{s.get('id') or s['name']}", description=s.get("description", "")
-        )
+        RoleDefinition(name=f"{workload}.{_skill_key(s)}", description=s.get("description", ""))
         for s in skills
     ]
     provision = ServiceProvision(
@@ -213,7 +219,14 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
             "label (deploy-time prerequisite for MCP tool discovery)",
         )
 
-    port = svc.spec.ports[0].port
+    ports = getattr(svc.spec, "ports", None) or []
+    if not ports:
+        raise HTTPException(
+            502,
+            f"Service {workload!r} in namespace {namespace!r} exposes no ports; "
+            "cannot resolve an MCP endpoint",
+        )
+    port = ports[0].port
     endpoint = f"http://{workload}.{namespace}.svc.cluster.local:{port}/mcp"
 
     # The MCP endpoint is fronted by the tool's AuthBridge sidecar, which validates inbound JWTs
@@ -231,8 +244,18 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
     except Exception as e:
         raise HTTPException(502, f"MCP tools/list failed at {endpoint}: {e}")
 
+    def _tool_name(t: dict) -> str:
+        name = t.get("name")
+        if not name:
+            raise HTTPException(
+                502,
+                f"MCP tools/list at {endpoint} returned a tool with no 'name'; "
+                f"cannot derive a scope name (tool: {t!r})",
+            )
+        return name
+
     scopes = [
-        ScopeDefinition(name=f"{workload}.{t['name']}", description=t.get("description", ""))
+        ScopeDefinition(name=f"{workload}.{_tool_name(t)}", description=t.get("description", ""))
         for t in tools
     ]
     provision = ServiceProvision(

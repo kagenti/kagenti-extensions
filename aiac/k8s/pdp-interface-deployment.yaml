@@ -15,23 +15,18 @@ data:
   # AIAC_RAG_INGEST_URL and AIAC_CHROMADB_URL are added in Phase 3 (RAG Pod, issue 4.20).
 
 ---
-# Prerequisites: create this Secret before applying this manifest:
+# Preconditions (NOT created by this manifest):
 #
-#   kubectl create secret generic keycloak-admin-secret \
-#     -n aiac-system \
-#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
-#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
-apiVersion: v1
-kind: Secret
-metadata:
-  name: keycloak-admin-secret
-  namespace: aiac-system
-type: Opaque
-stringData:
-  KEYCLOAK_ADMIN_USERNAME: "admin"
-  KEYCLOAK_ADMIN_PASSWORD: "admin"
-
----
+#   * The target namespace `aiac-system` must already exist
+#     (`kubectl create namespace aiac-system`).
+#   * The `keycloak-admin-secret` Secret must be pre-provisioned out-of-band —
+#     credentials must NEVER be committed to git. The Deployment below references
+#     it via secretRef. Create it once per cluster:
+#
+#       kubectl create secret generic keycloak-admin-secret \
+#         -n aiac-system \
+#         --from-literal=KEYCLOAK_ADMIN_USERNAME=<admin-user> \
+#         --from-literal=KEYCLOAK_ADMIN_PASSWORD=<admin-password>
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +48,12 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7071
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7071
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config
@@ -68,6 +69,12 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7072
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7072
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config

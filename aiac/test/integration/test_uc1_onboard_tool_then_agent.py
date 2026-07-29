@@ -237,7 +237,7 @@ def test_only_agent_rego_present(onboarded: dict) -> None:
     and are reconstructed onto the agent's model; no rules are written for the tool alone). Checks the
     writer's own ``/rego``, not just the host copy."""
     written = uc1.writer_rego_files(onboarded["writer_pod"])
-    assert not [f for f in written if f.startswith("github_tool")], (
+    assert not [f for f in written if "github_tool" in f], (
         f"unexpected tool Rego emitted: {written}"
     )
     for filename in (INBOUND_REGO, OUTBOUND_REGO):

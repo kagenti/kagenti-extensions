@@ -185,7 +185,7 @@ def test_only_agent_rego_present(onboarded: dict) -> None:
     target — no rules written for it, and it was not onboarded). Checks the writer's own ``/rego``,
     not just what was copied to the host."""
     written = uc1.writer_rego_files(onboarded["writer_pod"])
-    assert not [f for f in written if f.startswith("github_tool")], (
+    assert not [f for f in written if "github_tool" in f], (
         f"unexpected tool Rego emitted: {written}"
     )
     for filename in (INBOUND_REGO, OUTBOUND_REGO):

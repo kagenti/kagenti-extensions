@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS service_policies (
 - Every mutation writes through to SQLite synchronously before returning `204`.
 - On pod restart: load all rows from SQLite → populate cache → begin serving.
 
+**Concurrency (single write lock):** the mutating endpoints (`POST` / `DELETE /policy/services/{service_id}`)
+serialize their cache **and** DB writes under a single process-wide write lock, so the SQLite row and the
+in-memory cache entry are updated together as one critical section. This prevents interleaved
+upsert/delete requests from leaving the cache and DB inconsistent (e.g. a cache entry present after its
+row was deleted, or a lost update when two upserts for the same `service_id` race). Reads serve from the
+cache and do not take the write lock; the single-writer discipline is what keeps concurrent mutations
+consistent.
+
 **Transaction strategy:**
 - Per-service upsert (`POST /policy/services/{service_id}`): `INSERT OR REPLACE INTO service_policies VALUES (?, ?)`.
 - Per-service delete (`DELETE /policy/services/{service_id}`): `DELETE FROM service_policies WHERE service_id = ?`; evict the cache entry.
@@ -102,8 +110,8 @@ segment).
 **`main.py` functions:**
 
 - `_get_db() -> sqlite3.Connection` — open `SERVICEPOLICY_DB_PATH` with `check_same_thread=False`; run `CREATE TABLE IF NOT EXISTS` on first open.
-- `_upsert_service(service_id: str, model: ServicePolicyModel)` — `INSERT OR REPLACE INTO service_policies VALUES (?, ?)` with `model.model_dump_json()`; update cache.
-- `_delete_service(service_id: str)` — `DELETE FROM service_policies WHERE service_id = ?`; evict the cache entry (no-op if absent).
+- `_upsert_service(service_id: str, model: ServicePolicyModel)` — under the write lock: `INSERT OR REPLACE INTO service_policies VALUES (?, ?)` with `model.model_dump_json()`, then update cache (DB + cache write as one locked critical section).
+- `_delete_service(service_id: str)` — under the write lock: `DELETE FROM service_policies WHERE service_id = ?`, then evict the cache entry (no-op if absent) — DB + cache eviction as one locked critical section.
 - `_get_service(service_id: str) -> ServicePolicyModel` — read from in-memory cache; raise `404` if absent.
 - `_list_by_role(role_id: str) -> list[ServicePolicyModel]` — return every cached SPM whose `inbound_rules` references `role_id`.
 - `_load_cache()` — on startup, load all rows from SQLite into the in-memory cache.

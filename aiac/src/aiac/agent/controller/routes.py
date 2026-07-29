@@ -56,8 +56,12 @@ def apply_role(role_id: str) -> Response:
 # Offboard is keyed by the clientId (the SPM key), NOT the Keycloak internal UUID that
 # /apply/service/{service_id} carries: an offboarded client is gone from get_services(), so
 # UUID→clientId resolution is impossible. The {service_id:path} converter carries slash-bearing
-# SPIFFE-URI clientIds. Decommission is a whole-service teardown, so it bypasses the
-# (rules, override) → compute_and_apply path and calls the PCE's decommission directly.
+# SPIFFE-URI clientIds. Decommission is a whole-service teardown, so — BY DESIGN — it does NOT
+# go through the (rules, override) → compute_and_apply path the other /apply/* routes share.
+# compute_and_apply folds *incremental* rule updates into the SPM store; decommission is an
+# authoritative offboard that must tear down a service's entire policy footprint (its SPM, its
+# outbound edges on other SPMs, and its APM), which is not expressible as a rule delta. So this
+# route intentionally calls the PCE's decommission() directly. See the implementation plan.
 @app.post("/apply/offboard/{service_id:path}")
 def apply_offboard(service_id: str) -> Response:
     decommission(offboard_service(service_id))

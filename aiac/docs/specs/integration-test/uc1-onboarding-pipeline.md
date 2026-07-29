@@ -106,7 +106,8 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
    run; clear the writer's `/rego`. This gives every rung a clean slate and makes reruns converge. (With
    the OPA writer there are no composites — the only Keycloak mutations are the roles/scopes the onboarding
    agent provisions — but cleaning both is harmless and future-proofs against the Keycloak writer.)
-2. **Onboard** in the rung's order via `POST /apply/service/{client_id}`.
+2. **Onboard** in the rung's order via `POST /apply/service/{service_id}`, where `{service_id}` is the
+   internal Keycloak UUID (`Service.id`), **not** the clientId — the onboard route is keyed on the UUID.
    - `POST /apply/service/{github-tool id}` → UC-1 classifies it a **Tool**, reads the MCP manifest,
      provisions scopes `github-tool.{source-read, source-write, issues-read, issues-write}`, sets
      `client.type=Tool`. **No rules are written for the tool directly.**

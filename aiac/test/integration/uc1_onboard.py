@@ -256,7 +256,10 @@ def clear_policy_store() -> None:
     guarantees each run derives its Rego from only the edges this run onboarded.
 
     Hits ``DELETE /policy/services`` directly through a port-forward (the harness never imports
-    ``aiac``). Best-effort: a store that is unreachable or already empty must not fail the run."""
+    ``aiac``). Best-effort about *reachability* — a store that is unreachable (or a port-forward that
+    won't come up) is tolerated and only warned about. But a store that answers with a **non-2xx**
+    means the clear actually failed: proceeding would run the rung on dirty state (stale SPMs
+    replayed into every regenerated Rego), so that case fails loudly rather than silently."""
     try:
         with port_forward(
             STORE_TARGET,
@@ -266,10 +269,17 @@ def clear_policy_store() -> None:
             ready_url=f"http://127.0.0.1:{STORE_LOCAL_PORT}/health",
         ) as base_url:
             resp = requests.delete(f"{base_url}/policy/services", timeout=30)
-            resp.raise_for_status()
-            log.info("cleared Policy Store SPMs (HTTP %s)", resp.status_code)
-    except Exception as exc:  # noqa: BLE001 — best-effort; a store hiccup must not fail the run
-        log.warning("clear_policy_store: could not clear store (%s)", exc)
+    except (requests.ConnectionError, requests.Timeout, RuntimeError) as exc:
+        # Store unreachable / port-forward failed — best-effort, must not fail the run.
+        log.warning("clear_policy_store: store unreachable, skipping clear (%s)", exc)
+        return
+    if not (200 <= resp.status_code < 300):
+        raise AssertionError(
+            f"clear_policy_store: DELETE /policy/services returned HTTP {resp.status_code} — the "
+            f"store was reached but the clear failed, so the run would proceed on dirty state "
+            f"(stale SPMs): {resp.text[:500]}"
+        )
+    log.info("cleared Policy Store SPMs (HTTP %s)", resp.status_code)
 
 
 # ======================================================================================
@@ -293,14 +303,25 @@ def ensure_agent_policy(namespace: str) -> None:
         "metadata": {"name": POLICY_CONFIGMAP, "namespace": namespace},
         "data": {"policy.md": scn.POLICY_ABSTRACT},
     }
-    kubectl("apply", "-f", "-", input_text=json.dumps(cm))
+    apply_out = kubectl("apply", "-f", "-", input_text=json.dumps(cm))
+    # ``kubectl apply`` reports "created"/"configured" when the ConfigMap's content differs from the
+    # cluster and "unchanged" when it matches; use that to decide whether a rollout is needed.
+    cm_changed = "unchanged" not in apply_out
 
     mounted = kubectl(
         "get", "deployment", CONTROLLER_DEPLOYMENT, "-n", namespace,
         "-o", "jsonpath={.spec.template.spec.volumes[*].configMap.name}",
     )
     if POLICY_CONFIGMAP in mounted.split():
-        return  # already mounted — no rollout needed
+        # Already mounted, so no deployment patch (and thus no rollout) is triggered. But a projected
+        # ConfigMap volume only re-syncs on the kubelet's own (~minute) cadence, and the PRB reads
+        # policy.md once at startup — so if we just changed the ConfigMap's content the running pod
+        # would keep serving the stale policy. Force a rollout + wait so the new policy.md is in
+        # place before onboarding; skip it when apply reported the ConfigMap unchanged (fast reruns).
+        if cm_changed:
+            kubectl("rollout", "restart", f"deployment/{CONTROLLER_DEPLOYMENT}", "-n", namespace)
+            kubectl_rollout_status(f"deployment/{CONTROLLER_DEPLOYMENT}", namespace=namespace)
+        return  # already mounted — content is now current
 
     patch = {
         "spec": {"template": {"spec": {
@@ -388,8 +409,19 @@ def capture_rego(pod: str, rego_dir: Path) -> None:
 
 
 def opa_dump(rego: Path, ref: str) -> object:
-    """Return the value of a Rego data ref (a map/list, not a boolean) via ``opa eval``."""
-    return opa_eval([rego], ref, {})
+    """Return the value of a Rego data ref (a map/list, not a boolean) via ``opa eval``.
+
+    ``opa eval`` omits ``result`` entirely (or yields an empty expression list) when the ref is
+    undefined — e.g. the writer emitted a Rego with no such rule — which would otherwise surface as
+    a raw ``KeyError``/``IndexError`` from the result-unwrapping in ``opa_eval``. Turn that into a
+    clear assertion so a missing dump reads as an oracle failure, not an opaque crash."""
+    try:
+        return opa_eval([rego], ref, {})
+    except (KeyError, IndexError) as exc:
+        raise AssertionError(
+            f"opa eval produced no value for {ref!r} against {rego} — the ref is undefined "
+            f"(the pipeline may have emitted no such rule): {exc}"
+        ) from exc
 
 
 def outbound_subject_grants(rego_dir: Path) -> set[tuple[str, str]]:

@@ -10,7 +10,7 @@
 
 Keeping the canonical model definitions inside a PDP-namespaced module (`aiac.pdp.library.models`) forces both the Policy Store library and the Policy Computation Engine to take a dependency on the PDP package — a wrong-layer coupling. Any of the three consumers importing from `aiac.pdp.library.models` would create a transitive dependency on an unrelated service namespace.
 
-Additionally, the old `PolicyRule` used plain `str` for `role` and `scope`. The PCE algorithm requires typed `Role` and `Scope` objects (from `aiac.idp.configuration.models`) to invoke `Configuration.get_services_by_role` and `Configuration.get_services_by_scope`.
+Additionally, the old `PolicyRule` used plain `str` for `role` and `scope`. The current SPM/APM PCE requires typed `Role` and `Scope` objects (from `aiac.idp.configuration.models`): it routes each rule to the owning service's SPM by `scope.serviceId`, classifies edges by `role.kind`, and reads `role.actorIds` when deriving each `AgentPolicyModel` — all fields that a plain `str` cannot carry. (These typed fields replaced the earlier reliance on `Configuration.get_services_by_role` / `get_services_by_scope`, which the SPM-based engine no longer calls.)
 
 The original `source_roles`, `subject_roles`, and `scope_targets` maps used pydantic model objects (`Service`, `Subject`, `Scope`) as dict keys. Model-object keys do not round-trip through `model_dump(mode="json")` / JSON without custom key handling, and they couple `aiac.policy.model` to the id-only `__hash__`/`__eq__` of the IdP models. The outbound map was also keyed by scope (`scope → targets`), whereas consumers need the inverse (`target → scopes`) to emit per-target authorization directly.
 

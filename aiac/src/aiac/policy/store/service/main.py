@@ -1,10 +1,11 @@
 import os
 import sqlite3
+import threading
 from contextlib import asynccontextmanager
 from typing import Annotated
 
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from aiac.policy.model.models import ServicePolicyModel
@@ -16,6 +17,13 @@ DB_PATH = os.getenv("SERVICEPOLICY_DB_PATH", "/data/policy_model.db")
 # serving layer. All reads are served from here; SQLite is the durable write-through backend.
 _cache: dict[str, ServicePolicyModel] = {}
 _db_conn: sqlite3.Connection | None = None
+
+# Serializes the read-modify-write of the cache + SQLite backend across the mutating
+# endpoints. The cache dict and the shared connection are mutated by every request thread,
+# so without this a concurrent create/update/delete/clear can interleave and leave the cache
+# out of sync with the durable rows. Held only around the local SQLite write + cache mutation
+# (never across network I/O).
+_write_lock = threading.Lock()
 
 
 def get_db() -> sqlite3.Connection:
@@ -66,11 +74,12 @@ def clear_service_policies(
     # unambiguously. Intended for test harnesses that need a clean slate: without it the
     # StatefulSet PV outlives image redeploys, so pre-fix cruft accumulates across runs
     # (override=False appends). Never 404s; clearing an already-empty store is a no-op 204.
-    try:
-        conn.execute("DELETE FROM service_policies")
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-    _cache.clear()
+    with _write_lock:
+        try:
+            conn.execute("DELETE FROM service_policies")
+        except sqlite3.Error as e:
+            return JSONResponse(status_code=502, content={"error": str(e)})
+        _cache.clear()
     return Response(status_code=204)
 
 
@@ -89,14 +98,22 @@ def upsert_service_policy(
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
     service_id = decode_service_id(service_id)
-    try:
-        conn.execute(
-            "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
-            (service_id, body.model_dump_json()),
+    if body.service_id != service_id:
+        # The body's own service_id must agree with the path; a mismatch would silently
+        # persist a row under the wrong key. Fail loud with a 422 instead.
+        raise HTTPException(
+            status_code=422,
+            detail=f"body.service_id {body.service_id!r} does not match path service_id {service_id!r}",
         )
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-    _cache[service_id] = body
+    with _write_lock:
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO service_policies (service_id, spec) VALUES (?, ?)",
+                (service_id, body.model_dump_json()),
+            )
+        except sqlite3.Error as e:
+            return JSONResponse(status_code=502, content={"error": str(e)})
+        _cache[service_id] = body
     return Response(status_code=204)
 
 
@@ -106,11 +123,12 @@ def delete_service_policy(
     conn: Annotated[sqlite3.Connection, Depends(get_db)],
 ) -> Response:
     service_id = decode_service_id(service_id)
-    try:
-        conn.execute("DELETE FROM service_policies WHERE service_id = ?", (service_id,))
-    except sqlite3.Error as e:
-        return JSONResponse(status_code=502, content={"error": str(e)})
-    _cache.pop(service_id, None)
+    with _write_lock:
+        try:
+            conn.execute("DELETE FROM service_policies WHERE service_id = ?", (service_id,))
+        except sqlite3.Error as e:
+            return JSONResponse(status_code=502, content={"error": str(e)})
+        _cache.pop(service_id, None)
     return Response(status_code=204)
 
 

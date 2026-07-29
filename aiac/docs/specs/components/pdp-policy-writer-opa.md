@@ -146,7 +146,7 @@ allow if { subject_ok; source_ok }
 
 ### Outbound package: `authz.{agent_slug}.outbound`
 
-Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target}` (IDs). The gate requires **both** the subject and the agent to pass, but the outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): the subject must hold a role granting at least one **tool** scope the `target` accepts (via `subject_role_scopes`, grouped from `outbound_subject_rules`), **and** the agent (via its own `agent_roles`) must be permitted at least one scope that the `target` accepts. Both gates match against `target_scopes[input.target]`; `target_scopes` is consumed **directly** (target id → scopes) — it is not inverted. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here, and the outbound package does not emit `agent_scopes` at all: outbound decisions never consider the agent's own audience scopes, only its roles (`agent_roles`) and the target's accepted scopes.
+Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target, function_name}` (IDs; `function_name` is the requested target scope). `allow` is a **per-scope AND** keyed on `input.function_name`, requiring **both** gates to pass on that same scope. The outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): it passes iff the subject holds a role granted the **requested** `function_name` (via `subject_role_scopes`, grouped from `outbound_subject_rules`). The **capability** gate (`target_ok`) passes iff the requested `function_name` is one of the scopes the `target` accepts — `target_scopes[input.target]`, consumed **directly** (target id → scopes, not inverted). Because both gates test the *same* `function_name`, `allow` is a genuine per-scope intersection: a mismatch (user reaches scope A, agent reaches scope B) denies both. `agent_roles` / `agent_role_scopes` are still emitted (informational / debugging) but `allow` does **not** reference them — `target_scopes[input.target]` already *is* the per-scope capability gate. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here, and the outbound package does not emit `agent_scopes` at all: outbound decisions never consider the agent's own audience scopes.
 
 ```rego
 package authz.{agent_slug}.outbound
@@ -159,17 +159,14 @@ subject_role_scopes := { "{role.name}": ["{scope.name}", ...], ... }   # from ou
 agent_role_scopes            := { "{role.name}": ["{scope.name}", ...], ... }   # from outbound_rules (agent role → tool scopes)
 target_scopes                := { "{target_id}": ["{scope.name}", ...], ... }   # from target_scopes
 
-# user may reach the tool: holds a role granting >=1 tool scope the target accepts
+# user may reach the tool: holds a role granted the REQUESTED scope (input.function_name)
 subject_ok if {
     some role in subject_roles[input.subject]
-    some scope in subject_role_scopes[role]
-    scope in target_scopes[input.target]
+    input.function_name in subject_role_scopes[role]
 }
-# agent may reach the tool: agent role grants >=1 tool scope the target accepts
+# agent may reach the tool: the requested scope is one the target accepts (direct, per-scope)
 target_ok if {
-    some role in agent_roles
-    some scope in agent_role_scopes[role]
-    scope in target_scopes[input.target]
+    input.function_name in target_scopes[input.target]
 }
 
 default allow := false

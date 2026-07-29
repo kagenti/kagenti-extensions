@@ -9,6 +9,7 @@ embedded in the package, and ``allow`` resolves IDs -> roles -> scopes
 internally.
 """
 
+import json
 import re
 
 from aiac.policy.model.models import AgentPolicyModel, PolicyRule
@@ -39,19 +40,25 @@ def slugify(agent_id: str) -> str:
 
 
 def _render_list(var: str, values: list[str]) -> str:
-    """Render ``{var} := ["a", "b"]`` as Rego (empty-safe: ``[]``)."""
-    inner = ", ".join(f'"{v}"' for v in values)
+    """Render ``{var} := ["a", "b"]`` as Rego (empty-safe: ``[]``).
+
+    Each value is emitted via ``json.dumps`` so quotes/newlines/backslashes are escaped —
+    Rego string syntax is JSON-compatible, and this prevents Rego injection / broken output."""
+    inner = ", ".join(json.dumps(v) for v in values)
     return f"{var} := [{inner}]"
 
 
 def _render_map(var: str, mapping: dict[str, list[str]]) -> str:
-    """Render ``{var} := { "key": ["a", "b"], ... }`` as Rego (empty-safe: ``{}``)."""
+    """Render ``{var} := { "key": ["a", "b"], ... }`` as Rego (empty-safe: ``{}``).
+
+    Keys and values are emitted via ``json.dumps`` so quotes/newlines/backslashes are escaped
+    (JSON-compatible Rego string syntax) — this prevents Rego injection / broken output."""
     if not mapping:
         return f"{var} := {{}}"
     lines = [f"{var} := {{"]
     for key, values in mapping.items():
-        inner = ", ".join(f'"{v}"' for v in values)
-        lines.append(f'    "{key}": [{inner}],')
+        inner = ", ".join(json.dumps(v) for v in values)
+        lines.append(f"    {json.dumps(key)}: [{inner}],")
     lines.append("}")
     return "\n".join(lines)
 

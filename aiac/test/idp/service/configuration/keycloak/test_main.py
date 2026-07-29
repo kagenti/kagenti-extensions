@@ -1,4 +1,4 @@
-"""Unit tests for aiac/pdp/service/configuration/keycloak/main.py FastAPI application."""
+"""Unit tests for aiac/idp/service/configuration/keycloak/main.py FastAPI application."""
 
 import base64
 import json

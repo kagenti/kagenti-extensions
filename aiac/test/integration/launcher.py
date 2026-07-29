@@ -23,6 +23,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -228,32 +229,59 @@ def port_forward(target: str, *, namespace: str, local_port: int, remote_port: i
     yielding the local ``http://127.0.0.1:<local_port>`` base URL.
 
     ``target`` is a kubectl port-forward target (``svc/aiac-controller``, ``deploy/...``, ``pod/...``).
-    If ``ready_url`` is given it is polled until it answers (any HTTP status) before yielding;
-    otherwise a short fixed grace period is used (the Controller exposes no ``/health``).
+    The forward is not yielded until it is actually up: if ``ready_url`` is given it is polled until
+    it answers (any HTTP status); otherwise the tunnel's own ``Forwarding from ...`` line is awaited
+    (the Controller exposes no ``/health``). A background thread drains the merged stdout/stderr the
+    whole time — both to detect that line and so the OS pipe buffer can never fill and deadlock
+    kubectl — and its captured output is surfaced if the forward exits early or never comes up.
     """
     proc = subprocess.Popen(
         ["kubectl", "port-forward", "-n", namespace, target, f"{local_port}:{remote_port}"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
     base_url = f"http://127.0.0.1:{local_port}"
+    output: list[str] = []
+    forwarding = threading.Event()
+
+    def _drain() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:  # blocks in the thread, never on the main path
+            output.append(line)
+            if "Forwarding from" in line:
+                forwarding.set()
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    reader.start()
     try:
         deadline = time.time() + timeout
+        ready = False
         while time.time() < deadline:
             if proc.poll() is not None:
-                err = proc.stderr.read().decode() if proc.stderr else ""
-                raise RuntimeError(f"port-forward to {target} exited early: {err}")
+                reader.join(timeout=1)
+                raise RuntimeError(
+                    f"port-forward to {target} exited early: {''.join(output).strip()}"
+                )
             if ready_url is None:
-                time.sleep(1.0)
-                break
-            try:
-                requests.get(ready_url, timeout=1)
-                break
-            except requests.RequestException:
-                time.sleep(0.3)
+                if forwarding.wait(timeout=0.3):  # tunnel announced it is up
+                    ready = True
+                    break
+            else:
+                try:
+                    requests.get(ready_url, timeout=1)
+                    ready = True
+                    break
+                except requests.RequestException:
+                    time.sleep(0.3)
+        if not ready:
+            raise RuntimeError(
+                f"port-forward to {target} not ready within {timeout}s: {''.join(output).strip()}"
+            )
         yield base_url
     finally:
         terminate(proc)
+        reader.join(timeout=1)
 
 
 # ======================================================================================

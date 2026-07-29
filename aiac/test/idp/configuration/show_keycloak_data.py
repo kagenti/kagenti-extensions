@@ -1,9 +1,9 @@
-"""Print live Keycloak data via aiac-pdp-config-service, exercising all api methods.
+"""Print live Keycloak data via the IdP configuration service, exercising all Configuration methods.
 
 Usage:
-    python test/pdp/library/show_keycloak_data.py
+    .venv/bin/python test/idp/configuration/show_keycloak_data.py
 
-Requires the service to be reachable at AIAC_PDP_CONFIG_URL (default: http://localhost:7071).
+Requires the service to be reachable at AIAC_PDP_CONFIG_URL (default: http://127.0.0.1:7071).
 """
 
 import sys
@@ -112,7 +112,7 @@ def main() -> None:
     print("=== Services by Role ===")
     for r in roles:
         svcs_for_role: list[Service] = cfg.get_services_by_role(r)
-        names = ", ".join(s.serviceId for s in svcs_for_role) if svcs_for_role else "—"
+        names = ", ".join(s.serviceId or s.id or "?" for s in svcs_for_role) if svcs_for_role else "—"
         print(f"  {r.name}: {names}")
     print()
 
@@ -120,7 +120,7 @@ def main() -> None:
     print("=== Services by Scope ===")
     for sc in scopes:
         svcs_for_scope: list[Service] = cfg.get_services_by_scope(sc)
-        names = ", ".join(s.serviceId for s in svcs_for_scope) if svcs_for_scope else "—"
+        names = ", ".join(s.serviceId or s.id or "?" for s in svcs_for_scope) if svcs_for_scope else "—"
         print(f"  {sc.name}: {names}")
     print()
 

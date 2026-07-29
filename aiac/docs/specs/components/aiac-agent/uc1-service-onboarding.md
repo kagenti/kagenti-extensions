@@ -134,7 +134,7 @@ START → classify_service → [analyze_agent | analyze_tool] → provision_serv
   5. Returns `502` on Service/label lookup failure, discovery-token minting failure, or MCP call failure.
 
   > K8s access: `get` on `services` in the workload namespace (tool path). Identity is resolved by `classify_service` (config API).
-  > MCP path convention: all MCP tool services must serve at `/mcp` and carry the `protocol.kagenti.io/mcp` label. This label is a **deploy-time prerequisite** — the kagenti-operator does not stamp it today; automatic stamping is requested upstream (`docs/gh-issues/kagenti-operator-mcp-label-stamping.md`). Until then it must be applied at deploy time; `analyze_tool` fails loud (`502`, naming the workload + missing label) if it is absent.
+  > MCP path convention: all MCP tool services must serve at `/mcp` and carry the `protocol.kagenti.io/mcp` label. This label is a **deploy-time prerequisite** — the kagenti-operator does not stamp it today; automatic stamping is requested upstream (`docs/issues/kagenti-operator-mcp-label-stamping.md`). Until then it must be applied at deploy time; `analyze_tool` fails loud (`502`, naming the workload + missing label) if it is absent.
   > Discovery auth: the tool's inbound `jwt-validation` plugin stays fully enforcing — there is no
   > path bypass for `/mcp`. `analyze_tool` authenticates instead of relaxing the sidecar's auth.
 

@@ -8,7 +8,7 @@ This guide covers the full AIAC deployment in the `aiac-system` namespace.
 |---|---|---|
 | `pdp-interface-deployment.yaml` | Kagenti Interface Pod (IdP Configuration Service + PDP Policy Writer **Phase 1 rego-file mock** `aiac-pdp-policy-opa`) + 2 ClusterIP Services | 7071, 7072 |
 | `policy-store-statefulset.yaml` | Policy Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
-| `agent-deployment.yaml` | Agent Pod Deployment (init container + AIAC Agent) + ClusterIP Service | 7070 |
+| `agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent) + ClusterIP Service | 7070 |
 
 ## Prerequisites
 
@@ -37,7 +37,7 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile \
   -t localhost/aiac-policy-store:local aiac/src/
 
-# AIAC Agent (also used as the init container)
+# AIAC Agent
 docker build -f aiac/src/aiac/agent/controller/Dockerfile \
   -t localhost/aiac-agent:local aiac/src/
 ```
@@ -54,6 +54,10 @@ kind load docker-image localhost/aiac-agent:local            --name <cluster-nam
 ```
 
 **Remote registry** — tag, push, then update the `image:` fields in the manifests to match.
+
+> **Note:** the manifests set `imagePullPolicy: Never` because images are side-loaded
+> into a local Kind cluster (dev only). For a real cluster that pulls from a registry,
+> change these to `imagePullPolicy: IfNotPresent` (or `Always`).
 
 ## 3 — Create the admin secret
 
@@ -125,7 +129,7 @@ kubectl apply -f aiac/k8s/pdp-interface-deployment.yaml
 # 2. Policy Store — needs the aiac-system namespace
 kubectl apply -f aiac/k8s/policy-store-statefulset.yaml
 
-# 3. Agent — init container waits for Interface Pod + Policy Store to be healthy
+# 3. Agent — depends on the Interface Pod + Policy Store already being healthy
 kubectl apply -f aiac/k8s/agent-deployment.yaml
 ```
 

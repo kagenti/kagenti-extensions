@@ -10,6 +10,10 @@ from aiac.policy.store.keying import encode_service_id
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
+# Per-request timeout (seconds) for every Policy Store HTTP call. Without it a hung store
+# would block the caller indefinitely. Tunable via ``AIAC_HTTP_TIMEOUT``.
+_HTTP_TIMEOUT = float(os.getenv("AIAC_HTTP_TIMEOUT", "10"))
+
 
 def _base_url() -> str:
     return os.getenv("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
@@ -36,7 +40,9 @@ def _fresh_empty(service_id: str) -> ServicePolicyModel:
 
 
 def get_service_policy(service_id: str) -> ServicePolicyModel:
-    resp = requests.get(f"{_base_url()}/policy/services/{encode_service_id(service_id)}")
+    resp = requests.get(
+        f"{_base_url()}/policy/services/{encode_service_id(service_id)}", timeout=_HTTP_TIMEOUT
+    )
     if resp.status_code == 404:
         return _fresh_empty(service_id)
     _check(resp)
@@ -55,18 +61,26 @@ def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]:
     # The one genuinely new route. Returns every SPM whose inbound_rules reference role.id —
     # including stale role->service mappings the live IdP no longer reflects (which
     # override-purge needs). [] when none match.
-    resp = requests.get(f"{_base_url()}/policy/services", params={"role": role.id})
+    resp = requests.get(
+        f"{_base_url()}/policy/services", params={"role": role.id}, timeout=_HTTP_TIMEOUT
+    )
     _check(resp)
     return [ServicePolicyModel.model_validate(item) for item in resp.json()]
 
 
 def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None:
-    resp = requests.post(f"{_base_url()}/policy/services/{encode_service_id(service_id)}", json=spm.model_dump())
+    resp = requests.post(
+        f"{_base_url()}/policy/services/{encode_service_id(service_id)}",
+        json=spm.model_dump(),
+        timeout=_HTTP_TIMEOUT,
+    )
     _check(resp)
 
 
 def delete_service_policy(service_id: str) -> None:
-    resp = requests.delete(f"{_base_url()}/policy/services/{encode_service_id(service_id)}")
+    resp = requests.delete(
+        f"{_base_url()}/policy/services/{encode_service_id(service_id)}", timeout=_HTTP_TIMEOUT
+    )
     _check(resp)
 
 
@@ -74,5 +88,5 @@ def clear_service_policies() -> None:
     # Drop every SPM in the store. The collection-root DELETE (no service_id segment) —
     # distinct from delete_service_policy's by-id path. Intended for test harnesses that
     # need a clean slate before a run; clearing an already-empty store is a no-op.
-    resp = requests.delete(f"{_base_url()}/policy/services")
+    resp = requests.delete(f"{_base_url()}/policy/services", timeout=_HTTP_TIMEOUT)
     _check(resp)

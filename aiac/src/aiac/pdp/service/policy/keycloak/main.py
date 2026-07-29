@@ -103,7 +103,14 @@ def create_service_scope(
             "protocol": "openid-connect",
         }
         created = admin.create_client_scope(scope_payload)
-        admin.add_default_default_client_scope(service_id, created["id"])
+        # ``add_default_default_client_scope`` is not a real KeycloakAdmin method; the correct API
+        # is ``add_client_default_client_scope(client_id, client_scope_id, payload)``.
+        scope_id = created["id"]
+        admin.add_client_default_client_scope(
+            service_id,
+            scope_id,
+            {"realm": admin.connection.realm_name, "client": service_id, "clientScopeId": scope_id},
+        )
         return JSONResponse(status_code=201, content=created)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})

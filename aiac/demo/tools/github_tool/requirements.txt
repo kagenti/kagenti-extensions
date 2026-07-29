@@ -1,4 +1,4 @@
-mcp[cli]>=1.9.0
+mcp[cli]>=1.9.0,<2
 uvicorn[standard]>=0.34.0
 httpx>=0.28.0
 pytest>=8.0.0

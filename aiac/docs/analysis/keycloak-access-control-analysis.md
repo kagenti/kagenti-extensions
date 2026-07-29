@@ -166,11 +166,13 @@ keycloak_admin.add_client_default_client_scope(u_client_id, agent_aud_scope_id, 
 
 When U and Y authenticate through the **same** client, use Keycloak's scope-to-role mapping:
 
-**① Disable `fullScopeAllowed` on the scope** — prevents the scope from being included just
-because it is assigned to the client:
+**① Disable `fullScopeAllowed` on the client** — `fullScopeAllowed` is a boolean field on the
+**ClientRepresentation** (not on a client scope). While it is `true`, every role the client can
+access is added to its tokens regardless of scope-mappings, which defeats role gating. Set it
+`false` on the client so only roles bound via scope-mappings are included:
 ```python
-scope_representation["fullScopeAllowed"] = False
-admin.update_client_scope(scope_id, scope_representation)
+client_representation["fullScopeAllowed"] = False
+admin.update_client(client_id, client_representation)
 ```
 
 **② Bind the scope to a client role via scope-mappings** — the scope is only included in tokens
@@ -249,8 +251,10 @@ with `401` because `aud` does not contain T-SPIFFE.
 | A cannot reach T on Y's behalf | Keycloak RFC 8693 gate 3 | `tool-T-aud` scope-role mapping excludes Y's realm role | `400 invalid_scope` → `503` to Y |
 | B cannot reach T on anyone's behalf | Keycloak RFC 8693 gate 2 | `tool-T-aud` not assigned as optional to B's client | `400 invalid_scope` → `503` to B's caller |
 
-In all three cases the enforcement is in **Keycloak at token-issuance time**. AuthBridge is a
-pure PEP — it carries no policy knowledge.
+In all three cases the policy **decision** is made in **Keycloak at token-issuance time** — Keycloak
+acts as the **PDP** (Policy Decision Point), deciding which audiences/scopes a token may carry.
+AuthBridge is a pure **PEP** (Policy Enforcement Point): it enforces those decisions by validating the
+issued token and carries no policy knowledge of its own.
 
 ---
 
@@ -709,10 +713,13 @@ Realm: kagenti
 ```
 
 Each audience scope (`X-aud`) is created once when the service is registered and assigned as:
-- **Default** scope on the callee's own client — tokens issued through that client always
-  carry `aud=X-SPIFFE`.
-- **Optional** scope on each caller agent's client — enables gate 2 for that agent's
-  token exchange calls.
+- **Default** client scope on the callee's own client — a *default* client scope is added to
+  **every** token issued for that client automatically, without the caller having to request it via
+  the `scope` parameter, so those tokens always carry `aud=X-SPIFFE` (from the scope's audience
+  protocol mapper).
+- **Optional** client scope on each caller agent's client — an *optional* scope is included **only
+  when explicitly requested** (here, during the token exchange), which is what enables gate 2 for
+  that agent's token exchange calls.
 
 `fullScopeAllowed=true` everywhere — Keycloak never gates by role. OPA receives the full
 subject token and makes all access decisions.

@@ -380,9 +380,9 @@ with the user; keep them in sync with the *Scenario* table (see *Further Notes*)
 The descriptions are **generic and keyword-free** — they describe what each entity/role/scope *does*,
 carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
 cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
-description prose: the test provisions each client's `client.type` attribute (the type UC1
-discovers from the agent card / `kagenti.io/type` label) as a plain string `"Agent"` / `"Tool"`, so
-`Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
+description prose: the test sets each client's `client.type` attribute directly — as a plain string
+`"Agent"` / `"Tool"` written onto the client — rather than discovering it from a `kagenti.io/type`
+label, so `Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
 tags each client from the attribute without touching the TEMP description-keyword fallback.
 
 **`github-agent`** — client (Agent):

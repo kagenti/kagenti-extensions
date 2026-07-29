@@ -86,6 +86,13 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7070
+          # The Controller exposes only /apply/* routes (no /health endpoint),
+          # so readiness is gated on the port accepting TCP connections.
+          readinessProbe:
+            tcpSocket:
+              port: 7070
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config

@@ -2,6 +2,7 @@
 Module for A2A Agent.
 """
 
+import asyncio
 import logging
 import os
 import sys
@@ -194,7 +195,11 @@ class GithubExecutor(AgentExecutor):
                     "transport": "streamable-http",
                     "headers": headers,
                 }
-                with MCPServerAdapter(server_params, connect_timeout=settings.MCP_TIMEOUT) as mcp_tools:
+                adapter = MCPServerAdapter(server_params, connect_timeout=settings.MCP_TIMEOUT)
+                # MCPServerAdapter.__enter__/__exit__ perform blocking MCP I/O;
+                # run them off the event loop so we don't stall other async tasks.
+                mcp_tools = await asyncio.to_thread(adapter.__enter__)
+                try:
                     curated_tools = select_enabled_tools(mcp_tools, settings)
                     if not curated_tools:
                         raise RuntimeError(
@@ -202,6 +207,8 @@ class GithubExecutor(AgentExecutor):
                             "Check the ENABLED_TOOLS setting and ensure the server is reachable."
                         )
                     await self._run_agent(messages, settings, event_emitter, curated_tools)
+                finally:
+                    await asyncio.to_thread(adapter.__exit__, None, None, None)
             else:
                 await self._run_agent(messages, settings, event_emitter, None)
 

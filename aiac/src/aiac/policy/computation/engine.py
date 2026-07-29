@@ -285,20 +285,25 @@ def _run(rules: list[PolicyRule], override: bool) -> None:
     for service_id in changed:
         apply_service_policy(service_id, spms[service_id])
 
-    # (5) Affected-agent set — from the batch's roles/scopes, never a full scan.
+    # (5) Affected-agent set — from the batch's roles plus every owner whose stored SPM was
+    # modified during this run (routed, override-purged, or reconciled), never a full scan.
+    # Folding ``changed`` into the seed is what makes revocation propagate: under override an
+    # owner that only *lost* edges appears in ``changed`` but carries no fresh rule, so driving
+    # the recompute off the incoming ``rules`` alone would leave that owner's APM (and the APMs
+    # of agents that targeted it) stale.
+    touched_owners = {rule.scope.serviceId for rule in rules} | changed
+
     affected: set[str] = set()
     for role in distinct_roles.values():
         if role.kind == RoleKind.AGENT:
             affected.update(role.actorIds)  # owning agents — their outbound changed
-    for rule in rules:
-        scope = rule.scope
-        owner = scope.serviceId
+    for owner in touched_owners:
         if is_agent(owner):
-            affected.add(owner)  # the scope's owner is an agent — its inbound changed
-        # every agent targeting this scope: owners of the Agent-kind inbound rules on the
-        # owning SPM whose scope is this one.
+            affected.add(owner)  # the touched owner is an agent — its inbound changed
+        # every agent targeting a scope on this touched SPM: owners of its Agent-kind inbound
+        # rules (a superset of the exact-scope match — re-deriving is idempotent, so safe).
         for edge in spm(owner).inbound_rules:
-            if edge.scope.id == scope.id and edge.role.kind == RoleKind.AGENT:
+            if edge.role.kind == RoleKind.AGENT:
                 affected.update(edge.role.actorIds)
 
     # (6) Derive each affected agent's APM (zero IdP) and partial-upsert once. Tools get an SPM

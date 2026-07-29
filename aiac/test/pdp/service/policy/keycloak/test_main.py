@@ -161,7 +161,7 @@ class TestCreateServiceScope:
         )
         assert resp.status_code == 201
         assert resp.json()["name"] == "read:data"
-        admin.add_default_default_client_scope.assert_called_once()
+        admin.add_client_default_client_scope.assert_called_once()
 
     def test_keycloak_error_returns_502(self):
         admin = MagicMock()
@@ -182,7 +182,7 @@ class TestCreateServiceScope:
 
 
 class TestRealmQueryParam:
-    def test_no_realm_returns_200(self):
+    def test_no_realm_returns_204(self):
         admin = MagicMock()
         admin.get_realm_roles.return_value = []
         admin.get_composite_realm_roles_of_role.return_value = []

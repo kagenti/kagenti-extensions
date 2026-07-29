@@ -1,6 +1,6 @@
 # github-agent
 
-An autonomous A2A agent that acts on a user's behalf against GitHub **source repositories** and an **issue/PR tracker**, using the [`github-tool`](https://github.com/kagenti/kagenti-extensions) MCP server.
+An autonomous A2A agent that acts on a user's behalf against GitHub **source repositories** and an **issue/PR tracker**, using the [`github-tool-mcp`](https://github.com/kagenti/kagenti-extensions) MCP server.
 
 This agent implements the canonical `github-agent` used by the AIAC policy-pipeline integration test — the two skills match the policy scenario's `source_operations` and `issue_operations` roles.
 
@@ -70,7 +70,7 @@ Optionally, run `expect -f test_startup.exp` instead to check startup automatica
 
 ## Deploying to Kagenti (Kind cluster)
 
-Prerequisites: a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1`) with `github-tool` already deployed.
+Prerequisites: a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1`) with `github-tool-mcp` already deployed.
 
 1. **Build the image:**
    ```bash

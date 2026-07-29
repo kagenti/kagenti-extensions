@@ -5,7 +5,7 @@ from github_agent.config import Settings
 class CrewLLM:
     def __init__(self, config: Settings):
         kwargs = {}
-        if config.EXTRA_HEADERS is not None and None not in config.EXTRA_HEADERS:
+        if config.EXTRA_HEADERS:
             kwargs["extra_headers"] = config.EXTRA_HEADERS
 
         # For Ollama models, pass num_ctx to set the context window size.

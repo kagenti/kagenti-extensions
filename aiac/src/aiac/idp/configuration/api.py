@@ -37,8 +37,17 @@ class Configuration:
     @classmethod
     def for_default_realm(cls) -> "Configuration":
         """Build a ``Configuration`` for the realm named by ``$KEYCLOAK_REALM`` — the single source
-        of truth shared by provisioning, the policy builder, and the computation engine."""
-        return cls.for_realm(os.getenv(REALM_ENV_VAR, ""))
+        of truth shared by provisioning, the policy builder, and the computation engine.
+
+        Fails fast if the env var is unset or empty: an empty realm would silently target the
+        wrong Keycloak realm rather than surface the misconfiguration."""
+        realm = os.getenv(REALM_ENV_VAR, "").strip()
+        if not realm:
+            raise RuntimeError(
+                f"{REALM_ENV_VAR} is unset or empty; set it to the Keycloak realm the AIAC "
+                "pipeline operates on"
+            )
+        return cls.for_realm(realm)
 
     def _base_url(self) -> str:
         return os.getenv("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")

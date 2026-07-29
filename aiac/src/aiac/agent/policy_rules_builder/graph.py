@@ -15,10 +15,11 @@ from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, SecretStr
-from tenacity import Retrying, stop_after_attempt, wait_exponential
+from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule
+from aiac.shared.upstream import is_transient, max_retries
 
 from .policy_source import get_policy_source
 from .prompts import build_auditor_messages, build_proposer_messages
@@ -83,10 +84,15 @@ T = TypeVar("T", bound=BaseModel)
 
 
 def _structured_call(schema: type[T], messages: list[BaseMessage]) -> T:
-    """THE seam. Behavior tests patch this. Transport-retries each .invoke() via call-time Retrying."""
+    """THE seam. Behavior tests patch this. Transport-retries each .invoke() via call-time Retrying.
+
+    Only transient failures (connection errors / timeouts / 5xx) are retried — a permanent
+    failure (e.g. a bad request or a validation error) fails identically on every attempt, so
+    it is surfaced immediately (consistent with ``aiac.shared.upstream``)."""
     runnable = _build_llm().with_structured_output(schema)
     retryer = Retrying(
-        stop=stop_after_attempt(int(os.getenv("UPSTREAM_MAX_RETRIES", "3"))),
+        retry=retry_if_exception(is_transient),
+        stop=stop_after_attempt(max_retries()),
         wait=wait_exponential(multiplier=1, min=1, max=30),
         reraise=True,
     )

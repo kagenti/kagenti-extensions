@@ -23,23 +23,14 @@ data:
   KEYCLOAK_ADMIN_REALM: "master"
 
 ---
-# Prerequisites: create this Secret before applying this manifest:
+# keycloak-admin-secret is NOT defined here — it must be pre-provisioned
+# out-of-band before applying this manifest (credentials must NEVER be committed
+# to git). The Pod below references it via secretRef. Create it once:
 #
 #   kubectl create secret generic keycloak-admin-secret \
 #     -n aiac-system \
-#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
-#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
-apiVersion: v1
-kind: Secret
-metadata:
-  name: keycloak-admin-secret
-  namespace: aiac-system
-type: Opaque
-stringData:
-  KEYCLOAK_ADMIN_USERNAME: "admin"
-  KEYCLOAK_ADMIN_PASSWORD: "admin"
-
----
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=<admin-user> \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=<admin-password>
 apiVersion: v1
 kind: Pod
 metadata:

@@ -362,7 +362,7 @@ FastAPI service (`0.0.0.0:7074`, `aiac-policy-store-service`) deployed as a dedi
 
 Pure Python library module (`aiac.policy.computation`). No FastAPI, no Kubernetes deployment, no container image. Runs in-process within the AIAC Agent pod. AIAC Agent sub-UC agents call `compute_and_apply(rules: list[PolicyRule]) -> None` to translate partial policy rule lists into merged `AgentPolicyModel` objects and push them to OPA.
 
-The PCE is the **single point of coordination** between the Policy Store and PDP Policy Writer: it reads current agent policy state, additively merges new rules, writes back to the Policy Store, then pushes the updated `PolicyModel` to `aiac.pdp.policy.library.apply_policy()`. All exceptions are logged; none propagate to the caller.
+The PCE is the **single point of coordination** between the Policy Store and PDP Policy Writer: it reads current agent policy state, additively merges new rules, writes back to the Policy Store, then pushes the updated `PolicyModel` to `aiac.pdp.policy.library.apply_policy()`. All exceptions from any dependency (IdP, Policy Store, PDP) are logged and **re-raised** so the caller (the Controller / HTTP layer) surfaces the failure — e.g. as a 500 — instead of returning success while silently applying nothing.
 
 **Full spec:** [components/policy-computation-engine.md](components/policy-computation-engine.md)
 

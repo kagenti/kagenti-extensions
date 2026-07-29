@@ -62,17 +62,26 @@ def _assert_single_kind(members: list[dict], role_name: str) -> None:
         )
 
 
-def _assert_single_owner(admin: "KeycloakAdmin", scope: dict) -> None:
+def _build_scope_owner_index(admin: "KeycloakAdmin") -> dict[str, list[str]]:
+    """Map each client-scope id -> the clientIds exposing it as a default scope, from a single
+    pass over all clients. Building this once per request turns the Assumption-2 check from an
+    O(scopes × clients) nested rescan (a full ``get_clients`` + per-client default-scope fetch
+    for every scope) into a single scan plus O(1) lookups."""
+    index: dict[str, list[str]] = {}
+    for client in admin.get_clients():
+        for s in admin.get_client_default_client_scopes(client["id"]):
+            index.setdefault(s["id"], []).append(client["id"])
+    return index
+
+
+def _assert_single_owner(scope: dict, owner_index: dict[str, list[str]]) -> None:
     """Assumption 2 (single scope owner): an AIAC-managed client scope must be exposed as a
     default scope by exactly one client. Keycloak client scopes are realm-level and assignable
-    to many clients, so this is not a Keycloak guarantee — detect a multi-owner scope by scanning
-    clients' default scopes and fail loud, since a single ``Scope.serviceId`` cannot represent it."""
+    to many clients, so this is not a Keycloak guarantee — look the scope up in the precomputed
+    ``owner_index`` and fail loud on more than one owner, since a single ``Scope.serviceId``
+    cannot represent it."""
     scope_id = scope["id"]
-    owners = [
-        client
-        for client in admin.get_clients()
-        if any(s["id"] == scope_id for s in admin.get_client_default_client_scopes(client["id"]))
-    ]
+    owners = owner_index.get(scope_id, [])
     if len(owners) > 1:
         raise _InvariantViolation(
             f"AIAC-managed scope '{scope.get('name', scope_id)}' is exposed by {len(owners)} "
@@ -339,8 +348,12 @@ def list_service_roles(service_id: str, admin: KeycloakAdmin = Depends(get_admin
                     full_role["kind"] = "Agent"
                     full_role["actorIds"] = [service_client_id]
                     roles.append(full_role)
-        except KeycloakError:
-            pass  # service has no service account — skip
+        except KeycloakError as e:
+            # Only "the client has no service account" (Keycloak answers 400/404 on the
+            # service-account-user lookup) means skip. Any other Keycloak failure is a real
+            # error and must propagate to the outer 502 handler, not be silently swallowed.
+            if getattr(e, "response_code", None) not in (400, 404):
+                raise
 
         return roles
     except KeycloakError as e:
@@ -375,9 +388,14 @@ def list_service_scopes(service_id: str, admin: KeycloakAdmin = Depends(get_admi
             # one owner (Assumption 2) — enforce fail-loud. Built-ins are shared by design, so
             # they are exempt from the single-owner scan.
             owner = admin.get_client(service_id)["clientId"]
+            # Build the scope->owners reverse index at most once per request, only when there is
+            # an AIAC-managed scope to check (built-ins are exempt).
+            owner_index: dict[str, list[str]] | None = None
             for scope in scopes:
                 if _is_aiac_managed(scope.get("attributes")):
-                    _assert_single_owner(admin, scope)  # Assumption 2, fail loud
+                    if owner_index is None:
+                        owner_index = _build_scope_owner_index(admin)
+                    _assert_single_owner(scope, owner_index)  # Assumption 2, fail loud
                 scope["serviceId"] = owner
         return scopes
     except _InvariantViolation as e:

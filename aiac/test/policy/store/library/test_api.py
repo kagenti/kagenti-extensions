@@ -11,6 +11,7 @@ import pytest
 from aiac.idp.configuration.models import Role, Scope, ServiceType
 from aiac.policy.model.models import PolicyRule, ServicePolicyModel
 from aiac.policy.store.keying import encode_service_id
+from aiac.policy.store.library.api import _HTTP_TIMEOUT
 
 BASE_URL = "http://127.0.0.1:7074"
 
@@ -51,7 +52,9 @@ class TestGetServicePolicy:
             from aiac.policy.store.library.api import get_service_policy
 
             result = get_service_policy("svc-1")
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}")
+            mock_get.assert_called_once_with(
+                f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}", timeout=_HTTP_TIMEOUT
+            )
             assert isinstance(result, ServicePolicyModel)
             assert result.service_id == "svc-1"
 
@@ -104,7 +107,9 @@ class TestGetServicePolicyByScope:
             from aiac.policy.store.library.api import get_service_policy_by_scope
 
             result = get_service_policy_by_scope(scope)
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('owning-svc')}")
+            mock_get.assert_called_once_with(
+                f"{BASE_URL}/policy/services/{encode_service_id('owning-svc')}", timeout=_HTTP_TIMEOUT
+            )
             assert result is not None
             assert result.service_id == "owning-svc"
 
@@ -140,7 +145,9 @@ class TestGetServicePoliciesByRole:
             from aiac.policy.store.library.api import get_service_policies_by_role
 
             result = get_service_policies_by_role(role)
-            mock_get.assert_called_once_with(f"{BASE_URL}/policy/services", params={"role": "user-role"})
+            mock_get.assert_called_once_with(
+                f"{BASE_URL}/policy/services", params={"role": "user-role"}, timeout=_HTTP_TIMEOUT
+            )
             assert [s.service_id for s in result] == ["svc-a"]
 
     def test_by_role_multiple_returns_all(self):
@@ -184,7 +191,9 @@ class TestApplyServicePolicy:
 
             result = apply_service_policy("svc-1", spm)
             mock_post.assert_called_once_with(
-                f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}", json=spm.model_dump()
+                f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}",
+                json=spm.model_dump(),
+                timeout=_HTTP_TIMEOUT,
             )
             assert result is None
 
@@ -210,7 +219,9 @@ class TestDeleteServicePolicy:
             from aiac.policy.store.library.api import delete_service_policy
 
             result = delete_service_policy("svc-1")
-            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}")
+            mock_delete.assert_called_once_with(
+                f"{BASE_URL}/policy/services/{encode_service_id('svc-1')}", timeout=_HTTP_TIMEOUT
+            )
             assert result is None
 
     def test_raises_on_error_response(self):
@@ -234,7 +245,7 @@ class TestClearServicePolicies:
             from aiac.policy.store.library.api import clear_service_policies
 
             result = clear_service_policies()
-            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services")
+            mock_delete.assert_called_once_with(f"{BASE_URL}/policy/services", timeout=_HTTP_TIMEOUT)
             assert result is None
 
     def test_raises_on_error_response(self):

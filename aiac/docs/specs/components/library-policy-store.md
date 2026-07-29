@@ -62,6 +62,11 @@ def get_service_policy_by_scope(scope: Scope) -> ServicePolicyModel | None
     # Singular: a scope has exactly one owning service (Assumption 2).
     # Sugar over get_service_policy(scope.serviceId) — resolves the owner via
     # scope.serviceId; no dedicated HTTP route.
+    # Returns None ONLY when the scope has no resolved owner (scope.serviceId
+    # is unset/empty). When serviceId is present it delegates to
+    # get_service_policy, so a store miss (404) yields a *fresh empty* SPM,
+    # not None — None means "unowned scope", empty SPM means "owner exists,
+    # no policy stored yet".
 
 def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]
     # GET /policy/services?role={role.id}  (the one genuinely new route)

@@ -54,7 +54,8 @@ USERS: dict[str, str] = {
     "devops-user": "devops",
 }
 
-# Fixed dev password for the provisioned test users (throwaway realm).
+# Fixed dev password for the provisioned test users. The realm, users, and roles are provisioned
+# idempotently and left in place across runs (never deleted/recreated — see ``REALM_DEFAULT``).
 USER_PASSWORD = "password"
 
 # --- Realm-role descriptions (provisioned by the fixture; verbatim from the spec) -----------

@@ -79,10 +79,6 @@
         {
           "name": "request_copilot_review",
           "description": "Request a GitHub Copilot code review for a pull request. Use this for automated feedback on pull requests, usually before requesting a human reviewer."
-        },
-        {
-          "name": "search_pull_requests",
-          "description": "Search for pull requests in GitHub repositories using issues search syntax already scoped to is:pr"
         }
       ]
     },

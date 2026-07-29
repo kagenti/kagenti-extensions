@@ -103,11 +103,11 @@ class GithubAgent:
         await self.agents.crew.kickoff_async(
             inputs={
                 "request": query,
-                "owner": prereq.owner,
-                "repo": prereq.repo,
-                "ref": prereq.ref,
-                "path": prereq.path,
-                "numbers": prereq.numbers,
+                "owner": prereq.owner or "",
+                "repo": prereq.repo or "",
+                "ref": prereq.ref or "",
+                "path": prereq.path or "",
+                "numbers": prereq.numbers or [],
             }
         )
         return self.agents.github_query_task.output.raw

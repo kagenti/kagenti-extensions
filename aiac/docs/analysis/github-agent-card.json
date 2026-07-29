@@ -28,6 +28,6 @@
       "tags": ["git", "github", "issues"]
     }
   ],
-  "url": "http://0.0.0.0:8000/",
+  "url": "http://github-agent.team1.svc.cluster.local:8000/",
   "version": "1.0.0"
 }

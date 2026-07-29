@@ -67,7 +67,7 @@ Represents a role. Per Assumption 3 (policy-model spec), **user** roles are Keyc
 | `childRoles` | `list[Role]` | `composites.realm` | `[]` |
 | `attributes` | `dict[str, Any]` | `attributes` | `{}` |
 | `kind` | `RoleKind` | `clientRole` flag (user = realm role, agent = client role; resolved at the IdP boundary) | |
-| `actorIds` | `list[str]` | _(subject/user IDs holding a user-kind role; populated service-side from `get_subjects_by_role`, handoff 02)_ | `[]` |
+| `actorIds` | `list[str]` | _(member **usernames** of a user-kind (realm) role, or the owning agent's `serviceId`(s) for an agent-kind (client) role; populated service-side, user-kind values aligned with `get_subjects_by_role`, handoff 02)_ | `[]` |
 
 > **Field pass-through (handoff 03 audit).** `kind`, `actorIds`, and `Scope.serviceId` are declared
 > on the models by **handoff 01** and populated by the **IdP service** (handoff 02). The
@@ -220,12 +220,14 @@ class Configuration:
 1. `GET {AIAC_PDP_CONFIG_URL}/services?realm=<self.realm>` — fetch the base service list.
 2. Call `get_roles()` and `get_scopes()` once upfront to build `{id: Role}` and `{id: Scope}` lookup maps.
 3. For each service, delegate to `_build_service(raw, all_roles, all_scopes)` which issues:
-   - `GET /services/{id}/roles?realm=<self.realm>` → for each returned role, **merge its authoritative
-     `kind`/`actorIds` onto the matching `all_roles` object** (the full representation, carrying
-     `composite`/`childRoles`/`attributes`) → `Service.roles`. Merging (not a plain `all_roles`
-     lookup) is required: the per-service endpoint is the only source of the agent-context
-     `kind = Agent` / `actorIds = [serviceId]`; taking the role from `all_roles` alone would revert it
-     to the realm-level `kind = User` / `actorIds = [members]`.
+   - `GET /services/{id}/roles?realm=<self.realm>` → for each returned role, **copy the matching
+     `all_roles` object and merge its authoritative `kind`/`actorIds` onto the copy** — the merge is a
+     fresh dict (`{**base.model_dump(), **authoritative_fields}`), so the shared `all_roles` entry is
+     never mutated and cannot leak one service's agent-context values into another's view → `Service.roles`.
+     The copy carries the full representation (`composite`/`childRoles`/`attributes`). Merging (not a
+     plain `all_roles` lookup) is required: the per-service endpoint is the only source of the
+     agent-context `kind = Agent` / `actorIds = [serviceId]`; taking the role from `all_roles` alone
+     would leave it at the realm-level `kind = User` / `actorIds = [members]`.
    - `GET /services/{id}/scopes?realm=<self.realm>` → filter `all_scopes` map → `Service.scopes`, and
      **stamp each scope's `serviceId` = this service's `clientId`** (the owning client — the PCE's SPM
      routing key; `all_scopes` from `GET /scopes` carries no owner).
@@ -277,8 +279,10 @@ class Configuration:
 > owner/exposer signal (consistent with the new `Scope.serviceId`); the two agree because both derive
 > from the service-side truth. The filter still returns **only** genuine owners/exposers and returns
 > `[]` for realm-level roles that no service owns. No client-side re-derivation of role kind is
-> introduced by these methods; `get_services_by_role` is **retained as a method** — the PCE still uses
-> it (e.g. its re-derivation trigger fallback) even though `Role.kind` is now the authoritative kind.
+> introduced by these methods; `get_services_by_role` is **retained as a method** for API completeness
+> and ad-hoc callers, but the current SPM-based PCE no longer calls it: its **only** runtime IdP read is
+> `Configuration.get_services()` (see `aiac.policy.computation`), and owner/role lookups against stored
+> policy go through the Policy Store's `get_service_policies_by_role`, not this IdP filter.
 
 `get_subjects_by_role(role: Role) -> list[Subject]`:
 1. `GET {AIAC_PDP_CONFIG_URL}/subjects?role_id={role.id}&realm=<self.realm>`

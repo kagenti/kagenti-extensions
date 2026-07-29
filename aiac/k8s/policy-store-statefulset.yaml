@@ -5,7 +5,7 @@ metadata:
   name: aiac-policy-store-config
   namespace: aiac-system
 data:
-  AGENTPOLICY_DB_PATH: "/data/state.db"
+  SERVICEPOLICY_DB_PATH: "/data/policy_model.db"
 
 ---
 apiVersion: apps/v1
@@ -30,6 +30,12 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7074
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 7074
+            initialDelaySeconds: 5
+            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-policy-store-config

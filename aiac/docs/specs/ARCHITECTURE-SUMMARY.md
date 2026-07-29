@@ -160,7 +160,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 **AIAC ↔ Kagenti platform**
 The AIAC Agent reads `AgentRuntime` and `AgentCard` custom resources from the Kubernetes API to
 extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration` and
-`aiac.pdp.library` Python packages are the integration surface for other Kagenti components
+`aiac.pdp.policy.library` Python packages are the integration surface for other Kagenti components
 needing typed access to IdP configuration and PDP policy state.
 
 **AIAC ↔ Keycloak**
