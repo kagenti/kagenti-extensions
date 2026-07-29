@@ -399,6 +399,43 @@ func TestRequestFacts_A2AAndInference(t *testing.T) {
 	}
 }
 
+// mcp-parser attaches to ANY JSON-RPC body — including every a2a exchange —
+// so on an a2a hop both extensions are populated. The payload read is keyed by
+// the protocol fact: when the a2a parser yields nothing (no text parts, a
+// protocol-event artifact), the payload stays ABSENT rather than falling
+// through to the co-populated MCP parse of the same bytes (which would emit
+// the raw JSON-RPC envelope on an lineage.protocol=a2a span).
+func TestCaptureIO_A2ANeverFallsThroughToCoPopulatedMCP(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	p.cfg.CaptureIO = true
+	pctx := fakeContext(pipeline.Outbound, http.Header{})
+	pctx.Extensions.A2A = &pipeline.A2AExtension{
+		Method: "message/send",
+		// A status-update captured as the artifact — a protocol event, filtered.
+		Artifact: `{"kind":"status-update","taskId":"t-1"}`,
+	}
+	pctx.Extensions.MCP = &pipeline.MCPExtension{
+		Method: "message/send",
+		Params: map[string]any{"message": map[string]any{"role": "user"}},
+		Result: map[string]any{"artifacts": []any{map[string]any{"artifactId": "a-1"}}},
+	}
+
+	run(t, p, pctx, allow(200))
+	req, resp := roleSplit(t, exp.GetSpans())
+
+	checkAttr(t, req, "lineage.protocol", "a2a")
+	if v, ok := findAttr(req, "input.value"); ok {
+		t.Errorf("input.value = %q on an a2a hop with no a2a parts — leaked from the co-populated MCP parse", v.Emit())
+	}
+	if v, ok := findAttr(resp, "output.value"); ok {
+		t.Errorf("output.value = %q on an a2a hop whose artifact is a protocol event — leaked from the co-populated MCP parse", v.Emit())
+	}
+	// mcp.* facts belong to mcp hops only; the a2a label must keep them off.
+	if v, ok := findAttr(req, "mcp.method"); ok {
+		t.Errorf("mcp.method = %q emitted on an a2a hop", v.Emit())
+	}
+}
+
 func TestPrincipalFacts_InboundRequestOnly(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	pctx := fakeContext(pipeline.Inbound, http.Header{})

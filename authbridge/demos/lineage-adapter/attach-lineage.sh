@@ -119,11 +119,14 @@ data:
     # an MCP-entry tool with an a2a-only inbound chain records its tools/call
     # as anonymous http, which the DG UI then hides as infrastructure.
     #
-    # Uniform is safe because every parser is content-gated and the three are
-    # mutually exclusive: a2a-parser claims only the A2A JSON-RPC prefixes
-    # (message/*, tasks/*), mcp-parser claims other JSON-RPC methods,
-    # inference-parser matches only /v1/chat/completions|/v1/completions.
-    # Non-matching traffic falls through untouched.
+    # Uniform is safe because every parser is content-gated and the lineage
+    # plugin reads payloads ONLY through the protocol fact it stamped
+    # (protocolOf precedence: a2a > mcp > inference). The parsers are NOT
+    # mutually exclusive — mcp-parser attaches to any JSON-RPC body, so on
+    # every a2a exchange both extensions are populated; precedence picks the
+    # label and the protocol-keyed payload read keeps the wrong parser's
+    # output from ever landing on a span. Non-matching traffic falls through
+    # untouched as plain http.
     pipeline:
       inbound:
         plugins:

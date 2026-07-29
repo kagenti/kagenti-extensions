@@ -15,8 +15,16 @@
 // kinds, caller/callee — lives in the consumer's classify(). See the "removed
 // vs today" migration map in the contract for the attrs this no longer emits.
 //
-// The plugin implements Finisher so the response span is emitted even when an
-// earlier plugin denies the request; pctx.Outcome() is available at that point.
+// The plugin implements Finisher so the response span is emitted at stream
+// end whatever the outcome — including denials that happen AFTER the request
+// span was recorded (a response-phase deny, or a request-phase deny by a
+// plugin ordered after this one); pctx.Outcome() is available at that point
+// and maps to lineage.outcome=denied + lineage.denied_by. LIMITATION: this
+// plugin orders itself after the gate plugins (Capabilities.After includes
+// jwt-validation) and the pipeline short-circuits on a request-phase Reject,
+// so an exchange denied by a gate BEFORE OnRequest ran emits NO spans at all —
+// it is invisible to lineage. Moving lineage ahead of the gates (spans for
+// denied traffic too) is a named follow-up, not current behavior.
 package lineage
 
 import (
@@ -71,6 +79,11 @@ type exchangeState struct {
 	spanKind trace.SpanKind
 	// spanName is the request span's name; the response span appends " response".
 	spanName string
+	// protocol is the request span's lineage.protocol fact; the response
+	// span's output.value must be read through the SAME protocol's parser
+	// (parsers are precedence-ordered, not mutually exclusive — mcp-parser
+	// also matches any JSON-RPC body, including every a2a exchange).
+	protocol string
 	inbound  bool
 	traceID  string
 }
@@ -226,6 +239,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		common:   common,
 		spanKind: spanKind,
 		spanName: spanName,
+		protocol: protocol,
 		inbound:  pctx.Direction == pipeline.Inbound,
 		traceID:  reqCtx.TraceID().String(),
 	})
@@ -338,7 +352,7 @@ func (p *LineageTelemetry) OnFinish(ctx context.Context, pctx *pipeline.Context)
 		attrs = append(attrs, attribute.String("lineage.denied_by", deniedBy))
 	}
 	if p.cfg.CaptureIO {
-		if v := ioOutputValue(pctx); v != "" {
+		if v := ioOutputValue(pctx, state.protocol); v != "" {
 			attrs = append(attrs, attribute.String("output.value", v))
 		}
 	}
@@ -464,7 +478,7 @@ func (p *LineageTelemetry) appendRequestFacts(attrs []attribute.KeyValue, pctx *
 		}
 	}
 	if p.cfg.CaptureIO {
-		if v := ioInputValue(pctx); v != "" {
+		if v := ioInputValue(pctx, protocol); v != "" {
 			attrs = append(attrs, attribute.String("input.value", v))
 		}
 	}
@@ -537,11 +551,17 @@ func serviceLabel(selfID string) string {
 }
 
 // ioInputValue returns the input.value for a request span: the parsed request
-// content for the hop's protocol, or "" if nothing meaningful is available.
-func ioInputValue(pctx *pipeline.Context) string {
+// content for *protocol* — the hop's lineage.protocol fact — or "" if that
+// parser produced nothing meaningful. Only that protocol's extension is read:
+// parsers are precedence-ordered, not mutually exclusive (mcp-parser matches
+// any JSON-RPC body, including every a2a exchange), so falling through to
+// another parser's output would attach a mislabeled protocol envelope. A hop
+// whose own parser yields nothing keeps a NULL payload — the contract's
+// "interactions are independent of payloads".
+func ioInputValue(pctx *pipeline.Context, protocol string) string {
 	ext := pctx.Extensions
 	switch {
-	case ext.A2A != nil && len(ext.A2A.Parts) > 0:
+	case protocol == "a2a" && ext.A2A != nil && len(ext.A2A.Parts) > 0:
 		// Collect all text parts; fall back to JSON if non-text parts present.
 		var texts []string
 		for _, p := range ext.A2A.Parts {
@@ -555,11 +575,11 @@ func ioInputValue(pctx *pipeline.Context) string {
 		if b, err := json.Marshal(ext.A2A.Parts); err == nil {
 			return string(b)
 		}
-	case ext.Inference != nil && len(ext.Inference.Messages) > 0:
+	case protocol == "inference" && ext.Inference != nil && len(ext.Inference.Messages) > 0:
 		if b, err := json.Marshal(ext.Inference.Messages); err == nil {
 			return string(b)
 		}
-	case ext.MCP != nil && ext.MCP.Params != nil:
+	case protocol == "mcp" && ext.MCP != nil && ext.MCP.Params != nil:
 		// For tools/call, surface just the arguments (the semantically
 		// meaningful part) rather than the full {"name":…,"arguments":…} wrapper.
 		if ext.MCP.Method == "tools/call" {
@@ -595,21 +615,26 @@ func isA2AProtocolEvent(s string) bool {
 }
 
 // ioOutputValue returns the output.value for a response span: the parsed
-// response content for the hop's protocol, or "" if nothing is available.
-func ioOutputValue(pctx *pipeline.Context) string {
+// response content for *protocol* — the REQUEST span's lineage.protocol fact —
+// or "" if that parser produced nothing. Only that protocol's extension is
+// read, for the same reason as ioInputValue: mcp-parser also parses every a2a
+// response (any JSON-RPC body), and falling through to it would emit the raw
+// JSON-RPC envelope — including the protocol events isA2AProtocolEvent exists
+// to suppress — as an a2a hop's payload.
+func ioOutputValue(pctx *pipeline.Context, protocol string) string {
 	ext := pctx.Extensions
 	switch {
-	case ext.A2A != nil && ext.A2A.Artifact != "" && !isA2AProtocolEvent(ext.A2A.Artifact):
+	case protocol == "a2a" && ext.A2A != nil && ext.A2A.Artifact != "" && !isA2AProtocolEvent(ext.A2A.Artifact):
 		return ext.A2A.Artifact
-	case ext.A2A != nil && ext.A2A.ErrorMessage != "":
+	case protocol == "a2a" && ext.A2A != nil && ext.A2A.ErrorMessage != "":
 		return ext.A2A.ErrorMessage
-	case ext.Inference != nil && ext.Inference.Completion != "":
+	case protocol == "inference" && ext.Inference != nil && ext.Inference.Completion != "":
 		return ext.Inference.Completion
-	case ext.Inference != nil && len(ext.Inference.ToolCalls) > 0:
+	case protocol == "inference" && ext.Inference != nil && len(ext.Inference.ToolCalls) > 0:
 		if b, err := json.Marshal(ext.Inference.ToolCalls); err == nil {
 			return string(b)
 		}
-	case ext.MCP != nil && ext.MCP.Result != nil:
+	case protocol == "mcp" && ext.MCP != nil && ext.MCP.Result != nil:
 		// For tools/call results, extract the text content from the MCP
 		// content array rather than returning the full {"content":[…],"_meta":…}
 		// envelope, so the output matches what Phoenix shows for the tool span.
@@ -635,7 +660,7 @@ func ioOutputValue(pctx *pipeline.Context) string {
 		if b, err := json.Marshal(ext.MCP.Result); err == nil {
 			return string(b)
 		}
-	case ext.MCP != nil && ext.MCP.Err != nil:
+	case protocol == "mcp" && ext.MCP != nil && ext.MCP.Err != nil:
 		if b, err := json.Marshal(ext.MCP.Err); err == nil {
 			return string(b)
 		}
