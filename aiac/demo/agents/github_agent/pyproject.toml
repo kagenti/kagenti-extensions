@@ -20,6 +20,7 @@ dependencies = [
     "pillow>=12.3.0",           # Indirect; prevents CVE-2026-40192
     "lxml>=6.1.1",              # Indirect; prevents CVE-2026-41066
     "orjson>=3.11.6",           # Indirect; prevents CVE-2025-67221
+    "json-repair>=0.60.1",      # Indirect (via crewai); prevents GHSA-xf7x-x43h-rpqh (DoS)
     # CVE-2026-45829 (chromadb): no fixed version published; crewai pins chromadb<1.2.
     # Vulnerability requires running a chromadb HTTP server with trust_remote_code=true,
     # which this agent does not do.
