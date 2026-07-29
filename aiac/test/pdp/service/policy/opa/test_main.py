@@ -143,14 +143,18 @@ class TestOSErrorHandling:
 
 
 class TestHealth:
-    def test_returns_200_when_dir_writable(self, tmp_path):
-        resp = _make_client(tmp_path).get("/health")
+    # /health resolves the output dir from server config (REGO_OUTPUT_DIR) directly rather than
+    # via the injectable dependency, so drive it through the env var instead of dependency_overrides.
+    def test_returns_200_when_dir_writable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("REGO_OUTPUT_DIR", str(tmp_path))
+        resp = TestClient(app).get("/health")
         assert resp.status_code == 200
         assert resp.json() == {"status": "ok"}
 
-    def test_returns_503_when_dir_absent(self, tmp_path):
+    def test_returns_503_when_dir_absent(self, tmp_path, monkeypatch):
         missing = tmp_path / "does-not-exist"
-        resp = _make_client(missing).get("/health")
+        monkeypatch.setenv("REGO_OUTPUT_DIR", str(missing))
+        resp = TestClient(app).get("/health")
         assert resp.status_code == 503
         body = resp.json()
         assert body["status"] == "unavailable"

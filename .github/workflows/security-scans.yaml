@@ -40,6 +40,11 @@ jobs:
           fail-on-severity: moderate
           deny-licenses: GPL-3.0, AGPL-3.0
           comment-summary-in-pr: never
+          # CVE-2026-45829 / GHSA-f4j7-r4q5-qw2c (chromadb, transitive via crewai): no patched
+          # version exists (affected <= 1.5.9, crewai pins chromadb < 1.2). The vulnerability
+          # requires running a chromadb HTTP server with trust_remote_code=true, which the
+          # github_agent demo does not do. See demo/agents/github_agent/pyproject.toml.
+          allow-ghsas: GHSA-f4j7-r4q5-qw2c
 
   shellcheck:
     name: Shell Script Lint

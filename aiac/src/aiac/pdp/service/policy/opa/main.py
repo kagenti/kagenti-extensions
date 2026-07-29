@@ -87,7 +87,11 @@ def delete_all(out_dir: Path = Depends(get_output_dir)):
 
 
 @app.get("/health")
-def health(out_dir: Path = Depends(get_output_dir)):
+def health():
+    # Resolve the output dir from server config directly rather than as a route parameter: a
+    # FastAPI handler parameter is treated as request-controlled input, and feeding that into a
+    # filesystem path check reads as path injection. The dir is operator config, never a request.
+    out_dir = get_output_dir()
     if out_dir.is_dir() and os.access(out_dir, os.W_OK):
         return {"status": "ok"}
     return JSONResponse(
