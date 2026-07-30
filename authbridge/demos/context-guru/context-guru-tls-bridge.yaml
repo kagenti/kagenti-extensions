@@ -24,10 +24,9 @@
 #   off                — kill-switch: the plugin is dropped entirely (baseline).
 mode: proxy-sidecar
 listener:
-  # Note that commenting out the reverse proxy doesn't disable it, so give it a random port.
-  reverse_proxy_addr: ":0"
-  forward_proxy_addr: ":8081"
-  reverse_proxy_backend: "http://localhost:8001"   # the agent (moved off :0)
+  roles: [forward]             # egress-only: no reverse proxy at all
+  forward_proxy_addr: "localhost:8081"
+  # reverse_proxy_backend: "http://localhost:8001"   # the agent (moved off :0)
 
 # TLS termination of agent egress so the outbound pipeline sees decrypted HTTPS.
 tls_bridge:
@@ -41,19 +40,14 @@ tls_bridge:
                                #   TLS ports (LDAPS/DB-over-TLS) or the bridge breaks them.
   # upstream_ca_bundle: /path/to/roots.pem   # extra roots for re-origination to a
                                #   private-CA LLM endpoint; omit for system roots only.
-  passthrough_hosts:           # hosts to tunnel WITHOUT terminating (egress gate still
-    - "keycloak.*"             #   runs, they just aren't decrypted). Keep control-plane
-    - "*.keycloak.svc"         #   and IdP traffic out of the MITM path.
 
 pipeline:
-  # inbound:
-  #   plugins: []                                    # no-auth demo; add jwt-validation for the full flow
   outbound:
     plugins:
       - name: inference-parser
       - name: context-guru
-        on_error: enforce                          # enforce | observe | off  (see header)
         config:
+          on_error: enforce                          # enforce | observe | off  (see header)
           # Only inference paths are compacted; everything else passes through.
           paths: ["/v1/chat/completions", "/v1/completions", "/v1/messages"]
           # Static cheap model for the LLM-backed extract:code component. OpenAI wire

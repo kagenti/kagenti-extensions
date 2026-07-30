@@ -549,8 +549,7 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 		log.Fatalf("%s listen: %v", name, err)
 	}
 	go func() {
-		actualAddr := listener.Addr().String()
-		slog.Info("HTTP server listening", "name", name, "addr", actualAddr)
+		slog.Info("HTTP server listening", "name", name, "addr", listener.Addr().String())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%s serve: %v", name, err)
 		}

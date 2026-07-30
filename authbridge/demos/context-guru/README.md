@@ -157,3 +157,4 @@ inject a second sidecar). The extract-code key lives in the `cg-model-key` Secre
 - `k8s/authbridge-config.yaml` — sidecar config (pipeline, engine, the 3 modes).
 - `k8s/agent.yaml` — agent + context-guru sidecar Deployment/Service.
 - `run.sh` — `setup` / `drive <mode>` / `all`.
+- `context-guru-tls-bridge.yaml` — standalone/laptop HTTPS variant (tls_bridge + HTTPS_PROXY), not used by `run.sh`, but used by a demo in https://github.com/rossoctl/rossoctl
