@@ -212,11 +212,11 @@ func TestOnRequest_OverDurationLimit(t *testing.T) {
 	}
 }
 
-func TestOnResponse_Accumulates(t *testing.T) {
+func TestOnResponseFrame_Accumulates(t *testing.T) {
 	p := newTestPlugin(1000, 0, 0)
 	pctx := makePctx("sess-1", 42)
 
-	action := p.OnResponse(context.Background(), pctx)
+	action := p.OnResponseFrame(context.Background(), pctx, nil, true)
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue, got %v", action.Type)
 	}
@@ -237,7 +237,24 @@ func TestOnResponse_Accumulates(t *testing.T) {
 	}
 }
 
-func TestOnResponse_NoInference(t *testing.T) {
+func TestOnResponseFrame_SkipsNonLast(t *testing.T) {
+	p := newTestPlugin(1000, 0, 0)
+	pctx := makePctx("sess-1", 42)
+
+	action := p.OnResponseFrame(context.Background(), pctx, []byte("data"), false)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
+	}
+
+	p.mu.RLock()
+	_, ok := p.cache["sess-1"]
+	p.mu.RUnlock()
+	if ok {
+		t.Error("expected no cache entry on non-last frame")
+	}
+}
+
+func TestOnResponseFrame_NoInference(t *testing.T) {
 	p := newTestPlugin(1000, 0, 0)
 	pctx := &pipeline.Context{
 		Direction: pipeline.Outbound,
@@ -245,7 +262,7 @@ func TestOnResponse_NoInference(t *testing.T) {
 		Session:   &pipeline.SessionView{ID: "sess-1"},
 	}
 
-	action := p.OnResponse(context.Background(), pctx)
+	action := p.OnResponseFrame(context.Background(), pctx, nil, true)
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue, got %v", action.Type)
 	}

@@ -61,7 +61,7 @@ func TestFullLifecycle_DurationEnforcement(t *testing.T) {
 			Inference: &pipeline.InferenceExtension{TotalTokens: 10},
 		},
 	}
-	p.OnResponse(ctx, pctx)
+	p.OnResponseFrame(ctx, pctx, nil, true)
 
 	// Backdate startedAt past the 1s limit.
 	p.mu.Lock()

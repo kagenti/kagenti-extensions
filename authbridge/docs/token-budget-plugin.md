@@ -1,9 +1,24 @@
 # token-budget Plugin
 
 Enforces per-session lifetime budgets on tokens, inference calls, and
-wall-clock duration. Runs in the outbound pipeline after `inference-parser`.
+wall-clock duration. Runs in the outbound pipeline alongside `inference-parser`.
 Uses Redis for cross-pod durable counters; evaluates limits from a local
-cache with zero I/O on the hot path. Returns HTTP 429 on breach.
+cache with zero I/O on the hot path. Returns HTTP 403 on breach (lifetime
+cap is permanently exhausted; retrying won't help).
+
+## Build Tag
+
+This plugin is **opt-IN**. Build with `-tags include_plugin_tokenbudget`
+to include it (and its `storage/redis` dependency) in the binary:
+
+```bash
+cd authbridge
+docker build -f cmd/authbridge-proxy/Dockerfile \
+  --build-arg GO_BUILD_TAGS="include_plugin_tokenbudget" \
+  -t authbridge:latest .
+```
+
+Without the tag, neither token-budget nor go-redis are linked.
 
 ## Configuration
 
@@ -11,13 +26,15 @@ cache with zero I/O on the hot path. Returns HTTP 429 on breach.
 pipeline:
   outbound:
     plugins:
-      - name: inference-parser
+      - name: token-exchange
+        config: { ... }
       - name: token-budget
         config:
           redis_url: "redis://valkey.infra.svc:6379"
           max_tokens: 50000
           max_calls: 100
           max_duration_seconds: 1800
+      - name: inference-parser
 ```
 
 | Field | Required | Default | Description |
@@ -34,10 +51,13 @@ At least one of `max_tokens`, `max_calls`, or `max_duration_seconds` must be > 0
 
 ## Pipeline Position
 
-Must run after `inference-parser`, which populates `pctx.Extensions.Inference`
-with token counts from LLM responses.
+Must be declared **before** `inference-parser` in the outbound plugin list.
+The response path runs in reverse order, so inference-parser finalizes token
+counts first, then token-budget reads them. Both plugins implement
+`StreamingResponder` so they work with streaming SSE responses (Ollama,
+LiteLLM, OpenAI) and buffered JSON responses alike.
 
-## Response Format (429)
+## Response Format (403)
 
 ```json
 {

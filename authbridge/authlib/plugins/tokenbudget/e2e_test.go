@@ -35,7 +35,7 @@ func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *TokenBudget {
 }
 
 func respond(p *TokenBudget, sessionID string, tokens int) {
-	p.OnResponse(context.Background(), makePctx(sessionID, tokens))
+	p.OnResponseFrame(context.Background(), makePctx(sessionID, tokens), nil, true)
 }
 
 func request(p *TokenBudget, sessionID string) pipeline.Action {
@@ -89,7 +89,7 @@ func TestE2E_HTTPRoundTrip(t *testing.T) {
 }
 
 // TestE2E_AccumulateAndDeny verifies the full lifecycle: accumulate
-// tokens via OnResponse, then OnRequest denies with a 429.
+// tokens via OnResponseFrame, then OnRequest denies with a 403.
 func TestE2E_AccumulateAndDeny(t *testing.T) {
 	p := newE2EPlugin(t, 150, newMemStore())
 
@@ -102,8 +102,8 @@ func TestE2E_AccumulateAndDeny(t *testing.T) {
 		t.Fatalf("expected Reject, got %v", action.Type)
 	}
 	status, _, body := action.Violation.Render()
-	if status != http.StatusTooManyRequests {
-		t.Errorf("status = %d, want 429", status)
+	if status != http.StatusForbidden {
+		t.Errorf("status = %d, want 403", status)
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {

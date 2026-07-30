@@ -5,7 +5,7 @@
 //
 // Architecture: OnResponse accumulates token counts (from inference-parser)
 // into both a local cache and Redis (async). OnRequest evaluates the
-// cached counters against configured limits and returns 429 on breach.
+// cached counters against configured limits and returns 403 on breach.
 // Redis provides cross-pod durability (survives restarts); the local
 // cache provides sub-millisecond enforcement on the hot path.
 //
@@ -80,7 +80,6 @@ func (p *TokenBudget) Name() string { return "token-budget" }
 func (p *TokenBudget) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
 		Description: "Enforce per-session token, call, and duration budgets via Redis.",
-		Requires:    []string{"inference-parser"},
 	}
 }
 
@@ -126,7 +125,7 @@ func (p *TokenBudget) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// OnRequest checks cached counters against limits. Returns 429 if any
+// OnRequest checks cached counters against limits. Returns 403 if any
 // limit is breached. No I/O — reads only the local cache.
 func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	sessionID := p.sessionID(pctx)
@@ -153,9 +152,22 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// OnResponse reads token counts from inference-parser's extension and
-// updates both the local cache (synchronous) and Redis (async goroutine).
-func (p *TokenBudget) OnResponse(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+// OnResponse is a no-op: this plugin implements StreamingResponder, so
+// the framework routes all response handling through OnResponseFrame.
+func (p *TokenBudget) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// OnResponseFrame reads token counts from inference-parser's extension
+// on the last=true finalization call and updates both the local cache
+// (synchronous) and Redis (async goroutine). Intermediate frames are
+// ignored — inference-parser accumulates during streaming and only
+// finalizes its extension on last=true.
+func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context, _ []byte, last bool) pipeline.Action {
+	if !last {
+		return pipeline.Action{Type: pipeline.Continue}
+	}
+
 	sessionID := p.sessionID(pctx)
 	if sessionID == "" {
 		return pipeline.Action{Type: pipeline.Continue}
@@ -293,8 +305,9 @@ func (p *TokenBudget) redisKey(sessionID string) string {
 }
 
 var (
-	_ pipeline.Plugin       = (*TokenBudget)(nil)
-	_ pipeline.Configurable = (*TokenBudget)(nil)
-	_ pipeline.Initializer  = (*TokenBudget)(nil)
-	_ pipeline.Shutdowner   = (*TokenBudget)(nil)
+	_ pipeline.Plugin             = (*TokenBudget)(nil)
+	_ pipeline.Configurable       = (*TokenBudget)(nil)
+	_ pipeline.Initializer        = (*TokenBudget)(nil)
+	_ pipeline.Shutdowner         = (*TokenBudget)(nil)
+	_ pipeline.StreamingResponder = (*TokenBudget)(nil)
 )
