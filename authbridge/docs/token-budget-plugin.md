@@ -43,11 +43,25 @@ pipeline:
 | `max_tokens` | no | 0 | Cumulative token ceiling per session (0 = no limit) |
 | `max_calls` | no | 0 | Max inference calls per session (0 = no limit) |
 | `max_duration_seconds` | no | 0 | Wall-clock session lifetime in seconds (0 = no limit) |
+| `on_exceed` | no | "deny" | `deny` (block with 403) or `observe` (shadow — log but continue) |
 | `session_ttl_seconds` | no | 7200 | Redis key TTL; should be >= `max_duration_seconds` |
 | `refresh_interval` | no | "5s" | How often to sync local cache from Redis |
 | `redis_unavailable` | no | "fail_open" | `fail_open` or `fail_closed` when Redis is unreachable |
 
 At least one of `max_tokens`, `max_calls`, or `max_duration_seconds` must be > 0.
+
+## Shadow Mode
+
+Set `on_exceed: "observe"` to run the plugin in shadow mode. The plugin
+still accumulates counters and evaluates limits, but instead of blocking
+requests it logs a WARN and continues the pipeline. Use this to calibrate
+limits under real workloads before enabling enforcement.
+
+Rollout workflow:
+1. Deploy with `on_exceed: "observe"` and conservative limits
+2. Monitor logs for `"budget exceeded (shadow mode)"` entries
+3. Adjust `max_tokens` / `max_calls` / `max_duration_seconds` based on observed patterns
+4. Flip to `on_exceed: "deny"` when confident in the thresholds
 
 ## Pipeline Position
 
@@ -88,7 +102,16 @@ token-budget:<session-id>  (Hash, TTL = session_ttl_seconds)
 | Redis down at startup | Pod fails to start (`Init` error) |
 | Redis fails mid-session | Local cache continues enforcing; writes dropped silently |
 | Pod restarts | First request passes (cold cache); refresh picks up Redis counters within one interval |
-| `fail_closed` + outage | All inference requests denied until Redis recovers |
+| `fail_closed` + refresh failure | Stale cache retained; enforcement lags until Redis recovers |
+| Provider returns no usage data | `max_tokens` not enforced; `max_calls` and `max_duration_seconds` still work |
+
+**Note on token counting:** Token accumulation requires the LLM provider to
+return `usage` (prompt/completion token counts) in responses. Providers that
+omit usage from streaming chunks (e.g. Anthropic via LiteLLM) will show
+`promptTokens=0` in inference-parser logs — `max_tokens` enforcement won't
+trigger for these providers, but `max_calls` and `max_duration_seconds` still
+apply. Ollama, OpenAI, and Azure OpenAI include usage in streaming responses
+and work fully.
 
 ## Testing
 
