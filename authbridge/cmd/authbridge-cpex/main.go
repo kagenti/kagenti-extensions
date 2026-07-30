@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -319,9 +320,13 @@ func startHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Fatalf("%s listen: %v", name, err)
+	}
 	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		slog.Info("HTTP server listening", "name", name, "addr", listener.Addr().String())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%s serve: %v", name, err)
 		}
 	}()
@@ -339,7 +344,7 @@ func startReverseProxyServer(name string, rp *reverseproxy.Server, addr string) 
 		log.Fatalf("%s listen: %v", name, err)
 	}
 	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr, "mtls", rp.MTLSEnabled())
+		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("%s serve: %v", name, err)
 		}
