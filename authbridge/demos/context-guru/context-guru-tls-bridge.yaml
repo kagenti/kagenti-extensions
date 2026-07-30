@@ -46,8 +46,8 @@ pipeline:
     plugins:
       - name: inference-parser
       - name: context-guru
+        on_error: enforce                          # enforce | observe | off  (see header)
         config:
-          on_error: enforce                          # enforce | observe | off  (see header)
           # Only inference paths are compacted; everything else passes through.
           paths: ["/v1/chat/completions", "/v1/completions", "/v1/messages"]
           # Static cheap model for the LLM-backed extract:code component. OpenAI wire
