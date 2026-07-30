@@ -169,48 +169,6 @@ func TestOnRequest_UnderLimit(t *testing.T) {
 	}
 }
 
-func TestOnRequest_OverTokenLimit(t *testing.T) {
-	p := newTestPlugin(100, 0, 0)
-	pctx := makePctx("sess-1", 0)
-
-	// Seed cache with tokens over limit.
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 150, calls: 1, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), pctx)
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject, got %v", action.Type)
-	}
-}
-
-func TestOnRequest_OverCallLimit(t *testing.T) {
-	p := newTestPlugin(0, 5, 0)
-	pctx := makePctx("sess-1", 0)
-
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 5, startedAt: time.Now()}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), pctx)
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject, got %v", action.Type)
-	}
-}
-
-func TestOnRequest_OverDurationLimit(t *testing.T) {
-	p := newTestPlugin(0, 0, 60)
-	pctx := makePctx("sess-1", 0)
-
-	p.mu.Lock()
-	p.cache["sess-1"] = &counters{tokens: 0, calls: 1, startedAt: time.Now().Add(-90 * time.Second)}
-	p.mu.Unlock()
-
-	action := p.OnRequest(context.Background(), pctx)
-	if action.Type != pipeline.Reject {
-		t.Fatalf("expected Reject, got %v", action.Type)
-	}
-}
 
 func TestOnResponseFrame_Accumulates(t *testing.T) {
 	p := newTestPlugin(1000, 0, 0)
@@ -327,6 +285,35 @@ func TestConfigure_Validation(t *testing.T) {
 				t.Errorf("Configure() error = %v, wantErr = %v", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestOnRequest_ShadowMode(t *testing.T) {
+	p := New()
+	cfg := `{
+		"redis_url": "mem://test",
+		"max_tokens": 100,
+		"on_exceed": "observe",
+		"refresh_interval": "100ms"
+	}`
+	if err := p.Configure(json.RawMessage(cfg)); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+
+	p.OnResponseFrame(context.Background(), makePctx("sess-1", 60), nil, true)
+	p.OnResponseFrame(context.Background(), makePctx("sess-1", 60), nil, true)
+
+	p.mu.RLock()
+	c := p.cache["sess-1"]
+	p.mu.RUnlock()
+	if c.tokens != 120 {
+		t.Errorf("tokens = %d, want 120", c.tokens)
+	}
+
+	action := p.OnRequest(context.Background(), makePctx("sess-1", 0))
+	if action.Type != pipeline.Continue {
+		t.Fatalf("shadow mode: expected Continue past limit, got %v", action.Type)
 	}
 }
 

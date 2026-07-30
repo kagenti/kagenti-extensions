@@ -247,3 +247,48 @@ func (c *controllableStore) Expire(ctx context.Context, key string, ttl time.Dur
 	return c.inner.Expire(ctx, key, ttl)
 }
 func (c *controllableStore) Close() error { return nil }
+
+// TestE2E_ShadowMode verifies that on_exceed=observe allows requests
+// through even when budget is exceeded, while still accumulating.
+func TestE2E_ShadowMode(t *testing.T) {
+	p := New()
+	cfg, _ := json.Marshal(config{
+		RedisURL:        "mem://test",
+		MaxTokens:       150,
+		OnExceed:        "observe",
+		RefreshInterval: "30ms",
+		RedisUnavailable: "fail_open",
+	})
+	if err := p.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	store := newMemStore()
+	p.store = store
+	go p.refreshLoop(30 * time.Millisecond)
+	t.Cleanup(func() { close(p.stopCh); <-p.stopped })
+
+	for i := 0; i < 3; i++ {
+		respond(p, "sess", 60) // 180 total > 150 limit
+	}
+
+	// In observe mode, request should continue (not reject).
+	action := request(p, "sess")
+	if action.Type != pipeline.Continue {
+		t.Fatalf("shadow mode: expected Continue, got %v", action.Type)
+	}
+
+	// Counters should still accumulate past the limit.
+	respond(p, "sess", 20) // 200 total
+	p.mu.RLock()
+	c := p.cache["sess"]
+	p.mu.RUnlock()
+	if c.tokens != 200 {
+		t.Errorf("tokens = %d, want 200 (accumulation continues in shadow mode)", c.tokens)
+	}
+
+	// Subsequent requests also continue.
+	action = request(p, "sess")
+	if action.Type != pipeline.Continue {
+		t.Fatalf("shadow mode (2nd request): expected Continue, got %v", action.Type)
+	}
+}
