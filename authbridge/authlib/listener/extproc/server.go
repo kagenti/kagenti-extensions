@@ -151,6 +151,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		StartedAt: time.Now(),
 	}
 
+	originalTS := pctx.Headers.Get("tracestate")
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -158,7 +159,11 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	}
 
 	s.recordInboundSession(pctx)
-	return allowResponse(), pctx
+	resp := allowResponse()
+	if sh := tracestateSetHeaders(pctx, originalTS); sh != nil {
+		resp.GetRequestHeaders().Response.HeaderMutation.SetHeaders = sh
+	}
+	return resp, pctx
 }
 
 func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessServer, headers *corev3.HeaderMap, body []byte) (*extprocv3.ProcessingResponse, *pipeline.Context) {
@@ -172,6 +177,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		StartedAt: time.Now(),
 	}
 
+	originalTS := pctx.Headers.Get("tracestate")
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -179,7 +185,11 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	}
 
 	s.recordInboundSession(pctx)
-	return withBodyMutation(allowBodyResponse(), pctx), pctx
+	resp := allowBodyResponse()
+	if sh := tracestateSetHeaders(pctx, originalTS); sh != nil {
+		resp.GetRequestBody().Response.HeaderMutation.SetHeaders = sh
+	}
+	return withBodyMutation(resp, pctx), pctx
 }
 
 // inboundSessionID returns the bucket ID for an inbound event. Trusts the
@@ -628,6 +638,21 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 		Response: &extprocv3.ProcessingResponse_ResponseBody{
 			ResponseBody: &extprocv3.BodyResponse{},
 		},
+	}
+}
+
+// tracestateSetHeaders returns a SetHeaders mutation when a pipeline plugin
+// rewrote the request's tracestate header (the lineage plugin's inbound
+// exchange-id stamp), or nil when unchanged. Without this diff the mutation
+// would die in pctx.Headers — ext_proc forwards no header change it does not
+// explicitly emit (only the Authorization diff was propagated before).
+func tracestateSetHeaders(pctx *pipeline.Context, original string) []*corev3.HeaderValueOption {
+	now := pctx.Headers.Get("tracestate")
+	if now == original || now == "" {
+		return nil
+	}
+	return []*corev3.HeaderValueOption{
+		{Header: &corev3.HeaderValue{Key: "tracestate", RawValue: []byte(now)}},
 	}
 }
 

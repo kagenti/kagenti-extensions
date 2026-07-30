@@ -181,8 +181,8 @@ func TestSplice_OutboundHeaderRewritten(t *testing.T) {
 	}
 }
 
-func TestSplice_InboundHeadersUntouched(t *testing.T) {
-	p, _ := newTestPlugin(t)
+func TestSplice_InboundHeadersUntouchedExceptStamp(t *testing.T) {
+	p, exp := newTestPlugin(t)
 	h := traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7")
 	before := http.Header{}
 	maps.Copy(before, h)
@@ -190,8 +190,110 @@ func TestSplice_InboundHeadersUntouched(t *testing.T) {
 
 	run(t, p, pctx, allow(200))
 
-	if !headersEqual(before, pctx.Headers) {
-		t.Errorf("inbound headers mutated: before=%v after=%v", before, pctx.Headers)
+	// The ONLY inbound mutation is the tracestate stamp; traceparent and
+	// everything else are forwarded as they arrived.
+	req, _ := roleSplit(t, exp.GetSpans())
+	want := tracestateStampKey + "=" + req.SpanContext.SpanID().String()
+	if got := pctx.Headers.Get("tracestate"); got != want {
+		t.Errorf("tracestate = %q, want stamp %q", got, want)
+	}
+	after := http.Header{}
+	maps.Copy(after, pctx.Headers)
+	after.Del("tracestate")
+	if !headersEqual(before, after) {
+		t.Errorf("inbound headers beyond tracestate mutated: before=%v after=%v", before, after)
+	}
+}
+
+func TestStamp_PreservesForeignTracestateMembers(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	h := traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7")
+	h.Set("tracestate", "vendor=abc")
+	pctx := fakeContext(pipeline.Inbound, h)
+
+	run(t, p, pctx, allow(200))
+
+	req, _ := roleSplit(t, exp.GetSpans())
+	got := pctx.Headers.Get("tracestate")
+	wantStamp := tracestateStampKey + "=" + req.SpanContext.SpanID().String()
+	if !strings.Contains(got, wantStamp) || !strings.Contains(got, "vendor=abc") {
+		t.Errorf("tracestate = %q, want both %q and vendor=abc", got, wantStamp)
+	}
+}
+
+func TestStamp_NoWireTraceparentNoStamp(t *testing.T) {
+	p, _ := newTestPlugin(t)
+	pctx := fakeContext(pipeline.Inbound, http.Header{})
+
+	run(t, p, pctx, allow(200))
+
+	if got := pctx.Headers.Get("tracestate"); got != "" {
+		t.Errorf("tracestate stamped without a wire traceparent: %q", got)
+	}
+}
+
+// TestStamp_OutboundPrefersStampOverMap is the same-trace fan-in case in
+// miniature: two concurrent inbound exchanges on ONE trace (the trace-keyed
+// map can only hold the later one), then an outbound whose tracestate stamp
+// names the EARLIER inbound. Without the stamp this outbound would collapse
+// onto the map entry — the 1/N misattribution the fanin-test.sh e2e proves.
+func TestStamp_OutboundPrefersStampOverMap(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	// Two inbounds, same trace: the map now holds in2 only.
+	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "1111111111111111")), allow(200))
+	in1, _ := roleSplit(t, exp.GetSpans())
+	exp.Reset()
+	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "2222222222222222")), allow(200))
+	in2, _ := roleSplit(t, exp.GetSpans())
+
+	// Outbound couriered in1's stamp through the app.
+	exp.Reset()
+	h := traceparent(traceID, "3333333333333333")
+	h.Set("tracestate", tracestateStampKey+"="+in1.SpanContext.SpanID().String())
+	out := fakeContext(pipeline.Outbound, h)
+	run(t, p, out, allow(200))
+	outReq, _ := roleSplit(t, exp.GetSpans())
+
+	if outReq.Parent.SpanID() != in1.SpanContext.SpanID() {
+		t.Errorf("parent = %s, want stamped inbound %s (map held %s)",
+			outReq.Parent.SpanID(), in1.SpanContext.SpanID(), in2.SpanContext.SpanID())
+	}
+	if got := attrStr(outReq, "lineage.parent.source"); got != "tracestate" {
+		t.Errorf("lineage.parent.source = %q, want tracestate", got)
+	}
+}
+
+func TestStamp_MalformedFallsBackToMap(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "1111111111111111")), allow(200))
+	in1, _ := roleSplit(t, exp.GetSpans())
+
+	exp.Reset()
+	h := traceparent(traceID, "3333333333333333")
+	h.Set("tracestate", tracestateStampKey+"=nothex")
+	out := fakeContext(pipeline.Outbound, h)
+	run(t, p, out, allow(200))
+	outReq, _ := roleSplit(t, exp.GetSpans())
+
+	if outReq.Parent.SpanID() != in1.SpanContext.SpanID() {
+		t.Errorf("parent = %s, want map inbound %s", outReq.Parent.SpanID(), in1.SpanContext.SpanID())
+	}
+	if got := attrStr(outReq, "lineage.parent.source"); got != "map" {
+		t.Errorf("lineage.parent.source = %q, want map", got)
+	}
+}
+
+func TestStamp_ParentSourceWireOnMapMiss(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	out := fakeContext(pipeline.Outbound, traceparent("cccccccccccccccccccccccccccccccc", "1111111111111111"))
+	run(t, p, out, allow(200))
+	outReq, _ := roleSplit(t, exp.GetSpans())
+	if got := attrStr(outReq, "lineage.parent.source"); got != "wire" {
+		t.Errorf("lineage.parent.source = %q, want wire", got)
 	}
 }
 

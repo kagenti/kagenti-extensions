@@ -54,6 +54,17 @@ import (
 
 const pluginName = "lineage-telemetry"
 
+// tracestateStampKey is the W3C tracestate member this sidecar stamps on the
+// request it forwards to its own app: value = the inbound request span id
+// (the exchange id). The app's propagate-only shim carries tracestate through
+// its per-request causal chain (contextvars), so the member surfaces on
+// exactly the outbound calls that inbound caused — the only wire fact that
+// stays unambiguous under CONCURRENT same-trace inbound exchanges, where the
+// trace-keyed map (one entry per trace) collapses. Outbound parent precedence:
+// stamp > map > wire parent; the chosen source is recorded as the
+// lineage.parent.source fact.
+const tracestateStampKey = "kglin"
+
 // inboundSpans is process-wide so the forward-proxy instance (outbound
 // pipeline) can look up spans written by the reverse-proxy instance
 // (inbound pipeline). Both instances run in the same authbridge process
@@ -266,16 +277,24 @@ func (p *LineageTelemetry) spliceParent(
 	spanKind trace.SpanKind,
 	reqAttrs []attribute.KeyValue,
 ) (trace.SpanContext, string) {
-	// (3) Parent: outbound → this pod's inbound span for the same trace_id
-	// (the map), else the wire parent. Inbound always uses the wire parent.
+	// (3) Parent: outbound → the tracestate stamp (exact per-inbound
+	// attribution, survives same-trace concurrency), else this pod's inbound
+	// span for the same trace_id (the map), else the wire parent. Inbound
+	// always uses the wire parent.
 	parent := remoteCtx
+	parentSource := "wire"
 	if pctx.Direction == pipeline.Outbound {
 		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
-			if v, ok := inboundSpans.Load(rsc.TraceID().String()); ok {
+			if psc, ok := stampedParent(rsc); ok {
+				parent = trace.ContextWithRemoteSpanContext(ctx, psc)
+				parentSource = "tracestate"
+			} else if v, ok := inboundSpans.Load(rsc.TraceID().String()); ok {
 				parent = trace.ContextWithRemoteSpanContext(ctx, v.(trace.SpanContext))
+				parentSource = "map"
 			}
 		}
 	}
+	reqAttrs = append(reqAttrs, attribute.String("lineage.parent.source", parentSource))
 
 	// (4) Emit the request span and end it immediately. exchange.id is the
 	// span's own id, so it can only be set after Start; an ended span's
@@ -290,9 +309,20 @@ func (p *LineageTelemetry) spliceParent(
 	span.End()
 
 	// (5) Inbound → publish so this pod's outbound spans in the same trace
-	// can splice themselves directly under it.
+	// can splice themselves directly under it, and STAMP the forwarded
+	// request's tracestate with this exchange id so the app couriers exact
+	// per-inbound attribution back to the outbound side (see
+	// tracestateStampKey). The stamp requires a valid wire traceparent —
+	// without one the app's shim starts a fresh root trace and drops the
+	// tracestate anyway. The listener is responsible for propagating this
+	// header mutation to the app (ext_proc emits a SetHeaders diff).
 	if pctx.Direction == pipeline.Inbound {
 		inboundSpans.Store(sc.TraceID().String(), sc)
+		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
+			if ts, err := rsc.TraceState().Insert(tracestateStampKey, sc.SpanID().String()); err == nil {
+				pctx.Headers.Set("tracestate", ts.String())
+			}
+		}
 	}
 
 	// (6) Outbound → rewrite the forwarded traceparent to name the request
@@ -302,6 +332,28 @@ func (p *LineageTelemetry) spliceParent(
 	}
 
 	return sc, exchangeID
+}
+
+// stampedParent resolves the tracestate stamp on an outbound wire context:
+// the inbound exchange id this pod's sidecar wrote into tracestate on the
+// forwarded request, carried back by the app's shim. Returns ok=false when
+// the member is absent or malformed (caller falls back to the map).
+func stampedParent(rsc trace.SpanContext) (trace.SpanContext, bool) {
+	raw := rsc.TraceState().Get(tracestateStampKey)
+	if raw == "" {
+		return trace.SpanContext{}, false
+	}
+	sid, err := trace.SpanIDFromHex(raw)
+	if err != nil {
+		return trace.SpanContext{}, false
+	}
+	psc := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    rsc.TraceID(),
+		SpanID:     sid,
+		TraceFlags: rsc.TraceFlags(),
+		Remote:     true,
+	})
+	return psc, psc.IsValid()
 }
 
 // OnResponse is a no-op. The response span is emitted in OnFinish (which fires
