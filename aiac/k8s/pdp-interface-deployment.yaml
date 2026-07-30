@@ -1,11 +1,3 @@
-# PHASE 1 LOCAL / KIND DEV TOPOLOGY
-#
-# This manifest uses node-local images (`localhost/...:local` +
-# `imagePullPolicy: Never`), so it only runs on a cluster where every target
-# node has been preloaded with those images (e.g. `kind load` / `podman save`).
-# A production deployment must publish immutable, versioned images to the
-# deployment registry and use `imagePullPolicy: IfNotPresent` — layer that in
-# via a separate production overlay rather than editing this dev manifest.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -19,22 +11,27 @@ data:
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
-  # NATS_URL is added to this ConfigMap in Phase 2 (Event Broker, issue 4.19).
+  NATS_URL: "nats://aiac-event-broker-service:4222"
   # AIAC_RAG_INGEST_URL and AIAC_CHROMADB_URL are added in Phase 3 (RAG Pod, issue 4.20).
 
 ---
-# Preconditions (NOT created by this manifest):
+# Prerequisites: create this Secret before applying this manifest:
 #
-#   * The target namespace `aiac-system` must already exist
-#     (`kubectl create namespace aiac-system`).
-#   * The `keycloak-admin-secret` Secret must be pre-provisioned out-of-band —
-#     credentials must NEVER be committed to git. The Deployment below references
-#     it via secretRef. Create it once per cluster:
-#
-#       kubectl create secret generic keycloak-admin-secret \
-#         -n aiac-system \
-#         --from-literal=KEYCLOAK_ADMIN_USERNAME=<admin-user> \
-#         --from-literal=KEYCLOAK_ADMIN_PASSWORD=<admin-password>
+#   kubectl create secret generic keycloak-admin-secret \
+#     -n aiac-system \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=admin \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=admin
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-admin-secret
+  namespace: aiac-system
+type: Opaque
+stringData:
+  KEYCLOAK_ADMIN_USERNAME: "admin"
+  KEYCLOAK_ADMIN_PASSWORD: "admin"
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -56,12 +53,6 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7071
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 7071
-            initialDelaySeconds: 5
-            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config
@@ -77,12 +68,6 @@ spec:
           imagePullPolicy: Never
           ports:
             - containerPort: 7072
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 7072
-            initialDelaySeconds: 5
-            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config

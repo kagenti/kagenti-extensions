@@ -77,22 +77,23 @@ spec:
         app: aiac-agent
     spec:
       serviceAccountName: aiac-agent
-      # aiac-init init container is deferred to Phase 2 (issue 4.21).
-      # It will gate startup on NATS + IdP Config + PDP Policy + RAG Ingest health
-      # and provision the aiac-events JetStream stream.
+      initContainers:
+        # Gates Agent startup on NATS + IdP Config + PDP Policy (+ optional RAG
+        # Ingest) health, then provisions the aiac-events JetStream stream.
+        # Reuses the aiac-agent image (see src/aiac/agent/init/wait_and_provision.py).
+        - name: aiac-init
+          image: localhost/aiac-agent:local
+          imagePullPolicy: Never
+          command: ["python", "-m", "aiac.agent.init.wait_and_provision"]
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
       containers:
         - name: aiac-agent
           image: localhost/aiac-agent:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7070
-          # The Controller exposes only /apply/* routes (no /health endpoint),
-          # so readiness is gated on the port accepting TCP connections.
-          readinessProbe:
-            tcpSocket:
-              port: 7070
-            initialDelaySeconds: 5
-            periodSeconds: 10
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config

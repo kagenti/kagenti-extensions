@@ -1,3 +1,31 @@
+[project]
+name = "aiac"
+version = "0.1.0"
+description = "AIAC — IdP configuration, PDP policy writer, and policy store services for Kagenti."
+requires-python = ">=3.12"
+# Runtime dependencies — union of the per-service requirements.txt files under src/aiac/.
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "python-keycloak",
+    "python-dotenv",
+    "requests",
+    "kubernetes",
+    "nats-py",
+    "httpx",
+    "langgraph",
+    "langchain-openai",
+    "chromadb",
+    "tenacity",
+]
+
+[project.optional-dependencies]
+# Test/dev tooling — install with: uv pip install -e ".[test]"
+test = [
+    "pytest",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
@@ -11,5 +39,5 @@ select = ["E", "F", "I", "W"]
 testpaths = ["test"]
 pythonpath = ["src"]
 markers = [
-    "integration: tests that need live infra — a running Keycloak, Keycloak admin credentials, a real LLM endpoint, and the `opa` binary on PATH (see test/integration/.env)",
+    "integration: tests that call real LLM endpoints",
 ]
