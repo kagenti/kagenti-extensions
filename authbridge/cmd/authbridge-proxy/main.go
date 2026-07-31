@@ -27,16 +27,15 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
-	"github.com/rossoctl/cortex/authbridge/authlib/observe"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtime"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -56,8 +55,6 @@ import (
 	// authbridge-lite image excludes all but jwt-validation + token-exchange.
 )
 
-var logLevel = new(slog.LevelVar)
-
 // version is the authbridge-proxy build version, overridden at release time
 // via -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
 var version = "dev"
@@ -69,36 +66,6 @@ var version = "dev"
 // :8082, and config can't unset it (the preset refills an empty value), so this
 // gate is the only way to keep the demo to the listeners it actually uses.
 var demoMode bool
-
-func initLogging() {
-	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		logLevel.Set(slog.LevelInfo)
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-func startSignalToggle() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGUSR1)
-	go func() {
-		for range sigCh {
-			if logLevel.Level() == slog.LevelDebug {
-				logLevel.Set(slog.LevelInfo)
-				slog.Info("log level toggled to INFO (send SIGUSR1 to switch back to DEBUG)")
-			} else {
-				logLevel.Set(slog.LevelDebug)
-				slog.Info("log level toggled to DEBUG (send SIGUSR1 to switch back to INFO)")
-			}
-		}
-	}()
-}
 
 // spiffeProviderNeeded reports whether any configured feature actually consumes
 // the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
@@ -166,8 +133,8 @@ func main() {
 		return
 	}
 
-	initLogging()
-	startSignalToggle()
+	runtime.InitLogging()
+	runtime.StartSignalToggle()
 
 	if *demo {
 		demoMode = true
@@ -422,7 +389,7 @@ func main() {
 			log.Fatalf("creating reverse proxy: %v", rerr)
 		}
 		rpSrv.Shared = sharedStore
-		httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
+		httpServers = append(httpServers, runtime.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
 	}
 
 	// The transparent (enforce-redirect) listener rides with the forward proxy;
@@ -444,7 +411,7 @@ func main() {
 		fpSrv.SkipHosts = skipHosts
 		fpSrv.TLSBridge = bridge
 		fpSrv.Shared = sharedStore
-		httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+		httpServers = append(httpServers, runtime.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
 
 		// Outbound transparent listener (enforce-redirect mode). It shares the
 		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
@@ -463,7 +430,7 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv := runtime.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
 
 	// Warm the plugin catalog at boot so any factory that violates the
 	// constructor contract surfaces here rather than on the first
@@ -487,29 +454,9 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-proxy starting", "version", version, "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-proxy starting", "version", version, "mode", cfg.Mode, "logLevel", runtime.LogLevel().String())
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
-			slog.Warn("health server failed", "error", err)
-		}
-	}()
+	runtime.StartHealthServer(inboundH, outboundH)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -538,52 +485,6 @@ func main() {
 	}
 }
 
-func startHTTPServer(name string, handler http.Handler, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := net.Listen("tcp", addr)
-	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
-	}
-	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", listener.Addr().String())
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
-}
-
-// startReverseProxyServer mirrors startHTTPServer but uses the
-// reverseproxy.Server's Listen() method so the byte-peek TLS-sniffing
-// listener is wired in when mTLS is enabled. With mTLS off, Listen
-// returns a plain net.Listen and behavior matches startHTTPServer.
-//
-// Logged "mtls" attribute makes the listener mode visible at startup;
-// operators expecting a separate :8443 port for TLS get a clear hint
-// that this is the same :8080 with byte-peek detection.
-func startReverseProxyServer(name string, rp *reverseproxy.Server, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           rp.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := rp.Listen(addr)
-	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
-	}
-	go func() {
-		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
-}
-
 // startTransparentProxy binds the outbound transparent listener and serves it
 // in a goroutine, dispatching each REDIRECTed connection through the forward
 // proxy's outbound pipeline. Returns the listener (for shutdown), or nil when
@@ -610,16 +511,4 @@ func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListene
 		}
 	}()
 	return ln
-}
-
-func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
-	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
-		}
-	}()
-	return srv
 }
