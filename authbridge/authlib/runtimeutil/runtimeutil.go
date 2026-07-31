@@ -1,17 +1,12 @@
-// Package runtime holds process-level helpers shared by the authbridge
+// Package runtimeutil holds process-level helpers shared by the authbridge
 // binaries (authbridge-proxy, authbridge-cpex, authbridge-envoy). Each binary
 // has its own main() orchestration and listener wiring; only the byte-identical
 // plumbing — logging setup, the SIGUSR1 log-level toggle, the health and stats
 // servers, and the HTTP-listener helpers — lives here so a fix has to be made
 // once rather than three times.
-//
-// This package is intentionally listener-agnostic: it imports no gRPC and no
-// cgo, so authlib does not gain the envoy (go-control-plane / grpc) or cpex
-// (libcpex_ffi) dependency by hosting it.
-package runtime
+package runtimeutil
 
 import (
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,8 +30,10 @@ var logLevel = new(slog.LevelVar)
 func LogLevel() slog.Level { return logLevel.Level() }
 
 // InitLogging sets the process log level from the LOG_LEVEL env var (debug /
-// warn / error, default info) and installs a slog text handler on stderr.
-func InitLogging() {
+// warn / error, default info) and installs a slog text handler on stderr. The
+// binaryName is attached to every record as the "binary" attribute so logs from
+// co-located sidecars stay distinguishable.
+func InitLogging(binaryName string) {
 	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
 	case "debug":
 		logLevel.Set(slog.LevelDebug)
@@ -47,7 +44,8 @@ func InitLogging() {
 	default:
 		logLevel.Set(slog.LevelInfo)
 	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
+	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
+	slog.SetDefault(slog.New(h).With("binary", binaryName))
 }
 
 // StartSignalToggle installs a SIGUSR1 handler that toggles the process log
@@ -69,10 +67,10 @@ func StartSignalToggle() {
 	}()
 }
 
-// StartHealthServer serves liveness (/healthz) and readiness (/readyz) on :9091
+// StartHealthServer serves liveness (/healthz) and readiness (/readyz) on addr
 // in a goroutine. Readiness reports 503 while any inbound or outbound plugin is
 // still waiting on a dependency (e.g. a credential file that hasn't landed yet).
-func StartHealthServer(inboundH, outboundH *pipeline.Holder) {
+func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) {
 	go func() {
 		mux := http.NewServeMux()
 		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -89,31 +87,38 @@ func StartHealthServer(inboundH, outboundH *pipeline.Holder) {
 			}
 			w.WriteHeader(http.StatusOK)
 		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
+		slog.Info("health server listening", "addr", addr)
+		if err := http.ListenAndServe(addr, mux); err != nil {
 			slog.Warn("health server failed", "error", err)
 		}
 	}()
 }
 
-// StartStatServer starts the stats/config-inspection server (default :9093) in
-// a goroutine and returns it for graceful shutdown.
-func StartStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
+// StartStatServer binds addr for the stats/config-inspection server, serves it
+// in a goroutine, and returns the server for graceful shutdown. A bind failure
+// is returned so the caller can decide how to handle it (the mains log.Fatalf);
+// a serve-time failure after bind is logged.
+func StartStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler, addr string) (*observe.StatServer, error) {
+	srv := observe.NewStatServer(addr, cfgProvider, statsProvider,
 		observe.WithReloadStatus(reloadStatus))
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
+		slog.Info("stat server listening", "addr", listener.Addr().String())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("stat server failed", "error", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }
 
 // StartHTTPServer binds addr, serves handler in a goroutine, and returns the
 // server for graceful shutdown. It logs the concrete bound address (resolving
-// an ephemeral ":0" to the OS-assigned port). Bind failures are fatal.
-func StartHTTPServer(name string, handler http.Handler, addr string) *http.Server {
+// an ephemeral ":0" to the OS-assigned port). A bind failure is returned so the
+// caller can decide how to handle it; a serve-time failure after bind is logged.
+func StartHTTPServer(name string, handler http.Handler, addr string) (*http.Server, error) {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
@@ -121,15 +126,15 @@ func StartHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 	}
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
+		return nil, err
 	}
 	go func() {
 		slog.Info("HTTP server listening", "name", name, "addr", listener.Addr().String())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
+			slog.Error("HTTP server failed", "name", name, "error", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }
 
 // StartReverseProxyServer mirrors StartHTTPServer but uses the
@@ -140,7 +145,7 @@ func StartHTTPServer(name string, handler http.Handler, addr string) *http.Serve
 // Logged "mtls" attribute makes the listener mode visible at startup;
 // operators expecting a separate :8443 port for TLS get a clear hint
 // that this is the same :8080 with byte-peek detection.
-func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) *http.Server {
+func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) (*http.Server, error) {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           rp.Handler(),
@@ -148,13 +153,13 @@ func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) 
 	}
 	listener, err := rp.Listen(addr)
 	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
+		return nil, err
 	}
 	go func() {
 		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
+			slog.Error("Reverse server failed", "name", name, "error", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }

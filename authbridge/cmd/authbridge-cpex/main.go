@@ -35,7 +35,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
-	"github.com/rossoctl/cortex/authbridge/authlib/runtime"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -64,8 +64,8 @@ func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
 
-	runtime.InitLogging()
-	runtime.StartSignalToggle()
+	runtimeutil.InitLogging("authbridge-cpex")
+	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
 		log.Fatal("--config is required and must point to a YAML file")
@@ -202,8 +202,16 @@ func main() {
 	defer sharedStore.Close()
 	rpSrv.Shared = sharedStore
 	fpSrv.Shared = sharedStore
-	httpServers = append(httpServers, runtime.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
-	httpServers = append(httpServers, runtime.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+	rpHTTP, err := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
+	if err != nil {
+		log.Fatalf("reverse-proxy listen: %v", err)
+	}
+	httpServers = append(httpServers, rpHTTP)
+	fpHTTP, err := runtimeutil.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr)
+	if err != nil {
+		log.Fatalf("forward-proxy listen: %v", err)
+	}
+	httpServers = append(httpServers, fpHTTP)
 	_ = mtlsMetrics
 
 	statsProvider := func() *auth.Stats {
@@ -211,7 +219,10 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := runtime.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
 
 	plugins.WarmCatalog()
 
@@ -232,9 +243,9 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-cpex starting", "mode", cfg.Mode, "logLevel", runtime.LogLevel().String())
+	slog.Info("authbridge-cpex starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	runtime.StartHealthServer(inboundH, outboundH)
+	runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)

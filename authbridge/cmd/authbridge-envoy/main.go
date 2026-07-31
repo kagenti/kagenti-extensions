@@ -35,7 +35,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
-	"github.com/rossoctl/cortex/authbridge/authlib/runtime"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -62,8 +62,8 @@ func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
 
-	runtime.InitLogging()
-	runtime.StartSignalToggle()
+	runtimeutil.InitLogging("authbridge-envoy")
+	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
 		log.Fatal("--config is required and must point to a YAML file")
@@ -202,7 +202,10 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := runtime.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
 
 	// Warm the plugin catalog at boot so any factory that violates the
 	// constructor contract surfaces here rather than on the first
@@ -226,9 +229,9 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", runtime.LogLevel().String())
+	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	runtime.StartHealthServer(inboundH, outboundH)
+	runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
