@@ -46,7 +46,7 @@ pipeline:
 | `on_exceed` | no | "deny" | `deny` (block with 403) or `observe` (shadow — log but continue) |
 | `session_ttl_seconds` | no | 7200 | Redis key TTL; should be >= `max_duration_seconds` |
 | `refresh_interval` | no | "5s" | How often to sync local cache from Redis |
-| `redis_unavailable` | no | "fail_open" | `fail_open` or `fail_closed` when Redis is unreachable |
+| `redis_unavailable` | no | "fail_open" | `fail_open` (suppress refresh warnings) or `fail_closed` (log warnings; stale cache retained until Redis recovers) |
 
 At least one of `max_tokens`, `max_calls`, or `max_duration_seconds` must be > 0.
 

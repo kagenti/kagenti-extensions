@@ -1,21 +1,7 @@
-// Package tokenbudget implements a per-session lifetime budget plugin.
-// It enforces cumulative ceilings on tokens consumed, inference calls
-// made, and wall-clock time elapsed — stopping runaway agents before
-// the bill arrives, with zero agent code changes.
-//
-// Architecture: OnResponse accumulates token counts (from inference-parser)
-// into both a local cache and Redis (async). OnRequest evaluates the
-// cached counters against configured limits and returns 403 on breach.
-// Redis provides cross-pod durability (survives restarts); the local
-// cache provides sub-millisecond enforcement on the hot path.
-//
-// Failure model: Redis unavailability does not block agents (fail-open
-// by default). The local cache continues to enforce from its last-known
-// state. On recovery, the periodic refresh replaces cache values with
-// the authoritative store counters.
-//
-// Pipeline position: must run after inference-parser (which populates
-// pctx.Extensions.Inference with token counts from LLM responses).
+// Package tokenbudget enforces per-session lifetime budgets on tokens,
+// inference calls, and wall-clock duration. Must run before inference-parser
+// in the declared plugin order (response path is reverse: inference-parser
+// finalizes counts first, then this plugin reads them).
 package tokenbudget
 
 import (
@@ -49,9 +35,8 @@ type counters struct {
 	startedAt time.Time
 }
 
-// TokenBudget enforces per-session token/call/duration limits.
-// Counters are stored in Redis (keyed by session ID) and cached locally
-// for zero-latency evaluation on the request path.
+// TokenBudget is the plugin state. Redis provides cross-pod durability;
+// the local cache provides zero-I/O enforcement on the request path.
 type TokenBudget struct {
 	cfg   config
 	store storage.Store
@@ -162,17 +147,12 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// OnResponse is a no-op: this plugin implements StreamingResponder, so
-// the framework routes all response handling through OnResponseFrame.
+// OnResponse is a no-op; see OnResponseFrame.
 func (p *TokenBudget) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// OnResponseFrame reads token counts from inference-parser's extension
-// on the last=true finalization call and updates both the local cache
-// (synchronous) and Redis (async goroutine). Intermediate frames are
-// ignored — inference-parser accumulates during streaming and only
-// finalizes its extension on last=true.
+// OnResponseFrame accumulates token counts on finalization (last=true).
 func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context, _ []byte, last bool) pipeline.Action {
 	if !last {
 		return pipeline.Action{Type: pipeline.Continue}
@@ -221,8 +201,7 @@ func (p *TokenBudget) evaluate(c *counters) string {
 	return ""
 }
 
-// accumulate writes counters to Redis asynchronously. On failure, the
-// write is dropped (fail-open) — the local cache still has the data.
+// accumulate writes counters to Redis. On failure, writes are dropped (fail-open).
 func (p *TokenBudget) accumulate(sessionID string, tokens int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -259,9 +238,7 @@ func (p *TokenBudget) refreshLoop(interval time.Duration) {
 	}
 }
 
-// refreshCache polls Redis for each tracked session and replaces local
-// counters with the authoritative store values. This reconciles state
-// across replicas and after pod restarts.
+// refreshCache replaces local counters with authoritative Redis values.
 func (p *TokenBudget) refreshCache() {
 	p.mu.RLock()
 	keys := make([]string, 0, len(p.cache))
@@ -276,10 +253,11 @@ func (p *TokenBudget) refreshCache() {
 		cancel()
 
 		if err != nil {
-			if p.cfg.RedisUnavailable == "fail_open" {
-				continue
+			// TODO: fail_closed should deny requests when Redis is unreachable
+			// and the local cache has no data. Currently both modes retain stale cache.
+			if p.cfg.RedisUnavailable != "fail_open" {
+				p.log.Warn("redis refresh failed", "session", sessionID, "err", err)
 			}
-			p.log.Warn("redis refresh failed", "session", sessionID, "err", err)
 			continue
 		}
 
