@@ -67,31 +67,44 @@ func StartSignalToggle() {
 	}()
 }
 
-// StartHealthServer serves liveness (/healthz) and readiness (/readyz) on addr
-// in a goroutine. Readiness reports 503 while any inbound or outbound plugin is
-// still waiting on a dependency (e.g. a credential file that hasn't landed yet).
-func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) {
+// StartHealthServer binds addr, serves liveness (/healthz) and readiness
+// (/readyz) in a goroutine, and returns the server for graceful shutdown.
+// Readiness reports 503 while any inbound or outbound plugin is still waiting on
+// a dependency (e.g. a credential file that hasn't landed yet). A bind failure
+// is returned so the caller can decide how to handle it; a serve-time failure
+// after bind is logged.
+func StartHealthServer(inboundH, outboundH *pipeline.Holder, addr string) (*http.Server, error) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		if name := inboundH.NotReadyPlugin(); name != "" {
+			http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
+			return
+		}
+		if name := outboundH.NotReadyPlugin(); name != "" {
+			http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			slog.Warn("health server failed", "error", err)
+		slog.Info("health server listening", "addr", listener.Addr().String())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("health server failed", "error", err)
 		}
 	}()
+	return srv, nil
 }
 
 // StartStatServer binds addr for the stats/config-inspection server, serves it

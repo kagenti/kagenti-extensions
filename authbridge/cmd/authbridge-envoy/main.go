@@ -231,7 +231,10 @@ func main() {
 
 	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	if healthErr != nil {
+		log.Fatalf("health server listen: %v", healthErr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -249,6 +252,7 @@ func main() {
 		srv.GracefulStop()
 	}
 	statSrv.Shutdown(shutdownCtx)
+	healthSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
