@@ -34,9 +34,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
 	"sync/atomic"
-	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -58,20 +56,20 @@ const pluginName = "lineage-telemetry"
 // request it forwards to its own app: value = the inbound request span id
 // (the exchange id). The app's propagate-only shim carries tracestate through
 // its per-request causal chain (contextvars), so the member surfaces on
-// exactly the outbound calls that inbound caused — the only wire fact that
-// stays unambiguous under CONCURRENT same-trace inbound exchanges, where the
-// trace-keyed map (one entry per trace) collapses. Outbound parent precedence:
-// stamp > map > wire parent; the chosen source is recorded as the
+// exactly the outbound calls that inbound caused. It is the ONLY mechanism that
+// attributes an outbound to the inbound that caused it: outbound parent
+// precedence is stamp > wire parent, and the chosen source is recorded as the
 // lineage.parent.source fact.
+//
+// A trace-keyed map (one entry per trace, "the last inbound seen") used to sit
+// between the two. It was removed: its answer is correct only while exactly one
+// inbound of that trace is in flight — a precondition it never checked and could
+// not verify — and when it was wrong it produced a real, exported, walkable
+// parent that was simply untrue. Un-stamped outbound now falls to the wire
+// parent, which is an app-internal span this pipeline never exported: the
+// interaction still derives in full, but as a trace entry rather than a child.
+// A visibly missing edge is recoverable; a silently wrong one is not.
 const tracestateStampKey = "kglin"
-
-// inboundSpans is process-wide so the forward-proxy instance (outbound
-// pipeline) can look up spans written by the reverse-proxy instance
-// (inbound pipeline). Both instances run in the same authbridge process
-// but are created separately by the plugin factory. Keyed by trace_id →
-// this pod's inbound request span for that trace. Entries live 5 minutes
-// past exchange finish (see OnFinish) to tolerate SSE-connection drops.
-var inboundSpans sync.Map // map[traceID string]trace.SpanContext
 
 func init() {
 	plugins.RegisterPlugin(pluginName, func() pipeline.Plugin { return NewLineageTelemetry() })
@@ -95,8 +93,6 @@ type exchangeState struct {
 	// (parsers are precedence-ordered, not mutually exclusive — mcp-parser
 	// also matches any JSON-RPC body, including every a2a exchange).
 	protocol string
-	inbound  bool
-	traceID  string
 }
 
 // LineageTelemetry emits OTel spans for each request hop observed by authbridge.
@@ -251,24 +247,22 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		spanKind: spanKind,
 		spanName: spanName,
 		protocol: protocol,
-		inbound:  pctx.Direction == pipeline.Inbound,
-		traceID:  reqCtx.TraceID().String(),
 	})
 	pctx.Observe("recorded_request")
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// spliceParent is the mesh splice — the ONE place the trace-keyed map is read,
-// written, and injected. It (3) selects the request span's parent, (4) emits
-// and immediately ends the request span, (5) publishes it into inboundSpans on
-// inbound, and (6) rewrites the forwarded traceparent to name it on outbound.
-// Returns the request span's context and its span id (the exchange id).
+// spliceParent is the mesh splice. It (3) selects the request span's parent,
+// (4) emits and immediately ends the request span, (5) stamps the forwarded
+// tracestate on inbound, and (6) rewrites the forwarded traceparent to name the
+// request span on outbound. Returns the request span's context and its span id
+// (the exchange id).
 //
 // >>> OPTION-4 DELETION POINT <<<
-// The whole splice — this function plus inboundSpans and the 5-minute TTL in
-// OnFinish — is exactly what a pure read-only sidecar would drop. Deleting this
-// function and its inbound-store / outbound-inject reverts to wire-parent-only
-// propagation. See the splice design note before attempting that spike.
+// The whole splice — this function plus the inbound stamp — is exactly what a
+// pure read-only sidecar would drop. Deleting this function and its stamp /
+// outbound-inject reverts to wire-parent-only propagation. See the splice
+// design note before attempting that spike.
 func (p *LineageTelemetry) spliceParent(
 	ctx context.Context,
 	pctx *pipeline.Context,
@@ -278,9 +272,9 @@ func (p *LineageTelemetry) spliceParent(
 	reqAttrs []attribute.KeyValue,
 ) (trace.SpanContext, string) {
 	// (3) Parent: outbound → the tracestate stamp (exact per-inbound
-	// attribution, survives same-trace concurrency), else this pod's inbound
-	// span for the same trace_id (the map), else the wire parent. Inbound
-	// always uses the wire parent.
+	// attribution, survives same-trace concurrency), else the wire parent.
+	// Inbound always uses the wire parent. There is deliberately no third
+	// option: guessing an attribution is worse than declining to give one.
 	parent := remoteCtx
 	parentSource := "wire"
 	if pctx.Direction == pipeline.Outbound {
@@ -288,9 +282,6 @@ func (p *LineageTelemetry) spliceParent(
 			if psc, ok := stampedParent(rsc); ok {
 				parent = trace.ContextWithRemoteSpanContext(ctx, psc)
 				parentSource = "tracestate"
-			} else if v, ok := inboundSpans.Load(rsc.TraceID().String()); ok {
-				parent = trace.ContextWithRemoteSpanContext(ctx, v.(trace.SpanContext))
-				parentSource = "map"
 			}
 		}
 	}
@@ -308,16 +299,13 @@ func (p *LineageTelemetry) spliceParent(
 	span.SetAttributes(attribute.String("lineage.exchange.id", exchangeID))
 	span.End()
 
-	// (5) Inbound → publish so this pod's outbound spans in the same trace
-	// can splice themselves directly under it, and STAMP the forwarded
-	// request's tracestate with this exchange id so the app couriers exact
-	// per-inbound attribution back to the outbound side (see
-	// tracestateStampKey). The stamp requires a valid wire traceparent —
-	// without one the app's shim starts a fresh root trace and drops the
-	// tracestate anyway. The listener is responsible for propagating this
-	// header mutation to the app (ext_proc emits a SetHeaders diff).
+	// (5) Inbound → STAMP the forwarded request's tracestate with this exchange
+	// id so the app couriers exact per-inbound attribution back to the outbound
+	// side (see tracestateStampKey). The stamp requires a valid wire traceparent
+	// — without one the app's shim starts a fresh root trace and drops the
+	// tracestate anyway. The listener is responsible for propagating this header
+	// mutation to the app (ext_proc emits a SetHeaders diff).
 	if pctx.Direction == pipeline.Inbound {
-		inboundSpans.Store(sc.TraceID().String(), sc)
 		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
 			if ts, err := rsc.TraceState().Insert(tracestateStampKey, sc.SpanID().String()); err == nil {
 				pctx.Headers.Set("tracestate", ts.String())
@@ -379,16 +367,6 @@ func (p *LineageTelemetry) OnFinish(ctx context.Context, pctx *pipeline.Context)
 	state := pipeline.GetState[exchangeState](pctx, pluginName)
 	if state == nil || !state.reqCtx.IsValid() {
 		return
-	}
-
-	// Defer inbound span removal: the SSE connection from the client may be
-	// cut by a proxy/ztunnel idle-timeout before the agent finishes
-	// processing. Deleting immediately would break parent links for outbound
-	// spans emitted after the client connection drops but while the turn is
-	// still running. 5 minutes is well beyond any realistic turn duration.
-	if state.inbound {
-		traceID := state.traceID
-		time.AfterFunc(5*time.Minute, func() { inboundSpans.Delete(traceID) })
 	}
 
 	outcome, status, hasStatus, deniedBy := lineageOutcome(pctx.Outcome())

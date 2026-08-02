@@ -22,7 +22,6 @@ import (
 // so Init is not needed.
 func newTestPlugin(t *testing.T) (*LineageTelemetry, *tracetest.InMemoryExporter) {
 	t.Helper()
-	clearInboundSpans()
 	exp := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	p := NewLineageTelemetry()
@@ -31,15 +30,6 @@ func newTestPlugin(t *testing.T) (*LineageTelemetry, *tracetest.InMemoryExporter
 	p.selfID = "weather-service"
 	p.ready.Store(true)
 	return p, exp
-}
-
-// clearInboundSpans drains the process-global map so tests don't leak
-// parent links into one another.
-func clearInboundSpans() {
-	inboundSpans.Range(func(k, _ any) bool {
-		inboundSpans.Delete(k)
-		return true
-	})
 }
 
 // run drives a full exchange (request pass + finish) through a single-plugin
@@ -237,27 +227,28 @@ func TestStamp_NoWireTraceparentNoStamp(t *testing.T) {
 // map can only hold the later one), then an outbound whose tracestate stamp
 // names the EARLIER inbound. Without the stamp this outbound would collapse
 // onto the map entry — the 1/N misattribution the fanin-test.sh e2e proves.
-func TestStamp_OutboundPrefersStampOverMap(t *testing.T) {
+func TestStamp_OutboundUsesTheStampedInbound(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	// Two inbounds, same trace: the map now holds in2 only.
+	// Two concurrent inbounds on the SAME trace — the case no trace-keyed
+	// structure can disambiguate, and the reason the stamp exists.
 	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "1111111111111111")), allow(200))
 	in1, _ := roleSplit(t, exp.GetSpans())
 	exp.Reset()
 	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "2222222222222222")), allow(200))
 	in2, _ := roleSplit(t, exp.GetSpans())
 
-	// Outbound couriered in1's stamp through the app.
+	// Outbound couriered in1's stamp back through the app. It must parent
+	// under in1 specifically — not in2, not the wire parent.
 	exp.Reset()
 	h := traceparent(traceID, "3333333333333333")
 	h.Set("tracestate", tracestateStampKey+"="+in1.SpanContext.SpanID().String())
-	out := fakeContext(pipeline.Outbound, h)
-	run(t, p, out, allow(200))
+	run(t, p, fakeContext(pipeline.Outbound, h), allow(200))
 	outReq, _ := roleSplit(t, exp.GetSpans())
 
 	if outReq.Parent.SpanID() != in1.SpanContext.SpanID() {
-		t.Errorf("parent = %s, want stamped inbound %s (map held %s)",
+		t.Errorf("parent = %s, want stamped inbound %s (the other in-flight inbound was %s)",
 			outReq.Parent.SpanID(), in1.SpanContext.SpanID(), in2.SpanContext.SpanID())
 	}
 	if got := attrStr(outReq, "lineage.parent.source"); got != "tracestate" {
@@ -265,29 +256,34 @@ func TestStamp_OutboundPrefersStampOverMap(t *testing.T) {
 	}
 }
 
-func TestStamp_MalformedFallsBackToMap(t *testing.T) {
+func TestStamp_MalformedFallsBackToWire(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const wireParent = "3333333333333333"
 
+	// An inbound on this trace exists — and must NOT be used, because a
+	// malformed stamp means "unknown", not "guess for me".
 	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "1111111111111111")), allow(200))
 	in1, _ := roleSplit(t, exp.GetSpans())
 
 	exp.Reset()
-	h := traceparent(traceID, "3333333333333333")
+	h := traceparent(traceID, wireParent)
 	h.Set("tracestate", tracestateStampKey+"=nothex")
-	out := fakeContext(pipeline.Outbound, h)
-	run(t, p, out, allow(200))
+	run(t, p, fakeContext(pipeline.Outbound, h), allow(200))
 	outReq, _ := roleSplit(t, exp.GetSpans())
 
-	if outReq.Parent.SpanID() != in1.SpanContext.SpanID() {
-		t.Errorf("parent = %s, want map inbound %s", outReq.Parent.SpanID(), in1.SpanContext.SpanID())
+	if got := outReq.Parent.SpanID().String(); got != wireParent {
+		t.Errorf("parent = %s, want wire parent %s", got, wireParent)
 	}
-	if got := attrStr(outReq, "lineage.parent.source"); got != "map" {
-		t.Errorf("lineage.parent.source = %q, want map", got)
+	if outReq.Parent.SpanID() == in1.SpanContext.SpanID() {
+		t.Error("malformed stamp silently inherited this pod's inbound span")
+	}
+	if got := attrStr(outReq, "lineage.parent.source"); got != "wire" {
+		t.Errorf("lineage.parent.source = %q, want wire", got)
 	}
 }
 
-func TestStamp_ParentSourceWireOnMapMiss(t *testing.T) {
+func TestStamp_ParentSourceWireWhenUnstamped(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	out := fakeContext(pipeline.Outbound, traceparent("cccccccccccccccccccccccccccccccc", "1111111111111111"))
 	run(t, p, out, allow(200))
@@ -297,34 +293,32 @@ func TestStamp_ParentSourceWireOnMapMiss(t *testing.T) {
 	}
 }
 
-func TestSplice_ParentMapHitVsMiss(t *testing.T) {
+// TestSplice_UnstampedOutboundNeverInheritsInbound is the regression guard for
+// the removal of the trace-keyed map. An outbound with no stamp must fall to the
+// wire parent EVEN WHEN this pod has an inbound span for the same trace. The old
+// map answered such cases from "the last inbound seen", which is correct only
+// while exactly one inbound is in flight — a precondition it never checked. A
+// missing edge is recoverable; a confidently wrong one is not.
+func TestSplice_UnstampedOutboundNeverInheritsInbound(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const wireParent = "3333333333333333"
 
-	// Miss: outbound on a trace with no inbound span → parent is the wire parent.
-	const wireParent = "1111111111111111"
-	missCtx := fakeContext(pipeline.Outbound, traceparent(traceID, wireParent))
-	run(t, p, missCtx, allow(200))
-	missReq, _ := roleSplit(t, exp.GetSpans())
-	if got := missReq.Parent.SpanID().String(); got != wireParent {
-		t.Errorf("map miss: parent = %s, want wire parent %s", got, wireParent)
-	}
-
-	// Establish this pod's inbound span for the trace.
-	exp.Reset()
-	inCtx := fakeContext(pipeline.Inbound, traceparent(traceID, "2222222222222222"))
-	run(t, p, inCtx, allow(200))
+	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceID, "2222222222222222")), allow(200))
 	inReq, _ := roleSplit(t, exp.GetSpans())
-	inboundSpanID := inReq.SpanContext.SpanID()
 
-	// Hit: outbound on the same trace re-parents under the inbound span,
-	// ignoring the wire parent it arrived with.
 	exp.Reset()
-	hitCtx := fakeContext(pipeline.Outbound, traceparent(traceID, "3333333333333333"))
-	run(t, p, hitCtx, allow(200))
-	hitReq, _ := roleSplit(t, exp.GetSpans())
-	if hitReq.Parent.SpanID() != inboundSpanID {
-		t.Errorf("map hit: parent = %s, want inbound span %s", hitReq.Parent.SpanID(), inboundSpanID)
+	run(t, p, fakeContext(pipeline.Outbound, traceparent(traceID, wireParent)), allow(200))
+	outReq, _ := roleSplit(t, exp.GetSpans())
+
+	if outReq.Parent.SpanID() == inReq.SpanContext.SpanID() {
+		t.Fatal("un-stamped outbound inherited this pod's inbound span — the map is back")
+	}
+	if got := outReq.Parent.SpanID().String(); got != wireParent {
+		t.Errorf("parent = %s, want wire parent %s", got, wireParent)
+	}
+	if got := attrStr(outReq, "lineage.parent.source"); got != "wire" {
+		t.Errorf("lineage.parent.source = %q, want wire", got)
 	}
 }
 
@@ -333,16 +327,18 @@ func TestSplice_ConcurrentTracesNeverCross(t *testing.T) {
 	const traceA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const traceB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
-	// Two inbound spans on two traces.
+	// One inbound on each trace.
 	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceA, "1111111111111111")), allow(200))
 	inA, _ := roleSplit(t, exp.GetSpans())
 	exp.Reset()
 	run(t, p, fakeContext(pipeline.Inbound, traceparent(traceB, "2222222222222222")), allow(200))
 	inB, _ := roleSplit(t, exp.GetSpans())
 
-	// Outbound on trace A parents under inbound A, never B.
+	// Each outbound couriers its own trace's stamp back.
 	exp.Reset()
-	run(t, p, fakeContext(pipeline.Outbound, traceparent(traceA, "3333333333333333")), allow(200))
+	hA := traceparent(traceA, "3333333333333333")
+	hA.Set("tracestate", tracestateStampKey+"="+inA.SpanContext.SpanID().String())
+	run(t, p, fakeContext(pipeline.Outbound, hA), allow(200))
 	outA, _ := roleSplit(t, exp.GetSpans())
 	if outA.Parent.SpanID() != inA.SpanContext.SpanID() {
 		t.Errorf("outbound A parent = %s, want inbound A %s", outA.Parent.SpanID(), inA.SpanContext.SpanID())
@@ -350,10 +346,14 @@ func TestSplice_ConcurrentTracesNeverCross(t *testing.T) {
 	if outA.Parent.SpanID() == inB.SpanContext.SpanID() {
 		t.Error("outbound A crossed into inbound B's span")
 	}
+	if outA.SpanContext.TraceID().String() != traceA {
+		t.Errorf("outbound A trace = %s, want %s", outA.SpanContext.TraceID(), traceA)
+	}
 
-	// Outbound on trace B parents under inbound B.
 	exp.Reset()
-	run(t, p, fakeContext(pipeline.Outbound, traceparent(traceB, "4444444444444444")), allow(200))
+	hB := traceparent(traceB, "4444444444444444")
+	hB.Set("tracestate", tracestateStampKey+"="+inB.SpanContext.SpanID().String())
+	run(t, p, fakeContext(pipeline.Outbound, hB), allow(200))
 	outB, _ := roleSplit(t, exp.GetSpans())
 	if outB.Parent.SpanID() != inB.SpanContext.SpanID() {
 		t.Errorf("outbound B parent = %s, want inbound B %s", outB.Parent.SpanID(), inB.SpanContext.SpanID())
