@@ -225,6 +225,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					select {
 					case <-drainDone:
 					case <-time.After(15 * time.Second):
+						// KNOWN ISSUE (flagged in the pre-push audit, 2026-08-02):
+						// the drain goroutine is still running here — RealClose
+						// below closes the reader under it and applyToContext
+						// reads shared capture state without synchronization.
+						// Logged loudly so the condition is at least visible;
+						// the redesign is deferred for review with the original
+						// author (see the lineage PR's known-issues section).
+						slog.Warn("reverse-proxy: SSE drain timed out after 15s; final event may be lost or torn",
+							"host", r.Host, "path", r.URL.Path)
 					}
 				}
 				// Close the intercepted backend body now that we're done.

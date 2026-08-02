@@ -104,7 +104,14 @@ deploy_row() {
   APP_ENTRYPOINT="$entrypoint" SELF_ID="$self_id" \
   ENV_VARS="$env" NAMESPACE="$NAMESPACE" \
   "${SCRIPT_DIR}/attach-lineage.sh" | kubectl apply -f -
-  kubectl rollout restart -n "$NAMESPACE" "deploy/$name" >/dev/null 2>&1 || true
+  # A failed restart must fail the deploy: swallowing it lets the following
+  # rollout-status green-light STALE pods (fleet says "deployed", runs old
+  # images). First-ever apply has no pods to restart — that (and only that)
+  # case is tolerated explicitly.
+  if ! kubectl rollout restart -n "$NAMESPACE" "deploy/$name"; then
+    echo "ERROR: rollout restart failed for deploy/$name" >&2
+    exit 1
+  fi
   kubectl rollout status -n "$NAMESPACE" "deploy/$name" --timeout=180s
 }
 

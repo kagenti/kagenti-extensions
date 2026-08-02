@@ -68,14 +68,30 @@ podman build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
 
 # 2) Read the base image's own Cmd and prepend the opentelemetry-instrument
 #    wrapper, producing an exec-form JSON array for a thin CMD-override layer.
+#    An ENTRYPOINT-based image cannot be wrapped this way (the wrapper would
+#    land in the args, not the command) — refuse rather than mis-wrap.
+BASE_ENTRYPOINT_JSON="$(podman inspect --format '{{json .Config.Entrypoint}}' "${BASE_IMAGE}")"
+case "${BASE_ENTRYPOINT_JSON}" in
+  null|'""'|'[]') ;;
+  *)
+    echo "ERROR: ${BASE_IMAGE} declares an ENTRYPOINT (${BASE_ENTRYPOINT_JSON})." >&2
+    echo "       CMD-prepend wrapping would corrupt it. Wrap the entrypoint instead" >&2
+    echo "       (see attach-lineage.sh) or clear the ENTRYPOINT in an overlay." >&2
+    exit 1;;
+esac
 BASE_CMD_JSON="$(podman inspect --format '{{json .Config.Cmd}}' "${BASE_IMAGE}")"
 WRAPPED_CMD="$(
   BASE_CMD_JSON="${BASE_CMD_JSON}" python3 - <<'PY'
 import json, os, sys
 base = json.loads(os.environ["BASE_CMD_JSON"] or "null")
 if not base:
-    # Fall back to the kagenti backend's known CMD if the base declared none.
-    base = ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Never fabricate a command for an image we don't know: a guessed CMD
+    # fails later as an unrelated-looking pod crash. Refuse loudly instead.
+    sys.stderr.write(
+        "ERROR: base image declares no CMD; refusing to invent one.\n"
+        "       Inspect the image and wrap its real command explicitly.\n"
+    )
+    sys.exit(1)
 # Disable ALL THREE signal exporters, not just traces: the distro defaults
 # metrics+logs to OTLP, and we install only instrumentors (no OTLP exporter),
 # so `--traces_exporter none` alone throws RuntimeError 'otlp_proto_grpc not

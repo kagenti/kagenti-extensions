@@ -359,8 +359,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	runResponsePipeline := func() {
 		respAction := s.OutboundPipeline.RunResponse(r.Context(), pctx)
 		if respAction.Type == pipeline.Reject {
-			// Too late to reject an already-started response; just log.
-			slog.Debug("forward-proxy: response pipeline rejected after headers sent", "host", r.Host)
+			// Too late to reject an already-started response — headers are on
+			// the wire. A denial swallowed here is a security-relevant event,
+			// so it logs at WARN, never debug.
+			slog.Warn("forward-proxy: response pipeline REJECTED after headers sent; response already delivered",
+				"host", r.Host, "path", r.URL.Path)
 		}
 		if pctx.ResponseBodyMutated() {
 			// For non-SSE bodies the mutation can still rewrite Content-Length.

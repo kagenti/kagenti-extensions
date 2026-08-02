@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"maps"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -49,10 +51,13 @@ func allow(status int) pipeline.Outcome {
 	return pipeline.Outcome{FinalAction: pipeline.OutcomeAllow, StatusCode: status}
 }
 
+// fakeContext mirrors what the real listeners supply. Deliberately NO Method:
+// no listener populates pipeline.Context.Method today, so http.method is never
+// emitted in production — the fixture must not fabricate a field the wire
+// never carries (that lie kept the http.method contract gap invisible).
 func fakeContext(dir pipeline.Direction, headers http.Header) *pipeline.Context {
 	return &pipeline.Context{
 		Direction: dir,
-		Method:    "POST",
 		Host:      "test-service:8000",
 		Path:      "/test",
 		Headers:   headers,
@@ -450,7 +455,12 @@ func TestRequestFacts_MCPWithCapture(t *testing.T) {
 	checkAttr(t, req, "lineage.protocol", "mcp")
 	checkAttr(t, req, "mcp.method", "tools/call")
 	checkAttr(t, req, "mcp.tool", "get_weather")
-	checkAttr(t, req, "http.method", "POST")
+	// http.method: contract-reserved. No listener populates pctx.Method, so
+	// the fact must be ABSENT — asserting a value here would require the
+	// fixture to fabricate a field the wire never carries.
+	if _, ok := findAttr(req, "http.method"); ok {
+		t.Error("http.method emitted, but no listener populates pctx.Method — fixture drift?")
+	}
 	checkAttr(t, req, "url.path", "/mcp")
 	checkAttr(t, req, "lineage.self.id", "weather-service")
 	checkAttr(t, req, "lineage.peer.host", "weather-tool-mcp.team1.svc:8000")
@@ -739,4 +749,72 @@ func headersEqual(a, b http.Header) bool {
 		}
 	}
 	return true
+}
+
+// TestInit_RefusesToStartWithoutIdentity locks the v1.3 rule at the identity
+// boundary: a pod whose self identity cannot be resolved must fail at boot,
+// never serve traffic under a plausible-but-wrong label (the old behavior
+// emitted lineage.self.id="agent" from the empty-string serviceLabel).
+func TestInit_RefusesToStartWithoutIdentity(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     Config
+		wantErr bool
+	}{
+		{"inline self_id starts", Config{OTelEndpoint: "localhost:4317", SelfID: "weather-service"}, false},
+		{"missing self_id_file refuses", Config{OTelEndpoint: "localhost:4317", SelfIDFile: t.TempDir() + "/absent.txt"}, true},
+		{"no identity source refuses", Config{OTelEndpoint: "localhost:4317"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := NewLineageTelemetry()
+			p.cfg = tc.cfg
+			err := p.Init(context.Background())
+			if p.tp != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				_ = p.tp.Shutdown(ctx)
+				cancel()
+			}
+			if tc.wantErr && err == nil {
+				t.Fatal("Init succeeded without a resolvable identity")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("Init failed with a valid inline self_id: %v", err)
+			}
+			if tc.wantErr && p.Ready() {
+				t.Error("plugin reports Ready after a refused Init")
+			}
+		})
+	}
+}
+
+// TestInit_ReadsSelfIDFile covers the operator-injected path (file, not inline).
+func TestInit_ReadsSelfIDFile(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/client-id.txt"
+	if err := os.WriteFile(path, []byte("weather-service\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := NewLineageTelemetry()
+	p.cfg = Config{OTelEndpoint: "localhost:4317", SelfIDFile: path}
+	if err := p.Init(context.Background()); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	_ = p.tp.Shutdown(ctx)
+	cancel()
+	if p.selfID != "weather-service" {
+		t.Errorf("selfID = %q, want trimmed file content", p.selfID)
+	}
+}
+
+// TestConfig_UnknownKeysRefused: a typo'd knob must be a boot error, not a
+// silent run-with-defaults.
+func TestConfig_UnknownKeysRefused(t *testing.T) {
+	if _, err := decodeConfig([]byte(`{"capture-io": true}`)); err == nil {
+		t.Fatal("unknown config key accepted silently")
+	}
+	if _, err := decodeConfig([]byte(`{"capture_io": true, "self_id": "x"}`)); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
 }

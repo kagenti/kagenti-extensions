@@ -166,16 +166,21 @@ func (p *LineageTelemetry) Init(ctx context.Context) error {
 	)
 	p.tracer = p.tp.Tracer("authbridge/" + pluginName)
 
-	// Resolve self identity for the lineage.self.id fact.
+	// Resolve self identity for the lineage.self.id fact. Identity is the
+	// one fact every downstream derivation keys on, so an unresolvable
+	// identity refuses to start rather than serving traffic under a
+	// plausible-but-wrong label ("no mechanism may guess", contract v1.3).
 	if p.cfg.SelfID != "" {
 		p.selfID = p.cfg.SelfID
 	} else if p.cfg.SelfIDFile != "" {
-		if raw, err := os.ReadFile(p.cfg.SelfIDFile); err == nil {
-			p.selfID = strings.TrimSpace(string(raw))
-		} else {
-			slog.Warn("lineage-telemetry: could not read self_id_file; lineage.self.id will be empty",
-				"path", p.cfg.SelfIDFile, "error", err)
+		raw, err := os.ReadFile(p.cfg.SelfIDFile)
+		if err != nil {
+			return fmt.Errorf("lineage-telemetry: no inline self_id and self_id_file unreadable: %w", err)
 		}
+		p.selfID = strings.TrimSpace(string(raw))
+	}
+	if p.selfID == "" {
+		return fmt.Errorf("lineage-telemetry: self identity unresolved (empty self_id and self_id_file %q)", p.cfg.SelfIDFile)
 	}
 
 	p.ready.Store(true)
@@ -309,6 +314,12 @@ func (p *LineageTelemetry) spliceParent(
 		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
 			if ts, err := rsc.TraceState().Insert(tracestateStampKey, sc.SpanID().String()); err == nil {
 				pctx.Headers.Set("tracestate", ts.String())
+			} else {
+				// Stamp attempted and refused (tracestate full or a member
+				// malformed, W3C caps at 32 members / 512 bytes). Without this
+				// line the outcome is indistinguishable from "app has no shim".
+				slog.Warn("lineage-telemetry: tracestate stamp rejected; downstream outbound will attribute as wire",
+					"exchange_id", exchangeID, "error", err)
 			}
 		}
 	}
@@ -325,7 +336,7 @@ func (p *LineageTelemetry) spliceParent(
 // stampedParent resolves the tracestate stamp on an outbound wire context:
 // the inbound exchange id this pod's sidecar wrote into tracestate on the
 // forwarded request, carried back by the app's shim. Returns ok=false when
-// the member is absent or malformed (caller falls back to the map).
+// the member is absent or malformed (caller falls back to the wire parent).
 func stampedParent(rsc trace.SpanContext) (trace.SpanContext, bool) {
 	raw := rsc.TraceState().Get(tracestateStampKey)
 	if raw == "" {

@@ -34,23 +34,39 @@ for spec in "${SPECS[@]}"; do
   IFS='|' read -r name kind settle payload <<< "$spec"
   selected "$name" || continue
   echo ""; echo "======== verifying $name ($kind) ========"
-  out=""
+  # The harness must distinguish "test crashed" from "test ran and scored":
+  # a swallowed exit code here would mask every failure it exists to catch.
+  out="" rc=0
   if [ "$kind" = "a2a" ]; then
     out=$(SELF_ID="$name" TARGET="${name}.${NAMESPACE}.svc.cluster.local:8080" \
           PROMPT="$payload" SETTLE="$settle" N="$N" NAMESPACE="$NAMESPACE" \
-          "${SCRIPT_DIR}/concurrency-test.sh" 2>&1) || true
+          "${SCRIPT_DIR}/concurrency-test.sh" 2>&1) || rc=$?
     score=$(printf '%s\n' "$out" | grep -oE 'CORRECT PAIRING: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
   else
     out=$(FRONT=wiki-mcp BACKEND=wiki-service \
           MCP_URL="http://wiki-mcp.${NAMESPACE}.svc.cluster.local:8000/mcp" \
           TOOL="$payload" DRIVER_IMAGE=docker.io/library/wiki_memory_tool-otel:latest \
           SETTLE="$settle" N="$N" NAMESPACE="$NAMESPACE" \
-          "${SCRIPT_DIR}/concurrency-test-mcp.sh" 2>&1) || true
+          "${SCRIPT_DIR}/concurrency-test-mcp.sh" 2>&1) || rc=$?
     score=$(printf '%s\n' "$out" | grep -oE 'CORRECT 2-SERVICE PROPAGATION: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
   fi
+  if [ "$rc" -ne 0 ] && [ -z "$score" ]; then
+    echo "---- test CRASHED (exit $rc); full output: ----"
+    printf '%s\n' "$out"
+    results+=("${name}|CRASH(rc=$rc)")
+    continue
+  fi
   printf '%s\n' "$out" | tail -3
-  results+=("${name}|${score:-ERROR}")
+  results+=("${name}|${score:-NO-SCORE(rc=$rc)}")
 done
+
+# An empty selection verifying nothing must never report harmony.
+if [ "${#results[@]}" -eq 0 ]; then
+  echo "ERROR: selection matched no entry points." >&2
+  echo "Valid names:" >&2
+  for spec in "${SPECS[@]}"; do echo "  ${spec%%|*}" >&2; done
+  exit 1
+fi
 
 echo ""
 echo "================= HARMONY TABLE ================="

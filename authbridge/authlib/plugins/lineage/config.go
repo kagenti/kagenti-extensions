@@ -1,6 +1,7 @@
 package lineage
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -61,7 +62,11 @@ func decodeConfig(raw json.RawMessage) (Config, error) {
 	if len(raw) == 0 {
 		return cfg, nil
 	}
-	if err := json.Unmarshal(raw, &cfg); err != nil {
+	// Unknown keys are a boot error: a typo'd knob (capture-io, selfid_file)
+	// must not silently run with defaults.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("lineage-telemetry config: %w", err)
 	}
 	if cfg.OTelEndpoint == "" {
