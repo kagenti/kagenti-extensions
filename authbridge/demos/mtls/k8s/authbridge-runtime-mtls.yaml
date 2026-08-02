@@ -1,0 +1,29 @@
+# Minimal authbridge-runtime config for the envoy-sidecar mTLS demo.
+#
+# This config is consumed by the authbridge-envoy binary inside the
+# combined image — it does NOT carry an mtls block (envoy-sidecar
+# doesn't have one — mTLS is configured at the Envoy data-plane level
+# via envoy-config-mtls.yaml). Plugin pipelines are empty: this demo
+# tests TLS termination only, no token exchange or JWT validation.
+# The Envoy config has no ext_proc filter, so authbridge-envoy is
+# never invoked anyway.
+#
+# `spiffe: {}` (empty block) starts the in-process spiffe Provider
+# with default settings: socket /spiffe-workload-api/spire-agent.sock,
+# mirror_dir /opt. The demo pods mount /opt as an emptyDir (RW).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authbridge-runtime-mtls
+  namespace: team1
+  labels:
+    app.kubernetes.io/part-of: mtls-demo
+data:
+  config.yaml: |
+    mode: envoy-sidecar
+    pipeline:
+      inbound:
+        plugins: []
+      outbound:
+        plugins: []
+    spiffe: {}

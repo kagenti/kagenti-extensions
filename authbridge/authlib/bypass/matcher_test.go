@@ -34,6 +34,7 @@ func TestMatch(t *testing.T) {
 		{"/healthz", true},
 		{"/readyz", true},
 		{"/livez", true},
+		{"/metrics", true},
 
 		// Non-bypass paths
 		{"/test", false},
@@ -43,11 +44,15 @@ func TestMatch(t *testing.T) {
 		// Query string stripping
 		{"/healthz?verbose=true", true},
 		{"/.well-known/agent.json?format=json", true},
+		{"/metrics?format=prometheus", true},
 
 		// Path normalization (security)
 		{"//healthz", true},
 		{"/./healthz", true},
 		{"/foo/../healthz", true},
+
+		// Sub-paths of /metrics are NOT bypassed (exact match only)
+		{"/metrics/cadvisor", false},
 
 		// Well-known does NOT match nested paths (path.Match * doesn't cross /)
 		{"/.well-known/foo/bar", false},
@@ -81,5 +86,42 @@ func TestMatch_CustomPatterns(t *testing.T) {
 	}
 	if m.Match("/private/data") {
 		t.Error("expected /private/data to not match")
+	}
+}
+
+func TestNewMatcher_RejectsFootgunPatterns(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{"star", "*"},
+		{"slash-star", "/*"},
+		{"empty", ""},
+		{"whitespace-only", "  "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewMatcher([]string{tt.pattern})
+			if err == nil {
+				t.Errorf("NewMatcher(%q) should return error for match-all pattern", tt.pattern)
+			}
+		})
+	}
+}
+
+func TestNewMatcher_AllowsSpecificStar(t *testing.T) {
+	_, err := NewMatcher([]string{"/.well-known/*"})
+	if err != nil {
+		t.Fatalf("specific star pattern should be allowed: %v", err)
+	}
+}
+
+func TestNewMatcher_TrimsWhitespace(t *testing.T) {
+	m, err := NewMatcher([]string{" /healthz "})
+	if err != nil {
+		t.Fatalf("whitespace-padded pattern should be accepted: %v", err)
+	}
+	if !m.Match("/healthz") {
+		t.Error("trimmed pattern should match /healthz")
 	}
 }

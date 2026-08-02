@@ -6,9 +6,9 @@
 //
 // Mode is hardcoded to envoy-sidecar; YAML configs that specify a
 // different mode are rejected at boot. For proxy-sidecar mode (HTTP
-// forward/reverse proxies, no Envoy), use cmd/authbridge-proxy. For a
-// size-optimized proxy-sidecar build with parsers dropped, use
-// cmd/authbridge-lite.
+// forward/reverse proxies, no Envoy), use cmd/authbridge-proxy — which
+// also produces the size-optimized authbridge-lite image when built
+// with exclude_plugin_* tags.
 package main
 
 import (
@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -31,81 +30,56 @@ import (
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/observe"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/reloader"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/sessionapi"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
+	"github.com/rossoctl/cortex/authbridge/authlib/shared"
+	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 
 	// Only the ext_proc listener is compiled in (no ext_authz, no
 	// HTTP proxies).
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/listener/extproc"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/extproc"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
 
 	// Plugins. Auth gates first, then the protocol parsers that
 	// supply session-event context for abctl.
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/a2aparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/ibac"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/inferenceparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/lineage"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/mcpparser"
-	_ "github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/a2aparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/inferenceparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/lineage"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/mcpparser"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/opa"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/sparc"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenbroker"
+	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
-
-var logLevel = new(slog.LevelVar)
-
-func initLogging() {
-	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		logLevel.Set(slog.LevelInfo)
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-func startSignalToggle() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGUSR1)
-	go func() {
-		for range sigCh {
-			if logLevel.Level() == slog.LevelDebug {
-				logLevel.Set(slog.LevelInfo)
-				slog.Info("log level toggled to INFO (send SIGUSR1 to switch back to DEBUG)")
-			} else {
-				logLevel.Set(slog.LevelDebug)
-				slog.Info("log level toggled to DEBUG (send SIGUSR1 to switch back to INFO)")
-			}
-		}
-	}()
-}
 
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
 
-	initLogging()
-	startSignalToggle()
+	runtimeutil.InitLogging("authbridge-envoy")
+	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required")
+		log.Fatal("--config is required and must point to a YAML file")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured.
-	// envoy-sidecar mode currently doesn't terminate mTLS at this
-	// process — Envoy does TCP passthrough — so X509Source() is unused
+	// envoy-sidecar mode terminates mTLS in Envoy itself (via the
+	// file-based DownstreamTlsContext / UpstreamTlsContext referencing
+	// /opt/svid*.pem in the rendered envoy-config) — this binary
+	// doesn't see the TLS bytes directly, so X509Source() isn't read
 	// here. The Provider is still needed because token-exchange's
 	// spiffe identity path consumes a JWTSource via DI, and the file
-	// mirror keeps /opt/jwt_svid.token (and the X.509 SVID files)
-	// fresh on disk for Envoy and downstream consumers.
+	// mirror is what keeps /opt/svid.pem, /opt/svid_key.pem,
+	// /opt/svid_bundle.pem, and /opt/jwt_svid.token fresh on disk for
+	// Envoy and other consumers.
 	//
 	// We need cfg first to read the spiffe block, so do a one-shot
 	// Load before buildPipelines runs (buildPipelines re-Loads
@@ -115,7 +89,7 @@ func main() {
 	// instances.
 	bootCfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("initial config load: %v", err)
+		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
 	var provider *spiffe.Provider
 	if bootCfg.SPIFFE != nil {
@@ -149,6 +123,7 @@ func main() {
 		if err := config.Validate(c); err != nil {
 			return nil, nil, nil, err
 		}
+		config.WarnEmptyPipelines(c, slog.Default())
 		in, err := plugins.BuildWithSPIFFE(c.Pipeline.Inbound.Plugins, provider)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("inbound: %w", err)
@@ -194,7 +169,7 @@ func main() {
 				slog.Warn("invalid session.ttl, using default", "value", cfg.Session.TTL, "error", err)
 			}
 		}
-		maxEvents := 100
+		maxEvents := 500 // raised from 100: recording every message (incl. no-plugin-activity) ~doubles volume
 		if cfg.Session.MaxEvents > 0 {
 			maxEvents = cfg.Session.MaxEvents
 		}
@@ -208,15 +183,35 @@ func main() {
 		slog.Info("session tracking disabled")
 	}
 
+	store := shared.New()
+	defer store.Close() // stop the TTL janitor on normal main return
+
+	// SkipHosts: outbound destinations that bypass the pipeline AND
+	// session recording entirely. See ListenerConfig.SkipHosts for the
+	// motivating case (chatty observability sidecars evicting the
+	// inbound A2A user intent from the session FIFO).
+	skipHosts, err := skiphost.New(cfg.Listener.SkipHosts)
+	if err != nil {
+		log.Fatalf("listener.skip_hosts: %v", err)
+	}
+
 	var grpcServers []*grpc.Server
-	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, cfg.Listener.ExtProcAddr))
+	grpcServers = append(grpcServers, startGRPCExtProc(inboundH, outboundH, sessions, store, skipHosts, cfg.Listener.ExtProcAddr))
 
 	statsProvider := func() *auth.Stats {
 		sources := plugins.CollectStats(inboundH.Load())
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
+
+	// Warm the plugin catalog at boot so any factory that violates the
+	// constructor contract surfaces here rather than on the first
+	// /v1/plugins request.
+	plugins.WarmCatalog()
 
 	var sessionAPISrv *sessionapi.Server
 	if cfg.Listener.SessionAPIAddr != "" && sessions != nil {
@@ -224,6 +219,7 @@ func main() {
 			cfg.Listener.SessionAPIAddr,
 			sessions,
 			sessionapi.WithPipelines(inboundH, outboundH),
+			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -234,29 +230,12 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
-			slog.Warn("health server failed", "error", err)
-		}
-	}()
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	if healthErr != nil {
+		log.Fatalf("health server listen: %v", healthErr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -274,6 +253,7 @@ func main() {
 		srv.GracefulStop()
 	}
 	statSrv.Shutdown(shutdownCtx)
+	healthSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
@@ -286,12 +266,14 @@ func main() {
 	}
 }
 
-func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, addr string) *grpc.Server {
+func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Store, store pipeline.SharedStore, skipHosts *skiphost.Matcher, addr string) *grpc.Server {
 	srv := grpc.NewServer()
 	extprocv3.RegisterExternalProcessorServer(srv, &extproc.Server{
 		InboundPipeline:  inbound,
 		OutboundPipeline: outbound,
 		Sessions:         sessions,
+		Shared:           store,
+		SkipHosts:        skipHosts,
 	})
 	registerHealth(srv)
 	reflection.Register(srv)
@@ -304,18 +286,6 @@ func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Stor
 		slog.Info("ext_proc gRPC listening", "addr", addr)
 		if err := srv.Serve(lis); err != nil {
 			log.Fatalf("ext_proc serve: %v", err)
-		}
-	}()
-	return srv
-}
-
-func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
-	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
 		}
 	}()
 	return srv

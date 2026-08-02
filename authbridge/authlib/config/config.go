@@ -5,10 +5,11 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"gopkg.in/yaml.v3"
 )
 
@@ -37,6 +38,60 @@ type Config struct {
 	// = today's spiffe-helper-driven behavior (until the chart/operator
 	// follow-ups land and start populating the block).
 	SPIFFE *SPIFFEConfig `yaml:"spiffe,omitempty" json:"spiffe,omitempty"`
+	// TLSBridge, when non-nil and Enabled, terminates agent outbound TLS so the
+	// outbound pipeline sees decrypted HTTPS. See docs/.../tlsbridge-design.md.
+	TLSBridge *TLSBridgeConfig `yaml:"tls_bridge,omitempty" json:"tls_bridge,omitempty"`
+}
+
+// TLSBridgeConfig configures the outbound TLS bridge (TLS termination of
+// agent egress — formerly "MITM" — so the outbound plugin pipeline sees
+// decrypted HTTPS).
+type TLSBridgeConfig struct {
+	// Mode is the bridge posture: "disabled" (off) or "enabled" (intercept all
+	// eligible egress on the configured Ports). Empty == disabled.
+	Mode string `yaml:"mode" json:"mode"` // disabled | enabled
+	// CADir holds the per-agent signing CA, mounted from the operator's
+	// cert-manager Secret. The bridge reads tls.crt + tls.key (to sign leaves);
+	// ca.crt is the trust cert handed to the agent. cert-manager Secret key
+	// conventions, so only the directory is configured.
+	CADir string `yaml:"ca_dir" json:"ca_dir"`
+	// GenerateCA, when true, makes the bridge mint and persist a self-signed CA
+	// into CADir (tls.crt/tls.key/ca.crt) if those files are absent, instead of
+	// failing at startup. For standalone / demo use only — in-cluster the CA is
+	// a mounted cert-manager Secret and this stays false so a missing Secret
+	// fails loudly rather than silently forging leaves under an untrusted CA.
+	// CADir should persist across restarts: on ephemeral storage (e.g. an
+	// emptyDir) a fresh CA is minted each boot, so clients must re-trust the
+	// new ca.crt.
+	GenerateCA bool `yaml:"generate_ca" json:"generate_ca"`
+	// UpstreamCABundle is an extra-roots PEM file for re-origination (private-CA
+	// origins the agent trusts); empty == system roots only.
+	UpstreamCABundle string `yaml:"upstream_ca_bundle" json:"upstream_ca_bundle"`
+	// PassthroughHosts are hosts to tunnel (never intercept). Distinct from
+	// listener.skip_hosts, which bypasses the whole pipeline; these still run the
+	// egress gate, they just aren't TLS-terminated.
+	PassthroughHosts []string `yaml:"passthrough_hosts" json:"passthrough_hosts"`
+	// Ports is the set of TCP ports to intercept as TLS. Empty => {443, 8443}.
+	// Only HTTP(S)-bearing ports belong here: the bridge serves the decrypted
+	// stream as HTTP/1.1 or h2, so terminating a non-HTTP TLS protocol (LDAPS,
+	// SMTPS, DB-over-TLS, …) would break it.
+	Ports []int `yaml:"ports" json:"ports"`
+}
+
+// Validate is called from the loader when TLSBridge != nil.
+func (b *TLSBridgeConfig) Validate() error {
+	if b.Mode != "" && b.Mode != "disabled" && b.Mode != "enabled" {
+		return fmt.Errorf("tls_bridge.mode must be 'disabled' or 'enabled', got %q", b.Mode)
+	}
+	if b.Mode == "enabled" && b.CADir == "" {
+		return fmt.Errorf("tls_bridge.mode=enabled requires ca_dir")
+	}
+	for _, p := range b.Ports {
+		if p < 1 || p > 65535 {
+			return fmt.Errorf("tls_bridge.ports: %d is out of range 1-65535", p)
+		}
+	}
+	return nil
 }
 
 // MTLSMode names the inbound + outbound TLS posture. Vocabulary
@@ -152,7 +207,7 @@ type SessionConfig struct {
 	// "user didn't say" with "user said false" and silently flip the default.
 	Enabled     *bool  `yaml:"enabled" json:"enabled"`
 	TTL         string `yaml:"ttl" json:"ttl"`                   // duration string; default: 30m
-	MaxEvents   int    `yaml:"max_events" json:"max_events"`     // max events per session; default: 100
+	MaxEvents   int    `yaml:"max_events" json:"max_events"`     // max events per session; default: 500
 	MaxSessions int    `yaml:"max_sessions" json:"max_sessions"` // max concurrent sessions; default: 100 (0 = unlimited)
 }
 
@@ -317,10 +372,116 @@ type ListenerConfig struct {
 	ReverseProxyAddr    string `yaml:"reverse_proxy_addr" json:"reverse_proxy_addr"`
 	ReverseProxyBackend string `yaml:"reverse_proxy_backend" json:"reverse_proxy_backend"`
 
+	// Roles selects which proxies run in proxy-sidecar mode. Empty (the
+	// default) runs BOTH the reverse proxy (inbound) and the forward proxy
+	// (outbound) — the full pod deployment, so existing configs are unchanged.
+	// Set a subset to run a single shape:
+	//   roles: [forward]   # egress-only (e.g. a laptop TLS-bridge demo)
+	//   roles: [reverse]   # inbound-only JWT validation
+	// Valid values: "reverse", "forward". The preset fills an addr default
+	// only for an active role, and reverse_proxy_backend is required only when
+	// the reverse role is active. Ignored outside proxy-sidecar mode.
+	Roles []string `yaml:"roles" json:"roles"`
+
+	// TransparentProxyAddr is the bind address for the outbound transparent
+	// listener used by proxy-sidecar enforce-redirect mode: iptables REDIRECTs
+	// the agent's bypass egress here, and the listener recovers the original
+	// destination via SO_ORIGINAL_DST and tunnels it through the same outbound
+	// pipeline as the forward proxy. The proxy-sidecar / lite presets default it
+	// to ":8082", so for those shapes the listener is effectively always on —
+	// binding is harmless when nothing is redirected to it (cooperative
+	// HTTP_PROXY deployments simply never receive connections on it). An empty
+	// value only disables the listener for modes that have no preset default for
+	// this field (e.g. waypoint / envoy-sidecar); under proxy-sidecar / lite the
+	// preset refills it, matching the always-on enforce-redirect design.
+	TransparentProxyAddr string `yaml:"transparent_proxy_addr" json:"transparent_proxy_addr"`
+
 	// SessionAPIAddr is the bind address for the session events HTTP server
 	// (JSON snapshots + SSE stream consumed by abctl or curl). Default per
 	// mode preset is ":9094". Set to empty string to disable the endpoint.
 	SessionAPIAddr string `yaml:"session_api_addr" json:"session_api_addr"`
+
+	// SkipHosts lists outbound destination host patterns whose traffic
+	// bypasses the plugin pipeline AND session recording entirely. The
+	// listener forwards matched requests as a transparent proxy without
+	// running plugins or appending events to any session bucket.
+	//
+	// Intended for high-volume infrastructure traffic that competes
+	// with agent-meaningful events for session-buffer slots. The
+	// canonical example: an OpenTelemetry collector sidecar that emits
+	// dozens of exports per agent turn — without this gate, those
+	// exports occupy the session buffer's FIFO eviction window and
+	// silently push out the inbound A2A user intent that IBAC needs
+	// to align tool calls against, causing IBAC to fall through to
+	// the no_intent skip path on every call after the first.
+	//
+	// Patterns use `.`-delimited glob semantics (same library as
+	// `authproxy-routes`): "otel-collector*" matches the short
+	// service name, "otel-collector.rossoctl-system.svc.cluster.local"
+	// matches the FQDN, "*-collector" matches any single-label name
+	// ending in -collector. Port is stripped before matching, so
+	// patterns must NOT include `:port`.
+	//
+	// Empty list (default) preserves current behavior: every outbound
+	// host runs the pipeline and is eligible for session recording.
+	//
+	// Trust model — the value matched against SkipHosts is the
+	// destination Host as observed at the listener boundary, which is
+	// agent-influenceable in two of the three deployment shapes:
+	//
+	//   - ext_proc / envoy-sidecar: matches Envoy's `:authority`
+	//     (fallback `host` header). The agent sets these; Envoy may
+	//     rewrite them per its config, but ultimately the value is
+	//     "what the agent told Envoy it wanted to talk to."
+	//   - HTTP forward-proxy / proxy-sidecar: matches `r.Host` from
+	//     the HTTP request. The request is then dialed against
+	//     `r.URL`, so a forged Host that diverges from the real URL
+	//     host would skip-match yet send to the actual upstream.
+	//   - CONNECT-tunnel / proxy-sidecar: safer-by-construction —
+	//     `r.Host` IS the dial target. A forged Host cannot
+	//     skip-match while dialing elsewhere.
+	//
+	// Implication: do NOT list a destination here that you'd want
+	// IBAC / token-exchange to deny on. Skip means "the operator
+	// trusts every flow to this host enough to bypass the entire
+	// outbound enforcement pipeline." Limit entries to infrastructure
+	// destinations the agent should not be making policy decisions
+	// against in the first place (collector sidecars, log shippers).
+	//
+	// Each skip is logged at INFO with the matched host and pattern
+	// so an operator reviewing logs can see when a pattern fired and
+	// catch unexpected matches early. The `transparentproxy` listener
+	// (proxy-sidecar enforce-redirect mode) intentionally does NOT
+	// consult SkipHosts — that is the hard egress guard and must not
+	// be self-exemptable via the agent's outbound destination.
+	//
+	// Match-all patterns ("*", "**", whitespace-only) and patterns
+	// containing ":port" are rejected at startup so a single
+	// misconfigured entry can't silently disable all outbound
+	// enforcement. Mirrors the bypass-pattern guard added to ibac
+	// in #496.
+	SkipHosts []string `yaml:"skip_hosts" json:"skip_hosts"`
+}
+
+// Proxy roles selectable via ListenerConfig.Roles in proxy-sidecar mode.
+const (
+	RoleReverse = "reverse" // inbound reverse proxy
+	RoleForward = "forward" // outbound forward proxy
+)
+
+// ActiveRoles returns the set of proxy roles to run in proxy-sidecar mode. An
+// empty Roles list defaults to BOTH roles (the full pod deployment), so
+// existing configs and the operator path are unchanged; a non-empty list runs
+// exactly the roles named. Unknown values are surfaced by Validate, not here.
+func (l ListenerConfig) ActiveRoles() map[string]bool {
+	if len(l.Roles) == 0 {
+		return map[string]bool{RoleReverse: true, RoleForward: true}
+	}
+	set := make(map[string]bool, len(l.Roles))
+	for _, r := range l.Roles {
+		set[r] = true
+	}
+	return set
 }
 
 // StatsConfig represents the configuration for reporting config and statistics
@@ -357,7 +518,7 @@ func Load(path string) (*Config, error) {
 	// Default stats server address
 	if cfg.Stats.StatsAddress == "" {
 		// Note that we default to an open port, not localhost 127.0.0.1:9093,
-		// because the Kagenti UI needs to see this.  (If there are concerns
+		// because the Rossoctl UI needs to see this.  (If there are concerns
 		// about the data exposed, use TLS or redact fields.)
 		cfg.Stats.StatsAddress = ":9093"
 	}
@@ -387,5 +548,31 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.TLSBridge != nil {
+		if err := cfg.TLSBridge.Validate(); err != nil {
+			return nil, err
+		}
+		// With the bridge on, the session API may carry decrypted request/response
+		// bodies; restrict its bind to loopback so other pods can't scrape it.
+		// kubectl port-forward (abctl) still works — it targets the pod's loopback.
+		if cfg.TLSBridge.Mode == "enabled" {
+			cfg.Listener.SessionAPIAddr = forceLocalhost(cfg.Listener.SessionAPIAddr)
+		}
+	}
+
 	return &cfg, nil
+}
+
+// forceLocalhost rewrites a bind address to 127.0.0.1, preserving the port:
+// ":9094" / "0.0.0.0:9094" / "[::]:9094" -> "127.0.0.1:9094". Empty stays empty;
+// a malformed address is left as-is so the bind itself surfaces the error.
+func forceLocalhost(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return net.JoinHostPort("127.0.0.1", port)
 }

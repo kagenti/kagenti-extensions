@@ -1,4 +1,4 @@
-# Root Makefile for kagenti-extensions monorepo
+# Root Makefile for cortex monorepo
 # Orchestrates linting and formatting across all sub-projects
 
 .PHONY: lint fmt pre-commit build-proxy-init help
@@ -16,7 +16,6 @@ fmt: ## Run formatters across all sub-projects
 	cd authbridge/cmd/abctl && go fmt ./...
 	cd authbridge/cmd/authbridge-proxy && go fmt ./...
 	cd authbridge/cmd/authbridge-envoy && go fmt ./...
-	cd authbridge/cmd/authbridge-lite && go fmt ./...
 	ruff format authbridge/
 
 pre-commit: ## Install pre-commit hooks (including commit-msg)

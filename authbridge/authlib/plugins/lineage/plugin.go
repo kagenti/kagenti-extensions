@@ -46,8 +46,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 )
 
 const pluginName = "lineage-telemetry"
@@ -117,10 +117,15 @@ func (p *LineageTelemetry) Name() string { return pluginName }
 
 func (p *LineageTelemetry) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		// Soft ordering: if parsers are present they must run first so
-		// Extensions are populated when we read them to pick the protocol
-		// fact. Missing parsers are allowed — protocolOf falls back to http.
-		After: []string{"a2a-parser", "mcp-parser", "inference-parser", "jwt-validation"},
+		// At least one protocol parser must be present and earlier in the
+		// chain: the protocol fact and both payload reductions read the
+		// parsers' Extensions. A chain that misorders lineage before its
+		// parsers (or has none) fails at startup instead of silently
+		// emitting lineage.protocol="http" on everything. jwt-validation
+		// ordering (for the principal facts) cannot be soft-declared under
+		// this capabilities model — list it before lineage in the YAML.
+		RequiresAny: []string{"a2a-parser", "mcp-parser", "inference-parser"},
+		Description: "Emits two facts-only lineage spans per HTTP exchange (wire contract v1.3).",
 	}
 }
 

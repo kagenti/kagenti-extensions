@@ -79,6 +79,7 @@ func TestSessionEvent_JSONRoundTrip(t *testing.T) {
 		Identity:   &EventIdentity{Subject: "alice", ClientID: "agent-1"},
 		StatusCode: 200,
 		Error:      &EventError{Kind: "upstream", Message: "timeout"},
+		Tunnel:     true,
 	}
 
 	first, err := json.Marshal(orig)
@@ -153,7 +154,7 @@ func TestSessionEvent_Invocations_JSONRoundTrip(t *testing.T) {
 				Action: ActionDeny,
 				Reason: "jwt_failed",
 				Details: map[string]string{
-					"expected_issuer":   "http://keycloak.localtest.me:8080/realms/kagenti",
+					"expected_issuer":   "http://keycloak.localtest.me:8080/realms/rossoctl",
 					"expected_audience": "spiffe://localtest.me/ns/team1/sa/weather-tool",
 				},
 			}},

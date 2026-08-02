@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/redact"
 )
 
 type StatServer struct {
@@ -68,8 +70,8 @@ func NewStatServer(addr string, configProvider ConfigProvider, statsProvider Sta
 <html>
   <body>
     <ul>
-    <li><a href="/config">Kagenti AuthBridge configuration</a></li>
-    <li><a href="/stats">Kagenti AuthBridge statistics</a></li>
+    <li><a href="/config">Rossoctl AuthBridge configuration</a></li>
+    <li><a href="/stats">Rossoctl AuthBridge statistics</a></li>
     <li><a href="/reload/status">Config reload status</a></li>
     </ul>
   </body>
@@ -88,15 +90,16 @@ func NewStatServer(addr string, configProvider ConfigProvider, statsProvider Sta
 func handleConfigFactory(provider ConfigProvider) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Plugin config subtrees are captured verbatim as json.RawMessage
-		// by the PluginEntry unmarshaler. Operators shouldn't put
-		// secrets in the runtime config — the per-plugin convention is
-		// to reference a file path instead (client_secret_file, etc.) —
-		// so we render the config as-is. If a plugin ever needs to
-		// suppress a known-sensitive field here, it can be added to a
-		// redaction pass in a follow-up.
-		err := json.NewEncoder(w).Encode(provider())
+		raw, err := json.Marshal(provider())
 		if err != nil {
+			slog.Default().Info("Failed to marshal configuration", "err", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"marshal failed"}` + "\n"))
+			return
+		}
+		redacted := redact.JSON(raw)
+		redacted = append(redacted, '\n')
+		if _, err := w.Write(redacted); err != nil {
 			slog.Default().Info("Failed to send configuration", "err", err)
 		}
 	}
@@ -122,6 +125,12 @@ func handleStatsFactory(provider StatsProvider) func(http.ResponseWriter, *http.
 
 func (s *StatServer) ListenAndServe() error {
 	return s.server.ListenAndServe()
+}
+
+// Serve serves on an already-bound listener, letting the caller bind first (and
+// handle a bind error synchronously) before the server starts accepting.
+func (s *StatServer) Serve(l net.Listener) error {
+	return s.server.Serve(l)
 }
 
 func (s *StatServer) Shutdown(ctx context.Context) error {

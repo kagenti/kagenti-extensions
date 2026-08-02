@@ -118,25 +118,58 @@
 # but the cluster's networking stack uses legacy tables, our PREROUTING rules
 # have no effect — traffic bypasses Envoy's inbound listener entirely.
 #
-# This script auto-detects the correct backend by checking if iptables-legacy
-# is available and can manipulate the nat table in this network namespace.
-# Override with IPTABLES_CMD env var if needed.
+# This script auto-detects the correct backend by reading the kernel module
+# table (/proc/modules): the legacy nat path needs the `iptable_nat` module,
+# which is loaded on legacy clusters (Kind, kubeadm — kube-proxy uses it) and
+# ABSENT on nft-only platforms (OpenShift/ROSA expose only nf_tables +
+# nft_compat). Override with IPTABLES_CMD env var if needed.
 #
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -e
 
+# --- Mode selection ---
+# MODE selects the interception strategy:
+#   redirect          (default) — envoy-sidecar: transparently REDIRECT pod
+#                     traffic to the Envoy listeners (the behavior documented
+#                     above).
+#   enforce-redirect  — proxy-sidecar: a fail-closed egress guard that CAPTURES
+#                     rather than drops. External TCP egress that bypasses the
+#                     forward proxy is transparently REDIRECTed to AuthBridge's
+#                     transparent listener (TRANSPARENT_PORT), which recovers the
+#                     original destination via SO_ORIGINAL_DST and tunnels it
+#                     through the same outbound pipeline. Non-TCP external egress
+#                     (UDP/QUIC) is DROPped so it cannot bypass via HTTP/3.
+#                     In-cluster + loopback + proxy-UID traffic is left direct.
+#                     Nothing breaks for agents that ignore HTTP_PROXY — their
+#                     traffic is captured, not dropped. See setup_enforce_redirect().
+MODE="${MODE:-redirect}"
+case "${MODE}" in
+  redirect|enforce-redirect) ;;
+  *) echo "ERROR: unknown MODE='${MODE}' (expected: redirect | enforce-redirect)" >&2; exit 1 ;;
+esac
+
 # --- Auto-detect iptables backend ---
-# Prefer iptables-legacy for maximum compatibility with Kubernetes networking.
-# The nft backend sets rules in a different netfilter table that may not be
-# processed for PREROUTING when the cluster uses legacy iptables.
+# Select the backend that is actually FUNCTIONAL in this kernel, not merely
+# listable. A readability probe (`iptables-legacy -t nat -L`) mis-selects legacy
+# on nft-only nodes: the empty legacy nat table still lists fine, so legacy gets
+# chosen and our rules land in a table nothing consults (silent fail-open). A
+# write-probe is unreliable too — individual legacy ops succeed via nft_compat
+# even where the full nat pipeline later fails. Instead we check whether the
+# `iptable_nat` kernel module is loaded: present => legacy nat is in use, match
+# it (Kind, kubeadm); absent => nf_tables is the only working path (OpenShift/
+# ROSA, EKS-nft). /proc/modules is host-kernel-wide, readable from the pod netns,
+# timing-independent (unlike matching Istio's not-yet-installed rules), and not
+# foolable by nft_compat. Override with IPTABLES_CMD (the operator can set it
+# per-platform). PROC_MODULES is overridable for tests.
+PROC_MODULES="${PROC_MODULES:-/proc/modules}"
 detect_iptables_cmd() {
   if [ -n "${IPTABLES_CMD:-}" ]; then
     echo "${IPTABLES_CMD}"
     return
   fi
   if command -v iptables-legacy >/dev/null 2>&1 && \
-     iptables-legacy -t nat -L -n >/dev/null 2>&1; then
+     grep -q '^iptable_nat ' "${PROC_MODULES}" 2>/dev/null; then
     echo "iptables-legacy"
   else
     echo "iptables"
@@ -146,12 +179,61 @@ detect_iptables_cmd() {
 IPT=$(detect_iptables_cmd)
 echo "Using iptables command: ${IPT} ($(${IPT} --version 2>/dev/null || echo 'unknown version'))"
 
+# Fail loud if a jump rule we just installed is not actually present in the
+# chosen backend. `set -e` already aborts on hard programming errors; this also
+# catches the subtler case where a command returned 0 but the rule did not land
+# (e.g. rules written into a backend that is not the live datapath), so a
+# fail-closed traffic guard can never silently no-op. Usage:
+#   require_jump <cmd> <table> <parent-chain> <our-chain> [extra match tokens...]
+require_jump() {
+  _rj_cmd="$1"; _rj_tbl="$2"; _rj_parent="$3"; _rj_chain="$4"; shift 4
+  if ! ${_rj_cmd} -t "${_rj_tbl}" -C "${_rj_parent}" "$@" -j "${_rj_chain}" 2>/dev/null; then
+    echo "ERROR: ${_rj_cmd}: '${_rj_chain}' is not installed in ${_rj_tbl} ${_rj_parent}." >&2
+    echo "ERROR: traffic interception is NOT active — refusing to start with enforcement disabled." >&2
+    echo "ERROR: the selected iptables backend could not program rules. On nft-only or managed" >&2
+    echo "ERROR: platforms set IPTABLES_CMD=iptables and ensure NET_ADMIN/NET_RAW are granted" >&2
+    echo "ERROR: (and, on OpenShift, an SELinux context that permits nf_tables access)." >&2
+    exit 1
+  fi
+}
+
 PROXY_PORT="${PROXY_PORT:-15123}"
 INBOUND_PROXY_PORT="${INBOUND_PROXY_PORT:-15124}"
+# enforce-redirect mode: the forward proxy's transparent listener port, the
+# REDIRECT target for captured external TCP egress. Must match the authbridge
+# proxy-sidecar listener.transparent_proxy_addr (default :8082).
+TRANSPARENT_PORT="${TRANSPARENT_PORT:-8082}"
 PROXY_UID="${PROXY_UID:-1337}"
 SSH_PORT="${SSH_PORT:-22}"
 OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 INBOUND_PORTS_EXCLUDE="${INBOUND_PORTS_EXCLUDE:-}"
+
+# enforce-redirect mode: under the egress guard, cluster DNS must stay direct
+# (the forward proxy is HTTP-only and cannot carry DNS), while every other
+# in-cluster TCP flow is captured by the pipeline. Rather than guess in-cluster
+# CIDRs — the resolver may sit OUTSIDE them (OpenShift service net 172.30/172.31,
+# outside 10/8) or at a link-local address (NodeLocal DNSCache, 169.254.x) — we
+# read the pod's actual resolvers from /etc/resolv.conf and leave only DNS
+# (UDP/53 + TCP/53) to THOSE IPs direct. kubelet writes resolv.conf per the pod's
+# dnsPolicy, so it is the authoritative, cluster-agnostic source for "where is my
+# resolver". Override the path with RESOLV_CONF (e.g. for tests).
+RESOLV_CONF="${RESOLV_CONF:-/etc/resolv.conf}"
+
+# Emit the `nameserver` IPs from resolv.conf, one per line (IPv4 and IPv6 mixed;
+# callers split by address family). Empty output if the file is missing/unreadable.
+get_nameservers() {
+  [ -r "${RESOLV_CONF}" ] || return 0
+  while read -r _key _val _rest; do
+    [ "${_key}" = "nameserver" ] && [ -n "${_val}" ] && echo "${_val}"
+  done < "${RESOLV_CONF}"
+  # `read` returns non-zero at EOF; force success so `NS=$(get_nameservers)`
+  # under `set -e` does not abort the script (missing/empty resolv.conf is fine).
+  return 0
+}
+
+# IPv6 counterpart of the detected iptables backend (iptables-legacy ->
+# ip6tables-legacy, iptables -> ip6tables). Override with IP6TABLES_CMD.
+IP6T="${IP6TABLES_CMD:-$(echo "${IPT}" | sed 's/iptables/ip6tables/')}"
 
 # Istio ztunnel defaults
 ZTUNNEL_HBONE_PORT="${ZTUNNEL_HBONE_PORT:-15008}"
@@ -162,10 +244,186 @@ ISTIO_HEALTH_PROBE_SRC="${ISTIO_HEALTH_PROBE_SRC:-169.254.7.127}"
 # It must be passed via the Kubernetes Downward API (status.podIP) or set manually.
 # We use DNAT to the pod IP instead of REDIRECT to avoid needing route_localnet=1,
 # which would require a privileged init container (to write to read-only /proc/sys).
-if [ -z "${POD_IP}" ]; then
-  echo "ERROR: POD_IP environment variable is not set." >&2
+# POD_IP is only needed by redirect mode (DNAT target for the ambient inbound
+# rule). enforce-redirect does no DNAT, so it does not require it.
+if [ "${MODE}" = "redirect" ] && [ -z "${POD_IP}" ]; then
+  echo "ERROR: POD_IP environment variable is not set (required for redirect mode)." >&2
   echo "Set it via the Kubernetes Downward API (status.podIP) or manually." >&2
   exit 1
+fi
+
+# =============================================================================
+# enforce-redirect mode (proxy-sidecar fail-closed egress guard, capture variant)
+# =============================================================================
+#
+# Forces all external egress through AuthBridge regardless of whether the app
+# honors HTTP_PROXY, by CAPTURING bypass traffic: external TCP is transparently
+# REDIRECTed to the forward proxy's transparent listener (TRANSPARENT_PORT),
+# which recovers the original destination via SO_ORIGINAL_DST and tunnels it
+# through the same outbound pipeline. Because nothing is dropped, agents that
+# ignore HTTP_PROXY keep working — this is what lets enforcement be always-on.
+#
+# Placement — a dedicated chain hooked from *nat* OUTPUT at position 1 (REDIRECT
+# is a nat-table target). Inserted before Istio's appended ISTIO_OUTPUT so we
+# preempt ambient's nat redirect for external destinations, exactly as
+# redirect mode does for the Envoy path.
+#
+# Rule order: RETURN ztunnel's own sockets (fwmark 0x539, no-op without ambient)
+# -> RETURN the proxy's own re-originated egress (PROXY_UID, avoids the loop) ->
+# RETURN loopback (app -> forward proxy via HTTP_PROXY, and any loopback) ->
+# RETURN DNS-over-TCP (TCP/53) to the resolv.conf nameservers (left direct) ->
+# REDIRECT all remaining TCP -- external AND in-cluster -- to TRANSPARENT_PORT
+# (so agent->in-cluster calls are captured too) -> DROP all other egress
+# (UDP/QUIC, so HTTP/3 can't bypass; clients fall back to TCP). DNS-over-UDP
+# (UDP/53) to the resolvers is left direct by the mangle chain below; all other
+# non-TCP -- including non-DNS in-cluster UDP -- is dropped.
+#
+# The nat REDIRECT chain has no conntrack ESTABLISHED rule: nat only evaluates
+# the first packet of a flow, so replies and established connections are not
+# re-translated.
+# Two chains are needed because REDIRECT is a nat-table target but the nat table
+# forbids DROP ("the use of DROP is therefore inhibited"):
+#   * nat   OUTPUT / AB_REDIRECT — REDIRECT external TCP to TRANSPARENT_PORT.
+#   * mangle OUTPUT / AB_NOTCP   — DROP external non-TCP (UDP/QUIC) so HTTP/3
+#                                  cannot bypass; `-p tcp -j RETURN` lets TCP
+#                                  fall through to the nat REDIRECT.
+# mangle runs before nat in the OUTPUT hook, so non-TCP is dropped on its
+# original destination and TCP is passed to the nat REDIRECT. Both are inserted
+# at position 1 to precede Istio's appended chains.
+setup_enforce_redirect() {
+  REDIR_CHAIN="AB_REDIRECT"
+  NOTCP_CHAIN="AB_NOTCP"
+
+  # Fail closed and LOUD on zero resolvers: without a nameserver to exempt, the
+  # rules below would drop UDP/53 and capture TCP/53, leaving a running-but-DNS-
+  # dead pod that is far harder to triage than a failed init container. In a
+  # Kubernetes pod kubelet always populates resolv.conf, so an empty result means
+  # a real misconfiguration — surface it as Init:Error rather than silent breakage.
+  NAMESERVERS=$(get_nameservers)
+  if [ -z "${NAMESERVERS}" ]; then
+    echo "enforce-redirect: ERROR: no nameservers found in ${RESOLV_CONF}" >&2
+    echo "enforce-redirect: refusing to start — DNS egress would be dropped (UDP/53) / captured (TCP/53), silently breaking name resolution." >&2
+    echo "enforce-redirect: set RESOLV_CONF to a file with valid 'nameserver' entries if running outside Kubernetes." >&2
+    exit 1
+  fi
+
+  echo "enforce-redirect: installing fail-closed egress capture"
+  echo "enforce-redirect: external TCP -> 127.0.0.1:${TRANSPARENT_PORT} (nat REDIRECT); external non-TCP -> DROP (mangle)"
+  echo "enforce-redirect: exempt proxy UID=${PROXY_UID}; in-cluster TCP captured; DNS/53 to resolvers left direct (resolvers=$(echo "${NAMESERVERS}" | tr '\n' ' '))"
+
+  # --- IPv4: nat REDIRECT for TCP ---
+  ${IPT} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+  ${IPT} -t nat -F "${REDIR_CHAIN}"
+  # ztunnel's own sockets (ambient) carry fwmark 0x539 — let them through.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  # the AuthBridge proxy's own re-originated egress (runs as PROXY_UID) — avoids
+  # redirecting the proxy's upstream dial back into itself.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  # app -> forward proxy over loopback (HTTP_PROXY target), and any loopback.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  # DNS-over-TCP (TCP/53) to the pod's resolvers — left direct so cluster name
+  # resolution is not captured (the forward proxy can't carry DNS). All OTHER
+  # in-cluster TCP falls through to the REDIRECT below, so the egress pipeline
+  # sees agent->in-cluster calls (e.g. agent->tool). The proxy's re-originated
+  # egress (PROXY_UID, RETURNed above) is exempt, and in an Istio ambient mesh it
+  # falls through to ISTIO_OUTPUT -> ztunnel for mTLS.
+  for ns in ${NAMESERVERS}; do
+    case "${ns}" in *:*) continue ;; esac   # IPv6 resolver — handled in the v6 block
+    ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${ns}" -j RETURN
+  done
+  # all remaining TCP (external + in-cluster, minus in-cluster DNS) — capture it transparently.
+  ${IPT} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+  if ! ${IPT} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+    ${IPT} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
+  fi
+  require_jump "${IPT}" nat OUTPUT "${REDIR_CHAIN}"
+
+  # --- IPv4: mangle DROP for non-TCP ---
+  ${IPT} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+  ${IPT} -t mangle -F "${NOTCP_CHAIN}"
+  # established/related replies (incl. UDP conntrack, e.g. DNS replies) first.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -d 127.0.0.0/8 -j RETURN
+  # DNS-over-UDP (UDP/53) to the pod's resolvers — left direct (the terminal DROP
+  # below would otherwise kill cluster name resolution). Scoped to the resolvers
+  # and port 53: all other non-TCP, including non-DNS in-cluster UDP, is dropped
+  # so nothing can bypass the pipeline over UDP.
+  for ns in ${NAMESERVERS}; do
+    case "${ns}" in *:*) continue ;; esac   # IPv6 resolver — handled in the v6 block
+    ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p udp --dport 53 -d "${ns}" -j RETURN
+  done
+  # TCP is handled by the nat REDIRECT above — let it pass mangle untouched.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+  # everything else == external non-TCP egress (UDP/QUIC) — drop it.
+  ${IPT} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+  if ! ${IPT} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+    ${IPT} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
+  fi
+  require_jump "${IPT}" mangle OUTPUT "${NOTCP_CHAIN}"
+  echo "enforce-redirect: IPv4 egress capture configured"
+
+  # --- IPv6 ---
+  # Mirror of IPv4: allow loopback + link-local (fe80::/10 unicast, ff02::/16
+  # NDP/MLD multicast) and the proxy UID / ztunnel mark; leave DNS to any IPv6
+  # resolv.conf nameservers direct; REDIRECT external v6 TCP; DROP other v6 egress.
+  if command -v "${IP6T%% *}" >/dev/null 2>&1 && ${IP6T} -t nat -L >/dev/null 2>&1; then
+    ${IP6T} -t nat -N "${REDIR_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t nat -F "${REDIR_CHAIN}"
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -d ff02::/16 -j RETURN
+    # DNS-over-TCP (TCP/53) to IPv6 resolvers only — mirror of IPv4; all other
+    # in-cluster v6 TCP is captured below.
+    for ns in ${NAMESERVERS}; do
+      case "${ns}" in *:*) ;; *) continue ;; esac   # IPv4 resolver — handled in the v4 block
+      ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp --dport 53 -d "${ns}" -j RETURN
+    done
+    ${IP6T} -t nat -A "${REDIR_CHAIN}" -p tcp -j REDIRECT --to-port "${TRANSPARENT_PORT}"
+    if ! ${IP6T} -t nat -C OUTPUT -j "${REDIR_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t nat -I OUTPUT 1 -j "${REDIR_CHAIN}"
+    fi
+    require_jump "${IP6T}" nat OUTPUT "${REDIR_CHAIN}"
+
+    ${IP6T} -t mangle -N "${NOTCP_CHAIN}" 2>/dev/null || true
+    ${IP6T} -t mangle -F "${NOTCP_CHAIN}"
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m mark --mark "${ZTUNNEL_MARK}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -m owner --uid-owner "${PROXY_UID}" -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -o lo -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ::1/128 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d fe80::/10 -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -d ff02::/16 -j RETURN
+    # DNS-over-UDP (UDP/53) to IPv6 resolvers only — mirror of IPv4.
+    for ns in ${NAMESERVERS}; do
+      case "${ns}" in *:*) ;; *) continue ;; esac   # IPv4 resolver — handled in the v4 block
+      ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p udp --dport 53 -d "${ns}" -j RETURN
+    done
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -p tcp -j RETURN
+    ${IP6T} -t mangle -A "${NOTCP_CHAIN}" -j DROP
+    if ! ${IP6T} -t mangle -C OUTPUT -j "${NOTCP_CHAIN}" 2>/dev/null; then
+      ${IP6T} -t mangle -I OUTPUT 1 -j "${NOTCP_CHAIN}"
+    fi
+    require_jump "${IP6T}" mangle OUTPUT "${NOTCP_CHAIN}"
+    echo "enforce-redirect: IPv6 egress capture configured"
+  else
+    echo "enforce-redirect: ip6tables unavailable — skipping IPv6 egress capture"
+  fi
+
+  echo "enforce-redirect: fail-closed egress capture active"
+}
+
+# Dispatch enforce-redirect here and exit; redirect mode falls through to the
+# transparent-interception logic below.
+if [ "${MODE}" = "enforce-redirect" ]; then
+  setup_enforce_redirect
+  exit 0
 fi
 
 # =============================================================================
@@ -259,6 +517,7 @@ ${IPT} -t nat -A PROXY_OUTPUT -p tcp -j REDIRECT --to-port "${PROXY_PORT}"
 if ! ${IPT} -t nat -C OUTPUT -p tcp -j PROXY_OUTPUT 2>/dev/null; then
   ${IPT} -t nat -I OUTPUT 1 -p tcp -j PROXY_OUTPUT
 fi
+require_jump "${IPT}" nat OUTPUT PROXY_OUTPUT -p tcp
 
 # --- Mangle rule: prevent Envoy→app loop through ISTIO_OUTPUT ---
 # After inbound JWT validation, Envoy (UID 1337) connects to the local app.
@@ -342,6 +601,7 @@ ${IPT} -t nat -A PROXY_INBOUND -p tcp -j REDIRECT --to-port "${INBOUND_PROXY_POR
 if ! ${IPT} -t nat -C PREROUTING -p tcp -j PROXY_INBOUND 2>/dev/null; then
   ${IPT} -t nat -I PREROUTING 1 -p tcp -j PROXY_INBOUND
 fi
+require_jump "${IPT}" nat PREROUTING PROXY_INBOUND -p tcp
 
 echo "Inbound iptables rules configured successfully"
 echo "Inbound traffic will be redirected to port ${INBOUND_PROXY_PORT}"

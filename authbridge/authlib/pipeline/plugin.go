@@ -10,18 +10,14 @@ type Plugin interface {
 	OnResponse(ctx context.Context, pctx *Context) Action
 }
 
-// PluginCapabilities declares what extension slots a plugin reads and
-// writes, plus whether it accesses the request / response body.
+// PluginCapabilities declares whether a plugin accesses the request /
+// response body and which other plugins it depends on.
 //
-// The pipeline validates at startup that all Reads are satisfied by an
-// earlier plugin's Writes. Body-access fields drive the listener's
-// body-buffering handshake (ext_proc ProcessingMode, net/http read-body).
+// Body-access fields drive the listener's body-buffering handshake
+// (ext_proc ProcessingMode, net/http read-body). Dependency fields are
+// checked at startup by plugins.Build so misconfigured chains fail before
+// traffic arrives.
 type PluginCapabilities struct {
-	// Reads / Writes name extension slots (A2A, MCP, Inference, Custom
-	// map keys). Checked at pipeline.New.
-	Reads  []string
-	Writes []string
-
 	// ReadsBody: the plugin reads pctx.Body in OnRequest and/or
 	// pctx.ResponseBody in OnResponse. The listener buffers the body
 	// when any plugin declares this; without it, pctx.Body is nil and
@@ -41,14 +37,6 @@ type PluginCapabilities struct {
 	// process boot.
 	WritesBody bool
 
-	// BodyAccess is a deprecated alias for ReadsBody, kept so existing
-	// plugins compile unchanged through one release. Normalize() folds
-	// BodyAccess into ReadsBody before validation and listener
-	// negotiation read the normalized fields.
-	//
-	// Deprecated: use ReadsBody. Will be removed in a future release.
-	BodyAccess bool
-
 	// Requires names plugins that MUST be present in the same chain
 	// AND appear earlier (lower index). Matches are case-sensitive
 	// plugin Name() strings. A missing or misordered name causes
@@ -57,9 +45,7 @@ type PluginCapabilities struct {
 	// Use Requires when the plugin hardcodes access to a specific
 	// other plugin's extension fields — e.g., a tool-allowlist plugin
 	// that reads pctx.Extensions.MCP.Params["name"] declares
-	// Requires: []string{"mcp-parser"}. If the plugin instead reads
-	// through pctx.ContentSources() and works against any parser,
-	// see RequiresAny.
+	// Requires: []string{"mcp-parser"}.
 	Requires []string
 
 	// RequiresAny names plugins of which AT LEAST ONE must be present
@@ -68,46 +54,28 @@ type PluginCapabilities struct {
 	// causes plugins.Build to fail at startup.
 	//
 	// Use RequiresAny for protocol-agnostic plugins that read through
-	// pctx.ContentSources(). Example: a PII scrubber that consumes
-	// fragments from whatever parsers are wired in declares
-	// RequiresAny: []string{"a2a-parser", "mcp-parser", "inference-parser"}.
-	// That way a chain with no parsers fails loud instead of running
-	// the guardrail as silent dead code.
+	// pctx.ContentSources(). Example: a guardrail that works against any
+	// parser declares RequiresAny: []string{"a2a-parser", "mcp-parser",
+	// "inference-parser"} so a chain with no parsers fails loud instead
+	// of running the guardrail as silent dead code.
 	RequiresAny []string
 
-	// After names plugins that, IF present in the same chain, must
-	// appear earlier. Unlike Requires/RequiresAny, a missing name is
-	// not an error — After is a soft ordering hint. Useful for
-	// plugins that benefit from earlier state being populated but
-	// degrade gracefully without it.
-	After []string
-
-	// Claims declares semantic resources the plugin takes exclusive
-	// ownership of. Within a single chain, at most one plugin may
-	// declare any given claim string; two plugins with an overlapping
-	// claim cause plugins.Build to fail at startup.
+	// Description is operator-facing prose, one line, ≤80 chars,
+	// describing what this plugin does. Surfaces in `abctl`'s
+	// plugin-detail and catalog panes, and in /v1/plugins.
 	//
-	// Claim strings are arbitrary but authors should prefer the
-	// constants in authlib/contracts/ (e.g. contracts.ClaimAuthorizationHeader)
-	// so typos are compile errors and the canonical set is greppable.
-	// Third-party plugins may declare their own strings; the framework
-	// enforces uniqueness of whatever it sees, not "must be from the
-	// list." See authlib/contracts/claims.go for the canonical
-	// vocabulary.
-	Claims []string
+	// Capabilities are static type-level metadata: Capabilities() must
+	// return the same value for any instance produced by a given
+	// factory. If a plugin's behavior varies enough that its capabilities
+	// differ, register it under multiple names.
+	Description string
 }
 
-// Normalize applies compatibility rules to a PluginCapabilities:
-//   - BodyAccess (deprecated) is folded into ReadsBody.
-//   - WritesBody implies ReadsBody (you can't mutate what you didn't see).
-//
+// Normalize applies WritesBody-implies-ReadsBody promotion.
 // Called by Pipeline.New for every plugin's declared capabilities so the
 // rest of the framework reads a normalized form. Plugins never need to
 // call this themselves.
 func (c PluginCapabilities) Normalize() PluginCapabilities {
-	if c.BodyAccess {
-		c.ReadsBody = true
-	}
 	if c.WritesBody {
 		c.ReadsBody = true
 	}
@@ -196,6 +164,55 @@ type Shutdowner interface {
 // escape-hatch map documented in plugin-reference.md.
 type Finisher interface {
 	OnFinish(ctx context.Context, pctx *Context)
+}
+
+// StreamingResponder is an optional interface a plugin may implement
+// when its response handling is naturally per-message rather than over
+// a fully-buffered body. Listeners that detect a streaming response
+// (today: text/event-stream) deliver each complete protocol message
+// to the pipeline as a frame; plugins that opted in see one
+// OnResponseFrame call per frame and a final empty-frame call with
+// last=true so aggregating plugins (inference-parser, a2a-parser)
+// can finalize their running state.
+//
+// Plugins without streaming awareness are unaffected: the listener
+// either falls back to the buffered path (Content-Type: application/json
+// or any non-streaming response) and runs OnResponse as today, or — for
+// streaming responses — skips OnResponse entirely. Aggregating plugins
+// that want to support both shapes implement OnResponseFrame and treat
+// the buffered application/json case as a single last=true frame; the
+// listener delivers it that way for them so one code path covers both
+// shapes.
+//
+// Contract:
+//   - Per-frame ordering matches the wire: frames are dispatched to
+//     plugins in the order the listener parsed them off the upstream
+//     response, in pipeline reverse order (symmetric with RunResponse).
+//   - The frame slice is owned by the listener and is valid only for
+//     the duration of the call. Plugins that need to retain bytes
+//     must copy.
+//   - A non-Continue Action returned mid-stream stops further
+//     dispatch for that frame and rejects the response. Listener
+//     ordering varies: forwardproxy invokes OnResponseFrame before
+//     emitting frame bytes, while reverseproxy emits frame bytes
+//     first (FlushInterval=-1 ferries each Read straight to the
+//     client) and then dispatches. Either way previously-emitted
+//     frames cannot be un-sent, so a mid-stream Reject results in
+//     a truncated stream rather than a 4xx/5xx response. Today no
+//     in-tree plugin returns Reject from this hook; the contract
+//     leaves the door open for per-message enforcement to be added
+//     later (a listener doing enforcement would inspect-before-forward
+//     at that point).
+//   - last=true is always called exactly once at end-of-stream, even
+//     for an empty/zero-frame stream. Plugins finalize on last=true.
+//   - For application/json responses the listener calls
+//     OnResponseFrame once with the full body and last=true.
+//     pipeline.RunResponse skips plugins implementing this interface
+//     so OnResponse is not called for them — the framework picks one
+//     path so a single response body is never delivered through both
+//     hooks.
+type StreamingResponder interface {
+	OnResponseFrame(ctx context.Context, pctx *Context, frame []byte, last bool) Action
 }
 
 // Readier is an optional interface a plugin may implement when it has

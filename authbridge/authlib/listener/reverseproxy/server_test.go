@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/bypass"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/jwtvalidation/validation"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/plugintesting"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation/validation"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 )
 
 type mockVerifier struct {
@@ -109,6 +109,163 @@ func TestReverseProxy_BypassPath(t *testing.T) {
 	}
 }
 
+// TestReverseProxy_RewritesHostToBackend locks in the fix for the
+// Cloudflare-fronted-backend bug: httputil.NewSingleHostReverseProxy's
+// default Director rewrites the outbound URL but deliberately leaves
+// req.Host as the inbound caller's Host, so backends like
+// api.anthropic.com that validate Host reject the forwarded request.
+// The wrapped Director must set req.Host to the backend target's host
+// after the default rewrite runs.
+func TestReverseProxy_RewritesHostToBackend(t *testing.T) {
+	var gotHost string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHost = r.Host
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	p, err := pipeline.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("GET", proxy.URL+"/api/data", nil)
+	req.Host = "authbridge-ab1:8080" // inbound Host, deliberately different from the backend
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	backendHost := strings.TrimPrefix(strings.TrimPrefix(backend.URL, "https://"), "http://")
+	if gotHost != backendHost {
+		t.Errorf("backend received Host = %q, want %q (backend target host)", gotHost, backendHost)
+	}
+}
+
+// --- Header Propagation Tests ---
+
+// headerMutatorPlugin applies an arbitrary mutation function to
+// pctx.Headers during OnRequest. Used to simulate plugins like
+// static-inject (set x-api-key, delete Authorization) and
+// jwt-validation's mint mode (replace Authorization) without pulling
+// in their real implementations.
+type headerMutatorPlugin struct {
+	mutate func(h http.Header)
+}
+
+func (p *headerMutatorPlugin) Name() string { return "header-mutator" }
+func (p *headerMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
+	return pipeline.PluginCapabilities{}
+}
+func (p *headerMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
+	p.mutate(pctx.Headers)
+	return pipeline.Action{Type: pipeline.Continue}
+}
+func (p *headerMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
+	return pipeline.Action{Type: pipeline.Continue}
+}
+
+// TestReverseProxy_HeaderMutation_SetAndDelete locks in the fix for the
+// static-inject 401 bug: a plugin that sets a new header (x-api-key)
+// and deletes Authorization on pctx.Headers must have BOTH mutations
+// reach the backend. Before this fix, the reverse proxy only ever
+// propagated an Authorization change, so x-api-key never reached
+// api.anthropic.com and the stale Authorization was still forwarded.
+func TestReverseProxy_HeaderMutation_SetAndDelete(t *testing.T) {
+	var gotAPIKey string
+	var gotAuthOK bool
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAPIKey = r.Header.Get("x-api-key")
+		_, gotAuthOK = r.Header["Authorization"]
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	mutator := &headerMutatorPlugin{mutate: func(h http.Header) {
+		h.Set("x-api-key", "REALKEY")
+		h.Del("Authorization")
+	}}
+	p, err := pipeline.New([]pipeline.Plugin{mutator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("GET", proxy.URL+"/v1/messages", nil)
+	req.Header.Set("Authorization", "Bearer PLACEHOLDER")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotAPIKey != "REALKEY" {
+		t.Errorf("backend x-api-key = %q, want %q", gotAPIKey, "REALKEY")
+	}
+	if gotAuthOK {
+		t.Errorf("backend received an Authorization header; want it deleted")
+	}
+}
+
+// Authorization-replace (mint) regression coverage already exists in
+// placeholder_test.go's TestInboundPropagation_RewrittenAuthReachesBackend
+// (a plugin that replaces Authorization must have the new value reach
+// the backend). Confirmed still green under the full header-diff sync.
+
+// TestReverseProxy_HeaderMutation_PassThroughUnchanged confirms a
+// header the pipeline never touched still reaches the backend
+// unchanged under the new diff-sync (as opposed to only forwarding
+// whatever the pipeline explicitly set).
+func TestReverseProxy_HeaderMutation_PassThroughUnchanged(t *testing.T) {
+	var gotCustom string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotCustom = r.Header.Get("X-Untouched")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer backend.Close()
+
+	// Plugin mutates an unrelated header so pctx.Headers diverges from
+	// a pure clone, but never touches X-Untouched.
+	mutator := &headerMutatorPlugin{mutate: func(h http.Header) {
+		h.Set("x-api-key", "REALKEY")
+	}}
+	p, err := pipeline.New([]pipeline.Plugin{mutator})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := NewServer(pipeline.NewHolder(p), nil, backend.URL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httptest.NewServer(srv.Handler())
+	defer proxy.Close()
+
+	req, _ := http.NewRequest("GET", proxy.URL+"/api", nil)
+	req.Header.Set("X-Untouched", "still-here")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	if gotCustom != "still-here" {
+		t.Errorf("backend X-Untouched = %q, want %q (pass-through header dropped)", gotCustom, "still-here")
+	}
+}
+
 // --- Body Buffering Tests ---
 
 // bodyRecorderPlugin records whether it received a body during OnRequest.
@@ -118,7 +275,7 @@ type bodyRecorderPlugin struct {
 
 func (p *bodyRecorderPlugin) Name() string { return "body-recorder" }
 func (p *bodyRecorderPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{BodyAccess: true}
+	return pipeline.PluginCapabilities{ReadsBody: true}
 }
 func (p *bodyRecorderPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	p.receivedBody = pctx.Body
@@ -560,5 +717,84 @@ func TestReverseProxy_ModifyResponse_RekeyAndResponseEvent(t *testing.T) {
 	}
 	if respEvent.Invocations == nil || len(respEvent.Invocations.Inbound) == 0 {
 		t.Errorf("response event has no Invocations; expected one a2a-stamp observe entry")
+	}
+}
+
+// TestInboundSessionID_NoActiveSessionFallback locks in the
+// reverseproxy's bucketing rule: when the A2A request has no
+// contextId (first turn of a conversation), inboundSessionID returns
+// DefaultSessionID — never falling back to ActiveSession(). The
+// previous fallback was a cross-conversation contamination vector:
+// a fresh chat's first turn would silently inherit a previous
+// conversation's still-alive session bucket, stranding all events
+// in the prior bucket and creating an orphan one-event session for
+// the rekeyed response.
+func TestInboundSessionID_NoActiveSessionFallback(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  string // pctx.Extensions.A2A.SessionID
+		want string
+	}{
+		{"first turn — empty contextId", "", session.DefaultSessionID},
+		{"subsequent turn — explicit contextId", "ctx-abc", "ctx-abc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pctx := &pipeline.Context{
+				Direction: pipeline.Inbound,
+				Extensions: pipeline.Extensions{
+					A2A: &pipeline.A2AExtension{SessionID: tc.ctx},
+				},
+			}
+			if got := inboundSessionID(pctx); got != tc.want {
+				t.Errorf("inboundSessionID = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestInboundSessionID_NoA2AExtension exercises the auth-only path:
+// non-A2A inbound (e.g. a denied request that never reached the
+// parser) routes to DefaultSessionID, where operators expect to find
+// unauthorized-access events.
+func TestInboundSessionID_NoA2AExtension(t *testing.T) {
+	pctx := &pipeline.Context{Direction: pipeline.Inbound}
+	if got := inboundSessionID(pctx); got != session.DefaultSessionID {
+		t.Errorf("inboundSessionID = %q, want %q", got, session.DefaultSessionID)
+	}
+}
+
+// TestRecordInbound_NewChatDoesntLeakIntoPriorBucket is the
+// integration regression for the original bug: with a previous
+// conversation's session still alive (so ActiveSession() returns it),
+// a new chat's first-turn inbound request lands in DefaultSessionID
+// rather than the previous bucket. The rekey-on-response path then
+// migrates Default → server-assigned contextId, keeping the new
+// conversation in its own bucket.
+func TestRecordInbound_NewChatDoesntLeakIntoPriorBucket(t *testing.T) {
+	store := session.New(5*time.Minute, 100, 0)
+	defer store.Close()
+
+	// Seed a "previous conversation" bucket and make it the active session.
+	store.Append("prev-conversation", pipeline.SessionEvent{
+		At: time.Now(), Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
+	})
+	if got := store.ActiveSession(); got != "prev-conversation" {
+		t.Fatalf("setup: ActiveSession = %q, want prev-conversation", got)
+	}
+
+	// New chat's first turn arrives — empty contextId.
+	pctx := &pipeline.Context{
+		Direction: pipeline.Inbound,
+		Extensions: pipeline.Extensions{
+			A2A: &pipeline.A2AExtension{Method: "message/stream"},
+		},
+	}
+	sid := inboundSessionID(pctx)
+	if sid == "prev-conversation" {
+		t.Fatal("regression: new chat's first turn leaked into previous bucket")
+	}
+	if sid != session.DefaultSessionID {
+		t.Errorf("first-turn sid = %q, want %q", sid, session.DefaultSessionID)
 	}
 }

@@ -33,7 +33,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 type HelloLog struct{}
@@ -255,8 +255,8 @@ imports the registry instead of sharing its package:
 package myplugin
 
 import (
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 )
 
 type MyPlugin struct{}
@@ -279,7 +279,7 @@ package main
 import _ "github.com/acme/my-plugin"
 ```
 
-No fork of kagenti-extensions required.
+No fork of cortex required.
 
 ## Step 7 — Test your plugin
 
@@ -330,7 +330,7 @@ Minimal example for an Inference-like parser whose extension stores
 `Messages []struct{ Role, Content string }`:
 
 ```go
-import "github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
+import "github.com/rossoctl/cortex/authbridge/authlib/contracts"
 
 // Compile-time assertion — catches interface drift at build time.
 var _ contracts.ContentSource = (*MyExtension)(nil)
@@ -382,11 +382,6 @@ All optional. A plugin that doesn't implement them is treated as
   framework fields after each plugin returns. Recording an invocation
   from a spawned goroutine attributes it to whichever plugin the
   pipeline happens to be dispatching at the time — usually garbage.
-- **Reads/writes on Extensions slots aren't compile-checked.** The
-  pipeline's `Capabilities` validation catches "plugin A reads slot X
-  but no earlier plugin writes X," but typos in string names silently
-  fall through. Use the constants in `pipeline/extensions.go` when
-  they exist.
 - **DisallowUnknownFields or nothing.** Strict decode in Configure is
   not optional. A misspelled key at startup is always a bug; lenient
   decode hides it until it misbehaves at 3am.
@@ -401,6 +396,6 @@ All optional. A plugin that doesn't implement them is treated as
 - [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
   composes plugins, the Run / RunResponse dispatch order, and the
   lifecycle hooks.
-- [`pipeline/plugin.go`](../pipeline/plugin.go) — the Plugin interface
+- [`pipeline/plugin.go`](../authlib/pipeline/plugin.go) — the Plugin interface
   and all optional interfaces (Initializer / Shutdowner / Readier /
   Configurable).

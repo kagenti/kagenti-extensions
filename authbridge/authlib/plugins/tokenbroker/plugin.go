@@ -13,40 +13,45 @@ import (
 	"strings"
 
 	"github.com/gobwas/glob"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenbroker/client"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenbroker/client"
 	"gopkg.in/yaml.v3"
 )
 
 // tokenBrokerConfig is the plugin's local config schema.
+//
+// Field tags drive both runtime decoding (json) and operator-facing
+// schema introspection (description / required / default / enum).
+// See pipeline/schema.go for the consumer contract.
 type tokenBrokerConfig struct {
 	// BrokerURL is the base URL of the token broker service.
-	BrokerURL string `json:"broker_url"`
+	BrokerURL string `json:"broker_url" required:"true" description:"Base URL of the token broker service."`
 
 	// DefaultPolicy is applied when a request's host matches no route:
 	// "passthrough" (default) forwards the request unchanged;
 	// "broker" attempts to acquire a token from the broker.
-	DefaultPolicy string `json:"default_policy"`
+	DefaultPolicy string `json:"default_policy" description:"Behavior when host matches no route." default:"passthrough" enum:"passthrough,broker"`
 
 	// Routes drives host-to-broker matching. A host that matches no
 	// route falls through to DefaultPolicy.
-	Routes tokenBrokerRoutes `json:"routes"`
+	Routes tokenBrokerRoutes `json:"routes" description:"Host-to-broker routing rules; non-matching hosts fall through to default_policy."`
 }
 
 type tokenBrokerRoutes struct {
 	// File is an optional path to a routes.yaml file.
-	File string `json:"file"`
+	File string `json:"file" description:"Path to a routes.yaml file. Inline rules below are merged with file-loaded rules."`
 
 	// Rules are inline route entries; combined with routes loaded from File.
-	Rules []tokenBrokerRoute `json:"rules"`
+	Rules []tokenBrokerRoute `json:"rules" description:"Inline route entries. Combined with rules loaded from file."`
 }
 
 type tokenBrokerRoute struct {
-	Host                  string `json:"host"`
-	Action                string `json:"action"` // "broker" or "passthrough"; defaults to "broker"
-	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty"`
-	TokenEndpoint         string `json:"token_endpoint,omitempty"`
+	Host                  string `json:"host" description:"Host glob pattern."`
+	Action                string `json:"action" description:"broker or passthrough." default:"broker" enum:"broker,passthrough"`
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" description:"Per-route OAuth authorization endpoint override."`
+	TokenEndpoint         string `json:"token_endpoint,omitempty" description:"Per-route OAuth token endpoint override."`
 }
 
 func (c *tokenBrokerConfig) applyDefaults() {
@@ -154,7 +159,15 @@ func NewTokenBroker() *TokenBroker { return &TokenBroker{} }
 func (p *TokenBroker) Name() string { return "token-broker" }
 
 func (p *TokenBroker) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{}
+	return pipeline.PluginCapabilities{
+		Description: "Token broker: exchanges incoming tokens against the configured IdP.",
+	}
+}
+
+// ConfigSchema implements pipeline.SchemaProvider; surfaces field
+// metadata to abctl edit templates and other config-aware tooling.
+func (p *TokenBroker) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(tokenBrokerConfig{})
 }
 
 func (p *TokenBroker) Configure(raw json.RawMessage) error {
@@ -217,18 +230,7 @@ func (p *TokenBroker) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// Extract bearer token
-	subjectToken := extractBearer(authHeader)
-	if subjectToken == "" {
-		return pctx.DenyAndRecord("missing_subject_token", "auth.missing-token",
-			"broker route requires authorization token")
-	}
-
-	// Derive server URL from scheme + host. pctx.Scheme is populated
-	// by the listener from :scheme (ext_proc / ext_authz) or
-	// r.URL.Scheme / r.TLS (forward / reverse proxy). Defaults to
-	// "http" when the listener couldn't determine one — matches the
-	// previous hardcoded behavior.
+	// Derive server URL for logging
 	scheme := pctx.Scheme
 	if scheme == "" {
 		scheme = "http"
@@ -237,6 +239,22 @@ func (p *TokenBroker) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 
 	// Use the plugin's configured broker URL
 	brokerURL := p.cfg.BrokerURL
+
+	slog.Info("token-broker: processing outbound request",
+		"server_url", serverURL,
+		"broker_url", brokerURL)
+
+	subjectToken := strings.TrimSpace(auth.ExtractBearer(authHeader))
+	if subjectToken == "" {
+		return pctx.DenyAndRecord("missing_subject_token", "auth.missing-token",
+			"broker route requires authorization token")
+	}
+
+	slog.Debug("token-broker: requesting token from broker",
+		"server_url", serverURL,
+		"broker_url", brokerURL,
+		"authorization_endpoint", authorizationEndpoint,
+		"token_endpoint", tokenEndpoint)
 
 	// Call broker to acquire token, passing authorization and token endpoints if available
 	token, err := p.client.AcquireToken(ctx, brokerURL, subjectToken, serverURL, authorizationEndpoint, tokenEndpoint)
@@ -284,6 +302,10 @@ func (p *TokenBroker) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 	// Replace token in authorization header
 	pctx.Headers.Set("Authorization", "Bearer "+token)
 
+	slog.Info("token-broker: token acquired and added to request",
+		"server_url", serverURL,
+		"broker_url", brokerURL)
+
 	// Record successful token replacement
 	pctx.Record(pipeline.Invocation{
 		Action:  pipeline.ActionModify,
@@ -293,17 +315,19 @@ func (p *TokenBroker) OnRequest(ctx context.Context, pctx *pipeline.Context) pip
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-func (p *TokenBroker) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
-	return pipeline.Action{Type: pipeline.Continue}
-}
-
-// extractBearer extracts the bearer token from an Authorization header.
-func extractBearer(authHeader string) string {
-	const prefix = "Bearer "
-	if !strings.HasPrefix(authHeader, prefix) {
-		return ""
+func (p *TokenBroker) OnResponse(ctx context.Context, pctx *pipeline.Context) pipeline.Action {
+	// Derive server URL for logging
+	scheme := pctx.Scheme
+	if scheme == "" {
+		scheme = "http"
 	}
-	return strings.TrimSpace(strings.TrimPrefix(authHeader, prefix))
+	serverURL := scheme + "://" + pctx.Host
+
+	slog.Info("token-broker: received outbound response",
+		"server_url", serverURL,
+		"status_code", pctx.StatusCode,
+		"has_response_body", len(pctx.ResponseBody) > 0)
+	return pipeline.Action{Type: pipeline.Continue}
 }
 
 // loadBrokerRoutesFromFile loads broker routes from a YAML file.

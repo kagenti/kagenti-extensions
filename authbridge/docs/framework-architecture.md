@@ -160,6 +160,35 @@ Framework fills `Plugin`, `Phase`, `Path`; authors supply only what's specific t
 
 **Lifetime:** one `*Context` per HTTP transaction. Not reused across requests. Single-threaded — the pipeline guarantees sequential invocation of plugins within a phase, so plugins don't need internal locking for pctx reads/writes.
 
+### Example
+
+A typical configuration validates inbound traffic with the auth plugins, lets the
+protocol parsers record what is happening, has a guardrail consult the recorded
+session, and finally exchanges a token on the way out:
+
+```yaml
+# authbridge-runtime (abbreviated)
+session:
+  enabled: true
+pipeline:
+  inbound:  [ jwt-validation, a2a-parser ]
+  outbound: [ mcp-parser, ibac, token-exchange ]
+# routes.yaml: { host: github-tool-mcp → audience: github-tool }
+```
+
+The diagram below traces a request through that configuration: an inbound message
+is validated and recorded, then the workload's outbound tool call is judged
+against the recorded intent and finally re-tokenized.
+
+![Plugin pipeline sequence](plugin-sequence.svg)
+
+The pipelines dispatch in **declaration order** on the request phase. On the
+inbound pass `jwt-validation` runs first (and can reject with `401`), then
+`a2a-parser` records the user's request into the session store. On the outbound
+pass `mcp-parser` records the tool call, `ibac` reads the recorded intent to judge
+it (and can reject with `403`), and `token-exchange` swaps in an audience-scoped
+token. The response phase runs the same plugins in reverse order.
+
 ---
 
 ## 4. `Extensions` — typed plugin-to-plugin communication
@@ -219,6 +248,8 @@ Adding a named slot is an authlib-core change: edit `Extensions`, add a wire fie
 
 **Capability interfaces on the slot types.** Named-slot extensions may implement optional capability interfaces declared in [`authlib/contracts/`](../authlib/contracts/) so consumer plugins can interact with them without importing any specific parser package. The current capability is [`ContentSource`](../authlib/contracts/content.go) — implemented by `A2AExtension`, `MCPExtension`, and `InferenceExtension` — which lets guardrail plugins iterate inspectable text fragments via `pctx.ContentSources()`. Parser authors opt in by adding one method (`Fragments() []contracts.Fragment`); consumers see a uniform view across every protocol that implements the contract. See [`plugin-reference.md` "Exposing content to guardrails"](./plugin-reference.md#exposing-content-to-guardrails) for the pattern.
 
+**Classification on the slot types.** Each protocol extension also carries an `IsAction bool` field — the parser's verdict on whether the request is a user-meaningful action (judge it) or protocol mechanics (skip it). Parsers explicitly set `IsAction = true` for the small set of known action methods (`tools/call`, `prompts/get`, `resources/read` for MCP; `message/send`, `message/stream` for A2A; every populated case for inference); everything else inherits the zero-value false. Guardrails read the verdict aggregated across every populated extension via [`pctx.Classification()`](../authlib/pipeline/context.go), which returns `(anyAction, anyBypass)`. A defense-in-depth guardrail (IBAC pattern) skips on `anyBypass`, passes through on `!anyAction`, and judges only when `anyAction && !anyBypass`. This keeps protocol-specific knowledge in the parsers — adding a new guardrail or a new protocol doesn't multiply work at the guardrail layer.
+
 ### `Custom map[string]any` — plugin-private state + escape-hatch public events
 Two access patterns share the same map, disambiguated by key suffix.
 
@@ -260,24 +291,26 @@ All at `authbridge/authlib/pipeline/extensions.go`:
 
 ```go
 type MCPExtension struct {
-    Method string          // JSON-RPC method, e.g. "tools/call"
-    RPCID  any             // JSON-RPC id (could be int or string)
-    Params map[string]any  // request params
-    Result map[string]any  // response result (mutually exclusive with Err)
-    Err    *MCPError
+    Method   string          // JSON-RPC method, e.g. "tools/call"; or "$transport/stream" / "$transport/terminate" for body-less MCP transport patterns
+    RPCID    any             // JSON-RPC id (could be int or string)
+    Params   map[string]any  // request params
+    Result   map[string]any  // response result (mutually exclusive with Err)
+    Err      *MCPError
+    IsAction bool            // parser's classification verdict; true for tools/call, prompts/get, resources/read; false for housekeeping + transport
 }
 
 type A2AExtension struct {
-    Method      string
-    RPCID       any
-    SessionID   string  // contextId from the client, or server-assigned on first turn
-    MessageID   string
-    TaskID      string
-    Role        string  // "user" | "agent"
-    Parts       []A2APart
-    FinalStatus string  // response: "completed" | "failed" | "canceled"
-    Artifact    string  // response: assembled artifact text
-    ErrorMessage string // response: failure reason
+    Method       string
+    RPCID        any
+    SessionID    string  // contextId from the client, or server-assigned on first turn
+    MessageID    string
+    TaskID       string
+    Role         string  // "user" | "agent"
+    Parts        []A2APart
+    FinalStatus  string  // response: "completed" | "failed" | "canceled"
+    Artifact     string  // response: assembled artifact text
+    ErrorMessage string  // response: failure reason
+    IsAction     bool    // parser's classification verdict; true for message/send + message/stream
 }
 
 type InferenceExtension struct {
@@ -297,6 +330,8 @@ type InferenceExtension struct {
     CompletionTokens int
     TotalTokens      int
     ToolCalls        []InferenceToolCall
+    // Classification: every populated InferenceExtension is an outbound LLM call.
+    IsAction         bool  // unconditionally true when populated
 }
 
 type SecurityExtension struct {
@@ -350,7 +385,7 @@ Returning `Reject` from `OnRequest` halts the request pipeline; from `OnResponse
   "message":     "Bearer token required",
   "description": "No Authorization header present",
   "plugin":      "jwt-validation",
-  "details":     { "realm": "kagenti" }
+  "details":     { "realm": "rossoctl" }
 }
 ```
 
@@ -362,7 +397,7 @@ pipeline.DenyStatus(451, "policy.forbidden", "unavailable for legal reasons")
 pipeline.DenyWithDetails("policy.rate-limited", "quota hit", map[string]any{
     "remaining": 0, "window": "1h",
 })
-pipeline.Challenge("kagenti", "Authorization required")   // 401 + WWW-Authenticate
+pipeline.Challenge("rossoctl", "Authorization required")   // 401 + WWW-Authenticate
 pipeline.RateLimited(30*time.Second, "", "slow down")     // 429 + Retry-After
 ```
 
@@ -629,7 +664,7 @@ The pipeline **does not own**:
 |---|---|---|
 | HTTP wire protocol (ext_proc gRPC, ext_authz, reverse/forward proxy) | `cmd/authbridge/listener/` | Each mode speaks a different wire; pipeline stays protocol-free |
 | Body buffering negotiation (`ProcessingMode: BUFFERED`) | Listener reads `Pipeline.NeedsBody()` | Only listener can respond to the ext_proc handshake |
-| JWT issuance, client registration, Keycloak admin calls | Outside the pipeline (agent sidecars / kagenti-operator) | Async concerns happening before/after any request flow |
+| JWT issuance, client registration, Keycloak admin calls | Outside the pipeline (agent sidecars / operator) | Async concerns happening before/after any request flow |
 | Session store writes (`Store.Append`) | Listener, called after each phase | Plugins see only the read-only `SessionView` |
 | SSE streaming of events to abctl | `authlib/sessionapi` | Observability API, not a plugin concern |
 | **mTLS handshake + peer-cert verification** | **`authlib/listener/...` (proxy-sidecar) using `authlib/tls` + `authlib/spiffe`** | **Transport-level concern; happens before any plugin sees a decrypted HTTP message** |
@@ -656,8 +691,9 @@ identity:
 
 The mTLS code lives in `authlib/tls` + `authlib/spiffe` (framework-
 shared) and `authlib/listener/internal/tlssniff` (listener-internal
-byte-peek dispatcher). Only `cmd/authbridge-proxy` and
-`cmd/authbridge-lite` wire it up; `cmd/authbridge-envoy` stays on
+byte-peek dispatcher). Only `cmd/authbridge-proxy` wires it up (this
+also covers the `authbridge-lite` image — the same binary built with
+`exclude_plugin_*` tags); `cmd/authbridge-envoy` stays on
 plaintext-localhost because Envoy handles wire encryption via SDS
 independently.
 

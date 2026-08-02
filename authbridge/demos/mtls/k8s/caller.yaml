@@ -1,7 +1,7 @@
 # mTLS demo — caller pod.
 #
-# Operator-injected authbridge sidecar (kagenti.io/inject=enabled);
-# SPIRE enabled (kagenti.io/spire=enabled) so spiffe-helper writes
+# Operator-injected authbridge sidecar (rossoctl.io/inject=enabled);
+# SPIRE enabled (rossoctl.io/spire=enabled) so spiffe-helper writes
 # the X.509 SVID files authbridge consumes for mTLS. The "demo-app"
 # container is just curl in a sleep loop — the demo's verify scripts
 # kubectl-exec into it.
@@ -34,8 +34,8 @@ spec:
       labels:
         app.kubernetes.io/name: mtls-caller
         app.kubernetes.io/part-of: mtls-demo
-        kagenti.io/inject: enabled
-        kagenti.io/spire: enabled
+        rossoctl.io/inject: enabled
+        rossoctl.io/spire: enabled
     spec:
       serviceAccountName: mtls-caller
       securityContext:
@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: demo-app
-          image: curlimages/curl:latest
+          image: curlimages/curl:8.11.1
           imagePullPolicy: IfNotPresent
           command: ["sh", "-c", "while true; do sleep 30; done"]
           env:
@@ -55,6 +55,10 @@ spec:
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
+            # curlimages/curl USERs as the non-numeric `curl_user`;
+            # an explicit numeric runAsUser is required for the
+            # kubelet's runAsNonRoot check to pass.
+            runAsUser: 100
             capabilities:
               drop: ["ALL"]
           resources:
@@ -89,3 +93,19 @@ spec:
       protocol: TCP
       name: http
   type: ClusterIP
+
+---
+# AgentRuntime enrolls this workload with the operator. The operator
+# applies rossoctl.io/type=agent to the Deployment and Pod template,
+# which triggers webhook sidecar injection and Keycloak client registration.
+apiVersion: agent.rossoctl.dev/v1alpha1
+kind: AgentRuntime
+metadata:
+  name: mtls-caller
+  namespace: team1
+spec:
+  type: agent
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mtls-caller

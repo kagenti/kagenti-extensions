@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
 )
 
 func newTestConfig() *config.Config {

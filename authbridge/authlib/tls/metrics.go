@@ -8,10 +8,11 @@ import (
 // endpoint on :9093. Atomic counters because the listener and the
 // dialer call into them concurrently.
 //
-// Critical for permissive rollouts: an operator promoting from
-// permissive to strict needs OutboundFellBack to reach zero (or only
-// count destinations they know are deliberately plaintext) before
-// flipping. Without these, the rollout is blind.
+// Outbound: only present when the workload is in strict mode (the
+// only mode the forward proxy attempts TLS-or-fail outbound).
+// Permissive mode dials plaintext directly — no TLS attempt, no
+// fallback, no counter — matching envoy-sidecar's permissive
+// semantics.
 type Metrics struct {
 	// Inbound: which path did each accepted connection take?
 	InboundTLSAccepted   atomic.Uint64 // TLS handshake succeeded + verified
@@ -19,10 +20,10 @@ type Metrics struct {
 	InboundPlainRejected atomic.Uint64 // Plain HTTP rejected (strict only)
 	InboundTLSFailed     atomic.Uint64 // TLS handshake / verification failed
 
-	// Outbound: which path did each outbound dial take?
+	// Outbound: only counted in strict mode (TLS-or-fail). Permissive
+	// is plaintext outbound and bypasses these.
 	OutboundTLSSucceeded atomic.Uint64 // TLS handshake succeeded + verified
-	OutboundFellBack     atomic.Uint64 // TLS failed, plain TCP used (permissive only)
-	OutboundFailed       atomic.Uint64 // TLS failed, no fallback (strict) — request errored
+	OutboundFailed       atomic.Uint64 // TLS handshake / verification failed
 }
 
 // Snapshot is a point-in-time copy of the metrics for serialization
@@ -35,7 +36,6 @@ type Snapshot struct {
 	InboundTLSFailed     uint64 `json:"inbound_tls_failed"`
 
 	OutboundTLSSucceeded uint64 `json:"outbound_tls_succeeded"`
-	OutboundFellBack     uint64 `json:"outbound_fell_back"`
 	OutboundFailed       uint64 `json:"outbound_failed"`
 }
 
@@ -49,7 +49,6 @@ func (m *Metrics) Snapshot() Snapshot {
 		InboundPlainRejected: m.InboundPlainRejected.Load(),
 		InboundTLSFailed:     m.InboundTLSFailed.Load(),
 		OutboundTLSSucceeded: m.OutboundTLSSucceeded.Load(),
-		OutboundFellBack:     m.OutboundFellBack.Load(),
 		OutboundFailed:       m.OutboundFailed.Load(),
 	}
 }

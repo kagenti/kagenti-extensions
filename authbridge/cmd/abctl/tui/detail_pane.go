@@ -6,11 +6,12 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
-// showDetail loads e into the detail viewport as colorized JSON and
-// remembers the focused event so yank (y) can find it.
+// showDetail loads the row's event into the detail viewport as colorized
+// JSON and remembers the focused row so yank (y) can find the event and
+// layout() can re-render on resize.
 //
 // Marshal with SessionEvent.MarshalJSON first (readable wire form — string
 // enums, durationMs), then filter inference/mcp extensions so request
@@ -18,10 +19,18 @@ import (
 // response-side fields (TUI readability only — wire format is unchanged,
 // and yank still writes the full JSON).
 //
-// When the event arrived over TLS (SessionEvent.TLS non-nil), a small
-// header block is prepended to the JSON so operators can see the
-// connection-level identity at a glance. Absent for plaintext events.
-func (m *model) showDetail(e *pipeline.SessionEvent) {
+// The whole event is rendered — all plugin invocations, both directions —
+// because the timeline is now one row per message; the per-plugin breakdown
+// lives here in the detail, not in separate rows.
+//
+// When a CONNECT tunnel was folded into this row (TLS bridge), a one-block
+// summary of the tunnel is prepended so the operator sees the bridged
+// origin and the connection-level decision without a separate row. When the
+// event arrived over TLS (SessionEvent.TLS non-nil), a small TLS header
+// block is prepended too. Both absent for plaintext, non-bridged events.
+func (m *model) showDetail(r eventRow) {
+	e := r.event
+	m.detailRow = r
 	m.detailEvent = e
 	data, err := json.Marshal(e)
 	if err != nil {
@@ -35,11 +44,33 @@ func (m *model) showDetail(e *pipeline.SessionEvent) {
 		// content keeps its highlighting.
 		content = ansi.Wrap(content, w, " -")
 	}
+	if r.tunnel != nil {
+		content = tunnelHeader(r.tunnel) + "\n\n" + content
+	}
 	if header := tlsHeader(e.TLS); header != "" {
 		content = header + "\n\n" + content
 	}
 	m.detailVp.SetContent(content)
 	m.detailVp.GotoTop()
+}
+
+// tunnelHeader summarizes the CONNECT tunnel folded into a TLS-bridged
+// request row: the bridged origin (host:port) and any gate invocations that
+// ran on the tunnel-open before the bytes were decrypted. Lets an operator
+// see the connection-level decision without a separate row.
+//
+//	tunnel:  CONNECT example.com:443 (TLS bridge)
+//	  jwt-validation skip (no_inbound_identity)
+func tunnelHeader(tunnel *pipeline.SessionEvent) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("tunnel:  CONNECT %s (TLS bridge)", tunnel.Host))
+	for _, iv := range allInvocations(tunnel) {
+		b.WriteString(fmt.Sprintf("\n  %s %s", iv.Plugin, iv.Action))
+		if iv.Reason != "" {
+			b.WriteString(" (" + iv.Reason + ")")
+		}
+	}
+	return b.String()
 }
 
 // tlsHeader builds a one-block summary of the TLS connection state.
@@ -51,7 +82,7 @@ func (m *model) showDetail(e *pipeline.SessionEvent) {
 //
 //	TLS:
 //	  version: TLS 1.3 · cipher: TLS_AES_128_GCM_SHA256
-//	  peer:    spiffe://kagenti.local/ns/team1/sa/caller-agent
+//	  peer:    spiffe://rossoctl.local/ns/team1/sa/caller-agent
 //
 // Empty fields are skipped so the block stays terse on partial data.
 func tlsHeader(tls *pipeline.EventTLS) string {

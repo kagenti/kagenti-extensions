@@ -2,7 +2,7 @@
 
 This file provides context for Claude (AI assistant) when working with the `AuthBridge` codebase.
 For repo-level context (CI/CD, cross-component relationships), see [`../CLAUDE.md`](../CLAUDE.md).
-The sidecar injection webhook lives in [kagenti-operator](https://github.com/kagenti/kagenti-operator).
+The sidecar injection webhook lives in [operator](https://github.com/rossoctl/operator).
 
 ## Binaries
 
@@ -10,13 +10,26 @@ The unified `cmd/authbridge/` binary has been split into three mode-specific
 binaries with shared auth logic in `authlib/`:
 
 - `cmd/authbridge-proxy/` — proxy-sidecar mode (default). HTTP forward + reverse
-  proxies. Full plugin set (jwt-validation, token-exchange, a2a-parser,
-  mcp-parser, inference-parser, ibac).
+  proxies. Compiles in every plugin by default (jwt-validation, token-exchange,
+  a2a-parser, mcp-parser, inference-parser, opa, sparc, ibac, token-broker).
+  **Every** plugin is excludable via `-tags exclude_plugin_<name>` — one
+  `plugins_<name>.go` file per plugin, gated by `//go:build !exclude_plugin_<name>`;
+  `main.go` imports no plugin package directly. **Exception:** `context-guru` is
+  **opt-IN** (`//go:build include_plugin_contextguru`, not compiled by default),
+  because its embedded engine pulls a large transitive dependency set; build with
+  `-tags include_plugin_contextguru` to link it in.
 - `cmd/authbridge-envoy/` — envoy-sidecar mode. ext_proc gRPC server hooked
-  into Envoy. Full plugin set.
-- `cmd/authbridge-lite/` — proxy-sidecar mode, lite plugin set (auth gates
-  only, parsers dropped). For size-optimized deployments that don't need
-  protocol-aware session events.
+  into Envoy. Full plugin set. The `exclude_plugin_ibac` tag applies here too.
+- `cmd/authbridge-cpex/` — proxy-sidecar mode, full plugin set plus the
+  `cpex` plugin. Built with `-tags cpex` and requires cgo (CGO_ENABLED=1):
+  it links `libcpex_ffi.a` from a pinned CPEX release to route hooks through
+  the CPEX framework (APL DSL + named CPEX policy plugins). The FFI ABI
+  version lives in `cmd/authbridge-cpex/CPEX_FFI_VERSION`. The other
+  binaries are pure-Go (CGO_ENABLED=0) and do not import the cpex package.
+- `authbridge-lite` (**image, not a separate binary**) — `cmd/authbridge-proxy`
+  built with `exclude_plugin_*` tags so only jwt-validation + token-exchange
+  compile in (OPA + parsers dropped). For size-optimized deployments that
+  don't need protocol-aware session events.
 
 Each binary is hardcoded to its deployment shape; mode is no longer selected
 at runtime. The YAML `mode:` field must match the binary or boot fails.
@@ -57,12 +70,13 @@ authbridge/
 │   ├── Dockerfile                    #   envoy-sidecar combined image (Envoy + authbridge-envoy)
 │   └── entrypoint.sh
 │
-├── cmd/authbridge-lite/              # proxy-sidecar mode. Lite plugin set (no parsers).
+├── cmd/authbridge-cpex/              # proxy-sidecar mode + cpex plugin. -tags cpex, cgo required.
 │   ├── main.go
-│   ├── Dockerfile                    #   proxy-sidecar lite combined image
+│   ├── Dockerfile                    #   proxy-sidecar build linking libcpex_ffi.a
+│   ├── CPEX_FFI_VERSION              #   pinned CPEX FFI ABI version (build-arg source of truth)
 │   └── entrypoint.sh
 │
-├── proxy-init/                       # iptables init container (envoy-sidecar mode only)
+├── proxy-init/                       # iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes)
 │   ├── init-iptables.sh              #   iptables setup script
 │   ├── Dockerfile.init               #   proxy-init container image
 │   ├── Makefile                      #   docker-build-init + load-image targets
@@ -91,7 +105,7 @@ authbridge/
 
 ## Component Details
 
-### AuthBridge Binaries (cmd/authbridge-{proxy,envoy,lite}/)
+### AuthBridge Binaries (cmd/authbridge-{proxy,envoy}/)
 
 The mode-specific authbridge binaries handle both traffic directions. Auth logic
 and all listener implementations live in `authlib/` (under `authlib/listener/`);
@@ -126,7 +140,7 @@ wants to register.
 - The operator-supplied env vars (`KEYCLOAK_URL`, `KEYCLOAK_REALM`, `TOKEN_URL`, `ISSUER`, `DEFAULT_OUTBOUND_POLICY`, `CLIENT_ID`) are consumed by the default `authbridge-combined.yaml` via `${VAR}` expansion — they land inside the appropriate plugin's `config:` block rather than a top-level section.
 - `jwt-validation` derives `jwks_url` from `issuer` when omitted (appends `/protocol/openid-connect/certs`).
 - `token-exchange` derives `token_url` from `keycloak_url + keycloak_realm` when omitted (Keycloak convention).
-- Credential files: the **kagenti-operator** registers each workload with Keycloak and creates a Secret containing `client-id.txt` + `client-secret.txt`; the operator's webhook mounts that Secret at `/shared/client-id.txt` and `/shared/client-secret.txt` in containers that share the `shared-data` volume. SPIRE-issued credentials are sourced in-process via the `spiffe.Provider` (built from the top-level `spiffe:` block in `authbridge-runtime`) — authbridge's hot path reads X.509 SVIDs from an in-memory `spiffe.X509Source` (no per-handshake file I/O), and `token-exchange` consumes a JWT-SVID from the injected Provider via `plugins.BuildWithSPIFFE`. The Provider also mirrors `/opt/jwt_svid.token`, `/opt/svid.pem`, `/opt/svid_key.pem`, and `/opt/svid_bundle.pem` for external readers (e2e probes, debugging, future Envoy filesystem SDS). The `spiffe-helper` binary is no longer bundled in any combined image, and the `SPIRE_ENABLED` env var no longer gates anything — presence/absence of the `spiffe:` block in YAML drives behavior. `jwt-validation` reads the audience from `/shared/client-id.txt` via `audience_file`; `token-exchange` reads client credentials via `client_id_file` / `client_secret_file`. Each plugin attempts a synchronous read at Configure time and falls back to a background poll from its `Init` goroutine if the file isn't yet readable. The legacy in-pod `client-registration` sidecar has been removed entirely; the `kagenti.io/client-registration-inject: "true"` label is **no longer functional** — the operator's `ClientRegistrationReconciler` still treats it as a "skip operator-managed registration" signal (`SkipReason` in `kagenti-operator/internal/clientreg/names.go:58`), but the legacy sidecar that the label deferred to is gone. Setting it today silently breaks registration; do not add it to new manifests.
+- Credential files: the **operator** registers each workload with Keycloak and creates a Secret containing `client-id.txt` + `client-secret.txt`; the operator's webhook mounts that Secret at `/shared/client-id.txt` and `/shared/client-secret.txt` in containers that share the `shared-data` volume. SPIRE-issued credentials are sourced in-process via the `spiffe.Provider` (built from the top-level `spiffe:` block in `authbridge-runtime`) — authbridge's hot path reads X.509 SVIDs from an in-memory `spiffe.X509Source` (no per-handshake file I/O), and `token-exchange` consumes a JWT-SVID from the injected Provider via `plugins.BuildWithSPIFFE`. The Provider also mirrors `/opt/jwt_svid.token`, `/opt/svid.pem`, `/opt/svid_key.pem`, and `/opt/svid_bundle.pem` for external readers (e2e probes, debugging, future Envoy filesystem SDS). The `spiffe-helper` binary is no longer bundled in any combined image, and the `SPIRE_ENABLED` env var no longer gates anything — presence/absence of the `spiffe:` block in YAML drives behavior. `jwt-validation` reads the audience from `/shared/client-id.txt` via `audience_file`; `token-exchange` reads client credentials via `client_id_file` / `client_secret_file`. Each plugin attempts a synchronous read at Configure time and falls back to a background poll from its `Init` goroutine if the file isn't yet readable. The legacy in-pod `client-registration` sidecar has been removed entirely; the `rossoctl.io/client-registration-inject: "true"` label is **no longer functional** — the operator's `ClientRegistrationReconciler` still treats it as a "skip operator-managed registration" signal (`SkipReason` in `operator/internal/clientreg/names.go:58`), but the legacy sidecar that the label deferred to is gone. Setting it today silently breaks registration; do not add it to new manifests.
 - Outbound route config: `token-exchange` reads `/etc/authproxy/routes.yaml` by default (path is per-plugin, configured via `routes.file` in its config block); inline rules can be declared under `routes.rules`.
 - Outbound `default_policy`: `passthrough` (default) or `exchange`, configured per-plugin (no top-level `DEFAULT_OUTBOUND_POLICY` field anymore; the env var is still expanded into the plugin config by `authbridge-combined.yaml`).
 
@@ -139,6 +153,8 @@ wants to register.
 - `authlib/config/` -- Mode presets, YAML config loader, credential-file waiters, top-level (mode + listener + session) validation
 - `authlib/pipeline/` -- Plugin interface + lifecycle (`Configurable`, `Initializer`, `Shutdowner`); see [`docs/framework-architecture.md`](docs/framework-architecture.md)
 - `authlib/plugins/` -- The concrete plugins + registry; see [`docs/plugin-reference.md`](docs/plugin-reference.md) for the per-plugin config convention
+
+**Plugin classification.** Protocol parsers (`mcp-parser`, `a2a-parser`, `inference-parser`) populate an `IsAction bool` field on their respective extensions to classify each request as either a user-meaningful action or protocol mechanics. Default-false means "not classified as action" — guardrails treat it as bypass. Parsers explicitly set `IsAction = true` for the small set of action methods (`tools/call` / `prompts/get` / `resources/read` for MCP; `message/send` / `message/stream` for A2A; every populated case for inference). Guardrails (`ibac` today; future rate limiters, audit loggers, etc.) read the aggregated verdict via `pctx.Classification()` which returns `(anyAction, anyBypass)`. A defense-in-depth guardrail skips on `anyBypass`, passes through on `!anyAction` (no parser claimed this traffic), and judges only when `anyAction && !anyBypass`. This puts the protocol-specific bypass-vs-action vocabulary in each parser — adding a new guardrail or new protocol does not multiply work at the guardrail layer. See [`docs/plugin-reference.md` "Classifying requests"](docs/plugin-reference.md#classifying-requests-as-actions-vs-protocol-mechanics) for the contract.
 
 ### init-iptables.sh
 
@@ -185,14 +201,14 @@ Declarative Keycloak synchronization tool that maintains client scope mappings b
 
 ### Envoy Configuration
 
-Envoy config lives in the `envoy-config` ConfigMap rendered by the [kagenti Helm chart](https://github.com/kagenti/kagenti) at install time (template: `charts/kagenti/templates/agent-namespaces.yaml` / `authbridge-template-configmaps.yaml`). Key listeners: `outbound_listener` (15123), `inbound_listener` (15124). Inbound listener injects `x-authbridge-direction: inbound` header. Both use ext_proc cluster pointing to the authbridge binary on localhost:9090.
+Envoy config lives in the `envoy-config` ConfigMap rendered by the [rossoctl Helm chart](https://github.com/rossoctl/rossoctl) at install time (template: `charts/rossoctl/templates/agent-namespaces.yaml` / `authbridge-template-configmaps.yaml`). Key listeners: `outbound_listener` (15123), `inbound_listener` (15124). Inbound listener injects `x-authbridge-direction: inbound` header. Both use ext_proc cluster pointing to the authbridge binary on localhost:9090.
 
 ## Demo Scenarios
 
 The `demos/` directory contains the following scenarios (see `demos/README.md` for a recommended learning path):
 
 - **weather-agent/** -- Getting-started demo: inbound JWT validation with outbound passthrough. Simplest way to see AuthBridge in action (UI deployment). `demo-ui-advanced.md` extends this with outbound token exchange and tool-side AuthBridge; `demo-with-abctl.md` is a plugin-pipeline tooling walkthrough.
-- **webhook/** -- Shows how to use the webhook (now part of [kagenti-operator](https://github.com/kagenti/kagenti-operator)) to automatically inject AuthBridge sidecars. Recommended starting point for webhook-based deployments.
+- **webhook/** -- Shows how to use the webhook (now part of [operator](https://github.com/rossoctl/operator)) to automatically inject AuthBridge sidecars. Recommended starting point for webhook-based deployments.
 - **github-issue/** -- External API integration (GitHub) with inbound validation, outbound token exchange, and scope-based access control. Available as UI or manual deployment.
 - **token-exchange-routes/** -- Configuration reference for the `authproxy-routes` ConfigMap. Covers single-target (one route) and multi-target (one agent → many tools) patterns. Pairs with one of the deployment demos for a full stack.
 - **mcp-parser/** -- Configuration reference for enabling the outbound `mcp-parser` plugin.
@@ -208,19 +224,19 @@ There are **two** setup scripts for different demo scenarios:
 
 **Common Keycloak defaults across all scripts:**
 - URL: `http://keycloak.localtest.me:8080`
-- Realm: `kagenti`
+- Realm: `rossoctl`
 - Admin: `admin` / `admin`
 
 **Note:** All scripts share the same helper function patterns (`get_or_create_realm`, `get_or_create_client`, `get_or_create_client_scope`, etc.) and are idempotent.
 
 ## Required ConfigMaps for Webhook Injection
 
-When the webhook injects sidecars (via [kagenti-operator](https://github.com/kagenti/kagenti-operator)), these ConfigMaps must exist in the target namespace. The kagenti Helm chart's `agent-namespaces.yaml` and `authbridge-template-configmaps.yaml` templates render them; the operator copies them into agent namespaces that don't already have them:
+When the webhook injects sidecars (via [operator](https://github.com/rossoctl/operator)), these ConfigMaps must exist in the target namespace. The rossoctl Helm chart's `agent-namespaces.yaml` and `authbridge-template-configmaps.yaml` templates render them; the operator copies them into agent namespaces that don't already have them:
 
 | Resource | Kind | Consumer | Key Fields |
 |----------|------|----------|------------|
 | `authbridge-config` | ConfigMap | authbridge | `KEYCLOAK_URL`, `KEYCLOAK_REALM`, `PLATFORM_CLIENT_IDS` (optional), `TOKEN_URL` (optional, derived), `ISSUER` (optional, derived or explicit), `DEFAULT_OUTBOUND_POLICY` (optional). Inbound audience validation uses `CLIENT_ID` from `/shared/client-id.txt`. Target audience and scopes are configured per-route in `authproxy-routes`. |
-| `keycloak-admin-secret` | Secret | kagenti-operator (ClientRegistrationReconciler) | `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD` |
+| `keycloak-admin-secret` | Secret | operator (ClientRegistrationReconciler) | `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD` |
 | `authproxy-routes` | ConfigMap (optional) | authbridge | `routes.yaml` with per-host token exchange rules |
 | `spiffe-helper-config` | ConfigMap (legacy, unused by authbridge) | (none — retained only for compatibility with older deployments) | Previously held `helper.conf` for the bundled `spiffe-helper` binary. Authbridge now drives SPIRE configuration via the top-level `spiffe:` block in `authbridge-runtime` and no longer reads this ConfigMap. |
 | `envoy-config` | ConfigMap | Envoy (inside the `authbridge-envoy` combined image, envoy-sidecar mode only) | `envoy.yaml` (full Envoy configuration) |
@@ -265,8 +281,8 @@ preserved.
 
 When the runtime config carries an `mtls:` block, authbridge enables
 transport-level mTLS on the proxy-sidecar listeners (forward + reverse
-proxy). envoy-sidecar mode is unaffected — Envoy handles its own TLS
-via SDS independently.
+proxy). envoy-sidecar mode handles mTLS at the Envoy data-plane level
+instead — see the **envoy-sidecar mTLS** subsection below.
 
 ```yaml
 # authbridge-runtime ConfigMap (top-level)
@@ -279,7 +295,7 @@ mtls:
 | Mode | Inbound (reverse proxy `:8080`) | Outbound (forward proxy) |
 |---|---|---|
 | (no `mtls` block) | Plaintext only. | Plaintext only. |
-| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Try TLS first; on handshake failure fall back to plain TCP (one-line WARN log). |
+| `permissive` (default when block present) | Byte-peek listener: TLS handshakes verified against the SPIRE trust bundle; plaintext callers served on the same port. ⚠️ Plaintext requests carry their full headers and bodies in the clear — including any `Authorization: Bearer ...` token already injected by `token-exchange`. Use only during rollout with cluster-network trust. | Plaintext — no TLS-wrap attempt. Matches envoy-sidecar's permissive and Istio's PeerAuthentication semantics (permissive is inbound-only). A permissive caller cannot reach a strict peer; mixed-mode deployments need both ends compatible. |
 | `strict` | TLS only — non-TLS callers get the connection closed. | TLS or fail: handshake failure is a hard error, no fallback. |
 
 In both modes, a successful TLS handshake that fails certificate
@@ -294,29 +310,81 @@ per-caller decisions read `pctx.PeerCert` and check the URI SAN.
 pod restart to apply, matching the existing rule for `listener.*`
 addresses. Plugin-pipeline config keeps its own hot-reload behavior.
 
+### envoy-sidecar mTLS
+
+In envoy-sidecar mode the listeners live in Envoy, not authbridge,
+so the top-level `mtls:` block is a no-op there. Equivalent semantics
+are configured at the Envoy data-plane level by extending the
+`envoy-config` ConfigMap with TLS blocks:
+
+| Mode | Inbound (`:15124`) | Outbound (`:15123`) |
+|---|---|---|
+| `disabled` | plaintext (today's behavior) | plaintext (today's behavior) |
+| `permissive` | `tls_inspector` listener filter + two filter chains: `transport_protocol: tls` chain terminates mTLS, `transport_protocol: raw_buffer` chain accepts plaintext | **plaintext** — no TLS-wrap attempt |
+| `strict` | `tls_inspector` + single TLS filter chain; plaintext drops at filter chain match | `UpstreamTlsContext` on the `original_destination` cluster: TLS-or-fail, blanket |
+
+X.509 SVIDs are read by Envoy directly from `/opt/svid.pem`,
+`/opt/svid_key.pem`, `/opt/svid_bundle.pem` — the same paths
+proxy-sidecar's mTLS uses. The spiffe Provider's file-mirror in
+the `authbridge-envoy` binary keeps these fresh on rotation.
+
+**Inbound parity with proxy-sidecar:** byte-identical observable
+semantics — TLS handshakes terminate against the SPIRE trust bundle,
+plaintext is served (permissive) or rejected (strict). Same outcome
+as proxy-sidecar's `tlssniff.Listener`, just expressed as Envoy
+filter chains. This matches Istio's PERMISSIVE/STRICT inbound exactly.
+
+**Outbound is Istio-shaped:** Envoy has no native primitive for
+"try TLS, fall back to plaintext on handshake failure" within an
+`ORIGINAL_DST` cluster (and Istio itself doesn't do it — Pilot
+pre-decides mesh membership). Permissive keeps outbound plaintext;
+strict does blanket TLS-or-fail to everything the listener sees.
+This works in practice because outbound calls that need plaintext —
+Keycloak, JWKS, external HTTPS — never reach the listener: plugin
+outbound uses Go `net/http` directly, and `proxy-init`'s iptables
+doesn't redirect arbitrary HTTPS egress. **Proxy-sidecar matches
+this**: its forward proxy now also dials plaintext in permissive
+mode, so the two deployment shapes share one outbound semantics.
+
+**Behavioral note:** a *permissive* caller cannot reach a *strict*
+peer regardless of mode (its outbound is plaintext; the peer's
+strict inbound rejects it). Mixed-mode deployments need both ends
+compatible — both strict, both permissive, or one strict + the
+other permissive on inbound only.
+
+The operator's AgentRuntime CR's `Spec.MTLSMode` flows
+through to a per-agent rendered envoy-config with the matching TLS
+blocks (operator companion PR). The `authbridge/demos/mtls/`
+envoy-sidecar variant (`make demo-mtls-envoy*`) ships a hand-crafted
+demo that proves the same Envoy YAML design at the data-plane level
+without needing a CR.
+
 ## Build and Deploy
 
 ### Build images locally
 
 ```bash
-# Build the proxy-init iptables init container (envoy-sidecar mode only)
+# Build the proxy-init iptables init container (envoy-sidecar + proxy-sidecar enforce-redirect modes)
 cd authbridge/proxy-init
 make docker-build-init
-make load-image                     # Uses KIND_CLUSTER_NAME env var (default: kagenti)
+make load-image                     # Uses KIND_CLUSTER_NAME env var (default: rossoctl)
 
 # Build the combined sidecar images from the authbridge/ context.
 # Pick whichever you need; the operator selects the image per workload
-# from the resolved AuthBridge mode (see kagenti-operator#361).
+# from the resolved AuthBridge mode (see operator#361).
 cd ..
 podman build -f cmd/authbridge-proxy/Dockerfile -t authbridge:latest .       # proxy-sidecar (default)
 podman build -f cmd/authbridge-envoy/Dockerfile -t authbridge-envoy:latest . # envoy-sidecar
-podman build -f cmd/authbridge-lite/Dockerfile  -t authbridge-lite:latest .  # proxy-sidecar lite
-kind load docker-image authbridge:latest       --name kagenti
-kind load docker-image authbridge-envoy:latest --name kagenti
-kind load docker-image authbridge-lite:latest  --name kagenti
+# authbridge-lite: the proxy Dockerfile built with exclude_plugin_* tags (auth-only)
+podman build -f cmd/authbridge-proxy/Dockerfile \
+  --build-arg GO_BUILD_TAGS="exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker" \
+  -t authbridge-lite:latest .
+kind load docker-image authbridge:latest       --name rossoctl
+kind load docker-image authbridge-envoy:latest --name rossoctl
+kind load docker-image authbridge-lite:latest  --name rossoctl
 ```
 
-For the repo-level "build everything" path, the root `local-build-and-test.sh` orchestrates all four images plus the kagenti-side `spiffe-idp-setup`.
+For the repo-level "build everything" path, the root `local-build-and-test.sh` orchestrates all four images plus the rossoctl-side `spiffe-idp-setup`.
 
 ### Full demo with webhook injection
 
@@ -357,12 +425,17 @@ When `session.enabled` is true (default) and `listener.session_api_addr` is non-
 | `GET /v1/sessions` | `application/json` | List active sessions: `{sessions: [{id, createdAt, updatedAt, eventCount, active}]}`. |
 | `GET /v1/sessions/{id}` | `application/json` | Full snapshot of one session's events. 404 if unknown/expired. |
 | `GET /v1/events` | `text/event-stream` | SSE stream of new events. Optional `?session=<id>` filters to one session. Heartbeat every 30s. |
+| `GET /v1/pipeline` | `application/json` | Active pipeline composition: `{inbound: [...], outbound: [...]}`. Each plugin entry carries `name`, `direction`, `position`, `readsBody`, plus the static metadata (`requires`, `requiresAny`, `description`) and runtime `config` when present. abctl renders this as the Pipeline pane. |
+| `GET /v1/plugins` | `application/json` | Catalog of every registered plugin (whether or not in the active pipeline): `{plugins: [{name, requires, requiresAny, description, ...}]}`. abctl renders this as the Catalog pane (`P` key). 404s when the binary's session API was constructed without `WithCatalog`. |
 | `GET /healthz` | text | Liveness probe. |
 
 ### Quick examples
 
+The `abctl` TUI handles port-forward + connection automatically — pick a
+pod from the Namespaces → Pods picker. For raw HTTP exploration, set up
+your own port-forward first:
+
 ```sh
-# Port-forward to an agent pod
 POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-agent \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl port-forward -n team1 $POD 9094:9094 &
@@ -438,11 +511,11 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 
 ## Code Conventions
 
-### Go (authlib, cmd/authbridge-{proxy,envoy,lite}, demo-app)
-- Go 1.24
-- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy,lite}/` (mode-specific binaries that wire listeners + plugins together)
+### Go (authlib, cmd/authbridge-{proxy,envoy}, demo-app)
+- Go 1.25
+- Modules: `authbridge/authlib/` (pure library — all listeners, all plugins) and `authbridge/cmd/authbridge-{proxy,envoy}/` (mode-specific binaries that wire listeners + plugins together). The `authbridge-lite` image is the proxy binary built with `exclude_plugin_*` tags, not a separate module.
 - `authbridge/go.work` workspace links the modules for local development
-- Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`, `authbridge-lite`)
+- Logging with `log/slog`; the binaries log under their own name (`authbridge-proxy`, `authbridge-envoy`). Note the `authbridge-lite` image runs the `authbridge-proxy` binary, so it logs as `authbridge-proxy`.
 - gRPC ext-proc using `envoyproxy/go-control-plane` types (in `authlib/listener/extproc`)
 - JWT validation with `lestrrat-go/jwx/v2` (in `authlib/plugins/jwtvalidation/validation`)
 
@@ -451,7 +524,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 - `python-keycloak` library for all Keycloak admin API calls
 - `PyJWT` for JWT decoding (signature verification disabled -- uses `verify_signature: False`)
 - Idempotent: all `get_or_create_*` helper functions check existence before creating
-- UID/GID 1000 in Dockerfile **must match** the `runAsUser`/`runAsGroup` values set by the operator's webhook when injecting the client-registration container (see [kagenti-operator](https://github.com/kagenti/kagenti-operator))
+- UID/GID 1000 in Dockerfile **must match** the `runAsUser`/`runAsGroup` values set by the operator's webhook when injecting the client-registration container (see [operator](https://github.com/rossoctl/operator))
 
 ### Shell (init-iptables.sh)
 - `set -e` (exit on error)
@@ -466,7 +539,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 - Test by rebuilding the affected combined image (e.g.,
   `cd authbridge && podman build -f cmd/authbridge-envoy/Dockerfile
   -t authbridge-envoy:latest .` then `kind load docker-image
-  authbridge-envoy:latest --name kagenti`).
+  authbridge-envoy:latest --name rossoctl`).
 
 ### Modifying Inbound JWT Validation
 - Edit `authlib/validation/` -- the JWKS-backed JWT verifier
@@ -491,8 +564,8 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 - All scripts use `python-keycloak` library (KeycloakAdmin class)
 
 ### Changing Envoy Configuration
-- Edit the `envoy.yaml` template in the [kagenti Helm chart](https://github.com/kagenti/kagenti)
-  (`charts/kagenti/templates/agent-namespaces.yaml` or
+- Edit the `envoy.yaml` template in the [rossoctl Helm chart](https://github.com/rossoctl/rossoctl)
+  (`charts/rossoctl/templates/agent-namespaces.yaml` or
   `authbridge-template-configmaps.yaml`) and `helm upgrade`
 - Key listener/cluster names: `outbound_listener`, `inbound_listener`, `original_destination`, `ext_proc_cluster`
 - After changes, restart the affected pods so they pick up the new ConfigMap content
@@ -507,7 +580,7 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 
 4. **TLS passthrough is one-way**: Outbound HTTPS traffic passes through Envoy without token exchange via the TLS passthrough filter chain. Only plaintext HTTP outbound traffic reaches authbridge. With the default outbound policy of `"passthrough"`, even plaintext HTTP traffic is forwarded unchanged unless it matches an explicit route in `authproxy-routes`.
 
-5. **Admin credentials in ConfigMap**: the kagenti Helm chart's
+5. **Admin credentials in ConfigMap**: the rossoctl Helm chart's
    `agent-namespaces.yaml` template stores Keycloak admin credentials
    in `authbridge-config` (a ConfigMap, not a Secret). This is for
    demo / dev clusters only — production should use a Kubernetes
@@ -522,6 +595,19 @@ See [`docs/framework-architecture.md`](docs/framework-architecture.md#9-config-h
 9. **Keycloak scope assignment for dynamically registered clients**: When the operator's `ClientRegistrationReconciler` auto-registers an agent as a Keycloak client, the client may not inherit all necessary scopes. The agent's own audience scope (e.g., `agent-team1-git-issue-agent-aud`) must be a **default** client scope for inbound JWT audience validation to work. Token exchange scopes (e.g., `github-tool-aud`, `github-full-access`) must be **optional** client scopes for `client_credentials` grants with explicit `scope=` to succeed. Re-run the demo's `setup_keycloak.py` after the agent is deployed to assign these scopes to the registered client.
 
 10. **Outbound passthrough is the safe default**: The `DEFAULT_OUTBOUND_POLICY` defaults to `passthrough`, which means outbound traffic to LLM inference endpoints (e.g., Ollama via `host.docker.internal`) passes through without token exchange. If this were set to `exchange`, all outbound HTTP calls would attempt token exchange and fail for non-Keycloak destinations.
+
+11. **Chatty observability traffic and IBAC user intent**: The session store is FIFO with a default cap of 100 events per session. Two layered defenses keep the inbound A2A user intent visible to IBAC even when an agent generates dozens of outbound events per turn:
+
+    - **Primary fix — `listener.skip_hosts`**: list infrastructure destinations (OTel collectors, metrics endpoints, log shippers) whose traffic should bypass the pipeline AND session recording entirely. Matched requests are forwarded as a transparent proxy: no plugin runs, no event is appended. Patterns use the same `.`-delimited glob semantics as `authproxy-routes`; ports are stripped before matching. Example:
+      ```yaml
+      listener:
+        skip_hosts:
+          - "otel-collector.*.svc.cluster.local"
+          - "*.metrics.local"
+      ```
+      Any change to `listener.skip_hosts` requires a pod restart (same rule as other `listener.*` fields). Do NOT add hosts here that need IBAC / token-exchange policy applied — bypass means bypass.
+
+    - **Backstop — intent pin in the eviction policy**: even with `skip_hosts` empty, the session store now pins the most-recent inbound A2A request event against FIFO eviction. If the buffer overflows, every other event evicts in normal chronological order; the protected intent stays at its original timestamp, leaving a visible time gap in the timeline. Older intents from earlier turns are NOT pinned — only the latest one — so a multi-turn conversation with huge fan-out can't pile up stale intents and starve the buffer. The pin protects against FIFO eviction only: IBAC's `LastIntent()` survives buffer overflow as long as the session is still alive and an inbound A2A request has landed in it, but can still return nil after session expiry, explicit deletion, or before the first inbound request arrives. The pin is defense-in-depth; reach for `skip_hosts` first when the offending traffic is identifiable infrastructure.
 
 ## DCO Sign-Off (Mandatory)
 

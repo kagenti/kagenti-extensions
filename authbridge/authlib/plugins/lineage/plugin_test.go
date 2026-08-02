@@ -16,7 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // newTestPlugin creates a LineageTelemetry wired to an in-memory span exporter
@@ -51,13 +51,14 @@ func allow(status int) pipeline.Outcome {
 	return pipeline.Outcome{FinalAction: pipeline.OutcomeAllow, StatusCode: status}
 }
 
-// fakeContext mirrors what the real listeners supply. Deliberately NO Method:
-// no listener populates pipeline.Context.Method today, so http.method is never
-// emitted in production — the fixture must not fabricate a field the wire
-// never carries (that lie kept the http.method contract gap invisible).
+// fakeContext mirrors what the real listeners supply. Method is populated
+// because every listener now supplies it (reverseproxy/forwardproxy from
+// r.Method, ext_proc from the :method pseudo-header) — if a listener stops,
+// the fixture must change with it rather than keep asserting a fiction.
 func fakeContext(dir pipeline.Direction, headers http.Header) *pipeline.Context {
 	return &pipeline.Context{
 		Direction: dir,
+		Method:    "POST",
 		Host:      "test-service:8000",
 		Path:      "/test",
 		Headers:   headers,
@@ -455,12 +456,7 @@ func TestRequestFacts_MCPWithCapture(t *testing.T) {
 	checkAttr(t, req, "lineage.protocol", "mcp")
 	checkAttr(t, req, "mcp.method", "tools/call")
 	checkAttr(t, req, "mcp.tool", "get_weather")
-	// http.method: contract-reserved. No listener populates pctx.Method, so
-	// the fact must be ABSENT — asserting a value here would require the
-	// fixture to fabricate a field the wire never carries.
-	if _, ok := findAttr(req, "http.method"); ok {
-		t.Error("http.method emitted, but no listener populates pctx.Method — fixture drift?")
-	}
+	checkAttr(t, req, "http.method", "POST")
 	checkAttr(t, req, "url.path", "/mcp")
 	checkAttr(t, req, "lineage.self.id", "weather-service")
 	checkAttr(t, req, "lineage.peer.host", "weather-tool-mcp.team1.svc:8000")

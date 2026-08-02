@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/contracts"
+	"github.com/rossoctl/cortex/authbridge/authlib/contracts"
 )
 
 // Identity carries the subject identity established by whichever auth
@@ -27,7 +27,15 @@ type Identity interface {
 	Subject() string   // stable subject ID (sub claim / SPIFFE ID / email)
 	ClientID() string  // registering-client ID, if applicable
 	Scopes() []string  // granted scopes / roles
-	Username() string  // human-readable name (preferred_username claim); empty for service accounts
+}
+
+// SharedStore is a process-scoped key→value store with TTL, injected by the
+// listener so plugins can share state across the inbound→outbound request
+// boundary (e.g. credential placeholders). Implemented by authlib/shared.Store.
+type SharedStore interface {
+	Put(key string, val any, ttl time.Duration)
+	Get(key string) (any, bool)
+	Delete(key string)
 }
 
 // Direction indicates whether a request is inbound (caller → this agent) or
@@ -114,6 +122,18 @@ type Context struct {
 	Identity Identity     // nil before an auth plugin runs
 	Session  *SessionView // nil unless session tracking is enabled
 
+	// OutboundSessionID pins the session bucket resolved when the
+	// outbound REQUEST event was recorded, so the paired RESPONSE event
+	// lands in the same session. recordOutboundResponseEvent reuses it
+	// instead of re-resolving Store.ActiveSession() at response time:
+	// ActiveSession() returns the global "most-recently-updated session",
+	// which interleaving traffic (e.g. a health probe bucketed under
+	// "default") can flip between a streaming request and its response,
+	// mis-filing the response into the wrong session. Empty when no
+	// request event was recorded (skip_hosts, sessions disabled), in
+	// which case the response recorder falls back to ActiveSession().
+	OutboundSessionID string
+
 	// TLS is the connection state of the inbound TLS handshake when
 	// the request arrived over TLS, nil otherwise. Populated by the
 	// reverse-proxy listener; nil for plaintext callers (UI, curl,
@@ -126,6 +146,10 @@ type Context struct {
 	// to extract the URI SAN. Listeners use it to populate
 	// SessionEvent.TLS for the observability surface.
 	TLS *tls.ConnectionState
+
+	// Shared is the process-scoped store the listener injects. May be nil
+	// when no store is wired; plugins that require it must fail closed.
+	Shared SharedStore
 
 	// Response-phase fields (populated by listener before RunResponse).
 	// ResponseBody may be nil even during response phase if no plugin declared BodyAccess.
@@ -267,6 +291,16 @@ func (c *Context) clearCurrent() {
 // allowed," which matches how abctl and the session store classify
 // them.
 func (c *Context) RejectingPlugin() string { return c.rejectingPlugin }
+
+// CurrentPhase reports the phase of the plugin dispatch currently in
+// flight — InvocationPhaseRequest while Pipeline.Run is iterating
+// OnRequest, InvocationPhaseResponse while Pipeline.RunResponse is
+// iterating OnResponse, and "" outside a dispatch. Plugins read it to
+// distinguish request from response without inferring the phase from
+// body presence (an empty-bodied 204 response would otherwise look
+// like a request). Set by the framework via setCurrent before each
+// dispatch; see SetCurrentPlugin.
+func (c *Context) CurrentPhase() InvocationPhase { return c.currentPhase }
 
 // setRejectingPlugin records the name of the plugin that returned
 // Reject. Framework-internal; callers in Pipeline.Run / RunResponse
@@ -478,6 +512,67 @@ func (c *Context) ContentSources() []contracts.ContentSource {
 		out = append(out, c.Extensions.Inference)
 	}
 	return out
+}
+
+// Classification reports the request's protocol classification, aggregated
+// across every populated protocol extension on Extensions:
+//
+//   - anyAction is true if at least one populated extension has IsAction=true
+//     (e.g. mcp-parser saw "tools/call"; inference-parser saw any inference call).
+//   - anyBypass is true if at least one populated extension has IsAction=false
+//     (e.g. mcp-parser saw "tools/list" or a $transport/* synthetic event).
+//
+// Both false means no parser populated anything and the request is
+// unclassified — guardrails treating IBAC-style defense in depth (only
+// fire on traffic a parser claimed) should pass through.
+//
+// Parser-disjointness assumption. The current in-tree parsers fire on
+// disjoint request shapes — mcp-parser on JSON-RPC bodies (or body-
+// less MCP-shaped requests on configured paths), a2a-parser on A2A
+// JSON-RPC bodies, inference-parser on /v1/{chat/,}completions paths
+// — so a single request typically populates at most one extension.
+// The aggregation above is defensive (handles the multi-extension
+// case if a future hybrid transport ever does double-claim), but
+// parser authors should not rely on the aggregation as a feature: a
+// parser that populates an extension on a request another parser
+// already classified breaks the contract that classification belongs
+// to whichever parser owns the wire shape.
+//
+// Conflict resolution. If anyAction && anyBypass both end up true,
+// callers decide their own precedence:
+//
+//   - Defense-in-depth gates (IBAC, rate limiters): treat anyBypass
+//     as winning — skip first. Safer default when you can't tell who
+//     to trust.
+//   - Audit-style guardrails: probably want to log the action even
+//     if some extension said bypass; flip the precedence.
+//
+// Either choice is valid; the contract here just provides both signals.
+// In practice the question rarely comes up because of the disjointness
+// above.
+func (c *Context) Classification() (anyAction, anyBypass bool) {
+	if ext := c.Extensions.MCP; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.A2A; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	if ext := c.Extensions.Inference; ext != nil {
+		if ext.IsAction {
+			anyAction = true
+		} else {
+			anyBypass = true
+		}
+	}
+	return anyAction, anyBypass
 }
 
 // emitBodyMutation records the Invocation and publishes the

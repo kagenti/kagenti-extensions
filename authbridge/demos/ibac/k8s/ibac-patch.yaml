@@ -55,6 +55,20 @@ outbound_append:
       judge_inference: false
       agent_llm_host: "host.docker.internal"
 
+      # The IBAC demo's exfiltration scenario emits a plain HTTP
+      # POST from the agent's local function-calling tool to
+      # evil-server — it doesn't carry an MCP / A2A / inference
+      # protocol envelope, so no parser claims it. The default
+      # IBAC behavior under that condition is "passthrough"
+      # (defense-in-depth — only judge what a parser claimed).
+      # Set unclassified_policy: "judge" so plain-HTTP outbound
+      # also reaches the judge and the demo's threat-model
+      # walkthrough works end-to-end. Production deployments using
+      # MCP/A2A/inference exclusively should leave this at the
+      # default "passthrough" and rely on egress allowlists for
+      # plain-HTTP outbound control.
+      unclassified_policy: "judge"
+
       # Optional: override the judge's system prompt. When unset (the
       # default in this demo), the plugin uses defaultSystemPrompt
       # from authlib/plugins/ibac/judge.go — a generic

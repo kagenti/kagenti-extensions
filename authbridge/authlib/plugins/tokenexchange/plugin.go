@@ -10,37 +10,64 @@ import (
 	"net/http"
 	"strings"
 	"sync/atomic"
+	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/config"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/cache"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/plugins/tokenexchange/exchange"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
-	fwspiffe "github.com/kagenti/kagenti-extensions/authbridge/authlib/spiffe"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/placeholder"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/cache"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange/exchange"
+	"github.com/rossoctl/cortex/authbridge/authlib/routing"
+	fwspiffe "github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 )
 
 // tokenExchangeConfig is the plugin's local config schema. See
 // authbridge/docs/plugin-reference.md for the pattern.
+// Field tags drive both runtime decoding (json) and operator-facing
+// schema introspection (description / required / default / enum).
+// Inline doc comments retain long-form rationale; struct tags carry
+// single-line summaries for templating. See pipeline/schema.go.
 type tokenExchangeConfig struct {
-	// TokenURL is the OAuth token endpoint. Explicit value wins; else
-	// derived from KeycloakURL + KeycloakRealm using Keycloak's
-	// convention.
-	TokenURL string `json:"token_url"`
+	// TokenURL is the OAuth token endpoint. Explicit value always wins.
+	// When empty, derived from Provider + ProviderURL + ProviderRealm
+	// (or the deprecated keycloak_url + keycloak_realm pair).
+	TokenURL string `json:"token_url" description:"OAuth token endpoint URL. Required unless provider + provider_url (or keycloak_url + keycloak_realm) are set for automatic derivation."`
 
-	// KeycloakURL and KeycloakRealm are a convenience for deriving
-	// TokenURL when the operator prefers to supply Keycloak base + realm
-	// rather than the full token endpoint.
-	KeycloakURL   string `json:"keycloak_url"`
-	KeycloakRealm string `json:"keycloak_realm"`
+	// Provider selects the IdP for automatic endpoint derivation.
+	// Supported: keycloak, entra-id, okta, generic.
+	// When empty and keycloak_url is set, defaults to "keycloak" for
+	// backward compatibility. When "generic" or empty, token_url must
+	// be supplied explicitly.
+	Provider string `json:"provider" description:"IdP provider for endpoint derivation and client auth. Only registered providers are accepted." enum:"keycloak,generic"`
+
+	// ProviderURL is the IdP base URL used for endpoint derivation.
+	// Interpretation depends on Provider:
+	//   keycloak: internal Keycloak base URL (e.g. https://keycloak.example.com)
+	//   entra-id: ignored (endpoints are derived from ProviderRealm/tenant)
+	//   okta:     Okta domain URL (e.g. https://dev-123.okta.com)
+	ProviderURL string `json:"provider_url" description:"IdP base URL for endpoint derivation. Interpretation varies by provider."`
+
+	// ProviderRealm is the IdP-specific namespace/tenant:
+	//   keycloak: realm name (e.g. rossoctl)
+	//   entra-id: tenant ID or domain (e.g. contoso.onmicrosoft.com)
+	//   okta:     authorization server ID (optional, omit for org-level)
+	ProviderRealm string `json:"provider_realm" description:"IdP-specific realm/tenant/auth-server. Keycloak: realm name. Entra ID: tenant ID. Okta: auth server ID (optional)."`
+
+	// KeycloakURL and KeycloakRealm are deprecated aliases for
+	// ProviderURL and ProviderRealm with Provider="keycloak".
+	// Supported for backward compatibility; prefer provider_url +
+	// provider_realm + provider instead.
+	KeycloakURL   string `json:"keycloak_url" description:"DEPRECATED: use provider_url + provider=keycloak instead. Internal Keycloak base URL."`
+	KeycloakRealm string `json:"keycloak_realm" description:"DEPRECATED: use provider_realm + provider=keycloak instead. Keycloak realm name."`
 
 	// DefaultPolicy is applied when a request's host matches no route:
 	// "passthrough" (default) forwards the request unchanged;
 	// "exchange" attempts a client-credentials exchange with an empty
 	// audience (usually fails — kept for rare use cases where the IdP
 	// allows it).
-	DefaultPolicy string `json:"default_policy"`
+	DefaultPolicy string `json:"default_policy" description:"Behavior when host matches no route: passthrough forwards unchanged, exchange attempts empty-audience client-credentials." default:"passthrough" enum:"passthrough,exchange"`
 
 	// NoTokenPolicy controls how the plugin handles outbound requests
 	// that arrive without a bearer token: "client-credentials" does an
@@ -48,57 +75,57 @@ type tokenExchangeConfig struct {
 	// unchanged; "deny" rejects. Default: "deny" in all modes.
 	// Operators who need a different behavior (e.g. waypoint's historic
 	// "allow" default) must set it explicitly per plugin entry.
-	NoTokenPolicy string `json:"no_token_policy"`
+	NoTokenPolicy string `json:"no_token_policy" description:"Behavior when outbound has no bearer token: client-credentials, allow, or deny." default:"deny" enum:"client-credentials,allow,deny"`
 
 	// Identity carries client credentials used for token exchange.
-	Identity tokenExchangeIdentity `json:"identity"`
+	Identity tokenExchangeIdentity `json:"identity" description:"Client credentials used for token exchange (spiffe or client-secret)."`
 
 	// Routes drives host-to-audience matching. A host that matches no
 	// route falls through to DefaultPolicy.
-	Routes tokenExchangeRoutes `json:"routes"`
+	Routes tokenExchangeRoutes `json:"routes" description:"Host-to-audience routing rules; non-matching hosts fall through to default_policy."`
 
 	// AudienceFromHost — when true, requests with no matching route use
 	// routing.ServiceNameFromHost(host) as the target audience. Used in
 	// waypoint mode.
-	AudienceFromHost bool `json:"audience_from_host"`
+	AudienceFromHost bool `json:"audience_from_host" description:"When true, derive audience from host for unrouted requests (waypoint mode)." default:"false"`
+
+	ResolvePlaceholders bool `json:"resolve_placeholders" default:"false" description:"Resolve an inbound bearer carrying the placeholder prefix from the shared store to the real token before exchange. Unresolvable placeholders are denied (fail closed)."`
 }
 
 type tokenExchangeIdentity struct {
 	// Type is one of "spiffe" or "client-secret".
-	Type string `json:"type"`
+	Type string `json:"type" required:"true" description:"Identity scheme: spiffe (JWT-SVID assertion) or client-secret." enum:"spiffe,client-secret"`
 
-	// ClientID identifies the client in Keycloak. Explicit value wins;
-	// else read from ClientIDFile at Configure time (or by Init if the
-	// file isn't yet available).
-	ClientID     string `json:"client_id"`
-	ClientIDFile string `json:"client_id_file"`
+	// ClientID identifies the OAuth client at the IdP. Explicit value
+	// wins; else read from ClientIDFile at Configure time (or by Init
+	// if the file isn't yet available).
+	ClientID     string `json:"client_id" description:"OAuth client ID. One of client_id or client_id_file is required."`
+	ClientIDFile string `json:"client_id_file" description:"Read client ID from this file. Default: /shared/client-id.txt."`
 
 	// ClientSecret / ClientSecretFile are the client-secret credentials
 	// (type=client-secret).
-	ClientSecret     string `json:"client_secret"`
-	ClientSecretFile string `json:"client_secret_file"`
+	ClientSecret     string `json:"client_secret" description:"OAuth client secret (type=client-secret)."`
+	ClientSecretFile string `json:"client_secret_file" description:"Read client secret from file. Default: /shared/client-secret.txt."`
 
 	// JWTAudience is the audience claim minted on the JWT-SVID used as
 	// the RFC 8693 client assertion. Required when Type=="spiffe";
-	// ignored otherwise. Lives on the plugin (not the framework spiffe
-	// block) because only the spiffe identity path consumes it.
-	JWTAudience string `json:"jwt_audience"`
+	// ignored otherwise.
+	JWTAudience string `json:"jwt_audience" description:"Audience claim minted on the JWT-SVID assertion. REQUIRED when type=spiffe; ignored otherwise."`
 
-	// jwt_svid_path was historically a per-plugin path to the JWT-SVID
-	// file written by spiffe-helper. Removed in favor of injection via
-	// the framework spiffe.Provider (see the top-level spiffe block in
-	// authlib/config). T11 wires the Provider into TokenExchange and
-	// supplies the JWTSource directly.
+	// AssertionType is the client_assertion_type URN used with spiffe
+	// identity. Default: urn:ietf:params:oauth:client-assertion-type:jwt-spiffe
+	// (supported by Keycloak). Set to jwt-bearer for Okta compatibility.
+	AssertionType string `json:"assertion_type" description:"Client assertion type URN for spiffe identity. Default: jwt-spiffe. Use jwt-bearer for Okta." enum:"jwt-spiffe,jwt-bearer"`
 }
 
 type tokenExchangeRoutes struct {
 	// File is an optional path to a routes.yaml file (see
 	// authlib/routing.LoadRoutes).
-	File string `json:"file"`
+	File string `json:"file" description:"Path to a routes.yaml file. Default: /etc/authproxy/routes.yaml."`
 
 	// Rules are inline route entries; combined with routes loaded from
 	// File.
-	Rules []tokenExchangeRoute `json:"rules"`
+	Rules []tokenExchangeRoute `json:"rules" description:"Inline route entries. Combined with rules loaded from file."`
 }
 
 type tokenExchangeRoute struct {
@@ -113,17 +140,43 @@ type tokenExchangeRoute struct {
 }
 
 func (c *tokenExchangeConfig) applyDefaults() {
-	if c.TokenURL == "" && c.KeycloakURL != "" && c.KeycloakRealm != "" {
-		base := strings.TrimRight(c.KeycloakURL, "/") + "/realms/" + c.KeycloakRealm
-		c.TokenURL = base + "/protocol/openid-connect/token"
+	// Backward compatibility: migrate keycloak_url/keycloak_realm to
+	// provider_url/provider_realm when the new fields are empty.
+	// Also infer provider=keycloak when any deprecated keycloak_* field
+	// is present (handles mixed legacy/new paths).
+	if c.KeycloakURL != "" || c.KeycloakRealm != "" {
+		if c.Provider == "" {
+			c.Provider = DefaultProvider
+		}
+	}
+	if c.KeycloakURL != "" && c.ProviderURL == "" {
+		c.ProviderURL = c.KeycloakURL
+		slog.Warn("token-exchange: keycloak_url is deprecated; use provider_url + provider=keycloak instead")
+	}
+	if c.KeycloakRealm != "" && c.ProviderRealm == "" {
+		c.ProviderRealm = c.KeycloakRealm
+		slog.Warn("token-exchange: keycloak_realm is deprecated; use provider_realm + provider=keycloak instead")
+	}
+
+	// Derive token_url and default assertion_type from the registered
+	// IdP provider when not set explicitly.
+	if c.Provider != "" {
+		if p := LookupProvider(c.Provider); p != nil {
+			if c.TokenURL == "" {
+				c.TokenURL = p.TokenEndpoint(c.ProviderURL, c.ProviderRealm)
+			}
+			if c.Identity.AssertionType == "" && c.Identity.Type == SpiffeIdentity {
+				c.Identity.AssertionType = p.DefaultAssertionType()
+			}
+		}
 	}
 	if c.DefaultPolicy == "" {
-		c.DefaultPolicy = "passthrough"
+		c.DefaultPolicy = PassthroughPolicy
 	}
 	if c.NoTokenPolicy == "" {
 		c.NoTokenPolicy = auth.NoTokenPolicyDeny
 	}
-	// Kagenti file-system conventions for credential sources. Each
+	// Rossoctl file-system conventions for credential sources. Each
 	// default kicks in only when the matching inline value is also
 	// empty, so operators who supply inline credentials are never
 	// surprised by a file read.
@@ -136,13 +189,13 @@ func (c *tokenExchangeConfig) applyDefaults() {
 		c.Routes.File = "/etc/authproxy/routes.yaml"
 	}
 	switch c.Identity.Type {
-	case "spiffe":
+	case SpiffeIdentity:
 		if c.Identity.ClientID == "" && c.Identity.ClientIDFile == "" {
 			c.Identity.ClientIDFile = "/shared/client-id.txt"
 		}
 		// JWT-SVID source is injected via the framework SPIFFE provider
 		// (T11) rather than read from a per-plugin file path.
-	case "client-secret":
+	case ClientSecretIdentity:
 		if c.Identity.ClientID == "" && c.Identity.ClientIDFile == "" {
 			c.Identity.ClientIDFile = "/shared/client-id.txt"
 		}
@@ -153,13 +206,19 @@ func (c *tokenExchangeConfig) applyDefaults() {
 }
 
 func (c *tokenExchangeConfig) validate() error {
+	// Reject unknown provider names early.
+	if c.Provider != "" && c.Provider != GenericProvider {
+		if LookupProvider(c.Provider) == nil {
+			return fmt.Errorf("provider %q is not registered (available providers are registered via init())", c.Provider)
+		}
+	}
 	if c.TokenURL == "" {
-		return errors.New("token_url is required (or set keycloak_url + keycloak_realm)")
+		return errors.New("token_url is required (or set provider + provider_url + provider_realm)")
 	}
 	switch c.DefaultPolicy {
-	case "exchange", "passthrough":
+	case ExchangePolicy, PassthroughPolicy:
 	default:
-		return fmt.Errorf("default_policy must be exchange or passthrough, got %q", c.DefaultPolicy)
+		return fmt.Errorf("default_policy must be %s or %s, got %q", ExchangePolicy, PassthroughPolicy, c.DefaultPolicy)
 	}
 	switch c.NoTokenPolicy {
 	case auth.NoTokenPolicyAllow, auth.NoTokenPolicyDeny, auth.NoTokenPolicyClientCredentials:
@@ -167,7 +226,7 @@ func (c *tokenExchangeConfig) validate() error {
 		return fmt.Errorf("no_token_policy must be allow, deny, or client-credentials, got %q", c.NoTokenPolicy)
 	}
 	switch c.Identity.Type {
-	case "spiffe":
+	case SpiffeIdentity:
 		// applyDefaults fills the identity file paths when the
 		// matching inline values are empty, so no per-field check
 		// for client_id here — Configure's best-effort read logs a
@@ -182,13 +241,35 @@ func (c *tokenExchangeConfig) validate() error {
 		if c.Identity.JWTAudience == "" {
 			return errors.New("tokenexchange: identity.type=spiffe requires identity.jwt_audience to be set")
 		}
-	case "client-secret":
+		// Reject invalid assertion_type (non-empty but unknown).
+		if c.Identity.AssertionType != "" {
+			if _, ok := AssertionTypeURN[c.Identity.AssertionType]; !ok {
+				return fmt.Errorf("tokenexchange: unknown assertion_type %q (supported: %s, %s)", c.Identity.AssertionType, JWTSpiffeAssertion, JWTBearerAssertion)
+			}
+		}
+	case ClientSecretIdentity:
 		// applyDefaults fills the identity file paths when the
 		// matching inline values are empty.
 	case "":
-		return errors.New("identity.type is required (spiffe or client-secret)")
+		return fmt.Errorf("identity.type is required (%s or %s)", SpiffeIdentity, ClientSecretIdentity)
 	default:
 		return fmt.Errorf("unknown identity.type %q", c.Identity.Type)
+	}
+	// Validate provider↔identity compatibility when a provider is set.
+	if c.Provider != "" && c.Provider != GenericProvider {
+		if p := LookupProvider(c.Provider); p != nil {
+			supported := p.SupportedIdentityTypes()
+			found := false
+			for _, s := range supported {
+				if s == c.Identity.Type {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return fmt.Errorf("provider %q does not support identity.type=%q (supported: %v)", c.Provider, c.Identity.Type, supported)
+			}
+		}
 	}
 	return nil
 }
@@ -273,7 +354,15 @@ func init() {
 func (p *TokenExchange) Name() string { return "token-exchange" }
 
 func (p *TokenExchange) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{}
+	return pipeline.PluginCapabilities{
+		Description: "RFC 8693 outbound token exchange per route. Supports Keycloak, Entra ID, Okta, and any RFC 8693-compliant IdP.",
+	}
+}
+
+// ConfigSchema implements pipeline.SchemaProvider; surfaces field
+// metadata to abctl edit templates and other config-aware tooling.
+func (p *TokenExchange) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(tokenExchangeConfig{})
 }
 
 func (p *TokenExchange) Configure(raw json.RawMessage) error {
@@ -335,8 +424,7 @@ func (p *TokenExchange) Configure(raw json.RawMessage) error {
 	}
 
 	jwtSrc := p.jwtSource(c.Identity.JWTAudience)
-	clientAuth, err := buildClientAuthFrom(c.Identity.Type,
-		c.Identity.ClientID, c.Identity.ClientSecret, jwtSrc)
+	clientAuth, err := buildClientAuth(c.Provider, c.Identity, jwtSrc)
 	if err != nil {
 		return fmt.Errorf("token-exchange: %w", err)
 	}
@@ -384,9 +472,9 @@ func credentialsAreReady(id tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) bo
 		return false
 	}
 	switch id.Type {
-	case "client-secret":
+	case ClientSecretIdentity:
 		return id.ClientSecret != ""
-	case "spiffe":
+	case SpiffeIdentity:
 		// SPIFFE identity is ready iff a JWTSource was injected (via the
 		// framework Provider) and the operator's Secret mount has
 		// supplied the client_id.
@@ -395,34 +483,53 @@ func credentialsAreReady(id tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) bo
 	return false
 }
 
-// buildClientAuthFrom constructs an exchange.ClientAuth from explicit
-// args. Used both by Configure (against the local `c`, before p.cfg is
-// assigned) and by pollCredentials (which reads its credential values
-// from goroutine locals, not from the immutable p.cfg). Pure function
-// — no reads from the receiver.
+// buildClientAuth delegates client auth construction to the registered
 //
 // The "spiffe" identity path requires a non-nil JWTSource — supplied by
 // the framework spiffe.Provider via SetSPIFFEProvider (see
 // plugins.BuildWithSPIFFE). When the provider hasn't been wired in,
 // this returns an explicit configuration error rather than panicking.
-func buildClientAuthFrom(identityType, clientID, clientSecret string, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
-	switch identityType {
-	case "spiffe":
+// IdP provider. When no provider is set (generic/explicit token_url),
+// falls back to a default implementation supporting client-secret and
+// spiffe with jwt-spiffe assertion type.
+func buildClientAuth(providerName string, identity tokenExchangeIdentity, jwtSrc fwspiffe.JWTSource) (exchange.ClientAuth, error) {
+	id := IdentityConfig{
+		Type:          identity.Type,
+		ClientID:      identity.ClientID,
+		ClientSecret:  identity.ClientSecret,
+		AssertionType: identity.AssertionType,
+		JWTAudience:   identity.JWTAudience,
+	}
+	if p := LookupProvider(providerName); p != nil {
+		return p.BuildClientAuth(id, jwtSrc)
+	}
+	// Fallback for generic/empty provider — basic client-secret and
+	// spiffe with default jwt-spiffe assertion.
+	switch identity.Type {
+	case SpiffeIdentity:
 		if jwtSrc == nil {
 			return nil, errors.New("spiffe identity requires a SPIFFE provider to be injected")
 		}
+		assertionType := identity.AssertionType
+		if assertionType == "" {
+			assertionType = DefaultAssertion
+		}
+		urn, ok := AssertionTypeURN[assertionType]
+		if !ok {
+			return nil, fmt.Errorf("unknown assertion_type %q", assertionType)
+		}
 		return &exchange.JWTAssertionAuth{
-			ClientID:      clientID,
-			AssertionType: "urn:ietf:params:oauth:client-assertion-type:jwt-spiffe",
+			ClientID:      identity.ClientID,
+			AssertionType: urn,
 			TokenSource:   jwtSrc.FetchToken,
 		}, nil
-	case "client-secret":
+	case ClientSecretIdentity:
 		return &exchange.ClientSecretAuth{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
+			ClientID:     identity.ClientID,
+			ClientSecret: identity.ClientSecret,
 		}, nil
 	default:
-		return nil, fmt.Errorf("unknown identity.type %q", identityType)
+		return nil, fmt.Errorf("unknown identity.type %q", identity.Type)
 	}
 }
 
@@ -441,7 +548,7 @@ func buildRouterFrom(defaultPolicy string, routes tokenExchangeRoutes) (*routing
 	for _, rc := range routes.Rules {
 		action := rc.Action
 		if action == "" && rc.Passthrough {
-			action = "passthrough"
+			action = PassthroughPolicy
 		}
 		rules = append(rules, routing.Route{
 			Host:          rc.Host,
@@ -469,7 +576,7 @@ func buildRouterFrom(defaultPolicy string, routes tokenExchangeRoutes) (*routing
 // process-lifetime context (see bgCancel) so Pipeline.Start's 60s
 // budget doesn't kill it. Shutdown cancels the poller.
 func (p *TokenExchange) Init(ctx context.Context) error {
-	if p.cfg.Identity.Type == "spiffe" && p.provider != nil && p.cfg.Identity.JWTAudience != "" {
+	if p.cfg.Identity.Type == SpiffeIdentity && p.provider != nil && p.cfg.Identity.JWTAudience != "" {
 		if err := p.provider.MirrorJWT(ctx, p.cfg.Identity.JWTAudience); err != nil {
 			// Mirror failures are non-fatal: the in-memory
 			// JWTSource keeps working even if the file mirror
@@ -520,7 +627,10 @@ func (p *TokenExchange) pollCredentials(ctx context.Context, needID, needSecret 
 		}
 		clientSecret = v
 	}
-	clientAuth, err := buildClientAuthFrom(p.cfg.Identity.Type, clientID, clientSecret, p.jwtSource(p.cfg.Identity.JWTAudience))
+	pollIdentity := p.cfg.Identity
+	pollIdentity.ClientID = clientID
+	pollIdentity.ClientSecret = clientSecret
+	clientAuth, err := buildClientAuth(p.cfg.Provider, pollIdentity, p.jwtSource(p.cfg.Identity.JWTAudience))
 	if err != nil {
 		slog.Warn("token-exchange: failed to rebuild client auth after credential load", "error", err)
 		return
@@ -554,6 +664,14 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	authHeader := pctx.Headers.Get("Authorization")
 	host := pctx.Host
 
+	if p.cfg.ResolvePlaceholders && placeholder.IsPlaceholder(auth.ExtractBearer(authHeader)) {
+		real, ok := resolvePlaceholder(pctx, auth.ExtractBearer(authHeader))
+		if !ok {
+			return pctx.DenyAndRecord("placeholder_unresolved", "auth.unauthorized", "unresolvable credential placeholder")
+		}
+		authHeader = "Bearer " + real
+	}
+
 	result := p.inner.HandleOutbound(ctx, authHeader, host)
 	// Record an Auth.Outbound entry on every branch so operators have
 	// full outbound audit in the session stream — matches the inbound
@@ -585,6 +703,7 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 		return pipeline.DenyStatus(result.DenyStatus, code, result.DenyReason)
 	case auth.ActionReplaceToken:
 		pctx.Headers.Set("Authorization", "Bearer "+result.Token)
+		recordDelegationHop(pctx, result)
 		reason := "token_replaced"
 		if result.CacheHit {
 			reason = "cache_hit"
@@ -621,6 +740,20 @@ func (p *TokenExchange) OnRequest(ctx context.Context, pctx *pipeline.Context) p
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
+// resolvePlaceholder looks a handle up in the shared store. Returns ok=false
+// (fail closed) when no store is wired or the handle is unknown/expired.
+func resolvePlaceholder(pctx *pipeline.Context, handle string) (string, bool) {
+	if pctx.Shared == nil {
+		return "", false
+	}
+	v, ok := pctx.Shared.Get(placeholder.Key(handle))
+	if !ok {
+		return "", false
+	}
+	s, ok := v.(string)
+	return s, ok
+}
+
 // boolStr renders a boolean as "true" / "false" for Invocation.Details.
 // Kept as a small helper rather than inlining so both the deny and
 // modify branches use the same string form and abctl's filter
@@ -630,6 +763,49 @@ func boolStr(b bool) string {
 		return "true"
 	}
 	return "false"
+}
+
+// recordDelegationHop appends a delegation hop to pctx.Extensions.Delegation
+// whenever token-exchange mints (or cache-serves) a downstream token. This
+// is AuthBridge's own auth plugin establishing delegation provenance — the
+// chain is then forwarded into policy context (CPEX's DelegationExtension)
+// and surfaced on the session API, giving downstream policy a record of
+// what audience the agent's token was exchanged for, with which scopes, and
+// whether it came from cache.
+//
+// SubjectID is best-effort: the forward-proxy outbound pctx generally has
+// no validated Identity (JWT validation runs on the separate inbound pass),
+// so it's populated only when an Identity happens to be present. The
+// audience / scopes / strategy / from-cache fields are always known from
+// the exchange result and carry the bulk of the signal regardless.
+func recordDelegationHop(pctx *pipeline.Context, result *auth.OutboundResult) {
+	if pctx.Extensions.Delegation == nil {
+		pctx.Extensions.Delegation = &pipeline.DelegationExtension{}
+	}
+	subject := ""
+	if pctx.Identity != nil {
+		subject = pctx.Identity.Subject()
+	}
+	pctx.Extensions.Delegation.AppendHop(pipeline.DelegationHop{
+		SubjectID: subject,
+		Scopes:    splitScopes(result.RequestedScopes),
+		Timestamp: time.Now(),
+		Audience:  result.TargetAudience,
+		Strategy:  "token-exchange",
+		FromCache: result.CacheHit,
+	})
+}
+
+// splitScopes splits a raw space-separated OAuth scope string into a
+// slice, dropping empty fields. Returns nil (not an empty slice) for an
+// unscoped exchange so the hop's ScopesGranted stays absent rather than
+// an empty list.
+func splitScopes(raw string) []string {
+	fields := strings.Fields(raw)
+	if len(fields) == 0 {
+		return nil
+	}
+	return fields
 }
 
 func (p *TokenExchange) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {

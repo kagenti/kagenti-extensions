@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // --- Preset Tests ---
@@ -44,6 +43,49 @@ func TestApplyPreset_ProxySidecar(t *testing.T) {
 	}
 	if cfg.Listener.ForwardProxyAddr != ":8081" {
 		t.Errorf("forward_proxy_addr = %q, want :8081", cfg.Listener.ForwardProxyAddr)
+	}
+}
+
+func TestListenerConfig_ActiveRoles(t *testing.T) {
+	both := ListenerConfig{}.ActiveRoles()
+	if !both[RoleReverse] || !both[RoleForward] {
+		t.Errorf("empty Roles should default to both, got %v", both)
+	}
+	fwd := ListenerConfig{Roles: []string{RoleForward}}.ActiveRoles()
+	if fwd[RoleReverse] || !fwd[RoleForward] {
+		t.Errorf("roles=[forward] should be forward-only, got %v", fwd)
+	}
+	rev := ListenerConfig{Roles: []string{RoleReverse}}.ActiveRoles()
+	if !rev[RoleReverse] || rev[RoleForward] {
+		t.Errorf("roles=[reverse] should be reverse-only, got %v", rev)
+	}
+}
+
+func TestApplyPreset_ProxySidecar_ForwardOnly(t *testing.T) {
+	cfg := &Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleForward}}}
+	ApplyPreset(cfg)
+	if cfg.Listener.ReverseProxyAddr != "" {
+		t.Errorf("forward-only must not fill reverse_proxy_addr, got %q", cfg.Listener.ReverseProxyAddr)
+	}
+	if cfg.Listener.ForwardProxyAddr != ":8081" {
+		t.Errorf("forward_proxy_addr = %q, want :8081", cfg.Listener.ForwardProxyAddr)
+	}
+	if cfg.Listener.TransparentProxyAddr != ":8082" {
+		t.Errorf("transparent_proxy_addr = %q, want :8082", cfg.Listener.TransparentProxyAddr)
+	}
+}
+
+func TestApplyPreset_ProxySidecar_ReverseOnly(t *testing.T) {
+	cfg := &Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}}}
+	ApplyPreset(cfg)
+	if cfg.Listener.ReverseProxyAddr != ":8080" {
+		t.Errorf("reverse_proxy_addr = %q, want :8080", cfg.Listener.ReverseProxyAddr)
+	}
+	if cfg.Listener.ForwardProxyAddr != "" {
+		t.Errorf("reverse-only must not fill forward_proxy_addr, got %q", cfg.Listener.ForwardProxyAddr)
+	}
+	if cfg.Listener.TransparentProxyAddr != "" {
+		t.Errorf("reverse-only must not fill transparent_proxy_addr, got %q", cfg.Listener.TransparentProxyAddr)
 	}
 }
 
@@ -101,6 +143,41 @@ func TestValidate_ProxySidecarRequiresBackend(t *testing.T) {
 	}
 }
 
+func TestValidate_ProxySidecarRoles(t *testing.T) {
+	// forward-only: reverse_proxy_backend is NOT required.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleForward}}}); err != nil {
+		t.Errorf("forward-only should not require reverse_proxy_backend: %v", err)
+	}
+	// reverse role without backend: error.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}}}); err == nil {
+		t.Error("reverse role without reverse_proxy_backend should error")
+	}
+	// reverse-only with backend: ok.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{RoleReverse}, ReverseProxyBackend: "http://app"}}); err != nil {
+		t.Errorf("reverse-only with backend should be valid: %v", err)
+	}
+	// unknown role: error.
+	if err := Validate(&Config{Mode: ModeProxySidecar, Listener: ListenerConfig{Roles: []string{"sideways"}, ReverseProxyBackend: "http://app"}}); err == nil {
+		t.Error("unknown role should error")
+	}
+	// tls_bridge enabled without the forward role: error (it only affects outbound).
+	if err := Validate(&Config{
+		Mode:      ModeProxySidecar,
+		Listener:  ListenerConfig{Roles: []string{RoleReverse}, ReverseProxyBackend: "http://app"},
+		TLSBridge: &TLSBridgeConfig{Mode: "enabled", CADir: "/tmp/ca"},
+	}); err == nil {
+		t.Error("tls_bridge enabled without forward role should error")
+	}
+	// tls_bridge enabled WITH the forward role: ok.
+	if err := Validate(&Config{
+		Mode:      ModeProxySidecar,
+		Listener:  ListenerConfig{Roles: []string{RoleForward}},
+		TLSBridge: &TLSBridgeConfig{Mode: "enabled", CADir: "/tmp/ca"},
+	}); err != nil {
+		t.Errorf("tls_bridge with forward role should be valid: %v", err)
+	}
+}
+
 func TestValidate_ValidConfigs(t *testing.T) {
 	withPipeline := func(c *Config) *Config {
 		c.Pipeline = PipelineConfig{
@@ -120,31 +197,25 @@ func TestValidate_ValidConfigs(t *testing.T) {
 	}
 }
 
-// TestValidate_EmptyPipelineRejected guards the "open proxy" failure
-// mode: before this check, an operator who kept the pre-migration
-// top-level schema (inbound:, outbound:, identity:, bypass:, routes:)
-// in their ConfigMap would upgrade the image, land on a config where
-// yaml.v3 silently dropped the unknown top-level keys, end up with an
-// empty Pipeline, and boot successfully. Listeners would then run
-// pipelines with zero plugins — every request would pass through
-// without JWT validation or token exchange.
+// TestValidate_EmptyPipelineAllowed pins the "empty pipeline = pass-through"
+// contract. An operator who wants to run AuthBridge without inbound
+// validation (e.g. for testing, or asymmetric deployments where only
+// outbound token exchange is desired) should be able to do so without
+// adding a new opt-in config item. WarnEmptyPipelines emits a startup
+// WARN so the open-proxy condition is still visible in logs.
 //
-// Empty pipelines being a configuration error forces the operator to
-// either migrate to the new shape or leave the old image tagged. The
-// error message names the offending section and points at the new
-// schema.
-func TestValidate_EmptyPipelineRejected(t *testing.T) {
+// Previously this case was a hard rejection. The schema-migration
+// scenario it guarded against (operators upgrading from the pre-migration
+// top-level schema and silently landing on an empty pipeline) is now
+// surfaced by the WARN log instead of by a boot failure.
+func TestValidate_EmptyPipelineAllowed(t *testing.T) {
 	cfg := &Config{Mode: ModeEnvoySidecar}
-	err := Validate(cfg)
-	if err == nil {
-		t.Fatal("expected error for empty pipeline")
-	}
-	if !strings.Contains(err.Error(), "pipeline.inbound.plugins is empty") {
-		t.Errorf("error does not name the offending section: %q", err)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("empty pipeline should be allowed, got: %v", err)
 	}
 }
 
-func TestValidate_EmptyOutboundPipelineRejected(t *testing.T) {
+func TestValidate_EmptyOutboundPipelineAllowed(t *testing.T) {
 	cfg := &Config{
 		Mode: ModeEnvoySidecar,
 		Pipeline: PipelineConfig{
@@ -152,12 +223,8 @@ func TestValidate_EmptyOutboundPipelineRejected(t *testing.T) {
 			// Outbound intentionally empty
 		},
 	}
-	err := Validate(cfg)
-	if err == nil {
-		t.Fatal("expected error for empty outbound pipeline")
-	}
-	if !strings.Contains(err.Error(), "pipeline.outbound.plugins is empty") {
-		t.Errorf("error does not name the offending section: %q", err)
+	if err := Validate(cfg); err != nil {
+		t.Fatalf("empty outbound pipeline should be allowed, got: %v", err)
 	}
 }
 
@@ -277,7 +344,7 @@ pipeline:
       - name: jwt-validation
         id: jwt-validation
         config:
-          issuer: "http://keycloak.example/realms/kagenti"
+          issuer: "http://keycloak.example/realms/rossoctl"
           bypass_paths:
             - /healthz
             - /.well-known/*
@@ -304,7 +371,7 @@ pipeline:
 	if err := json.Unmarshal(e.Config, &decoded); err != nil {
 		t.Fatalf("config JSON parse: %v\nbytes: %s", err, e.Config)
 	}
-	if decoded["issuer"] != "http://keycloak.example/realms/kagenti" {
+	if decoded["issuer"] != "http://keycloak.example/realms/rossoctl" {
 		t.Errorf("issuer round-trip lost: %v", decoded["issuer"])
 	}
 	paths, ok := decoded["bypass_paths"].([]any)
@@ -738,6 +805,96 @@ spiffe: {}
 	}
 }
 
+// --- TLS bridge config ---
+
+// The tls_bridge block decodes into TLSBridgeConfig and Load surfaces it.
+func TestConfig_TLSBridgeBlockDecodes(t *testing.T) {
+	y := []byte("mode: proxy-sidecar\n" +
+		"tls_bridge:\n" +
+		"  mode: enabled\n" +
+		"  ca_dir: /etc/authbridge/tls-bridge-ca\n" +
+		"  passthrough_hosts: [\"pinned.example.com\"]\n" +
+		"  ports: [443, 9443]\n")
+	p := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(p, y, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.TLSBridge == nil || cfg.TLSBridge.Mode != "enabled" || cfg.TLSBridge.CADir != "/etc/authbridge/tls-bridge-ca" {
+		t.Fatalf("tls_bridge block did not decode: %+v", cfg.TLSBridge)
+	}
+	if len(cfg.TLSBridge.PassthroughHosts) != 1 || len(cfg.TLSBridge.Ports) != 2 {
+		t.Fatalf("passthrough_hosts/ports did not decode: %+v", cfg.TLSBridge)
+	}
+}
+
+func TestTLSBridgeConfig_Validate(t *testing.T) {
+	cases := []struct {
+		name    string
+		cfg     TLSBridgeConfig
+		wantErr bool
+	}{
+		{"valid empty", TLSBridgeConfig{}, false},
+		{"valid disabled", TLSBridgeConfig{Mode: "disabled"}, false},
+		{"valid enabled with ca_dir", TLSBridgeConfig{Mode: "enabled", CADir: "/etc/authbridge/tls-bridge-ca"}, false},
+		{"bad mode", TLSBridgeConfig{Mode: "external"}, true},
+		{"enabled without ca_dir", TLSBridgeConfig{Mode: "enabled"}, true},
+		{"valid ports", TLSBridgeConfig{Ports: []int{443, 8443, 9443}}, false},
+		{"port zero", TLSBridgeConfig{Ports: []int{0}}, true},
+		{"port too high", TLSBridgeConfig{Ports: []int{70000}}, true},
+		{"port negative", TLSBridgeConfig{Ports: []int{-1}}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if (err != nil) != tc.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestForceLocalhost(t *testing.T) {
+	cases := map[string]string{
+		":9094":             "127.0.0.1:9094",
+		"0.0.0.0:9094":      "127.0.0.1:9094",
+		"[::]:9094":         "127.0.0.1:9094",
+		"127.0.0.1:9094":    "127.0.0.1:9094",
+		"":                  "",
+		"no-port-malformed": "no-port-malformed", // left as-is; bind surfaces the error
+	}
+	for in, want := range cases {
+		if got := forceLocalhost(in); got != want {
+			t.Errorf("forceLocalhost(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// With the bridge enabled, Load() restricts the session API to loopback so
+// other pods can't scrape decrypted bodies.
+func TestLoad_TLSBridgeHardensSessionAPI(t *testing.T) {
+	y := []byte("mode: proxy-sidecar\n" +
+		"listener:\n" +
+		"  session_api_addr: \":9094\"\n" +
+		"tls_bridge:\n" +
+		"  mode: enabled\n" +
+		"  ca_dir: /etc/authbridge/tls-bridge-ca\n")
+	p := filepath.Join(t.TempDir(), "cfg.yaml")
+	if err := os.WriteFile(p, y, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Listener.SessionAPIAddr != "127.0.0.1:9094" {
+		t.Errorf("session_api_addr = %q, want 127.0.0.1:9094 (bridge on => loopback)", cfg.Listener.SessionAPIAddr)
+	}
+}
+
 // Absent mtls block leaves cfg.MTLS nil — today's behavior, no TLS.
 func TestLoad_MTLS_AbsentBlock(t *testing.T) {
 	dir := t.TempDir()
@@ -759,4 +916,3 @@ listener:
 		t.Errorf("MTLS = %+v, want nil (absent block)", cfg.MTLS)
 	}
 }
-

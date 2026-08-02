@@ -9,7 +9,7 @@ please report it responsibly.
 
 1. **Do NOT create public GitHub issues** for security vulnerabilities
 2. **Email**: Report vulnerabilities privately via GitHub Security Advisories
-   - Go to the [Security tab](../../security/advisories/new) and create a new advisory
+   - Go to the [Security tab](https://github.com/rossoctl/cortex/security/advisories/new) and create a new advisory
 3. **Include**: A clear description of the vulnerability, steps to reproduce,
    and potential impact
 
@@ -40,4 +40,4 @@ This project implements several security controls:
 
 For deployment security configuration, see:
 - [AuthBridge README](authbridge/README.md) - Authentication bridge architecture
-- [kagenti-operator](https://github.com/kagenti/kagenti-operator) - Admission webhook configuration (migrated from this repo)
+- [operator](https://github.com/rossoctl/operator) - Admission webhook configuration (migrated from this repo)

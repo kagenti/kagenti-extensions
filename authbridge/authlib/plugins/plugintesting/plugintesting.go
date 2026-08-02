@@ -16,9 +16,9 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/auth"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/pipeline"
-	"github.com/kagenti/kagenti-extensions/authbridge/authlib/routing"
+	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/routing"
 )
 
 // JWTValidationStub mimics the jwt-validation plugin's OnRequest
@@ -46,7 +46,7 @@ func NewJWTValidation(a *auth.Auth, audienceFromHost bool) *JWTValidationStub {
 func (p *JWTValidationStub) Name() string { return "jwt-validation" }
 
 func (p *JWTValidationStub) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{Writes: []string{"security"}}
+	return pipeline.PluginCapabilities{}
 }
 
 func (p *JWTValidationStub) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Action {

@@ -28,31 +28,12 @@ type Pipeline struct {
 	finishTimeout time.Duration
 }
 
-// defaultSlots lists the built-in extension slot names.
-var defaultSlots = map[string]bool{
-	"mcp":        true,
-	"a2a":        true,
-	"security":   true,
-	"delegation": true,
-	"inference":  true,
-	"custom":     true,
-}
-
 // Option configures pipeline construction.
 type Option func(*options)
 
 type options struct {
-	extraSlots    []string
 	policies      []ErrorPolicy
 	finishTimeout time.Duration
-}
-
-// WithSlots registers additional valid extension slot names beyond the built-in set.
-// Use this when a bridge plugin (e.g., CPEX) produces extensions not in the default set.
-func WithSlots(slots ...string) Option {
-	return func(o *options) {
-		o.extraSlots = append(o.extraSlots, slots...)
-	}
 }
 
 // WithFinishTimeout overrides the per-plugin OnFinish timeout. Each
@@ -79,21 +60,13 @@ func WithPolicies(policies ...ErrorPolicy) Option {
 	}
 }
 
-// New creates a Pipeline from the given plugins after validating capability wiring.
-// Returns an error if any plugin declares a read on a slot that no earlier plugin writes.
+// New creates a Pipeline from the given plugins after validating body-access rules.
 func New(plugins []Plugin, opts ...Option) (*Pipeline, error) {
 	var o options
 	for _, opt := range opts {
 		opt(&o)
 	}
-	validSlots := make(map[string]bool, len(defaultSlots)+len(o.extraSlots))
-	for k, v := range defaultSlots {
-		validSlots[k] = v
-	}
-	for _, s := range o.extraSlots {
-		validSlots[s] = true
-	}
-	if err := validateCapabilities(plugins, validSlots); err != nil {
+	if err := validateCapabilities(plugins); err != nil {
 		return nil, err
 	}
 	if len(o.policies) > len(plugins) {
@@ -160,6 +133,13 @@ func (p *Pipeline) Run(ctx context.Context, pctx *Context) Action {
 // RunResponse executes the response phase in reverse order.
 // The last plugin in the chain sees the response first.
 //
+// Plugins implementing StreamingResponder are skipped here — the
+// framework picks one path per the StreamingResponder contract:
+// streaming-aware plugins receive a final OnResponseFrame(last=true)
+// from the listener (single dispatch on the buffered application/json
+// path; per-frame + last=true on the SSE path) instead of OnResponse,
+// so the same body is never delivered through both hooks.
+//
 // See Run for the pctx attribution stamping, the off-policy skip, and
 // the observe-policy shadow conversion. Same pattern, phase set to
 // InvocationPhaseResponse.
@@ -167,6 +147,9 @@ func (p *Pipeline) RunResponse(ctx context.Context, pctx *Context) Action {
 	for i := len(p.plugins) - 1; i >= 0; i-- {
 		policy := p.policyAt(i)
 		if policy == ErrorPolicyOff {
+			continue
+		}
+		if _, ok := p.plugins[i].(StreamingResponder); ok {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -188,6 +171,70 @@ func (p *Pipeline) RunResponse(ctx context.Context, pctx *Context) Action {
 		}
 	}
 	return Action{Type: Continue}
+}
+
+// RunResponseFrame dispatches a single response frame to every plugin
+// implementing StreamingResponder, in reverse declaration order
+// (symmetric with RunResponse). Plugins that don't implement the
+// interface are skipped — they're handled by the buffered RunResponse
+// path the listener still calls when the response is non-streaming.
+//
+// The off-policy skip and observe-policy shadow conversion are
+// applied identically to RunResponse — see Run for the contract.
+//
+// Frames are dispatched in wire-arrival order: callers invoke this
+// once per frame as they arrive off the upstream, then once with
+// last=true (typically with an empty frame) at end-of-stream so
+// aggregating plugins can finalize. Application/json responses are
+// delivered as a single last=true frame so streaming-aware plugins
+// have one code path.
+//
+// A plugin that returns Reject mid-stream causes the listener to
+// short-circuit. Today no in-tree plugin returns Reject here (the
+// listeners forward+flush before invoking the hook for observability
+// only); the contract leaves room for per-message enforcement later.
+func (p *Pipeline) RunResponseFrame(ctx context.Context, pctx *Context, frame []byte, last bool) Action {
+	for i := len(p.plugins) - 1; i >= 0; i-- {
+		policy := p.policyAt(i)
+		if policy == ErrorPolicyOff {
+			continue
+		}
+		if ctx.Err() != nil {
+			slog.Info("pipeline: response frame cancelled", "plugin", p.plugins[i].Name())
+			return Deny("pipeline.cancelled", "request cancelled")
+		}
+		sr, ok := p.plugins[i].(StreamingResponder)
+		if !ok {
+			continue
+		}
+		pctx.setCurrent(p.plugins[i].Name(), InvocationPhaseResponse, policy)
+		action := sr.OnResponseFrame(ctx, pctx, frame, last)
+		pctx.clearCurrent()
+		if action.Type == Reject {
+			stampPluginName(&action, p.plugins[i].Name())
+			if policy == ErrorPolicyObserve {
+				markShadowAndLog(pctx, p.plugins[i].Name(), InvocationPhaseResponse, action, "response-frame")
+				continue
+			}
+			pctx.setRejectingPlugin(p.plugins[i].Name())
+			logReject(p.plugins[i].Name(), action, "pipeline: plugin rejected response frame")
+			return action
+		}
+	}
+	return Action{Type: Continue}
+}
+
+// HasStreamingResponders reports whether any plugin in the pipeline
+// implements StreamingResponder. Listeners use this to decide whether
+// the streaming code path is worth taking — without any opt-in plugin
+// the buffered path delivers the same result for less complexity.
+func (p *Pipeline) HasStreamingResponders() bool {
+	for _, plugin := range p.plugins {
+		if _, ok := plugin.(StreamingResponder); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // policyAt returns the resolved policy for plugins[i]. The policies
@@ -318,8 +365,6 @@ func (p *Pipeline) NotReadyPlugin() string {
 
 // NeedsBody returns true if any plugin in the pipeline needs the body
 // buffered — either to read it (ReadsBody) or to mutate it (WritesBody).
-// Normalize() folds the deprecated BodyAccess alias into ReadsBody, so
-// both legacy and modern plugins are covered by the single check.
 func (p *Pipeline) NeedsBody() bool {
 	for _, plugin := range p.plugins {
 		caps := plugin.Capabilities().Normalize()
@@ -501,44 +546,23 @@ func (p *Pipeline) dispatchFinish(parent context.Context, name string, f Finishe
 	f.OnFinish(ctx, pctx)
 }
 
-// validateCapabilities checks that every slot a plugin reads has been written
-// by an earlier plugin in the chain, and applies the body-mutation rules:
-//   - At most one WritesBody plugin per pipeline (direction-scoped).
-//     Mutation ordering would otherwise be ambiguous; downstream readers
-//     can't tell which version they're seeing.
-//   - A body mutator must not run before a body reader. Readers that
-//     declared ReadsBody expect to see the original bytes; placing a
-//     mutator earlier would silently change what they observe.
-func validateCapabilities(plugins []Plugin, validSlots map[string]bool) error {
-	written := make(map[string]bool)
-	var mutatorName string        // set once the first WritesBody plugin is seen
-	var readerAfterMutator string // non-empty if a ReadsBody plugin follows the mutator
+// validateCapabilities enforces body-mutation ordering rules:
+//   - At most one WritesBody plugin per pipeline — mutation ordering would
+//     otherwise be ambiguous; downstream readers can't tell which version
+//     they're seeing.
+//   - A body reader (ReadsBody) must not follow a body mutator (WritesBody) —
+//     the reader would silently see mutated bytes instead of the originals.
+func validateCapabilities(plugins []Plugin) error {
+	var mutatorName string
+	var readerAfterMutator string
 	for _, plugin := range plugins {
 		caps := plugin.Capabilities().Normalize()
-		for _, slot := range caps.Reads {
-			if !validSlots[slot] {
-				return fmt.Errorf("plugin %q declares read on unknown slot %q", plugin.Name(), slot)
-			}
-			if !written[slot] {
-				return fmt.Errorf("plugin %q reads slot %q but no earlier plugin writes it", plugin.Name(), slot)
-			}
-		}
-		for _, slot := range caps.Writes {
-			if !validSlots[slot] {
-				return fmt.Errorf("plugin %q declares write on unknown slot %q", plugin.Name(), slot)
-			}
-			written[slot] = true
-		}
 		if caps.WritesBody {
 			if mutatorName != "" {
 				return fmt.Errorf("pipeline: two plugins declare WritesBody: %q and %q — mutation ordering would be ambiguous; at most one body mutator per pipeline is allowed", mutatorName, plugin.Name())
 			}
 			mutatorName = plugin.Name()
 		} else if caps.ReadsBody && mutatorName != "" && readerAfterMutator == "" {
-			// ReadsBody-only plugin running AFTER a WritesBody plugin
-			// would see the mutated bytes, which surprises the reader.
-			// Stash the first occurrence; validated below so the error
-			// names both plugins involved.
 			readerAfterMutator = plugin.Name()
 		}
 	}

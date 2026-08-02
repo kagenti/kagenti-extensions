@@ -17,6 +17,7 @@ Built-in plugins and the open plugin registry. Plugin authoring docs live under
 | `mcp-parser` | Parse Model Context Protocol traffic into `Extensions.MCP` |
 | `inference-parser` | Parse OpenAI-style / Ollama inference traffic into `Extensions.Inference` |
 | [`ibac`](../../docs/ibac-plugin.md) | Outbound Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's most recent intent. Catches prompt-injection / data-exfiltration attempts |
+| `opa` | OPA policy evaluation on inbound and outbound requests via bundle download |
 
 ## Reusable building blocks for plugin authors
 
@@ -37,3 +38,17 @@ side-effect import. See
 for the contract and
 [`docs/plugin-tutorial.md`](../../docs/plugin-tutorial.md#step-6--out-of-tree-plugins)
 for the walkthrough.
+
+### Build-tag plugin exclusion
+
+Some plugins can be excluded at build time using Go build tags. Their
+side-effect import lives in a dedicated `plugins_<name>.go` file (in
+each `cmd/` binary) gated by `//go:build !exclude_plugin_<name>`.
+The default build (no tags) includes everything.
+
+| Tag | Plugin excluded |
+|-----|----------------|
+| `exclude_plugin_ibac` | `ibac` |
+
+See the [authbridge README](../../README.md#build-tag-plugin-selection)
+for usage examples and instructions for tagging additional plugins.

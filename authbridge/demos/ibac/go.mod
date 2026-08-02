@@ -1,3 +1,3 @@
-module github.com/kagenti/kagenti-extensions/authbridge/demos/ibac
+module github.com/rossoctl/cortex/authbridge/demos/ibac
 
 go 1.24

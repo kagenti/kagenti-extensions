@@ -1,0 +1,93 @@
+name: Release binaries
+
+# Cross-compiles the standalone `abctl` and `authbridge-proxy` binaries and
+# attaches them (with SHA-256 checksums) to the GitHub Release for a `v*` tag.
+# Both are pure-Go (CGO_ENABLED=0); each cmd module resolves authlib via its
+# `replace => ../../authlib`, so builds run per-module with GOWORK=off — no
+# workspace needed. workflow_dispatch runs a dry build that only uploads
+# workflow artifacts (no Release), for testing.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version string to stamp for a dry-run build (no Release is created)'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: read
+
+jobs:
+  release-binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # create the Release and upload assets (tag pushes only)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v4
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v5
+        with:
+          go-version-file: authbridge/cmd/authbridge-proxy/go.mod
+
+      - name: Build binaries (linux/darwin, amd64/arm64)
+        env:
+          # Untrusted input passed via env (never interpolated into the script).
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME}"
+          else
+            VERSION="${INPUT_TAG:-dev}"
+          fi
+          echo "Building version ${VERSION}"
+          mkdir -p dist
+          for bin in abctl authbridge-proxy; do
+            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+              os="${target%/*}"
+              arch="${target#*/}"
+              echo "==> ${bin} ${os}/${arch}"
+              ( cd "authbridge/cmd/${bin}" && \
+                GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+                go build -trimpath \
+                  -ldflags "-s -w -X main.version=${VERSION}" \
+                  -o "${GITHUB_WORKSPACE}/dist/${bin}" . )
+              tar -C dist -czf "dist/${bin}_${VERSION}_${os}_${arch}.tar.gz" "${bin}"
+              rm -f "dist/${bin}"
+            done
+          done
+          ( cd dist && sha256sum ./*.tar.gz > checksums.txt )
+          ls -l dist
+
+      - name: Publish to GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          notes="Prebuilt \`abctl\` and \`authbridge-proxy\` binaries for linux and macOS (amd64/arm64).
+
+          Verify downloads with \`sha256sum -c checksums.txt\`. On macOS, clear the Gatekeeper quarantine after extracting: \`xattr -dr com.apple.quarantine ./abctl\`."
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
+          else
+            prerelease=""
+            case "${TAG}" in *-rc*|*-alpha*|*-beta*) prerelease="--prerelease" ;; esac
+            gh release create "${TAG}" dist/*.tar.gz dist/checksums.txt \
+              --title "${TAG}" --notes "${notes}" ${prerelease}
+          fi
+
+      - name: Upload dry-run artifacts
+        if: github.ref_type != 'tag'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v4
+        with:
+          name: release-binaries
+          path: dist/*
+          if-no-files-found: error

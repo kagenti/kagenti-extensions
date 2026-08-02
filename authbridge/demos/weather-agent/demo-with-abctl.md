@@ -1,17 +1,17 @@
 # Weather Agent Walkthrough with `abctl`
 
-This demo extends the standard [Weather Agent demo](./demo-ui.md) with a live view of AuthBridge's plugin pipeline using **`abctl`**, the terminal UI that reads AuthBridge's session API. You'll send chat messages from the Kagenti UI, then watch the request flow through inbound JWT validation → protocol parsers → outbound MCP calls → LLM inference → response — all with token counts, caller identity, request/response pairing, and request-scoped pipeline state visible in real time.
+This demo extends the standard [Weather Agent demo](./demo-ui.md) with a live view of AuthBridge's plugin pipeline using **`abctl`**, the terminal UI that reads AuthBridge's session API. You'll send chat messages from the Rossoctl UI, then watch the request flow through inbound JWT validation → protocol parsers → outbound MCP calls → LLM inference → response — all with token counts, caller identity, request/response pairing, and request-scoped pipeline state visible in real time.
 
 ## Prerequisites
 
 Before starting, complete these in order:
 
-1. **Install Kagenti** (operator + Keycloak + UI + SPIFFE/SPIRE): [Kagenti Installation Guide](https://github.com/kagenti/kagenti/blob/main/docs/install.md). Works on Kind (local) or OpenShift.
-2. **Deploy the Weather Agent + Tool** through the Kagenti UI: [Weather Agent Demo with AuthBridge](./demo-ui.md). At the end of that demo you'll have:
+1. **Install Rossoctl** (operator + Keycloak + UI + SPIFFE/SPIRE): [Rossoctl Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md). Works on Kind (local) or OpenShift.
+2. **Deploy the Weather Agent + Tool** through the Rossoctl UI: [Weather Agent Demo with AuthBridge](./demo-ui.md). At the end of that demo you'll have:
    - `weather-service` agent running in the `team1` namespace (with AuthBridge sidecars).
    - `weather-tool-mcp` MCP tool running in `team1`.
    - Keycloak configured with the agent's `agent-team1-weather-service-aud` scope.
-   - The Kagenti UI reachable at its route, with a working chat tab for the weather agent.
+   - The Rossoctl UI reachable at its route, with a working chat tab for the weather agent.
 
 Verify by sending one chat message and getting a weather response. Once that works, you're ready for this walkthrough.
 
@@ -37,46 +37,36 @@ Verify by sending one chat message and getting a weather response. Once that wor
 
    Merging only the `pipeline:` key into the existing YAML is brittle across operator versions. If the patch above doesn't take effect, `kubectl edit configmap authbridge-runtime-config -n team1` and add the `pipeline:` section to the existing `config.yaml` by hand. See [mcp-parser demo](../mcp-parser/README.md) for the full config format and rationale.
 
-## 1. Build `abctl`
+## 1. Get `abctl`
 
-`abctl` lives in the `kagenti-extensions` repo. Build it once:
+Download a prebuilt `abctl` (linux/macOS, amd64/arm64) from the
+[Releases page](https://github.com/rossoctl/cortex/releases) — see
+[Download prebuilt binaries](../../README.md#download-prebuilt-binaries) for verify + macOS
+quarantine steps — and put it on your PATH.
+
+Or build it from source:
 
 ```sh
-git clone https://github.com/kagenti/kagenti-extensions.git
-cd kagenti-extensions/authbridge/cmd/abctl
+git clone https://github.com/rossoctl/cortex.git
+cd cortex/authbridge/cmd/abctl
 go build .
 ```
 
-Produces a single ~10 MB binary at `./abctl`. See [the abctl README](../../cmd/abctl/README.md) for full flags and keybindings.
+Either way you get a single `abctl` binary. See [the abctl README](../../cmd/abctl/README.md) for full flags and keybindings.
 
-## 2. Port-forward the agent's session API
-
-AuthBridge exposes session telemetry on port `9094` of the agent pod. Forward it to your laptop:
-
-```sh
-POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service \
-  -o jsonpath='{.items[0].metadata.name}')
-kubectl port-forward -n team1 "$POD" 9094:9094 &
-```
-
-Quick sanity check:
-
-```sh
-curl -s http://localhost:9094/v1/sessions | python3 -m json.tool
-```
-
-Should return `{"sessions": [...]}` — possibly empty on a fresh pod, populated once you've sent a chat message.
-
-## 3. Launch `abctl`
+## 2. Launch `abctl`
 
 ```sh
 ./abctl
 ```
 
-Opens the terminal UI pointed at `http://localhost:9094`. The initial view is the **Sessions** pane:
+`abctl` discovers AuthBridge agents in your current `kubectl` context
+and opens a **Namespaces → Pods** picker. Pick `team1`, then the
+weather-service pod — `abctl` spawns a `kubectl port-forward`
+automatically and drops you into the **Sessions** pane:
 
-```
-╭─ abctl · http://localhost:9094 · [Sessions] Pipeline ─────────────────╮
+```text
+╭─ abctl · http://127.0.0.1:<port> · [Sessions] Pipeline ──────────────────────╮
 │  ID                                       UPDATED    EVENTS  TOKENS   ACTIVE  │
 │  (no sessions yet)                                                             │
 │                                                                                │
@@ -85,11 +75,15 @@ Opens the terminal UI pointed at `http://localhost:9094`. The initial view is th
 ╰────────────────────────────────────────────────────────────────────────────────╯
 ```
 
-## 4. Send a chat message from the Kagenti UI
+Esc backs you out to the Pods pane (and tears down the port-forward) so
+you can switch pods without quitting. `--endpoint http://...` skips the
+picker entirely if you already have a port-forward running yourself.
+
+## 3. Send a chat message from the Rossoctl UI
 
 In a browser:
 
-1. Open the Kagenti UI (route from `kubectl get route kagenti-ui -n kagenti-system` or port-forward).
+1. Open the Rossoctl UI (route from `kubectl get route rossoctl-ui -n rossoctl-system` or port-forward).
 2. Navigate to the Weather Service agent's chat.
 3. Type a question: *"What's the weather in New York?"*
 4. Wait for the agent to reply.
@@ -107,7 +101,7 @@ In a browser:
 - **TOKENS** — total tokens consumed across all inference calls in this conversation.
 - **ACTIVE** (●) — the most recently updated session.
 
-## 5. Drill into the session's events
+## 4. Drill into the session's events
 
 Select the row with `↑`/`↓` (or `j`/`k`) and press `Enter` to open the **Events** pane:
 
@@ -115,7 +109,7 @@ Select the row with `↑`/`↓` (or `j`/`k`) and press `Enter` to open the **Eve
 ╭─ abctl · 4647e888-db99-4739-926e-8bcceeb237c6 ─────────────────────────╮
 │ ┌─ IDENTITY ─────────────────────────────────────────────────────────┐ │
 │ │ subject  alice                                                      │ │
-│ │ client   kagenti                                                    │ │
+│ │ client   rossoctl                                                    │ │
 │ │ scopes   openid, email, profile +1 more                             │ │
 │ └─────────────────────────────────────────────────────────────────────┘ │
 │                                                                          │
@@ -138,7 +132,7 @@ Select the row with `↑`/`↓` (or `j`/`k`) and press `Enter` to open the **Eve
 
 What to notice:
 
-- **IDENTITY banner** at the top of the pane — the caller subject (`alice` from Keycloak), the OAuth client (`kagenti`, the UI), and the scopes their token carried. This is per-session, extracted from the inbound JWT.
+- **IDENTITY banner** at the top of the pane — the caller subject (`alice` from Keycloak), the OAuth client (`rossoctl`, the UI), and the scopes their token carried. This is per-session, extracted from the inbound JWT.
 - **Event rows**:
   - `DIR` — `in` = inbound (caller → agent), `out` = outbound (agent → tool or LLM).
   - `PHASE` — `req` for request, `└resp` for the matching response (the `└` visually connects a response row back to its paired request).
@@ -149,7 +143,7 @@ What to notice:
 
 The flow you're looking at: inbound A2A request → outbound MCP `tools/list` (discover what the weather tool offers) → LLM inference (plan) → outbound MCP `tools/call` (execute weather query) → LLM inference (synthesize answer) → inbound A2A response.
 
-## 6. Inspect an individual event
+## 5. Inspect an individual event
 
 Select any row and press `Enter` for the **Detail** pane. It shows the event as pretty-printed JSON, filtered to the fields relevant to that event's phase:
 
@@ -207,7 +201,7 @@ Press `y` (yank) to write the full, unfiltered wire-format JSON to `/tmp/abctl-e
 
 Press `Esc` to go back to the events pane.
 
-## 7. View the plugin pipeline composition
+## 6. View the plugin pipeline composition
 
 From any top-level pane, press `Tab` to switch between **Sessions** and **Pipeline**:
 
@@ -238,7 +232,7 @@ Session recording itself isn't a plugin — the listener (ext_proc / ext_authz /
 
 Select any plugin and press `Enter` for a plugin-detail pane with its declared reads / writes / body-access flag.
 
-## 8. Follow a conversation live
+## 7. Follow a conversation live
 
 Back in the Sessions or Events pane, everything is **streamed via SSE** from the `/v1/events` endpoint. Send another chat message and watch:
 
@@ -248,7 +242,7 @@ Back in the Sessions or Events pane, everything is **streamed via SSE** from the
 
 The bottom-footer rate indicator (`3.2 ev/s`) is a live smoothed events-per-second gauge — useful to tell if traffic is flowing or something upstream is stuck.
 
-## 9. Filter and search
+## 8. Filter and search
 
 Press `/` in Sessions or Events to open a substring filter. Filters apply to:
 
@@ -257,7 +251,7 @@ Press `/` in Sessions or Events to open a substring filter. Filters apply to:
 
 `Esc` to cancel, `Enter` to commit. Press `/` again and clear with `Esc` to remove the filter.
 
-## 10. Pause / resume
+## 9. Pause / resume
 
 Press `p` to pause stream rendering. The SSE connection stays open (events don't get dropped), but the UI stops refreshing — useful when you want to read a burst of events without chasing them. Press `p` again to resume.
 
@@ -268,7 +262,7 @@ Press `p` to pause stream rendering. The SSE connection stays open (events don't
 | Footer shows `✗ failed: …` | `/v1/sessions` fetch failed — check the port-forward is still up and the pod is Ready. |
 | Sessions appear and disappear | The pod restarted (session store is in-memory). |
 | `TOKENS` shows `—` on a session | No inference events in that bucket yet, or the server is older than the token-aggregation change (client-side fallback sums from streamed events). |
-| Multiple session buckets for one conversation | The UI backend isn't forwarding the A2A `contextId` on subsequent turns. See [kagenti#1481](https://github.com/kagenti/kagenti/pull/1481) for the fix. |
+| Multiple session buckets for one conversation | The UI backend isn't forwarding the A2A `contextId` on subsequent turns. See [rossoctl#1481](https://github.com/rossoctl/rossoctl/pull/1481) for the fix. |
 | Events missing identity | `jwt-validation` didn't run on this code path (e.g. bypass path) or the caller didn't send a Bearer token. |
 | IDENTITY banner reports `subject  —` | The JWT had no `sub` claim (common for Keycloak public-client tokens). Field is still extracted from `azp` / scopes. |
 
