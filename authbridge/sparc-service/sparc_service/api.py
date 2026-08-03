@@ -4,12 +4,18 @@ Endpoints:
   POST /reflect  — run SPARC on a proposed tool call, return the verdict.
   GET  /healthz  — liveness (always ok if the process is up).
   GET  /readyz   — readiness (config valid and component buildable).
+
+Log levels:
+  INFO  — clean operational log: startup skip list + evaluated verdicts only.
+  DEBUG — adds per-call skip entries and full request payloads
+          (payloads only when SPARC_LOG_REQUESTS=true).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
@@ -20,8 +26,16 @@ from .settings import Settings
 
 log = logging.getLogger(__name__)
 
-# _LOG_REQUESTS and _STRIP_KEYS are now read from Settings (via Settings.from_env)
-# so all config comes from a single place. See settings.py.
+# SPARC_LOG_REQUESTS and SPARC_STRIP_TOOL_ARG_KEYS are read via Settings.from_env
+# so all config flows through a single place. See settings.py.
+
+# SPARC_SKIP_TOOLS — comma-separated tool names to auto-approve without SPARC.
+# Use for infrastructure tools (e.g. message, calculate) that have no policy
+# risk and would cause false-positive rejects.
+# Example: SPARC_SKIP_TOOLS=message,calculate
+_SKIP_TOOLS: frozenset[str] = frozenset(
+    t.strip() for t in os.getenv("SPARC_SKIP_TOOLS", "").split(",") if t.strip()
+)
 
 
 def _strip_tool_arg_keys(tool_calls: list[dict], keys: frozenset[str]) -> list[dict]:
@@ -57,6 +71,10 @@ def create_app(engine: ReflectionEngine | None = None) -> FastAPI:
     app.state.engine = engine
     app.state.settings = settings
 
+    # INFO: announce skip list once at startup so operators know what is bypassed
+    if _SKIP_TOOLS:
+        log.info("SPARC_SKIP_TOOLS: the following tools will be auto-approved without evaluation: %s", sorted(_SKIP_TOOLS))
+
     @app.get("/healthz")
     def healthz() -> dict[str, object]:
         return {
@@ -75,15 +93,23 @@ def create_app(engine: ReflectionEngine | None = None) -> FastAPI:
 
     @app.post("/reflect", response_model=ReflectResponse)
     async def reflect(request: ReflectRequest) -> ReflectResponse:
+        # DEBUG: full request payload — only when SPARC_LOG_REQUESTS=true
         if settings.log_requests:
-            log.info("incoming reflect request: %s", request.model_dump_json())
+            log.debug("incoming reflect request: %s", request.model_dump_json())
 
         if settings.strip_tool_arg_keys and request.tool_calls:
             request = request.model_copy(
                 update={"tool_calls": _strip_tool_arg_keys(request.tool_calls, settings.strip_tool_arg_keys)}
             )
             if settings.log_requests:
-                log.info("after strip (%s): tool_calls=%s", sorted(settings.strip_tool_arg_keys), request.tool_calls)
+                log.debug("after strip (%s): tool_calls=%s", sorted(settings.strip_tool_arg_keys), request.tool_calls)
+
+        if _SKIP_TOOLS and request.tool_calls:
+            tool_name = request.tool_calls[0].get("function", {}).get("name", "")
+            if tool_name in _SKIP_TOOLS:
+                # DEBUG: per-call skip entry — visible only at DEBUG level
+                log.debug("reflect tool=%s skipped (SPARC_SKIP_TOOLS)", tool_name)
+                return ReflectResponse(decision="approve", issues=[], overall_avg_score=None, execution_time_ms=None)
 
         # SPARCReflectionComponent.process is synchronous (and CPU/IO bound on the
         # LLM call); run it off the event loop so the service stays responsive.
