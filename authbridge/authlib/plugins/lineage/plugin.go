@@ -468,12 +468,6 @@ func baseAttrs(pctx *pipeline.Context, self, protocol string) []attribute.KeyVal
 		attribute.String("lineage.self.id", self),
 		attribute.String("lineage.protocol", protocol),
 	}
-	// RemoteAddr is the direct TCP caller: on inbound that IS the peer; on
-	// outbound it is the app's own socket (and empty under ext_proc), so it
-	// is omitted rather than mislabeled — callee identity comes from peer.host.
-	if pctx.Direction == pipeline.Inbound && pctx.RemoteAddr != "" {
-		attrs = append(attrs, attribute.String("lineage.peer.addr", pctx.RemoteAddr))
-	}
 	if pctx.Host != "" {
 		attrs = append(attrs, attribute.String("lineage.peer.host", pctx.Host))
 	}

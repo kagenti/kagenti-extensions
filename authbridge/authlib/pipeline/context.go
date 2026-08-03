@@ -24,9 +24,9 @@ import (
 // that need plugin-specific fields type-assert to a richer interface
 // or to the plugin's known concrete type.
 type Identity interface {
-	Subject() string   // stable subject ID (sub claim / SPIFFE ID / email)
-	ClientID() string  // registering-client ID, if applicable
-	Scopes() []string  // granted scopes / roles
+	Subject() string  // stable subject ID (sub claim / SPIFFE ID / email)
+	ClientID() string // registering-client ID, if applicable
+	Scopes() []string // granted scopes / roles
 }
 
 // SharedStore is a process-scoped key→value store with TTL, injected by the
@@ -107,10 +107,7 @@ type Context struct {
 	Scheme  string
 	Host    string
 	Path    string
-	// RemoteAddr is the "IP:port" of the direct TCP caller, populated by the
-	// proxy listeners from r.RemoteAddr. Empty for ext_proc and test contexts.
-	RemoteAddr string
-	Headers    http.Header
+	Headers http.Header
 	Body    []byte // nil unless at least one plugin declares BodyAccess: true
 
 	// StartedAt is the wall-clock time this context was constructed by the

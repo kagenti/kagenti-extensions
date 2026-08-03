@@ -169,7 +169,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	}
 
 	originalAuth := pctx.Headers.Get("Authorization")
-	originalTS := pctx.Headers.Get("tracestate")
+	originalTrace := snapshotTraceHeaders(pctx.Headers)
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -183,11 +183,8 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		resp = replaceTokenResponse(auth.ExtractBearer(newAuth))
 	}
 	// Both mutations may apply on one pass (token replaced AND tracestate
-	// stamped) — append, never assign, so neither writer clobbers the other.
-	if sh := tracestateSetHeaders(pctx, originalTS); sh != nil {
-		hm := resp.GetRequestHeaders().Response.HeaderMutation
-		hm.SetHeaders = append(hm.SetHeaders, sh...)
-	}
+	// stamped) — appendSetHeaders appends, never assigns.
+	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
 	return resp, pctx
 }
 
@@ -205,7 +202,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	}
 
 	originalAuth := pctx.Headers.Get("Authorization")
-	originalTS := pctx.Headers.Get("tracestate")
+	originalTrace := snapshotTraceHeaders(pctx.Headers)
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -219,10 +216,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		resp = replaceTokenBodyResponse(auth.ExtractBearer(newAuth))
 	}
 	// Same append-not-assign rule as the headers-phase handler above.
-	if sh := tracestateSetHeaders(pctx, originalTS); sh != nil {
-		hm := resp.GetRequestBody().Response.HeaderMutation
-		hm.SetHeaders = append(hm.SetHeaders, sh...)
-	}
+	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
 	return withBodyMutation(resp, pctx), pctx
 }
 
@@ -511,6 +505,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 	}
 
 	originalAuth := pctx.Headers.Get("Authorization")
+	originalTrace := snapshotTraceHeaders(pctx.Headers)
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
@@ -520,11 +515,16 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 
 	s.recordOutboundSession(pctx)
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		return replaceTokenResponse(auth.ExtractBearer(newAuth)), pctx
+	resp := passResponse()
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		resp = replaceTokenResponse(auth.ExtractBearer(newAuth))
 	}
-	return passResponse(), pctx
+	// The lineage plugin's splice rewrites the forwarded traceparent to name
+	// its outbound request span; without this diff the rewrite dies in
+	// pctx.Headers and the callee's sidecar parents on the app shim's
+	// unexported client span (the phantom-root forests).
+	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
+	return resp, pctx
 }
 
 func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessServer, headers *corev3.HeaderMap, body []byte) (*extprocv3.ProcessingResponse, *pipeline.Context) {
@@ -563,6 +563,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 	}
 
 	originalAuth := pctx.Headers.Get("Authorization")
+	originalTrace := snapshotTraceHeaders(pctx.Headers)
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
@@ -572,11 +573,13 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 
 	s.recordOutboundSession(pctx)
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		return withBodyMutation(replaceTokenBodyResponse(auth.ExtractBearer(newAuth)), pctx), pctx
+	resp := passBodyResponse()
+	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
+		resp = replaceTokenBodyResponse(auth.ExtractBearer(newAuth))
 	}
-	return withBodyMutation(passBodyResponse(), pctx), pctx
+	// Same splice-on-the-wire rule as handleOutbound above.
+	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
+	return withBodyMutation(resp, pctx), pctx
 }
 
 func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.HeaderMap, pctx *pipeline.Context, direction string) *extprocv3.ProcessingResponse {
@@ -720,19 +723,67 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	}
 }
 
-// tracestateSetHeaders returns a SetHeaders mutation when a pipeline plugin
-// rewrote the request's tracestate header (the lineage plugin's inbound
-// exchange-id stamp), or nil when unchanged. Without this diff the mutation
-// would die in pctx.Headers — ext_proc forwards no header change it does not
-// explicitly emit (only the Authorization diff was propagated before).
-func tracestateSetHeaders(pctx *pipeline.Context, original string) []*corev3.HeaderValueOption {
-	now := pctx.Headers.Get("tracestate")
-	if now == original || now == "" {
-		return nil
+// traceHeaderNames are the headers a pipeline plugin may rewrite that must
+// reach the wire: the lineage plugin's inbound tracestate stamp and its
+// outbound traceparent splice. Authorization has its own replace path.
+var traceHeaderNames = []string{"traceparent", "tracestate"}
+
+// snapshotTraceHeaders captures the pre-pipeline values of traceHeaderNames
+// so headerDiffSetHeaders can emit only what a plugin actually changed.
+func snapshotTraceHeaders(h http.Header) map[string]string {
+	originals := make(map[string]string, len(traceHeaderNames))
+	for _, name := range traceHeaderNames {
+		originals[name] = h.Get(name)
 	}
-	return []*corev3.HeaderValueOption{
-		{Header: &corev3.HeaderValue{Key: "tracestate", RawValue: []byte(now)}},
+	return originals
+}
+
+// headerDiffSetHeaders returns SetHeaders mutations for every trace header a
+// pipeline plugin rewrote, or nil when none changed. Without this diff the
+// mutation would die in pctx.Headers — ext_proc forwards no header change it
+// does not explicitly emit (only the Authorization diff was propagated
+// before; the outbound traceparent splice was inert on the wire until this).
+func headerDiffSetHeaders(pctx *pipeline.Context, originals map[string]string) []*corev3.HeaderValueOption {
+	var out []*corev3.HeaderValueOption
+	for _, name := range traceHeaderNames {
+		now := pctx.Headers.Get(name)
+		if now == originals[name] || now == "" {
+			continue
+		}
+		out = append(out, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{Key: name, RawValue: []byte(now)},
+		})
 	}
+	return out
+}
+
+// appendSetHeaders appends sh to resp's request-phase header mutation,
+// creating the mutation containers when the base response carries none
+// (passResponse / passBodyResponse). Append, never assign, so it composes
+// with an Authorization replacement already present on the response.
+func appendSetHeaders(resp *extprocv3.ProcessingResponse, sh []*corev3.HeaderValueOption) {
+	if len(sh) == 0 {
+		return
+	}
+	var cr *extprocv3.CommonResponse
+	switch r := resp.Response.(type) {
+	case *extprocv3.ProcessingResponse_RequestHeaders:
+		if r.RequestHeaders.Response == nil {
+			r.RequestHeaders.Response = &extprocv3.CommonResponse{}
+		}
+		cr = r.RequestHeaders.Response
+	case *extprocv3.ProcessingResponse_RequestBody:
+		if r.RequestBody.Response == nil {
+			r.RequestBody.Response = &extprocv3.CommonResponse{}
+		}
+		cr = r.RequestBody.Response
+	default:
+		return // ImmediateResponse or response-phase; nothing to forward.
+	}
+	if cr.HeaderMutation == nil {
+		cr.HeaderMutation = &extprocv3.HeaderMutation{}
+	}
+	cr.HeaderMutation.SetHeaders = append(cr.HeaderMutation.SetHeaders, sh...)
 }
 
 func headerMapToHTTP(headers *corev3.HeaderMap) http.Header {

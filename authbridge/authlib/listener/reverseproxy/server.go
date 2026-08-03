@@ -210,12 +210,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		Scheme:    requestScheme(r),
 		Host:      r.Host,
 		Path:      r.URL.Path,
-		// The direct TCP caller — the lineage plugin's inbound
-		// lineage.peer.addr fact (anonymous-caller identity).
-		RemoteAddr: r.RemoteAddr,
-		Headers:    r.Header.Clone(),
-		Shared:     s.Shared,
-		StartedAt:  time.Now(),
+		Headers:   r.Header.Clone(),
+		Shared:    s.Shared,
+		StartedAt: time.Now(),
 	}
 
 	// Surface connection-level identity to plugins that opt in. r.TLS is
