@@ -588,7 +588,7 @@ func TestCaptureIO_A2ANeverFallsThroughToCoPopulatedMCP(t *testing.T) {
 func TestPrincipalFacts_InboundRequestOnly(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	pctx := fakeContext(pipeline.Inbound, http.Header{})
-	pctx.Identity = fakeIdentity{sub: "alice", client: "weather-ui", user: "Alice"}
+	pctx.Identity = fakeIdentity{sub: "alice", client: "weather-ui"}
 
 	run(t, p, pctx, allow(200))
 	req, resp := roleSplit(t, exp.GetSpans())
@@ -625,7 +625,7 @@ func TestForbiddenKeysNeverEmitted(t *testing.T) {
 	shapes := []func() *pipeline.Context{
 		func() *pipeline.Context {
 			c := fakeContext(pipeline.Inbound, http.Header{})
-			c.Identity = fakeIdentity{sub: "alice", client: "weather-ui", user: "Alice"}
+			c.Identity = fakeIdentity{sub: "alice", client: "weather-ui"}
 			return c
 		},
 		func() *pipeline.Context {
@@ -722,14 +722,13 @@ func TestConfigure_DecodesKeptKeys(t *testing.T) {
 // ---- helpers ----
 
 type fakeIdentity struct {
-	sub, client, user string
-	scopes            []string
+	sub, client string
+	scopes      []string
 }
 
 func (f fakeIdentity) Subject() string  { return f.sub }
 func (f fakeIdentity) ClientID() string { return f.client }
 func (f fakeIdentity) Scopes() []string { return f.scopes }
-func (f fakeIdentity) Username() string { return f.user }
 
 func findAttr(span tracetest.SpanStub, key string) (attribute.Value, bool) {
 	for _, kv := range span.Attributes {

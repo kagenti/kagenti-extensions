@@ -85,7 +85,6 @@ type testIdentity struct {
 func (i testIdentity) Subject() string  { return i.subject }
 func (i testIdentity) ClientID() string { return i.clientID }
 func (i testIdentity) Scopes() []string { return i.scopes }
-func (i testIdentity) Username() string { return "" }
 
 func (p *JWTValidationStub) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}

@@ -51,7 +51,6 @@ import (
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/a2aparser"
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/inferenceparser"
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/jwtvalidation"
-	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/lineage"
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/mcpparser"
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/opa"
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/sparc"
