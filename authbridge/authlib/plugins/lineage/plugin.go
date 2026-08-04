@@ -67,6 +67,11 @@ const pluginName = "lineage-telemetry"
 // the sidecar chain stays self-consistent in ours. (Until v1.4 the outbound
 // instead rewrote the forwarded traceparent — the splice; v1.5 removed it.)
 //
+// The key names the consuming data-governance system (W3C convention: the key
+// identifies the owner of the entry) and is deliberately platform-neutral —
+// it was `kglin` until 2026-08-04; the name never lands in stored data, so
+// renaming is wire-only.
+//
 // A trace-keyed map (one entry per trace, "the last inbound seen") used to sit
 // between the two. It was removed: its answer is correct only while exactly one
 // inbound of that trace is in flight — a precondition it never checked and could
@@ -75,7 +80,7 @@ const pluginName = "lineage-telemetry"
 // parent, which is an app-internal span this pipeline never exported: the
 // interaction still derives in full, but as a trace entry rather than a child.
 // A visibly missing edge is recoverable; a silently wrong one is not.
-const tracestateStampKey = "kglin"
+const tracestateStampKey = "dg-parent"
 
 func init() {
 	plugins.RegisterPlugin(pluginName, func() pipeline.Plugin { return NewLineageTelemetry() })

@@ -1745,7 +1745,7 @@ func mutationHeaderValue(hm *extprocv3.HeaderMutation, key string) string {
 // response — this is what puts the lineage stamp on the wire.
 func TestExtProc_Outbound_SpliceReachesWire(t *testing.T) {
 	const newTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-aaaaaaaaaaaaaaaa-01"
-	const newTS = "kglin=aaaaaaaaaaaaaaaa"
+	const newTS = "dg-parent=aaaaaaaaaaaaaaaa"
 	srv := traceRewriterServer(t, &traceRewriterPlugin{traceparent: newTP, tracestate: newTS})
 
 	stream := &mockStream{
@@ -1754,7 +1754,7 @@ func TestExtProc_Outbound_SpliceReachesWire(t *testing.T) {
 			outboundRequest(makeHeaders(
 				":authority", "fanin-echo",
 				"traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-				"tracestate", "kglin=00f067aa0ba902b7",
+				"tracestate", "dg-parent=00f067aa0ba902b7",
 			)),
 		},
 	}
@@ -1823,7 +1823,7 @@ func TestExtProc_Outbound_UnchangedTraceHeadersEmitNothing(t *testing.T) {
 			outboundRequest(makeHeaders(
 				":authority", "fanin-echo",
 				"traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-				"tracestate", "kglin=00f067aa0ba902b7",
+				"tracestate", "dg-parent=00f067aa0ba902b7",
 			)),
 		},
 	}
