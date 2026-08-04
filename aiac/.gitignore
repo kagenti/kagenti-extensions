@@ -1,7 +1,5 @@
 # AIAC working artefacts (regenerated; not source of truth)
-docs/issues/
 docs/handoffs/
-docs/gh-issues/
 
 # PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
 test/pdp/policy/rego_out/

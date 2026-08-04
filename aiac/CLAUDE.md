@@ -15,11 +15,25 @@ When a document under `docs/specs/` contains a markdown link to another file, us
 
 ## Issue tracking
 
-Issues are tracked as local markdown files under `docs/issues/`, not on GitHub.
-Never use `gh` commands to create, update, or list issues — always read/write the local files directly.
+Issues are tracked as **GitHub issues** on the `s-and-p-team/cortex` repo,
+organized in the org-level **AIAC** Project (Projects v2):
+<https://github.com/orgs/s-and-p-team/projects/1>. Use `gh` to read and manage
+them.
 
-`docs/issues/implementation-plan.md` — overall implementation plan.
-For current issue list, `ls` the subdirectories under `docs/issues/`.
+Hierarchy: the Project groups **Feature**-typed container issues — one per
+component area, nested via GitHub **native sub-issues** to form the tree — over
+**Task**-typed leaf issues. Every issue carries the `aiac` label plus cumulative
+`area:<path>` labels; open issues also carry a `status:<value>` label, and the
+Project's **AIAC Status** field records the issue's status.
+
+```bash
+# list / view (filter to the AIAC set)
+gh issue list -R s-and-p-team/cortex --label aiac --state all
+gh issue view <number> -R s-and-p-team/cortex
+```
+
+Filtered web list:
+<https://github.com/s-and-p-team/cortex/issues?q=is%3Aissue+label%3Aaiac>
 
 ## Issue tracking — codebase inspection policy
 
@@ -178,3 +192,17 @@ demo workloads, which don't) and CPU/memory requests + limits.
 ## External references
 
 - [Kagenti Developer Guide](https://github.com/kagenti/kagenti/blob/main/docs/dev-guide.md) — upstream Kagenti dev guide: per-persona workflows (agent, tool, extensions developers, MCP gateway operators), Git/PR process, pre-commit hooks, feature flags, local Kagenti UI v2 development (React frontend + FastAPI backend, building/deploying images to Kubernetes), and HyperShift-based testing on ephemeral OpenShift clusters (cluster lifecycle, cost management, troubleshooting).
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues on `s-and-p-team/cortex`, filtered by the `aiac` label, tracked in the org-level AIAC Project. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Five canonical roles map to `aiac-status:<value>` labels (distinct from the board's separate `AIAC Status` Project field). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context, scoped to `aiac/` (`CONTEXT.md` + `docs/adr/` at the `aiac/` root). See `docs/agents/domain.md`.
