@@ -90,6 +90,7 @@ spec:
         }
 
         source_ok if { not input.identity.client_id }
+        source_ok if { input.identity.client_id == "rossoctl"}
         source_ok if {
             some role in source_roles[input.identity.client_id]
             some scope in role_scopes[role]
