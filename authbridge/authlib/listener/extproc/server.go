@@ -519,10 +519,10 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
 		resp = replaceTokenResponse(auth.ExtractBearer(newAuth))
 	}
-	// The lineage plugin's splice rewrites the forwarded traceparent to name
-	// its outbound request span; without this diff the rewrite dies in
-	// pctx.Headers and the callee's sidecar parents on the app shim's
-	// unexported client span (the phantom-root forests).
+	// The lineage plugin re-stamps the forwarded tracestate to name its
+	// outbound request span (wire contract v1.5); without this diff the
+	// rewrite dies in pctx.Headers and the callee's sidecar parents on the
+	// app shim's unexported client span (the phantom-root forests).
 	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
 	return resp, pctx
 }
@@ -577,7 +577,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
 		resp = replaceTokenBodyResponse(auth.ExtractBearer(newAuth))
 	}
-	// Same splice-on-the-wire rule as handleOutbound above.
+	// Same stamp-on-the-wire rule as handleOutbound above.
 	appendSetHeaders(resp, headerDiffSetHeaders(pctx, originalTrace))
 	return withBodyMutation(resp, pctx), pctx
 }
@@ -724,8 +724,10 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 }
 
 // traceHeaderNames are the headers a pipeline plugin may rewrite that must
-// reach the wire: the lineage plugin's inbound tracestate stamp and its
-// outbound traceparent splice. Authorization has its own replace path.
+// reach the wire: today only the lineage plugin's tracestate stamp (both
+// directions, wire contract v1.5 — traceparent is no longer rewritten but
+// stays diffed so a future rewrite cannot silently die in pctx.Headers).
+// Authorization has its own replace path.
 var traceHeaderNames = []string{"traceparent", "tracestate"}
 
 // snapshotTraceHeaders captures the pre-pipeline values of traceHeaderNames

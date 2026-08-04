@@ -1682,10 +1682,11 @@ func TestExtProc_BufferedSSEResponse_DispatchesPerEvent(t *testing.T) {
 	}
 }
 
-// traceRewriterPlugin mimics the lineage plugin's header writes — the
-// outbound traceparent splice and the inbound tracestate stamp. Used to
+// traceRewriterPlugin mimics a pipeline plugin's trace-header writes — the
+// lineage plugin's tracestate stamp today (wire contract v1.5), plus a
+// traceparent rewrite to prove the diff mechanism covers it too. Used to
 // assert the listener forwards trace-header rewrites as SetHeaders
-// mutations: before headerDiffSetHeaders the outbound splice died in
+// mutations: before headerDiffSetHeaders such rewrites died in
 // pctx.Headers (inert on the wire — the phantom-root forests).
 type traceRewriterPlugin struct {
 	traceparent string
@@ -1741,7 +1742,7 @@ func mutationHeaderValue(hm *extprocv3.HeaderMutation, key string) string {
 
 // TestExtProc_Outbound_SpliceReachesWire: a plugin rewrite of the outbound
 // traceparent/tracestate must be emitted as SetHeaders on the headers-phase
-// response — this is the wire effect of the lineage splice.
+// response — this is what puts the lineage stamp on the wire.
 func TestExtProc_Outbound_SpliceReachesWire(t *testing.T) {
 	const newTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-aaaaaaaaaaaaaaaa-01"
 	const newTS = "kglin=aaaaaaaaaaaaaaaa"

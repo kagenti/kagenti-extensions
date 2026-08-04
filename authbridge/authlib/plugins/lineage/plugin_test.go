@@ -152,32 +152,75 @@ func TestExchange_TwoSpansPairedAndParented(t *testing.T) {
 	}
 }
 
-// ---- the splice ----
+// ---- the stamp (single-channel parenting, wire contract v1.5) ----
 
-func TestSplice_OutboundHeaderRewritten(t *testing.T) {
+// TestStamp_OutboundRewritesStampNotTraceparent: the outbound reads its
+// parent from the inbound's stamp, then re-stamps the forwarded tracestate
+// with its OWN request span id for the peer sidecar's inbound to read. The
+// forwarded traceparent is NOT modified (v1.5 removed the splice) — an app
+// chain riding traceparent toward its own backend stays intact.
+func TestStamp_OutboundRewritesStampNotTraceparent(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceID, wireParent = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+	const inboundID = "1111111111111111"
 	h := traceparent(traceID, wireParent)
+	h.Set("tracestate", tracestateStampKey+"="+inboundID)
 	pctx := fakeContext(pipeline.Outbound, h)
 	pctx.Extensions.MCP = &pipeline.MCPExtension{Method: "tools/call", Params: map[string]any{"name": "get_weather"}}
 
 	run(t, p, pctx, allow(200))
 
 	req, _ := roleSplit(t, exp.GetSpans())
-	// The forwarded traceparent now names the request span (not the wire parent).
-	forwarded := extractParent(pctx.Headers)
-	if forwarded.SpanID() != req.SpanContext.SpanID() {
-		t.Errorf("forwarded parent = %s, want request span %s", forwarded.SpanID(), req.SpanContext.SpanID())
+	// Parent comes from the inbound's stamp.
+	if got := req.Parent.SpanID().String(); got != inboundID {
+		t.Errorf("parent = %s, want stamped inbound %s", got, inboundID)
 	}
-	if forwarded.SpanID().String() == wireParent {
-		t.Error("forwarded parent was left as the wire parent — splice did not apply")
+	// The forwarded traceparent is untouched — still the wire parent.
+	forwarded := extractParent(pctx.Headers)
+	if got := forwarded.SpanID().String(); got != wireParent {
+		t.Errorf("forwarded traceparent parent = %s, want untouched wire parent %s", got, wireParent)
 	}
 	if got := forwarded.TraceID().String(); got != traceID {
-		t.Errorf("forwarded trace = %s, want %s (splice must keep the trace)", got, traceID)
+		t.Errorf("forwarded trace = %s, want %s", got, traceID)
+	}
+	// The forwarded tracestate now stamps THIS outbound request span,
+	// replacing the inbound's stamp it consumed.
+	want := tracestateStampKey + "=" + req.SpanContext.SpanID().String()
+	if got := pctx.Headers.Get("tracestate"); got != want {
+		t.Errorf("tracestate = %q, want re-stamp %q", got, want)
 	}
 }
 
-func TestSplice_InboundHeadersUntouchedExceptStamp(t *testing.T) {
+// TestStamp_InboundParentsOnPeerStamp is the cross-pod link: the caller
+// sidecar's outbound stamped tracestate with its request span id, and this
+// inbound must parent on that stamp — not on the wire traceparent, whose
+// span id may belong to an app chain this pipeline never exports.
+func TestStamp_InboundParentsOnPeerStamp(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	const traceID, wireParent = "4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"
+	const peerOutbound = "2222222222222222"
+	h := traceparent(traceID, wireParent)
+	h.Set("tracestate", tracestateStampKey+"="+peerOutbound)
+	pctx := fakeContext(pipeline.Inbound, h)
+
+	run(t, p, pctx, allow(200))
+
+	req, _ := roleSplit(t, exp.GetSpans())
+	if got := req.Parent.SpanID().String(); got != peerOutbound {
+		t.Errorf("parent = %s, want peer outbound stamp %s", got, peerOutbound)
+	}
+	if got := attrStr(req, "lineage.parent.source"); got != "tracestate" {
+		t.Errorf("lineage.parent.source = %q, want tracestate", got)
+	}
+	// The forwarded stamp now names THIS inbound request span — the app's
+	// shim couriers it to exactly the outbound calls this inbound causes.
+	want := tracestateStampKey + "=" + req.SpanContext.SpanID().String()
+	if got := pctx.Headers.Get("tracestate"); got != want {
+		t.Errorf("tracestate = %q, want re-stamp %q", got, want)
+	}
+}
+
+func TestStamp_InboundHeadersUntouchedExceptStamp(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	h := traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7")
 	before := http.Header{}
@@ -198,6 +241,10 @@ func TestSplice_InboundHeadersUntouchedExceptStamp(t *testing.T) {
 	after.Del("tracestate")
 	if !headersEqual(before, after) {
 		t.Errorf("inbound headers beyond tracestate mutated: before=%v after=%v", before, after)
+	}
+	// No stamp arrived, so the parent is the wire traceparent — recorded as such.
+	if got := attrStr(req, "lineage.parent.source"); got != "wire" {
+		t.Errorf("lineage.parent.source = %q, want wire", got)
 	}
 }
 
@@ -299,13 +346,13 @@ func TestStamp_ParentSourceWireWhenUnstamped(t *testing.T) {
 	}
 }
 
-// TestSplice_UnstampedOutboundNeverInheritsInbound is the regression guard for
+// TestStamp_UnstampedOutboundNeverInheritsInbound is the regression guard for
 // the removal of the trace-keyed map. An outbound with no stamp must fall to the
 // wire parent EVEN WHEN this pod has an inbound span for the same trace. The old
 // map answered such cases from "the last inbound seen", which is correct only
 // while exactly one inbound is in flight — a precondition it never checked. A
 // missing edge is recoverable; a confidently wrong one is not.
-func TestSplice_UnstampedOutboundNeverInheritsInbound(t *testing.T) {
+func TestStamp_UnstampedOutboundNeverInheritsInbound(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const wireParent = "3333333333333333"
@@ -328,7 +375,7 @@ func TestSplice_UnstampedOutboundNeverInheritsInbound(t *testing.T) {
 	}
 }
 
-func TestSplice_ConcurrentTracesNeverCross(t *testing.T) {
+func TestStamp_ConcurrentTracesNeverCross(t *testing.T) {
 	p, exp := newTestPlugin(t)
 	const traceA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const traceB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"

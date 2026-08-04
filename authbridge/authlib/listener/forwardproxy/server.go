@@ -329,10 +329,11 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		r.Header.Set("Authorization", "Bearer "+auth.ExtractBearer(newAuth))
 	}
 
-	// Propagate the lineage splice's trace-context rewrite to the wire:
-	// the lineage plugin renames the forwarded traceparent to its outbound
-	// request span (and may carry tracestate through). Plugins write to
-	// pctx.Headers; r.Header is what this proxy actually forwards.
+	// Propagate the lineage plugin's trace-context rewrite to the wire:
+	// it re-stamps the forwarded tracestate with its outbound request span
+	// (wire contract v1.5; traceparent is carried through unchanged).
+	// Plugins write to pctx.Headers; r.Header is what this proxy actually
+	// forwards.
 	for _, hdr := range []string{"traceparent", "tracestate"} {
 		if v := pctx.Headers.Get(hdr); v != "" {
 			r.Header.Set(hdr, v)

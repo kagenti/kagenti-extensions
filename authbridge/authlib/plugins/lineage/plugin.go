@@ -52,20 +52,26 @@ import (
 
 const pluginName = "lineage-telemetry"
 
-// tracestateStampKey is the W3C tracestate member this sidecar stamps on the
-// request it forwards to its own app: value = the inbound request span id
-// (the exchange id). The app's propagate-only shim carries tracestate through
-// its per-request causal chain (contextvars), so the member surfaces on
-// exactly the outbound calls that inbound caused. It is the ONLY mechanism that
-// attributes an outbound to the inbound that caused it: outbound parent
-// precedence is stamp > wire parent, and the chosen source is recorded as the
-// lineage.parent.source fact.
+// tracestateStampKey is the W3C tracestate member that carries the sidecar
+// parent chain — the single channel every lineage element reads its parent
+// from and writes its own request span id into (wire contract v1.5). Inbound
+// stamps the request it forwards to its own app; the app's propagate-only shim
+// carries tracestate through its per-request causal chain (contextvars), so
+// the member surfaces on exactly the outbound calls that inbound caused.
+// Outbound re-stamps the request it forwards to the peer, whose inbound
+// sidecar reads it as its parent. Parent precedence is stamp > wire parent in
+// BOTH directions, and the chosen source is recorded as the
+// lineage.parent.source fact. The forwarded traceparent is never modified:
+// the sidecar chain lives entirely in this member, so an app that emits its
+// own spans keeps an intact traceparent chain toward its own backend while
+// the sidecar chain stays self-consistent in ours. (Until v1.4 the outbound
+// instead rewrote the forwarded traceparent — the splice; v1.5 removed it.)
 //
 // A trace-keyed map (one entry per trace, "the last inbound seen") used to sit
 // between the two. It was removed: its answer is correct only while exactly one
 // inbound of that trace is in flight — a precondition it never checked and could
 // not verify — and when it was wrong it produced a real, exported, walkable
-// parent that was simply untrue. Un-stamped outbound now falls to the wire
+// parent that was simply untrue. Un-stamped traffic falls to the wire
 // parent, which is an app-internal span this pipeline never exported: the
 // interaction still derives in full, but as a trace entry rather than a child.
 // A visibly missing edge is recoverable; a silently wrong one is not.
@@ -125,7 +131,7 @@ func (p *LineageTelemetry) Capabilities() pipeline.PluginCapabilities {
 		// ordering (for the principal facts) cannot be soft-declared under
 		// this capabilities model — list it before lineage in the YAML.
 		RequiresAny: []string{"a2a-parser", "mcp-parser", "inference-parser"},
-		Description: "Emits two facts-only lineage spans per HTTP exchange (wire contract v1.3).",
+		Description: "Emits two facts-only lineage spans per HTTP exchange (wire contract v1.5).",
 	}
 }
 
@@ -245,7 +251,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	reqAttrs = append(reqAttrs, base...)
 	reqAttrs = p.appendRequestFacts(reqAttrs, pctx, protocol)
 
-	reqCtx, exchangeID := p.spliceParent(ctx, pctx, remoteCtx, spanName, spanKind, reqAttrs)
+	reqCtx, exchangeID := p.stampParent(ctx, pctx, remoteCtx, spanName, spanKind, reqAttrs)
 
 	common := make([]attribute.KeyValue, 0, len(base)+1)
 	common = append(common, base...)
@@ -262,18 +268,19 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// spliceParent is the mesh splice. It (3) selects the request span's parent,
-// (4) emits and immediately ends the request span, (5) stamps the forwarded
-// tracestate on inbound, and (6) rewrites the forwarded traceparent to name the
-// request span on outbound. Returns the request span's context and its span id
-// (the exchange id).
+// stampParent is the single-channel parenting mechanism (wire contract v1.5).
+// It (3) selects the request span's parent from the tracestate stamp, (4)
+// emits and immediately ends the request span, and (5) re-stamps the forwarded
+// tracestate with the request span's id. The forwarded traceparent is never
+// modified (see tracestateStampKey). Returns the request span's context and
+// its span id (the exchange id).
 //
 // >>> OPTION-4 DELETION POINT <<<
-// The whole splice — this function plus the inbound stamp — is exactly what a
-// pure read-only sidecar would drop. Deleting this function and its stamp /
-// outbound-inject reverts to wire-parent-only propagation. See the splice
-// design note before attempting that spike.
-func (p *LineageTelemetry) spliceParent(
+// The whole stamp machinery — this function's parent selection plus the
+// tracestate rewrite — is exactly what a pure read-only sidecar would drop.
+// Deleting it reverts to wire-parent-only propagation. See the splice design
+// note before attempting that spike.
+func (p *LineageTelemetry) stampParent(
 	ctx context.Context,
 	pctx *pipeline.Context,
 	remoteCtx context.Context,
@@ -281,18 +288,18 @@ func (p *LineageTelemetry) spliceParent(
 	spanKind trace.SpanKind,
 	reqAttrs []attribute.KeyValue,
 ) (trace.SpanContext, string) {
-	// (3) Parent: outbound → the tracestate stamp (exact per-inbound
-	// attribution, survives same-trace concurrency), else the wire parent.
-	// Inbound always uses the wire parent. There is deliberately no third
-	// option: guessing an attribution is worse than declining to give one.
+	// (3) Parent: the tracestate stamp — the previous sidecar element in the
+	// chain (the caller's outbound for an inbound, this pod's inbound for an
+	// outbound) — else the wire parent. Same precedence in both directions.
+	// There is deliberately no third option: guessing an attribution is worse
+	// than declining to give one.
 	parent := remoteCtx
 	parentSource := "wire"
-	if pctx.Direction == pipeline.Outbound {
-		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
-			if psc, ok := stampedParent(rsc); ok {
-				parent = trace.ContextWithRemoteSpanContext(ctx, psc)
-				parentSource = "tracestate"
-			}
+	rsc := trace.SpanContextFromContext(remoteCtx)
+	if rsc.IsValid() {
+		if psc, ok := stampedParent(rsc); ok {
+			parent = trace.ContextWithRemoteSpanContext(ctx, psc)
+			parentSource = "tracestate"
 		}
 	}
 	reqAttrs = append(reqAttrs, attribute.String("lineage.parent.source", parentSource))
@@ -309,30 +316,23 @@ func (p *LineageTelemetry) spliceParent(
 	span.SetAttributes(attribute.String("lineage.exchange.id", exchangeID))
 	span.End()
 
-	// (5) Inbound → STAMP the forwarded request's tracestate with this exchange
-	// id so the app couriers exact per-inbound attribution back to the outbound
-	// side (see tracestateStampKey). The stamp requires a valid wire traceparent
-	// — without one the app's shim starts a fresh root trace and drops the
-	// tracestate anyway. The listener is responsible for propagating this header
-	// mutation to the app (ext_proc emits a SetHeaders diff).
-	if pctx.Direction == pipeline.Inbound {
-		if rsc := trace.SpanContextFromContext(remoteCtx); rsc.IsValid() {
-			if ts, err := rsc.TraceState().Insert(tracestateStampKey, sc.SpanID().String()); err == nil {
-				pctx.Headers.Set("tracestate", ts.String())
-			} else {
-				// Stamp attempted and refused (tracestate full or a member
-				// malformed, W3C caps at 32 members / 512 bytes). Without this
-				// line the outcome is indistinguishable from "app has no shim".
-				slog.Warn("lineage-telemetry: tracestate stamp rejected; downstream outbound will attribute as wire",
-					"exchange_id", exchangeID, "error", err)
-			}
+	// (5) STAMP the forwarded request's tracestate with this exchange id —
+	// both directions. Inbound: the app's propagate-only shim couriers it to
+	// exactly the outbound calls this inbound caused. Outbound: the peer
+	// sidecar's inbound reads it as its parent. The stamp requires a valid
+	// wire traceparent — without one the app's shim starts a fresh root trace
+	// and drops the tracestate anyway. The listener is responsible for
+	// propagating this header mutation (ext_proc emits a SetHeaders diff).
+	if rsc.IsValid() {
+		if ts, err := rsc.TraceState().Insert(tracestateStampKey, sc.SpanID().String()); err == nil {
+			pctx.Headers.Set("tracestate", ts.String())
+		} else {
+			// Stamp attempted and refused (tracestate full or a member
+			// malformed, W3C caps at 32 members / 512 bytes). Without this
+			// line the outcome is indistinguishable from "app has no shim".
+			slog.Warn("lineage-telemetry: tracestate stamp rejected; the next element will attribute as wire",
+				"exchange_id", exchangeID, "error", err)
 		}
-	}
-
-	// (6) Outbound → rewrite the forwarded traceparent to name the request
-	// span as parent (the splice). Inbound headers are left untouched.
-	if pctx.Direction == pipeline.Outbound {
-		p.propagator.Inject(trace.ContextWithSpanContext(ctx, sc), propagation.HeaderCarrier(pctx.Headers))
 	}
 
 	return sc, exchangeID
