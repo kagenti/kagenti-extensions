@@ -33,7 +33,10 @@
 #   SYS_NS         platform namespace                     (default: rossoctl-system)
 #   KC             Keycloak base URL          (default: http://keycloak.localtest.me:8080)
 #   REALM          Keycloak realm                         (default: rossoctl)
-#   POLL_SECS      max seconds to wait for OPA to poll a new bundle (default: 60)
+#   POLL_SECS      max seconds to wait for OPA to poll a new bundle (default: 150).
+#                  The OPA SDK bundle poller uses min_delay 10s / max_delay 120s,
+#                  so a freshly applied CR can take up to ~120s to reach the
+#                  agent; the default leaves margin above that worst case.
 #   SKIP_ENABLE    if set to 1, skip Step 1's image rebuild + opa-kind-enable.sh
 #                  and only verify OPA is already wired (fast path when iterating
 #                  on the policy CR against an already-enabled cluster).
@@ -58,7 +61,7 @@ NS="${NS:-team1}"
 SYS_NS="${SYS_NS:-rossoctl-system}"
 KC="${KC:-http://keycloak.localtest.me:8080}"
 REALM="${REALM:-rossoctl}"
-POLL_SECS="${POLL_SECS:-60}"
+POLL_SECS="${POLL_SECS:-150}"
 
 AGENT_LABEL="app.kubernetes.io/name=github-agent"
 EXPECTED_SPIFFE="spiffe://localtest.me/ns/${NS}/sa/github-agent"
@@ -160,8 +163,8 @@ probe_as() {
 
 # probe_expect <user> <want_code> <secs> <label>  — poll probe_as until it
 # returns want_code (tolerates transient 502/000 while the app finishes binding
-# its HTTP port, and the ~20-30s OPA bundle-poll delay after a CR change), or
-# die after <secs>.
+# its HTTP port, and the OPA bundle-poll delay after a CR change — up to ~120s,
+# the SDK's max_delay_seconds), or die after <secs>.
 probe_expect() {
   local user="$1" want="$2" secs="$3" label="$4"
   local deadline=$((SECONDS + secs)) res code body
@@ -294,11 +297,13 @@ step "A.2 — Baseline: before any client policy, BOTH users reach the app (HTTP
 if kubectl get -f "$POLICY_FILE" >/dev/null 2>&1; then
   info "a client policy CR is already applied — deleting it so the baseline is clean"
   kubectl delete -f "$POLICY_FILE" --ignore-not-found >/dev/null 2>&1 || true
-  info "waiting ~30s for OPA to drop the removed bundle..."
+  info "letting OPA drop the removed bundle (poll interval up to ~120s)..."
   sleep 30
 fi
-probe_expect dev-user 200 90 "baseline probe as dev-user"
-probe_expect alice    200 90 "baseline probe as alice"
+# Dropping the bundle after a CR delete is also bundle-poll bound (up to ~120s),
+# so give the baseline the same window as the enforced flip below.
+probe_expect dev-user 200 "$POLL_SECS" "baseline probe as dev-user"
+probe_expect alice    200 "$POLL_SECS" "baseline probe as alice"
 
 step "A.3 — Apply the client-scoped policy CR"
 kubectl apply -f "$POLICY_FILE" || die "kubectl apply -f ${POLICY_FILE} failed"
@@ -307,7 +312,7 @@ info "applied $(basename "$POLICY_FILE"); bundle-service rebuilds the team1 bund
 step "A.4 — Enforced: dev-user allowed (200), alice blocked (403)  [polling up to ${POLL_SECS}s]"
 # alice flips to 403 once OPA picks up the new bundle; poll for it.
 probe_expect alice    403 "$POLL_SECS" "enforced probe as alice (blocked by OPA, never reaches the app)"
-probe_expect dev-user 200 60           "enforced probe as dev-user (allowed)"
+probe_expect dev-user 200 "$POLL_SECS"  "enforced probe as dev-user (allowed)"
 
 step "A.5 — The INBOUND OPA input, exactly (+ decision result)"
 # Re-probe dev-user to make sure a fresh inbound decision is in the log tail.
