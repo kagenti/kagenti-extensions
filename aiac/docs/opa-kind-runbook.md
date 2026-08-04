@@ -334,34 +334,43 @@ TOK=$(curl -s -X POST "http://keycloak.localtest.me:8080/realms/rossoctl/protoco
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
 
 cat > /tmp/probe.py <<PY
-import urllib.request, json
+import urllib.request, urllib.error, json
 tok = """$TOK"""
 op = urllib.request.build_opener(urllib.request.ProxyHandler({"http": "http://127.0.0.1:8081"}))
 body = json.dumps({"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}).encode()
 req = urllib.request.Request("http://github-tool:9090/", data=body,
     headers={"Content-Type":"application/json","Authorization":"Bearer "+tok})
 try:
-    r = op.open(req, timeout=15); print("HTTP", r.status)
-except urllib.error.HTTPError as e: print("HTTPError", e.code)
+    r = op.open(req, timeout=15); print("HTTP", r.status); print(r.read().decode())
+except urllib.error.HTTPError as e: print("HTTPError", e.code); print(e.read().decode())
 PY
 kubectl exec -i -n team1 "$POD" -c agent -- python3 - < /tmp/probe.py
-# HTTPError 404
+# HTTP 200
+# {"error":{"code":-32000,"data":{"error":"policy.forbidden","plugin":"opa"},"message":"policy denied"},"id":"1","jsonrpc":"2.0"}
 ```
 
-`HTTPError 404` is the **success signal here**: the request traversed the full
-outbound pipeline (forward proxy → `token-exchange` succeeded → OPA allowed →
-`github-tool`), and `github-tool` answered `404` for `tools/list`. A
-`token-exchange` failure would have surfaced as `503` before ever reaching the
-tool.
-
-> **The example CR's `outbound/request.rego` denies this `tools/list` probe.**
+> **The example CR's `outbound/request.rego` denies this `tools/list` probe** —
+> and because the outbound pipeline includes `mcp-parser`, that denial is
+> surfaced the MCP-correct way: a **JSON-RPC 2.0 error frame at HTTP 200**
+> (`error.code: -32000`, `error.data.plugin: "opa"`), not an HTTP error status.
+> The forward proxy renders a `Reject` for an MCP JSON-RPC request (one with a
+> `method` and an `id`) as an application-layer error frame so the caller's MCP
+> client sees a single failed tool call rather than a transport break — see
+> `writeMCPRejection` in
+> `authbridge/authlib/listener/httpx/render.go`. The request is **denied and
+> never reaches `github-tool`**; the `HTTP 200` is only the JSON-RPC transport
+> envelope. Classify the outcome by the response **body** (an `error` frame =
+> denied, a `result` frame = allowed), not the HTTP status.
+>
 > The rule admits a call only when the delegated user's role and the target
 > service both list the request's `input.mcp.params.name` (the invoked tool).
-> A `tools/list` call carries no `params.name`, so neither gate matches, `allow`
-> is `false`, and the probe returns `403`/`503` instead of `404`. To see the
-> `404` success path, apply only the inbound tier of the CR, or drive a real
-> tool invocation whose tool name is present in `subject_role_scopes` and
-> `target_scopes` in the outbound rego.
+> A `tools/list` call carries no `params.name`, so neither gate matches and
+> `allow` is `false`. A non-MCP-shaped rejection (no parser, or a JSON-RPC
+> *notification* with no `id`) instead falls through to a plain HTTP `403`; a
+> `token-exchange` failure surfaces as `503` before OPA is even consulted. To
+> see the full allow path (a `result` frame at HTTP 200), apply only the inbound
+> tier of the CR, or drive a real tool invocation whose tool name is present in
+> `subject_role_scopes` and `target_scopes` in the outbound rego.
 
 ## B.5 — The outbound OPA input, exactly
 
