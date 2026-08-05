@@ -1,8 +1,8 @@
-"""Unit tests for aiac/policy/store/keying.py — slash-safe service_id encoding."""
+"""Unit tests for aiac/policy/model_store/keying.py — slash-safe service_id encoding."""
 
 import pytest
 
-from aiac.policy.store.keying import decode_service_id, encode_service_id
+from aiac.policy.model_store.keying import decode_service_id, encode_service_id
 
 
 @pytest.mark.parametrize(

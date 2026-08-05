@@ -1,6 +1,6 @@
-"""Architecture guard: the PRB must not import the PDP/Policy-Store libraries.
+"""Architecture guard: the PRB must not import the PDP/Policy-Model-Store libraries.
 
-Only the PCE touches aiac.pdp.policy.library / aiac.policy.store.library. A
+Only the PCE touches aiac.pdp.policy.library / aiac.policy.model_store.library. A
 sys.modules check gives false positives (other imported modules pull those in),
 so we AST-scan the PRB package's own source instead.
 """
@@ -10,7 +10,7 @@ import pathlib
 
 import aiac.agent.policy_rules_builder as prb
 
-FORBIDDEN = ("aiac.pdp.policy.library", "aiac.policy.store.library")
+FORBIDDEN = ("aiac.pdp.policy.library", "aiac.policy.model_store.library")
 
 
 def test_prb_imports_no_pdp_or_store_library():

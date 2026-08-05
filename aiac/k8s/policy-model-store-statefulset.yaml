@@ -2,7 +2,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: aiac-policy-store-config
+  name: aiac-policy-model-store-config
   namespace: aiac-system
 data:
   SERVICEPOLICY_DB_PATH: "/data/policy_model.db"
@@ -11,18 +11,18 @@ data:
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: aiac-policy-store
+  name: aiac-policy-model-store
   namespace: aiac-system
 spec:
   replicas: 1
-  serviceName: aiac-policy-store-headless
+  serviceName: aiac-policy-model-store-headless
   selector:
     matchLabels:
-      app: aiac-policy-store
+      app: aiac-policy-model-store
   template:
     metadata:
       labels:
-        app: aiac-policy-store
+        app: aiac-policy-model-store
     spec:
       # The image runs as non-root UID 10001. fsGroup makes the mounted PVC
       # (/data, the SQLite backend) group-writable by that user; the image's
@@ -35,8 +35,8 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       containers:
-        - name: aiac-policy-store
-          image: localhost/aiac-policy-store:local
+        - name: aiac-policy-model-store
+          image: localhost/aiac-policy-model-store:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7074
@@ -69,9 +69,9 @@ spec:
             periodSeconds: 20
           envFrom:
             - configMapRef:
-                name: aiac-policy-store-config
+                name: aiac-policy-model-store-config
           volumeMounts:
-            - name: policy-store-data
+            - name: policy-model-store-data
               mountPath: /data
             - name: tmp
               mountPath: /tmp
@@ -80,7 +80,7 @@ spec:
           emptyDir: {}
   volumeClaimTemplates:
     - metadata:
-        name: policy-store-data
+        name: policy-model-store-data
       spec:
         accessModes:
           - ReadWriteOnce
@@ -93,14 +93,14 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: aiac-policy-store-headless
+  name: aiac-policy-model-store-headless
   namespace: aiac-system
 spec:
   clusterIP: None
   selector:
-    app: aiac-policy-store
+    app: aiac-policy-model-store
   ports:
-    - name: policy-store
+    - name: policy-model-store
       port: 7074
       targetPort: 7074
 
@@ -108,12 +108,12 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: aiac-policy-store-service
+  name: aiac-policy-model-store-service
   namespace: aiac-system
 spec:
   selector:
-    app: aiac-policy-store
+    app: aiac-policy-model-store
   ports:
-    - name: policy-store
+    - name: policy-model-store
       port: 7074
       targetPort: 7074

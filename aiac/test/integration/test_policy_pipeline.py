@@ -56,7 +56,7 @@ from test.integration.launcher import (  # noqa: E402
 TEST_REALM = os.environ.get("AIAC_TEST_REALM", scn.REALM_DEFAULT)
 os.environ["KEYCLOAK_REALM"] = TEST_REALM  # the PCE reads back the realm we provision (single source of truth)
 os.environ.setdefault("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")
-os.environ.setdefault("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
+os.environ.setdefault("AIAC_POLICY_MODEL_STORE_URL", "http://127.0.0.1:7074")
 os.environ.setdefault("AIAC_PDP_POLICY_URL", "http://127.0.0.1:7072")
 os.environ.setdefault("AIAC_POLICY_FILE", str(HERE / "policy.explicit.md"))  # overridden per variant
 os.environ.setdefault("KEYCLOAK_ADMIN_REALM", "master")  # inherited by the IdP subprocess
@@ -319,7 +319,7 @@ def pipeline() -> dict[str, dict]:
     provision_keycloak_admin(admin, TEST_REALM)
 
     idp_host, idp_port = _host_port(os.environ["AIAC_PDP_CONFIG_URL"], 7071)
-    store_host, store_port = _host_port(os.environ["AIAC_POLICY_STORE_URL"], 7074)
+    store_host, store_port = _host_port(os.environ["AIAC_POLICY_MODEL_STORE_URL"], 7074)
     opa_host, opa_port = _host_port(os.environ["AIAC_PDP_POLICY_URL"], 7072)
 
     idp = Service("aiac.idp.service.configuration.keycloak.main:app", port=idp_port, host=idp_host)
@@ -345,7 +345,7 @@ def pipeline() -> dict[str, dict]:
             log.info("variant %s: policy=%s rego_dir=%s", variant, os.environ["AIAC_POLICY_FILE"], rego_dir)
 
             store = Service(
-                "aiac.policy.store.service.main:app",
+                "aiac.policy.model_store.service.main:app",
                 port=store_port,
                 host=store_host,
                 env={"SERVICEPOLICY_DB_PATH": str(db_path)},

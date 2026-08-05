@@ -153,7 +153,7 @@ def load_config() -> Config:
         controller_local_port=int(os.environ.get("AIAC_CONTROLLER_LOCAL_PORT", "7070")),
         controller_remote_port=int(os.environ.get("AIAC_CONTROLLER_REMOTE_PORT", "7070")),
         store_namespace=os.environ.get("AIAC_STORE_NAMESPACE", "aiac-system"),
-        store_target=os.environ.get("AIAC_STORE_TARGET", "svc/aiac-policy-store-service"),
+        store_target=os.environ.get("AIAC_STORE_TARGET", "svc/aiac-policy-model-store-service"),
         store_local_port=int(os.environ.get("AIAC_STORE_LOCAL_PORT", "7074")),
         store_remote_port=int(os.environ.get("AIAC_STORE_REMOTE_PORT", "7074")),
         controller_deployment=os.environ.get("AIAC_CONTROLLER_DEPLOYMENT", "aiac-agent"),

@@ -18,7 +18,7 @@ data:
   KEYCLOAK_ADMIN_REALM: "master"
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
-  AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
+  AIAC_POLICY_MODEL_STORE_URL: "http://aiac-policy-model-store-service:7074"
   # NATS_URL is added to this ConfigMap in Phase 2 (Event Broker, issue 4.19).
   # AIAC_RAG_INGEST_URL and AIAC_CHROMADB_URL are added in Phase 3 (RAG Pod, issue 4.20).
 

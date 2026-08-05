@@ -10,7 +10,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 
 from aiac.policy.model.models import ServicePolicyModel
-from aiac.policy.store.keying import decode_service_id
+from aiac.policy.model_store.keying import decode_service_id
 
 logger = logging.getLogger(__name__)
 
