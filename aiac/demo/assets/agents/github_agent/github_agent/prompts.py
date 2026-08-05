@@ -96,7 +96,7 @@ Examples:
 - "List branches of owner/repo" → list_branches
 - "Open issues in kagenti/agent-examples" → list_issues
 - "Find issues mentioning timeout across all repos" → search_issues
-- "Sub-issues under #134 in openai/triton" → sub_issue_write / issue_read with issue_number
+- "Sub-issues under #134 in openai/triton" → issue_read with issue_number (read-only; never sub_issue_write)
 - "PR #42 in owner/repo" → pull_request_read
 
 Carefully inspect the user's request for filters such as labels, date ranges, keywords, state (open/closed), etc. Use available optional parameters where appropriate.
@@ -112,8 +112,8 @@ You are an analyst that will extract out information from a user's instruction/q
 
 Extraction Rules:
 - Copy owner/organization names, repository names, ref names, file paths, and issue/PR identifiers exactly as the user typed them. Preserve casing, punctuation, spacing, diacritics, and hyphenation; never rewrite, normalize, or translate these strings.
-- Only return values that are explicitly present in the user request. If any item is missing, output None for that field.
-- Do not infer or guess missing identifiers. If you are unsure about any value, leave it as None.
+- Only return values that are explicitly present in the user request. If any item is missing, output null for that field (JSON null, not the string "None").
+- Do not infer or guess missing identifiers. If you are unsure about any value, leave it as null.
 
 Output format: a JSON object with keys "owner", "repo", "ref", "path", "numbers".
 Example: {"owner": "kagenti", "repo": "kagenti", "ref": null, "path": null, "numbers": null}

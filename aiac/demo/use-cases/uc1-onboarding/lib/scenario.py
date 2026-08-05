@@ -20,7 +20,7 @@ DEMO_NAMESPACE_DEFAULT = "team1"
 AGENT_WORKLOAD = "github-agent"
 TOOL_WORKLOAD = "github-tool"
 
-# Public ROPC client the demo's run-*.py drivers log the demo users in with (see init/setup_keycloak.py).
+# Public ROPC client the demo's run-*.py drivers log the demo users in with (see lib/setup_keycloak.py).
 ROPC_CLIENT_ID = "aiac-demo-cli"
 
 # username -> the realm role the user holds
@@ -30,6 +30,8 @@ USERS: dict[str, str] = {
     "devops-user": "devops",
 }
 
+# Demo-only shared credential for the ephemeral Keycloak users; never used outside
+# local/CI throwaway clusters. Not a production or secret value.
 USER_PASSWORD = "password"
 
 # Keycloak 26's declarative user profile requires email/firstName/lastName for role "user" before
@@ -119,7 +121,7 @@ Grant access on a least-privilege basis: allow only what this policy states; den
 @dataclass(frozen=True)
 class Intent:
     label: str  # what the driver script prints before asking the tool
-    function_name: str  # the tool scope this intent maps to
+    function_name: str | None  # the tool scope this intent maps to (None = inbound-only denial case)
 
 
 INTENTS: dict[str, list[Intent]] = {

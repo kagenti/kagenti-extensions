@@ -6,6 +6,7 @@ description = "Github Agent module"
 dependencies = [
     "python-dotenv>=1.2.2",
     "a2a-sdk>=1.1.0,<2",
+    "aiohttp>=3.14.3",          # Indirect; prevents GHSA-cq5v-8q36-5273 / GHSA-mfx4-hv73-q22v / GHSA-mq44-7p77-q5h7
     # We use 1.6.1 instead of the latest because
     # crewai requires openai>=2.30.0
     # but litellm requires openai==2.24.0
@@ -14,7 +15,7 @@ dependencies = [
     "crewai-tools[mcp]>=1.6.1",
     "urllib3>=2.7.0",   # Indirect; prevents CVE-2025-66418
     "python-multipart>=0.0.32", # Indirect; prevents CVE-2026-24486
-    "cryptography>=48.0.0,<49", # Indirect; prevents CVE-2026-26007
+    "cryptography>=50.0.0",     # Indirect; prevents CVE-2026-26007 + GHSA-g6cj-pr64-35w5
     "pyasn1>=0.6.3",            # Indirect; prevents CVE-2026-30922
     "starlette>=1.3.1",        # Indirect; prevents CVE-2025-62727
     "pillow>=12.3.0",           # Indirect; prevents CVE-2026-40192

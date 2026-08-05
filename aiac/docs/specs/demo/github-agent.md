@@ -218,7 +218,7 @@ Manifests live under `aiac/demo/assets/agents/github_agent/k8s/`, adapted from t
   (`authbridge/demos/github-issue/k8s/github-tool-deployment.yaml`, Service name `github-tool-mcp`) +
   `github-tool-secrets`, a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1` —
   installer-provided and enrolled for AuthBridge injection).
-  The sibling UC-1 stub at `demo/assets/tools/github_tool/` (Service `github-tool`) is a separate deployment
+  The sibling UC-1 stub at `aiac/demo/assets/tools/github_tool/` (Service `github-tool`) is a separate deployment
   for AIAC onboarding discovery and is **not** a runtime dependency of this agent.
 
 **Wiring invariant:** agent `MCP_URL` host (`github-tool-mcp`) == `authproxy-routes` host == tool

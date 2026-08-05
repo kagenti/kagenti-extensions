@@ -44,25 +44,35 @@ def ensure_token_exchange_enabled(admin, cfg: Config, client_uuid: str, client_n
         note(f"token exchange already enabled on {client_name!r}")
         return
     attrs["standard.token.exchange.enabled"] = "true"
-    admin.update_client(client_uuid, {"attributes": attrs})
+    # update_client issues a PUT that replaces the whole client representation, so send the full
+    # fetched client with only ``attributes`` overridden — a bare {"attributes": ...} would clobber
+    # the client's other fields.
+    admin.update_client(client_uuid, {**client, "attributes": attrs})
     ok(f"enabled standard.token.exchange.enabled on {client_name!r}")
 
 
-def ensure_default_audience_scope(admin, cfg: Config, client_uuid: str, client_name: str, scope_name: str) -> None:
+def ensure_default_audience_scope(admin, cfg: Config, client_uuid: str, client_name: str, scope_name: str) -> bool:
     """Ensure ``scope_name`` (the tool's ``*-aud`` audience client scope) is a DEFAULT scope on the
     agent client, so an exchanged token's ``aud`` includes the tool without the caller requesting it
-    explicitly."""
+    explicitly.
+
+    Returns ``True`` when the scope is now assigned (added here or already present) and ``False``
+    when the scope does not exist yet, so the scope was skipped. The ``02-setup.py`` path calls this
+    before the tool is onboarded, where ``False`` is expected; the ``04-onboard-tool.py`` path calls
+    it afterwards, where ``False`` means the token-exchange audience is missing and onboarding must
+    not report success."""
     admin.change_current_realm(cfg.realm)
     scope = admin.get_client_scope_by_name(scope_name)
     if scope is None:
         note(f"client scope {scope_name!r} does not exist yet (tool not onboarded?) — skipping")
-        return
+        return False
     existing = {s["name"] for s in admin.get_client_default_client_scopes(client_uuid)}
     if scope_name in existing:
         note(f"{scope_name!r} already a default scope on {client_name!r}")
-        return
+        return True
     admin.add_client_default_client_scope(client_uuid, scope["id"], {})
     ok(f"added {scope_name!r} as a default scope on {client_name!r}")
+    return True
 
 
 def run(admin, cfg: Config, *, agent_uuid: str) -> None:

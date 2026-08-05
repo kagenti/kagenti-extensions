@@ -52,8 +52,8 @@ touches source — exactly the two-line policy, and nothing it didn't say.
 
 Everything below is a real cluster, a real Keycloak, a real LLM call, and a real RFC 8693 token
 exchange — there is no offline mode. Bring up a Kagenti cluster with SPIRE + Keycloak + the
-kagenti operator first (see [../assets/INSTALL.md](../assets/INSTALL.md) and
-[../../k8s/aiac-deployment-guide.md](../../k8s/aiac-deployment-guide.md) for reference, not as a
+kagenti operator first (see [../../assets/INSTALL.md](../../assets/INSTALL.md) and
+[../../../k8s/aiac-deployment-guide.md](../../../k8s/aiac-deployment-guide.md) for reference, not as a
 manual checklist — `make prereqs` below verifies and, where safe, installs what's missing) and
 export `KEYCLOAK_URL` / `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD`.
 
@@ -80,7 +80,7 @@ make onboard-tool    # AIAC discovers github-tool's capabilities and completes t
 make show
 ```
 
-**Pause 3 — both onboarded.** `make show --diff 01-after-agent` (or `make diff PRIOR=01-after-agent`)
+**Pause 3 — both onboarded.** `make diff PRIOR=01-after-agent`
 shows the outbound gate's maps filling in: `target_scopes` keyed by the tool's SPIFFE identity, and
 per-role grants for every discovered tool scope. This is the moment least-privilege access to a
 downstream tool exists — generated, not hand-written.

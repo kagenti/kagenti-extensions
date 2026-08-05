@@ -110,4 +110,7 @@ class GithubAgent:
                 "numbers": prereq.numbers or [],
             }
         )
-        return self.agents.github_query_task.output.raw
+        output = self.agents.github_query_task.output
+        if output is None or output.raw is None:
+            return "The agent produced no output for this request."
+        return output.raw
