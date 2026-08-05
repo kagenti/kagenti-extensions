@@ -231,7 +231,7 @@ def port_forward(target: str, *, namespace: str, local_port: int, remote_port: i
     ``target`` is a kubectl port-forward target (``svc/aiac-controller``, ``deploy/...``, ``pod/...``).
     The forward is not yielded until it is actually up: if ``ready_url`` is given it is polled until
     it answers (any HTTP status); otherwise the tunnel's own ``Forwarding from ...`` line is awaited
-    (the Controller exposes no ``/health``). A background thread drains the merged stdout/stderr the
+    (used for targets that expose no HTTP readiness path). A background thread drains the merged stdout/stderr the
     whole time — both to detect that line and so the OS pipe buffer can never fill and deadlock
     kubectl — and its captured output is surfaced if the forward exits early or never comes up.
     """

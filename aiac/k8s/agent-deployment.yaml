@@ -108,15 +108,17 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
-          # The Controller exposes only /apply/* routes (no /health endpoint),
-          # so both probes are gated on the port accepting TCP connections.
+          # The Controller is stateless; GET /health is a bare liveness/readiness
+          # signal (200 {"status": "ok"} whenever the process is serving).
           readinessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health
               port: 7070
             initialDelaySeconds: 5
             periodSeconds: 10
           livenessProbe:
-            tcpSocket:
+            httpGet:
+              path: /health
               port: 7070
             initialDelaySeconds: 10
             periodSeconds: 20

@@ -23,6 +23,21 @@ def _rule(role_id: str = "r-1", scope_id: str = "s-1") -> PolicyRule:
     )
 
 
+def test_health_returns_ok_without_touching_handlers_or_pce():
+    # Liveness/readiness: the Controller is stateless, so /health answers 200 on its own
+    # without dispatching to any use-case handler or the PCE.
+    with (
+        patch("aiac.agent.controller.routes.onboard_service") as orch,
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.get("/health")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    orch.assert_not_called()
+    pce.assert_not_called()
+
+
 def test_apply_service_dispatches_to_orchestrator_and_calls_pce_once():
     with (
         patch("aiac.agent.controller.routes.onboard_service", return_value=([], False)) as orch,
