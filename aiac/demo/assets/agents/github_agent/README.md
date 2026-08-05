@@ -20,8 +20,8 @@ Deploy it before starting the agent:
 authbridge/demos/github-issue/k8s/github-tool-deployment.yaml
 ```
 
-> **Not the same as `demo/assets/tools/github_tool/`.**
-> `demo/assets/tools/github_tool/` is a simplified 4-tool stub (`source-read`, `source-write`, `issues-read`,
+> **Not the same as `aiac/demo/assets/tools/github_tool/`.**
+> `aiac/demo/assets/tools/github_tool/` is a simplified 4-tool stub (`source-read`, `source-write`, `issues-read`,
 > `issues-write`) deployed as Service `github-tool` for **UC-1 onboarding discovery** only.
 > The agent never connects to it — it connects to the production `github-tool-mcp` server which
 > exposes the 44-tool GitHub API federation.

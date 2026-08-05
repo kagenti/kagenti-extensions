@@ -1,6 +1,10 @@
 # AIAC working artefacts (regenerated; not source of truth)
 docs/handoffs/
 
+# Matt Pocock engineering-skill config — local per-clone (set up via
+# /setup-matt-pocock-skills); the skills read these, they are not repo source.
+docs/agents/
+
 # PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
 test/pdp/policy/rego_out/
 

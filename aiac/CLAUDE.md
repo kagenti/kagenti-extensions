@@ -20,11 +20,16 @@ organized in the org-level **AIAC** Project (Projects v2):
 <https://github.com/orgs/s-and-p-team/projects/1>. Use `gh` to read and manage
 them.
 
+Note: `s-and-p-team/cortex` is the AIAC team's fork of the canonical upstream
+`rossoctl/cortex`. Tracking issues on the fork (not upstream) is deliberate —
+PRs still target upstream, but issue tracking stays on the team fork, so the
+`-R s-and-p-team/cortex` scoping below is intentional.
+
 Hierarchy: the Project groups **Feature**-typed container issues — one per
 component area, nested via GitHub **native sub-issues** to form the tree — over
 **Task**-typed leaf issues. Every issue carries the `aiac` label plus cumulative
 `area:<path>` labels; open issues also carry a `status:<value>` label, and the
-Project's **AIAC Status** field records the issue's status.
+Project's built-in **Status** field mirrors that value.
 
 ```bash
 # list / view (filter to the AIAC set)
@@ -201,7 +206,7 @@ GitHub issues on `s-and-p-team/cortex`, filtered by the `aiac` label, tracked in
 
 ### Triage labels
 
-Five canonical roles map to `aiac-status:<value>` labels (distinct from the board's separate `AIAC Status` Project field). See `docs/agents/triage-labels.md`.
+Issue status is tracked with `status:<value>` labels; the board's built-in **Status** field carries the same values. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 

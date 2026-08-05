@@ -3,6 +3,7 @@ Module for A2A Agent.
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import sys
@@ -196,19 +197,24 @@ class GithubExecutor(AgentExecutor):
                     "headers": headers,
                 }
                 adapter = MCPServerAdapter(server_params, connect_timeout=settings.MCP_TIMEOUT)
-                # MCPServerAdapter.__enter__/__exit__ perform blocking MCP I/O;
-                # run them off the event loop so we don't stall other async tasks.
-                mcp_tools = await asyncio.to_thread(adapter.__enter__)
-                try:
-                    curated_tools = select_enabled_tools(mcp_tools, settings)
-                    if not curated_tools:
-                        raise RuntimeError(
-                            "No enabled tools found from the GitHub MCP server. "
-                            "Check the ENABLED_TOOLS setting and ensure the server is reachable."
-                        )
-                    await self._run_agent(messages, settings, event_emitter, curated_tools)
-                finally:
-                    await asyncio.to_thread(adapter.__exit__, None, None, None)
+                # MCPServerAdapter.__enter__/__exit__ perform blocking MCP I/O; run them off the
+                # event loop so we don't stall other async tasks. They MUST run on the SAME thread
+                # (the adapter binds MCP session state to the entering thread), so use a dedicated
+                # single-worker executor rather than asyncio.to_thread's shared pool, which could
+                # otherwise dispatch __enter__ and __exit__ to different workers.
+                loop = asyncio.get_running_loop()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as mcp_exec:
+                    mcp_tools = await loop.run_in_executor(mcp_exec, adapter.__enter__)
+                    try:
+                        curated_tools = select_enabled_tools(mcp_tools, settings)
+                        if not curated_tools:
+                            raise RuntimeError(
+                                "No enabled tools found from the GitHub MCP server. "
+                                "Check the ENABLED_TOOLS setting and ensure the server is reachable."
+                            )
+                        await self._run_agent(messages, settings, event_emitter, curated_tools)
+                    finally:
+                        await loop.run_in_executor(mcp_exec, adapter.__exit__, None, None, None)
             else:
                 await self._run_agent(messages, settings, event_emitter, None)
 

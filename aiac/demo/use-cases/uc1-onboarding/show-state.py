@@ -14,13 +14,14 @@ across runs, and a text diff on unstable ordering would show noise, not signal.
 from __future__ import annotations
 
 import argparse
+import difflib
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 
 import scenario as scn
-from _lib import GENERATED, connect_admin, load_config, note, opa_eval, rule, say, table
+from _lib import GENERATED, abort, connect_admin, load_config, note, opa_eval, rule, say, table
 
 
 def latest_snapshot() -> Path | None:
@@ -76,6 +77,13 @@ def show_snapshot(cfg, rego_dir: Path) -> None:
         print(f"  {f}:")
         print((rego_dir / f).read_text())
 
+    # grant_sets loads BOTH Rego files; an interrupted capture that left only one would abort here
+    # after printing partial state. Only tally grants when the snapshot is complete.
+    if len(files_present) < 2:
+        rule()
+        print("  (incomplete snapshot — grant tallies need both Rego files; skipping)")
+        return
+
     inbound, outbound = grant_sets(cfg, rego_dir)
     rule()
     print(f"  inbound grants:  {len(inbound)}")
@@ -84,11 +92,45 @@ def show_snapshot(cfg, rego_dir: Path) -> None:
     table(sorted(outbound), headers=("role", "tool scope"))
 
 
+def _complete(cfg, d: Path) -> bool:
+    """True only when both Rego files are present — grant_sets loads both, so a half-captured
+    snapshot cannot be diffed."""
+    return (d / cfg.inbound_rego).is_file() and (d / cfg.outbound_rego).is_file()
+
+
 def show_diff(cfg, prior_name: str, current_dir: Path) -> None:
     prior_dir = GENERATED / prior_name
+    if not _complete(cfg, prior_dir):
+        abort(
+            f"prior snapshot {prior_name!r} is incomplete under {prior_dir} — need both "
+            f"{cfg.inbound_rego} and {cfg.outbound_rego}. Run the earlier onboarding step first, "
+            "or pass a snapshot that exists."
+        )
+    if not _complete(cfg, current_dir):
+        abort(
+            f"current snapshot {current_dir} is incomplete — need both {cfg.inbound_rego} and "
+            f"{cfg.outbound_rego}. Re-run the onboarding step that captures it."
+        )
     say("B", "B", f"Diff: {prior_dir.name} -> {current_dir.name}")
-    prior_in, prior_out = grant_sets(cfg, prior_dir) if (prior_dir / cfg.inbound_rego).is_file() else (set(), set())
-    cur_in, cur_out = grant_sets(cfg, current_dir) if (current_dir / cfg.inbound_rego).is_file() else (set(), set())
+
+    # Narrate the raw Rego text first (line-oriented, so a presenter can see exactly what changed),
+    # then assert on the order-independent (role, scope) sets below.
+    for f in (cfg.inbound_rego, cfg.outbound_rego):
+        rule()
+        print(f"  {f}:")
+        diff = difflib.unified_diff(
+            (prior_dir / f).read_text().splitlines(),
+            (current_dir / f).read_text().splitlines(),
+            fromfile=f"{prior_dir.name}/{f}",
+            tofile=f"{current_dir.name}/{f}",
+            lineterm="",
+        )
+        lines = list(diff)
+        print("\n".join(lines) if lines else "  (no textual change)")
+    rule()
+
+    prior_in, prior_out = grant_sets(cfg, prior_dir)
+    cur_in, cur_out = grant_sets(cfg, current_dir)
 
     print("  inbound:")
     print(f"    + added:   {sorted(cur_in - prior_in) or 'none'}")

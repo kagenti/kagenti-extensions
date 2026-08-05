@@ -277,7 +277,10 @@ def opa_bin() -> str:
 
 def opa_eval(rego_paths: list[Path], query: str, input_doc: dict) -> object:
     cmd = [opa_bin(), "eval", "-f", "json", *sum((["-d", str(p)] for p in rego_paths), []), "--stdin-input", query]
-    proc = subprocess.run(cmd, input=json.dumps(input_doc), capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, input=json.dumps(input_doc), capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        abort(f"opa eval timed out after 30s for {query!r} against {rego_paths}")
     if proc.returncode != 0:
         abort(f"opa eval failed for {query!r}: {proc.stderr.strip()}")
     try:

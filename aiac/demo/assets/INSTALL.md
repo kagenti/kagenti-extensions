@@ -62,8 +62,8 @@ These each fail far from their cause — read before editing the manifests or in
 **Tool:**
 ```bash
 cd tools/github_tool
-podman build -t github-tool:latest .   # or docker
-kind load docker-image github-tool:latest --name kagenti
+podman build -t localhost/github-tool:latest .   # or docker; the localhost/ prefix must match the manifest's image ref
+kind load docker-image localhost/github-tool:latest --name kagenti
 kubectl apply -f k8s/github-tool-deployment.yaml
 kubectl rollout status deployment/github-tool -n team1
 ```
@@ -71,8 +71,8 @@ kubectl rollout status deployment/github-tool -n team1
 **Agent:**
 ```bash
 cd agents/github_agent
-podman build -t github-agent:latest .   # or docker
-kind load docker-image github-agent:latest --name kagenti
+podman build -t localhost/github-agent:latest .   # or docker; the localhost/ prefix must match the manifest's image ref
+kind load docker-image localhost/github-agent:latest --name kagenti
 kubectl apply -f k8s/configmaps.yaml
 kubectl apply -f k8s/github-agent-deployment.yaml
 kubectl rollout status deployment/github-agent -n team1
