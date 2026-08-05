@@ -33,7 +33,7 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
   -t localhost/aiac-pdp-policy-opa:local \
   aiac/src/
 
-# Policy Store
+# Policy Model Store
 docker build -f aiac/src/aiac/policy/model_store/service/Dockerfile \
   -t localhost/aiac-policy-model-store:local aiac/src/
 
@@ -113,7 +113,7 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | Agent |
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
 | `AIAC_POLICY_MODEL_STORE_URL` | `http://aiac-policy-model-store-service:7074` | Agent |
-| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Store |
+| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Model Store |
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
 | `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |
@@ -126,10 +126,10 @@ Apply in dependency order:
 # 1. Interface Pod — creates the namespace, ConfigMap, Secret, and ClusterIP Services
 kubectl apply -f aiac/k8s/pdp-interface-deployment.yaml
 
-# 2. Policy Store — needs the aiac-system namespace
+# 2. Policy Model Store — needs the aiac-system namespace
 kubectl apply -f aiac/k8s/policy-model-store-statefulset.yaml
 
-# 3. Agent — depends on the Interface Pod + Policy Store already being healthy
+# 3. Agent — depends on the Interface Pod + Policy Model Store already being healthy
 kubectl apply -f aiac/k8s/agent-deployment.yaml
 ```
 
@@ -156,7 +156,7 @@ kubectl port-forward svc/aiac-pdp-policy-service 7072:7072 -n aiac-system &
 curl http://localhost:7072/health
 # {"status":"ok"}
 
-# Policy Store
+# Policy Model Store
 kubectl port-forward svc/aiac-policy-model-store-service 7074:7074 -n aiac-system &
 curl http://localhost:7074/health
 # {"status":"ok"}
