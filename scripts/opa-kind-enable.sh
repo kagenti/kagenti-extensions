@@ -6,6 +6,10 @@
 # mcp-parser, inference-parser) so OPA policies have input.a2a / input.mcp /
 # input.inference available on both legs, not just input.host.
 #
+# On the outbound leg OPA is placed AFTER token-exchange so policies can
+# read input.delegation (the target audience + scopes the agent's token was
+# exchanged for). See the overlay comment in Step 3 for the rationale.
+#
 # Does NOT modify charts/rossoctl/values.yaml on disk. The pipeline override
 # lives in a throwaway temp file merged on top of the real values.yaml via a
 # second `helm upgrade -f` — Helm layers -f files left-to-right, so the repo
@@ -84,7 +88,7 @@ OVERLAY_FILE="$(mktemp "${TMPDIR:-/tmp}/opa-kind-enable-overlay.XXXXXX")"
 TMPFILES+=("$OVERLAY_FILE")
 
 echo "==> Step 1/5: deploying bundle-service (${OPERATOR_DIR})"
-( cd "$OPERATOR_DIR" && ./hack/bundle-service-kind.sh "$CLUSTER_NAME" "$RELEASE_NAMESPACE" )
+( cd "$OPERATOR_DIR" && ./operator/hack/bundle-service-kind.sh "$CLUSTER_NAME" "$RELEASE_NAMESPACE" )
 kubectl get pods -n "$RELEASE_NAMESPACE" -l app=bundle-service
 
 echo "==> Step 2/5: building + loading authbridge-proxy (${IMAGE_TAG}) via ${CONTAINER_RUNTIME}"
@@ -102,35 +106,62 @@ cat > "$OVERLAY_FILE" <<YAML
 #     authbridge/demos/ibac/k8s/ibac-patch.yaml.
 #   - opa runs after jwt-validation on inbound so input.identity is set
 #     (see authbridge/docs/opa-migration-guide.md Step 1).
-#   - token-exchange is intentionally omitted, as in the runbook: this
-#     overlay demonstrates OPA + parser signals only. Add a token-exchange
-#     entry back into pipeline.outbound.plugins if you also need
-#     per-destination token exchange.
-pipeline: |
-  inbound:
-    plugins:
-      - name: a2a-parser
-      - name: mcp-parser
-      - name: inference-parser
-      - name: jwt-validation
-        config:
-          issuer: "http://keycloak.localtest.me:8080/realms/rossoctl"
-          keycloak_url: "http://keycloak-service.keycloak.svc:8080"
-          keycloak_realm: "rossoctl"
-      - name: opa
-        config:
-          bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
-  outbound:
-    plugins:
-      - name: a2a-parser
-      - name: mcp-parser
-      - name: inference-parser
-      - name: opa
-        config:
-          bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
+#   - On OUTBOUND, opa runs AFTER token-exchange so the delegation signal
+#     is populated: token-exchange records the target audience + granted
+#     scopes it minted a token for (RFC 8693) into the delegation chain,
+#     and OPA exposes it as input.delegation (origin, actor, depth, and a
+#     chain of {subject_id, audience, scopes, strategy, from_cache}). This
+#     lets outbound policy reason about WHAT the agent's token was
+#     exchanged for — e.g. "deny github-full-access to non-admin agents" —
+#     without re-parsing the minted token and without a fail-closed JWT
+#     gate that would reject passthrough egress. input.identity stays
+#     empty outbound (no JWT is validated on this leg); input.delegation is
+#     the outbound identity signal.
+#   - token-exchange uses the chart's default shape (client-secret identity
+#     from /shared, passthrough default policy). Per-destination routes
+#     come from the authproxy-routes ConfigMap; hosts with no route fall
+#     through unchanged and simply carry no delegation hop.
+# NOTE: the rossoctl chart reads the pipeline from `.Values.authBridge.pipeline`
+# (a multiline string rendered via tpl() into the namespace
+# authbridge-runtime-config ConfigMap — see charts/rossoctl/templates/
+# _helpers.tpl "rossoctl.authbridge-runtime-config-yaml"). The operator webhook
+# then uses that ConfigMap's `pipeline:` verbatim as the base for each per-agent
+# authbridge-config-<agent> ConfigMap. So the override MUST be nested under
+# `authBridge.pipeline` — a top-level `pipeline:` key is silently ignored.
+authBridge:
+  pipeline: |
+    inbound:
+      plugins:
+        - name: a2a-parser
+        - name: mcp-parser
+        - name: inference-parser
+        - name: jwt-validation
+          config:
+            issuer: "http://keycloak.localtest.me:8080/realms/rossoctl"
+            keycloak_url: "http://keycloak-service.keycloak.svc:8080"
+            keycloak_realm: "rossoctl"
+        - name: opa
+          config:
+            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+    outbound:
+      plugins:
+        - name: a2a-parser
+        - name: mcp-parser
+        - name: inference-parser
+        - name: token-exchange
+          config:
+            keycloak_url: "http://keycloak-service.keycloak.svc:8080"
+            keycloak_realm: "rossoctl"
+            default_policy: "passthrough"
+            identity:
+              type: "client-secret"
+        - name: opa
+          config:
+            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
 YAML
 
 echo "==> Step 4/5: helm upgrade (base values.yaml + overlay — base file not modified)"
+( cd "$CHART_DIR" && helm dependency build )
 helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   -f "$VALUES_FILE" \
   -f "$OVERLAY_FILE" \

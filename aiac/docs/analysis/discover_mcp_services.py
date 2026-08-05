@@ -29,7 +29,7 @@ v1 = client.CoreV1Api()
 # The label value is "" (empty string) — the selector matches on key presence.
 mcp_services = v1.list_namespaced_service(
     namespace="team1",
-    label_selector="protocol.kagenti.io/mcp",
+    label_selector="protocol.rossoctl.io/mcp",
 )
 
 for svc in mcp_services.items:
