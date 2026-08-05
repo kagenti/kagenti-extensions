@@ -282,7 +282,7 @@ class Configuration:
 > introduced by these methods; `get_services_by_role` is **retained as a method** for API completeness
 > and ad-hoc callers, but the current SPM-based PCE no longer calls it: its **only** runtime IdP read is
 > `Configuration.get_services()` (see `aiac.policy.computation`), and owner/role lookups against stored
-> policy go through the Policy Store's `get_service_policies_by_role`, not this IdP filter.
+> policy go through the Policy Model Store's `get_service_policies_by_role`, not this IdP filter.
 
 `get_subjects_by_role(role: Role) -> list[Subject]`:
 1. `GET {AIAC_PDP_CONFIG_URL}/subjects?role_id={role.id}&realm=<self.realm>`

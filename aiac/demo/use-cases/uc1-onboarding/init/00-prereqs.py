@@ -34,10 +34,10 @@ AIAC_NAMESPACE = "aiac-system"
 AIAC_IMAGES = [
     ("localhost/aiac-pdp-config:local", "src/aiac/idp/service/configuration/keycloak/Dockerfile", "src/aiac/idp/service/configuration/keycloak"),
     ("localhost/aiac-pdp-policy-opa:local", "src/aiac/pdp/service/policy/opa/Dockerfile", "src"),
-    ("localhost/aiac-policy-store:local", "src/aiac/policy/store/service/Dockerfile", "src"),
+    ("localhost/aiac-policy-model-store:local", "src/aiac/policy/model_store/service/Dockerfile", "src"),
     ("localhost/aiac-agent:local", "src/aiac/agent/controller/Dockerfile", "src"),
 ]
-AIAC_MANIFESTS = ["pdp-interface-deployment.yaml", "policy-store-statefulset.yaml", "agent-deployment.yaml"]
+AIAC_MANIFESTS = ["pdp-interface-deployment.yaml", "policy-model-store-statefulset.yaml", "agent-deployment.yaml"]
 
 
 # --- class 1: verify only ---------------------------------------------------------------------
@@ -136,7 +136,7 @@ def ensure_aiac_deployed(cfg: Config) -> None:
         kubectl("apply", "-f", str(AIAC_ROOT / "k8s" / manifest))
 
     kubectl("wait", "deployment/aiac-interface", "-n", AIAC_NAMESPACE, "--for=condition=Available", "--timeout=120s")
-    kubectl("wait", "statefulset/aiac-policy-store", "-n", AIAC_NAMESPACE, "--for=jsonpath={.status.readyReplicas}=1", "--timeout=120s")
+    kubectl("wait", "statefulset/aiac-policy-model-store", "-n", AIAC_NAMESPACE, "--for=jsonpath={.status.readyReplicas}=1", "--timeout=120s")
     kubectl("wait", "deployment/aiac-agent", "-n", AIAC_NAMESPACE, "--for=condition=Available", "--timeout=120s")
     ok("AIAC stack deployed")
 

@@ -5,10 +5,10 @@
 `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` were previously defined in `aiac.pdp.library.models`. Three independent consumers now need these types:
 
 - `aiac.pdp.policy.library` — translates `PolicyModel` into HTTP calls to the PDP Policy Writer
-- `aiac.policy.store.library` — reads/writes `AgentPolicyModel` from/to the Policy Store
+- `aiac.policy.model_store.library` — reads/writes `AgentPolicyModel` from/to the Policy Model Store
 - `aiac.policy.computation` — builds and merges `AgentPolicyModel` objects
 
-Keeping the canonical model definitions inside a PDP-namespaced module (`aiac.pdp.library.models`) forces both the Policy Store library and the Policy Computation Engine to take a dependency on the PDP package — a wrong-layer coupling. Any of the three consumers importing from `aiac.pdp.library.models` would create a transitive dependency on an unrelated service namespace.
+Keeping the canonical model definitions inside a PDP-namespaced module (`aiac.pdp.library.models`) forces both the Policy Model Store library and the Policy Computation Engine to take a dependency on the PDP package — a wrong-layer coupling. Any of the three consumers importing from `aiac.pdp.library.models` would create a transitive dependency on an unrelated service namespace.
 
 Additionally, the old `PolicyRule` used plain `str` for `role` and `scope`. The current SPM/APM PCE requires typed `Role` and `Scope` objects (from `aiac.idp.configuration.models`): it routes each rule to the owning service's SPM by `scope.serviceId`, classifies edges by `role.kind`, and reads `role.actorIds` when deriving each `AgentPolicyModel` — all fields that a plain `str` cannot carry. (These typed fields replaced the earlier reliance on `Configuration.get_services_by_role` / `get_services_by_scope`, which the SPM-based engine no longer calls.)
 
@@ -29,7 +29,7 @@ The fix is a **two-layer model**: a per-service persistent source of truth (`Ser
 
 A canonical, dependency-free model module at `aiac.policy.model` defines `ServicePolicyModel`, `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` with typed fields. No HTTP client, no service code — importable by any consumer without side effects. `PolicyRule.role` and `PolicyRule.scope` are typed `Role` and `Scope` objects from `aiac.idp.configuration.models`.
 
-**Two-layer model.** `ServicePolicyModel` (SPM) is the **persistent source of truth**, one per **service** (agent *and* tool). It holds the service's **inbound** rules plus its own identity (owned roles and scopes). `AgentPolicyModel` (APM) becomes a **pure derived projection** built from the relevant SPMs by the PCE — it is **no longer persisted**. Its shape is unchanged so existing consumers (PDP Policy Library, Policy Store readers) keep working.
+**Two-layer model.** `ServicePolicyModel` (SPM) is the **persistent source of truth**, one per **service** (agent *and* tool). It holds the service's **inbound** rules plus its own identity (owned roles and scopes). `AgentPolicyModel` (APM) becomes a **pure derived projection** built from the relevant SPMs by the PCE — it is **no longer persisted**. Its shape is unchanged so existing consumers (PDP Policy Library, Policy Model Store readers) keep working.
 
 **Canonical form.** *Every rule is an inbound edge on the SPM of the service that owns the rule's scope.* An agent's outbound edge is the target's inbound edge — `AR→TS` is stored on `SPM(T)`, not on `A`. The routing key is `Scope.serviceId`: a rule `(role, scope)` routes to `SPM(scope.serviceId)`.
 
@@ -41,7 +41,7 @@ The relationship maps (`source_roles`, `subject_roles`, `target_scopes`) are key
 
 1. As the Policy Computation Engine, I want to import `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` from a shared, neutral namespace, so that I do not take an unwanted dependency on the PDP package.
 2. As the PDP Policy Library, I want to import `PolicyModel` and `AgentPolicyModel` from `aiac.policy.model`, so that my HTTP serialization logic does not duplicate model definitions.
-3. As the Policy Store Library, I want to import `AgentPolicyModel` and `PolicyModel` from `aiac.policy.model`, so that response deserialization uses the same canonical types as every other consumer.
+3. As the Policy Model Store Library, I want to import `AgentPolicyModel` and `PolicyModel` from `aiac.policy.model`, so that response deserialization uses the same canonical types as every other consumer.
 4. As an AIAC Agent sub-UC agent, I want to construct a `PolicyRule` with typed `Role` and `Scope` objects, so that the PCE can use them for IdP queries without additional type conversion.
 5. As the Policy Computation Engine, I want `source_roles`, `subject_roles`, and `target_scopes` keyed by string entity IDs, so that I build them with `entity.id` and they serialize to JSON without custom key handling.
 6. As a developer, I want all models to silently ignore unknown fields from API responses, so that IdP API additions do not break deserialization.
@@ -120,7 +120,7 @@ A single access rule pairing a typed role with a typed scope. Used in both inbou
 
 Complete policy definition for a single agent (service). Inbound and outbound rule sets are typed collections.
 
-> **Derived, not persisted.** `AgentPolicyModel` is now a **pure derived projection** built by the PCE from the relevant `ServicePolicyModel`s. It is **no longer a persisted entity** — the durable source of truth is `ServicePolicyModel`. Its shape is **unchanged** so existing consumers (PDP Policy Library, Policy Store readers) keep working; the docstring on the model states this explicitly.
+> **Derived, not persisted.** `AgentPolicyModel` is now a **pure derived projection** built by the PCE from the relevant `ServicePolicyModel`s. It is **no longer a persisted entity** — the durable source of truth is `ServicePolicyModel`. Its shape is **unchanged** so existing consumers (PDP Policy Library, Policy Model Store readers) keep working; the docstring on the model states this explicitly.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -142,7 +142,7 @@ Complete policy definition for a single agent (service). Inbound and outbound ru
 
 #### `PolicyModel`
 
-A partial or full system policy model. When sent to `POST /policy` on the Policy Store, it may contain only the agents whose policies have changed.
+A partial or full system policy model. When sent to `POST /policy` on the Policy Model Store, it may contain only the agents whose policies have changed.
 
 | Field | Type |
 |-------|------|
@@ -215,7 +215,7 @@ Key behaviors to assert:
 
 ## Out of Scope
 
-- HTTP serialization logic — handled by `aiac.policy.store.library`, `aiac.policy.store.service`, and `aiac.pdp.policy.library`.
+- HTTP serialization logic — handled by `aiac.policy.model_store.library`, `aiac.policy.model_store.service`, and `aiac.pdp.policy.library`.
 - IdP API integration — `Service`, `Role`, `Scope` shapes are owned by `aiac.idp.configuration.models`.
 - Rule revocation semantics — TBD; no model changes required until the design is finalised.
 

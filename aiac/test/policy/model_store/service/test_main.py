@@ -1,4 +1,4 @@
-"""Unit tests for aiac/policy/store/service/main.py FastAPI application.
+"""Unit tests for aiac/policy/model_store/service/main.py FastAPI application.
 
 SPM-centric surface: the store persists ``ServicePolicyModel`` rows keyed by
 ``service_id``. ``AgentPolicyModel`` is derived and never persisted, so there are no
@@ -12,11 +12,11 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-import aiac.policy.store.service.main as svc
+import aiac.policy.model_store.service.main as svc
 from aiac.idp.configuration.models import Role, Scope, ServiceType
 from aiac.policy.model.models import PolicyRule, ServicePolicyModel
-from aiac.policy.store.keying import encode_service_id
-from aiac.policy.store.service.main import app, get_db
+from aiac.policy.model_store.keying import encode_service_id
+from aiac.policy.model_store.service.main import app, get_db
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers

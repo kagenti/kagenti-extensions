@@ -48,7 +48,7 @@ from aiac.policy.model.models import (
     PolicyRule,
     ServicePolicyModel,
 )
-from aiac.policy.store.library.api import (
+from aiac.policy.model_store.library.api import (
     apply_service_policy,
     delete_service_policy,
     get_service_policies_by_role,

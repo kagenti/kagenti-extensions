@@ -7,7 +7,7 @@ exposes two module-level functions that producing sub-agents call directly. Each
 internally runs a LangGraph `StateGraph`; callers are decoupled from LangGraph mechanics. The
 PRB fetches its own policy context (see **Policy source** below), reasons over it with an LLM,
 and emits `list[PolicyRule]` scoped to the input. It does **not** call
-`aiac.pdp.policy.library` or `aiac.policy.store.library` directly; only the PCE does.
+`aiac.pdp.policy.library` or `aiac.policy.model_store.library` directly; only the PCE does.
 
 ---
 

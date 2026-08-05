@@ -7,7 +7,7 @@ This guide covers the full AIAC deployment in the `aiac-system` namespace.
 | Manifest | Contents | Port(s) |
 |---|---|---|
 | `pdp-interface-deployment.yaml` | Rossoctl Interface Pod (IdP Configuration Service + PDP Policy Writer **Phase 1 rego-file mock** `aiac-pdp-policy-opa`) + 2 ClusterIP Services | 7071, 7072 |
-| `policy-store-statefulset.yaml` | Policy Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
+| `policy-model-store-statefulset.yaml` | Policy Model Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
 | `agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent) + ClusterIP Service | 7070 |
 
 ## Prerequisites
@@ -33,9 +33,9 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
   -t localhost/aiac-pdp-policy-opa:local \
   aiac/src/
 
-# Policy Store
-docker build -f aiac/src/aiac/policy/store/service/Dockerfile \
-  -t localhost/aiac-policy-store:local aiac/src/
+# Policy Model Store
+docker build -f aiac/src/aiac/policy/model_store/service/Dockerfile \
+  -t localhost/aiac-policy-model-store:local aiac/src/
 
 # AIAC Agent
 docker build -f aiac/src/aiac/agent/controller/Dockerfile \
@@ -49,7 +49,7 @@ docker build -f aiac/src/aiac/agent/controller/Dockerfile \
 ```bash
 kind load docker-image localhost/aiac-pdp-config:local       --name <cluster-name>
 kind load docker-image localhost/aiac-pdp-policy-opa:local    --name <cluster-name>
-kind load docker-image localhost/aiac-policy-store:local     --name <cluster-name>
+kind load docker-image localhost/aiac-policy-model-store:local     --name <cluster-name>
 kind load docker-image localhost/aiac-agent:local            --name <cluster-name>
 ```
 
@@ -112,8 +112,8 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 | `KEYCLOAK_ADMIN_REALM` | `master` | IdP Configuration Service |
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | Agent |
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
-| `AIAC_POLICY_STORE_URL` | `http://aiac-policy-store-service:7074` | Agent |
-| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Store |
+| `AIAC_POLICY_MODEL_STORE_URL` | `http://aiac-policy-model-store-service:7074` | Agent |
+| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Model Store |
 | `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
 | `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |
@@ -126,10 +126,10 @@ Apply in dependency order:
 # 1. Interface Pod — creates the namespace, ConfigMap, Secret, and ClusterIP Services
 kubectl apply -f aiac/k8s/pdp-interface-deployment.yaml
 
-# 2. Policy Store — needs the aiac-system namespace
-kubectl apply -f aiac/k8s/policy-store-statefulset.yaml
+# 2. Policy Model Store — needs the aiac-system namespace
+kubectl apply -f aiac/k8s/policy-model-store-statefulset.yaml
 
-# 3. Agent — depends on the Interface Pod + Policy Store already being healthy
+# 3. Agent — depends on the Interface Pod + Policy Model Store already being healthy
 kubectl apply -f aiac/k8s/agent-deployment.yaml
 ```
 
@@ -137,7 +137,7 @@ Wait for all pods to be ready:
 
 ```bash
 kubectl wait deployment/aiac-interface     -n aiac-system --for=condition=Available --timeout=120s
-kubectl wait statefulset/aiac-policy-store -n aiac-system --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s
+kubectl wait statefulset/aiac-policy-model-store -n aiac-system --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s
 kubectl wait deployment/aiac-agent         -n aiac-system --for=condition=Available --timeout=120s
 ```
 
@@ -156,8 +156,8 @@ kubectl port-forward svc/aiac-pdp-policy-service 7072:7072 -n aiac-system &
 curl http://localhost:7072/health
 # {"status":"ok"}
 
-# Policy Store
-kubectl port-forward svc/aiac-policy-store-service 7074:7074 -n aiac-system &
+# Policy Model Store
+kubectl port-forward svc/aiac-policy-model-store-service 7074:7074 -n aiac-system &
 curl http://localhost:7074/health
 # {"status":"ok"}
 

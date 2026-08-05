@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 # Scope / Role / ServiceType are re-exported by aiac.policy.model.models (it imports them
 # from aiac.idp.configuration.models), so the whole model surface comes from one module.
 from aiac.policy.model.models import Role, Scope, ServicePolicyModel, ServiceType
-from aiac.policy.store.keying import encode_service_id
+from aiac.policy.model_store.keying import encode_service_id
 
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), ".env"))
 
@@ -16,7 +16,7 @@ _HTTP_TIMEOUT = float(os.getenv("AIAC_HTTP_TIMEOUT", "10"))
 
 
 def _base_url() -> str:
-    return os.getenv("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
+    return os.getenv("AIAC_POLICY_MODEL_STORE_URL", "http://127.0.0.1:7074")
 
 
 def _check(response: requests.Response) -> None:

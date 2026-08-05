@@ -70,9 +70,9 @@ CONTROLLER_REMOTE_PORT = int(os.environ.get("AIAC_CONTROLLER_REMOTE_PORT", "7070
 # Policy Store (in-cluster) reached via ``kubectl port-forward`` to clear stale SPMs before a run.
 # The store's SQLite lives on a StatefulSet PV that survives image redeploys, so pre-fix cruft
 # would otherwise accumulate across runs (onboarding appends with override=False). Defaults match
-# the deployed stack (svc/aiac-policy-store-service:7074 in aiac-system).
+# the deployed stack (svc/aiac-policy-model-store-service:7074 in aiac-system).
 STORE_NAMESPACE = os.environ.get("AIAC_STORE_NAMESPACE", "aiac-system")
-STORE_TARGET = os.environ.get("AIAC_STORE_TARGET", "svc/aiac-policy-store-service")
+STORE_TARGET = os.environ.get("AIAC_STORE_TARGET", "svc/aiac-policy-model-store-service")
 STORE_LOCAL_PORT = int(os.environ.get("AIAC_STORE_LOCAL_PORT", "7074"))
 STORE_REMOTE_PORT = int(os.environ.get("AIAC_STORE_REMOTE_PORT", "7074"))
 

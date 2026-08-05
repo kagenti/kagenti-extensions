@@ -1,6 +1,6 @@
-# Component PRD: Policy Store Library (`aiac.policy.store.library`)
+# Component PRD: Policy Model Store Library (`aiac.policy.model_store.library`)
 
-Companion library for the [AIAC Policy Store](policy-store.md). Follows the same pattern as `aiac.pdp.policy.library` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
+Companion library for the [AIAC Policy Model Store](policy-model-store.md). Follows the same pattern as `aiac.pdp.policy.library` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
 
 ## Location
 `aiac/src/aiac/policy/store/library/`
@@ -17,7 +17,7 @@ aiac/src/aiac/policy/store/
 All `__init__.py` files are empty. Callers use explicit submodule paths:
 
 ```python
-from aiac.policy.store.library.api import (
+from aiac.policy.model_store.library.api import (
     get_service_policy,
     get_service_policy_by_scope,
     get_service_policies_by_role,
@@ -37,10 +37,10 @@ exposes any per-agent read/write functions. The library surface is entirely SPM-
 
 ---
 
-## Submodule: `aiac.policy.store.library.api`
+## Submodule: `aiac.policy.model_store.library.api`
 
 ### Description
-HTTP client module wrapping the [AIAC Policy Store](policy-store.md) REST API. Exposes five module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
+HTTP client module wrapping the [AIAC Policy Model Store](policy-model-store.md) REST API. Exposes five module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_MODEL_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
 
 ### Dependencies
 ```
@@ -84,7 +84,7 @@ def delete_service_policy(service_id: str) -> None
 
 `service_id` is a plain string everywhere in this API (slashes and all) — callers never encode
 anything. Internally, the three functions above base64url-encode `service_id` into the URL path
-segment via `aiac.policy.store.keying.encode_service_id` before issuing the request (the clientId is
+segment via `aiac.policy.model_store.keying.encode_service_id` before issuing the request (the clientId is
 slash-bearing and can't be a single path segment); the service decodes it back. `service_id` in every
 returned `ServicePolicyModel` is always the original, decoded form.
 
@@ -104,16 +104,16 @@ the same signature without changing callers.
 
 ### Configuration
 
-Read from `AIAC_POLICY_STORE_URL` environment variable (or `.env` file co-located with `api.py`). Falls back to the default if absent.
+Read from `AIAC_POLICY_MODEL_STORE_URL` environment variable (or `.env` file co-located with `api.py`). Falls back to the default if absent.
 
 | Variable | Default |
 |----------|---------|
-| `AIAC_POLICY_STORE_URL` | `http://127.0.0.1:7074` |
+| `AIAC_POLICY_MODEL_STORE_URL` | `http://127.0.0.1:7074` |
 
 ### Usage
 
 ```python
-from aiac.policy.store.library.api import (
+from aiac.policy.model_store.library.api import (
     get_service_policy,
     get_service_policy_by_scope,
     get_service_policies_by_role,
@@ -139,7 +139,7 @@ apply_service_policy("weather-service", updated_spm)
 
 ## Testing Decisions
 
-**Seam:** HTTP boundary — mock responses from `AIAC_POLICY_STORE_URL`.
+**Seam:** HTTP boundary — mock responses from `AIAC_POLICY_MODEL_STORE_URL`.
 
 **Prior art:** `3.14-unit-tests-write-api.md` (mock PDP Policy Writer HTTP; cover module-level functions).
 
@@ -151,4 +151,4 @@ Key behaviors to assert:
 - `apply_service_policy(id, spm)` issues `POST /policy/services/{id}` with serialized `ServicePolicyModel`; upsert round-trip (write then read back the same SPM).
 - `delete_service_policy(id)` issues `DELETE /policy/services/{id}`; returns `None` on success.
 - Any unexpected non-2xx response raises `RuntimeError`.
-- `AIAC_POLICY_STORE_URL` is read from env; falls back to `http://127.0.0.1:7074`.
+- `AIAC_POLICY_MODEL_STORE_URL` is read from env; falls back to `http://127.0.0.1:7074`.
