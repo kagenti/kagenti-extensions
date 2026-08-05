@@ -7,7 +7,7 @@ from keycloak.exceptions import KeycloakError
 
 from aiac.pdp.service.policy.keycloak.main import app, get_admin
 
-REALM = "kagenti"
+REALM = "rossoctl"
 
 
 def _make_client(admin_mock: MagicMock) -> TestClient:

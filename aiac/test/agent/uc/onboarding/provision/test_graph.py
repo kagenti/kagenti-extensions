@@ -22,7 +22,7 @@ def _get(result, key):
 def _pod(type_value):
     return SimpleNamespace(
         metadata=SimpleNamespace(
-            labels={"kagenti.io/type": type_value},
+            labels={"rossoctl.io/type": type_value},
             owner_references=[SimpleNamespace(kind="ReplicaSet", name="weather-abc")],
         )
     )
@@ -92,7 +92,7 @@ class TestEndToEnd:
             core = MagicMock()
             core.list_namespaced_pod.return_value = SimpleNamespace(items=[_pod("tool")])
             core.read_namespaced_service.return_value = SimpleNamespace(
-                metadata=SimpleNamespace(labels={"protocol.kagenti.io/mcp": ""}),
+                metadata=SimpleNamespace(labels={"protocol.rossoctl.io/mcp": ""}),
                 spec=SimpleNamespace(ports=[SimpleNamespace(port=8080)]),
             )
             core_v1.return_value = core

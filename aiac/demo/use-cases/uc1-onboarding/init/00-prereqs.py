@@ -9,7 +9,7 @@ setup`` touches Keycloak. Two classes of check, per the handoff:
 
 Then the real readiness condition: poll Keycloak until both the ``team1/github-agent`` and
 ``team1/github-tool`` clients exist (registration is async — "rollout complete" is not "ready to
-onboard"), and assert the tool Service carries the ``protocol.kagenti.io/mcp`` LABEL (the handoff's
+onboard"), and assert the tool Service carries the ``protocol.rossoctl.io/mcp`` LABEL (the handoff's
 own spec text calls it an annotation; it is not).
 """
 
@@ -47,16 +47,16 @@ def verify_cluster_reachable() -> None:
     try:
         kubectl("cluster-info", timeout=15)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-        abort("kubectl cannot reach a cluster. Set up a Kagenti/Kind cluster first (see the Rossoctl/Kagenti installer).")
+        abort("kubectl cannot reach a cluster. Set up a rossoctl/Kind cluster first (see the Rossoctl installer).")
     ok("cluster reachable")
 
 
 def verify_crds() -> None:
-    for crd in ("agentruntimes.agent.kagenti.dev", "agentcards.agent.kagenti.dev"):
+    for crd in ("agentruntimes.agent.rossoctl.dev", "agentcards.agent.rossoctl.dev"):
         try:
             kubectl("get", "crd", crd, timeout=15)
         except subprocess.CalledProcessError:
-            abort(f"CRD {crd!r} not found — is the kagenti-operator installed?")
+            abort(f"CRD {crd!r} not found — is the rossoctl-operator installed?")
     ok("agentruntimes/agentcards CRDs present")
 
 
@@ -64,7 +64,7 @@ def verify_namespace(namespace: str) -> None:
     try:
         kubectl("get", "namespace", namespace, timeout=15)
     except subprocess.CalledProcessError:
-        abort(f"namespace {namespace!r} does not exist — run the Rossoctl/Kagenti installer first.")
+        abort(f"namespace {namespace!r} does not exist — run the Rossoctl installer first.")
     ok(f"namespace {namespace!r} exists")
 
 
@@ -123,7 +123,7 @@ def ensure_aiac_deployed(cfg: Config) -> None:
 
     note("AIAC stack not found — building images, loading into kind, and applying manifests")
     runtime = _container_runtime()
-    cluster_name = "kagenti"
+    cluster_name = "rossoctl"
 
     for image, dockerfile, context in AIAC_IMAGES:
         if _image_present(image):
@@ -186,15 +186,15 @@ def wait_for_client_registration(cfg: Config, timeout: float = 180.0) -> None:
 def verify_mcp_label(namespace: str) -> None:
     label = kubectl(
         "get", "service", scn.TOOL_WORKLOAD, "-n", namespace,
-        "-o", "jsonpath={.metadata.labels.protocol\\.kagenti\\.io/mcp}",
+        "-o", "jsonpath={.metadata.labels.protocol\\.rossoctl\\.io/mcp}",
     ).strip()
     if label != "true":
         abort(
             f"Service {scn.TOOL_WORKLOAD!r} in {namespace!r} is missing the "
-            f"protocol.kagenti.io/mcp='true' LABEL (found: {label!r}) — UC-1's analyze_tool will "
+            f"protocol.rossoctl.io/mcp='true' LABEL (found: {label!r}) — UC-1's analyze_tool will "
             f"502 during onboarding. See demo/assets/INSTALL.md."
         )
-    ok(f"Service {scn.TOOL_WORKLOAD!r} carries protocol.kagenti.io/mcp='true'")
+    ok(f"Service {scn.TOOL_WORKLOAD!r} carries protocol.rossoctl.io/mcp='true'")
 
 
 def main() -> None:

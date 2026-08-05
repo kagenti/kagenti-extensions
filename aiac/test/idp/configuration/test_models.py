@@ -285,7 +285,7 @@ class TestServiceTypeResolution:
     def test_type_none_from_spiffe_clientId_without_attribute(self):
         # A spiffe:// clientId means the workload is SPIRE-enabled, not that it is an
         # agent. Without a client.type attribute the type stays None regardless of
-        # clientId shape; the operator's kagenti.io/type label (persisted as client.type)
+        # clientId shape; the operator's rossoctl.io/type label (persisted as client.type)
         # is the authoritative agent/tool signal.
         s = Service.model_validate(
             {
@@ -385,7 +385,7 @@ class TestKeycloakRealWorldPayloads:
                 "description": "Developer lead with admin and viewer permissions",
                 "composite": True,
                 "clientRole": False,
-                "containerId": "kagenti",
+                "containerId": "rossoctl",
                 "childRoles": [
                     {
                         "id": "r-dev-uuid",

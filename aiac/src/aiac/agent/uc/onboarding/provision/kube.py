@@ -11,7 +11,7 @@ from kubernetes import client, config
 
 from aiac.shared.upstream import run_upstream
 
-_AGENTCARD_GROUP = "agent.kagenti.dev"
+_AGENTCARD_GROUP = "agent.rossoctl.dev"
 _AGENTCARD_VERSION = "v1alpha1"
 _AGENTCARD_PLURAL = "agentcards"
 

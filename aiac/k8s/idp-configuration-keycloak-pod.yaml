@@ -3,7 +3,7 @@
 # This manifest deploys the IdP Configuration Service as a standalone Pod for
 # isolated development and testing.  It does NOT reflect the production topology.
 #
-# In production both interface services run as containers in a single Kagenti Interface Pod
+# In production both interface services run as containers in a single Rossoctl Interface Pod
 # defined in pdp-interface-deployment.yaml.
 
 ---

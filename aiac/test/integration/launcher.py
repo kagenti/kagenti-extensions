@@ -6,7 +6,7 @@ and ``test/integration/test_policy_pipeline.py`` (5.3).
 
 The cluster half — ``kubectl`` cp, ``kubectl port-forward``, ``resolve_pod``, and the ``opa``
 oracle — is used by the UC-1 onboarding ladder (``test/integration/test_uc1_onboard_agent_only.py``
-and its rung-2/3 siblings, 5.4), which drives a real Kagenti/Kind cluster rather than in-process
+and its rung-2/3 siblings, 5.4), which drives a real rossoctl/Kind cluster rather than in-process
 subprocesses.
 
 It imports only the standard library and ``requests`` — never ``aiac`` — so a launcher may import

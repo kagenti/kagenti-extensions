@@ -15,7 +15,7 @@ from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, T
 
 NS = "team-a"
 WORKLOAD = "github-tool"
-MCP_LABEL = "protocol.kagenti.io/mcp"
+MCP_LABEL = "protocol.rossoctl.io/mcp"
 
 
 def _state():

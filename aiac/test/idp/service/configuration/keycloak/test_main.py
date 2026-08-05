@@ -10,7 +10,7 @@ from keycloak.exceptions import KeycloakError
 
 from aiac.idp.service.configuration.keycloak.main import _cache, app, get_admin
 
-REALM = "kagenti"
+REALM = "rossoctl"
 
 
 def _make_client(admin_mock: MagicMock) -> TestClient:
@@ -65,10 +65,10 @@ class TestGetRoles:
         admin = MagicMock()
         admin.get_realm_roles.return_value = [
             {"id": "r1", "name": "reader"},
-            {"id": "r2", "name": "default-roles-kagenti"},
+            {"id": "r2", "name": "default-roles-rossoctl"},
         ]
         resp = _make_client(admin).get(f"/roles?realm={REALM}")
-        # default-roles-kagenti is the Keycloak default composite for this realm -> excluded.
+        # default-roles-rossoctl is the Keycloak default composite for this realm -> excluded.
         assert [r["kind"] for r in resp.json()] == ["User"]
 
     def test_excludes_default_roles_composite_for_realm(self):
@@ -550,7 +550,7 @@ class TestGetService:
 
 
 class TestMintDiscoveryToken:
-    ISS = "http://keycloak.localtest.me:8080/realms/kagenti"
+    ISS = "http://keycloak.localtest.me:8080/realms/rossoctl"
 
     def _wire(self, admin, monkeypatch, *, aud, iss=None, mappers=None, secret="sek"):
         monkeypatch.setenv("KEYCLOAK_URL", "http://kc-internal:8080")
@@ -632,7 +632,7 @@ class TestMintDiscoveryToken:
     def test_hard_iss_assertion_when_env_set(self, monkeypatch):
         admin = MagicMock()
         oid = self._wire(
-            admin, monkeypatch, aud=["github-tool"], iss="http://kc-internal:8080/realms/kagenti"
+            admin, monkeypatch, aud=["github-tool"], iss="http://kc-internal:8080/realms/rossoctl"
         )
         monkeypatch.setenv("AIAC_KEYCLOAK_ISSUER", self.ISS)
         with patch(

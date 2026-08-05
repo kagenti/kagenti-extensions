@@ -8,7 +8,7 @@ import pytest
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import Role, RoleKind, Scope, Service, ServiceType, Subject
 
-REALM = "kagenti"
+REALM = "rossoctl"
 BASE = "http://127.0.0.1:7071"
 
 

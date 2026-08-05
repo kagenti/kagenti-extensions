@@ -1,16 +1,16 @@
 # Installing the demo assets (`github-tool` + `github-agent`)
 
 Single install guide for both reusable demo workloads under `demo/assets/`, deployed to a
-Kagenti/Kind cluster in namespace `team1`. Consolidates what used to be split across
+rossoctl/Kind cluster in namespace `team1`. Consolidates what used to be split across
 [`docs/specs/demo/github-tool.md`](../../docs/specs/demo/github-tool.md) §7–8 and the agent
-README's former "Deploying to Kagenti" section, so the two installation paths can't drift apart
+README's former "Deploying to Rossoctl" section, so the two installation paths can't drift apart
 again. Prefer [`install.sh`](install.sh) over doing this by hand; the steps below are what it
 automates.
 
 ## Prerequisites
 
-- A running Kagenti/Kind cluster with the kagenti-operator installed.
-- Namespace **`team1`** already exists — created by the Rossoctl/Kagenti installer, not by
+- A running rossoctl/Kind cluster with the rossoctl-operator installed.
+- Namespace **`team1`** already exists — created by the Rossoctl installer, not by
   anything in this repo. Nothing here creates cluster-owned resources.
 - `kubectl`, `kind`, and a container runtime (`docker` or `podman`) on `PATH`.
 
@@ -28,11 +28,11 @@ apply the manifests → `kubectl rollout status`.
 
 These each fail far from their cause — read before editing the manifests or install path.
 
-- **The tool `Service` must carry `protocol.kagenti.io/mcp: "true"`.** This is a *deploy-time*
-  label that the kagenti operator does **not** add. Without it, UC-1's `analyze_tool` returns
+- **The tool `Service` must carry `protocol.rossoctl.io/mcp: "true"`.** This is a *deploy-time*
+  label that the rossoctl operator does **not** add. Without it, UC-1's `analyze_tool` returns
   **502** — during onboarding, long after deployment looked fine. It is already present in the
   committed manifest; don't drop it when editing.
-- **`kagenti.io/type` is applied by the operator** from the `AgentRuntime` CR. Don't hand-set it
+- **`rossoctl.io/type` is applied by the operator** from the `AgentRuntime` CR. Don't hand-set it
   on the pod.
 - **The tool's declared `PORT` must not be `9090`.** The AuthBridge sidecar reuses the declared
   `PORT` as its own reverse-proxy listener and shifts the app's real listen port to `PORT+1`.
@@ -54,7 +54,7 @@ These each fail far from their cause — read before editing the manifests or in
   `/.well-known/agent-card.json` with no MCP server present, which is all UC-1 discovery needs.
   **Do not add `github-tool-mcp` to this install path.**
 - **Namespace `team1` is a precondition, not an output.** No manifest here creates it; the
-  Rossoctl/Kagenti installer owns it (and any labels it carries). `install.sh` fails fast with a
+  Rossoctl installer owns it (and any labels it carries). `install.sh` fails fast with a
   pointer to the installer if the namespace is missing.
 
 ## Manual steps (what `install.sh` automates)
@@ -63,7 +63,7 @@ These each fail far from their cause — read before editing the manifests or in
 ```bash
 cd tools/github_tool
 podman build -t localhost/github-tool:latest .   # or docker; the localhost/ prefix must match the manifest's image ref
-kind load docker-image localhost/github-tool:latest --name kagenti
+kind load docker-image localhost/github-tool:latest --name rossoctl
 kubectl apply -f k8s/github-tool-deployment.yaml
 kubectl rollout status deployment/github-tool -n team1
 ```
@@ -72,7 +72,7 @@ kubectl rollout status deployment/github-tool -n team1
 ```bash
 cd agents/github_agent
 podman build -t localhost/github-agent:latest .   # or docker; the localhost/ prefix must match the manifest's image ref
-kind load docker-image localhost/github-agent:latest --name kagenti
+kind load docker-image localhost/github-agent:latest --name rossoctl
 kubectl apply -f k8s/configmaps.yaml
 kubectl apply -f k8s/github-agent-deployment.yaml
 kubectl rollout status deployment/github-agent -n team1
@@ -81,9 +81,9 @@ kubectl rollout status deployment/github-agent -n team1
 ## Verifying
 
 ```bash
-# Tool got its MCP label and the operator stamped kagenti.io/type
-kubectl get svc github-tool -n team1 -o jsonpath='{.metadata.labels.protocol\.kagenti\.io/mcp}'
-kubectl get pod -l app=github-tool -n team1 -o jsonpath='{.items[0].metadata.labels.kagenti\.io/type}'
+# Tool got its MCP label and the operator stamped rossoctl.io/type
+kubectl get svc github-tool -n team1 -o jsonpath='{.metadata.labels.protocol\.rossoctl\.io/mcp}'
+kubectl get pod -l app=github-tool -n team1 -o jsonpath='{.items[0].metadata.labels.rossoctl\.io/type}'
 
 # Agent serves its card with no MCP server present
 kubectl port-forward svc/github-agent 8080:8080 -n team1 &
@@ -92,7 +92,7 @@ curl -s http://localhost:8080/.well-known/agent-card.json | python3 -m json.tool
 
 ## Out of scope
 
-- Deploying `github-tool-mcp`, Keycloak, SPIRE, the kagenti operator, or the cluster itself.
+- Deploying `github-tool-mcp`, Keycloak, SPIRE, the rossoctl operator, or the cluster itself.
 - Deploying the AIAC stack (`k8s/`) — see `k8s/aiac-deployment-guide.md`.
 - Waiting for Keycloak client registration — that needs Keycloak credentials this install path
   has no business holding; it belongs to whatever use-case demo consumes the client (e.g. UC-1's

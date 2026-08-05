@@ -1,4 +1,4 @@
-# Keycloak Access Control in Kagenti: U → Agent A → Tool T
+# Keycloak Access Control in Rossoctl: U → Agent A → Tool T
 
 > Analysis of the minimum Keycloak configuration required for the
 > scenario where a user U calls agent A, which in turn calls tool T —
@@ -15,13 +15,13 @@
 
 ## 1. Architecture Overview
 
-The Kagenti platform uses a **three-layer trust chain** enforced by:
+The Rossoctl platform uses a **three-layer trust chain** enforced by:
 
 - **Keycloak** — OAuth2/OIDC token issuer and policy decision point (PDP)
 - **AuthBridge** — transparent sidecar proxy acting as pure policy enforcement point (PEP)
 - **SPIFFE/SPIRE** — workload identity via SPIFFE IDs used as Keycloak `clientId`
 
-Every workload (agent or tool) has an AuthBridge sidecar injected by the kagenti-operator. The sidecar:
+Every workload (agent or tool) has an AuthBridge sidecar injected by the rossoctl-operator. The sidecar:
 - **Inbound**: validates incoming JWTs (signature, issuer, audience) — returns `401` on failure
 - **Outbound**: intercepts HTTP calls to other services and performs RFC 8693 token exchange transparently
 
@@ -54,7 +54,7 @@ Tool T pod
 
 | # | Object | Type | Key Properties | Purpose |
 |---|--------|------|----------------|---------|
-| 1 | `kagenti` | Realm | `enabled: true` | Hosts all principals |
+| 1 | `rossoctl` | Realm | `enabled: true` | Hosts all principals |
 | 2 | Agent A client | Keycloak Client | `clientId=A-SPIFFE`, `standard.token.exchange.enabled=true` | A's service identity; acting party in exchange |
 | 3 | Tool T client | Keycloak Client | `clientId=T-SPIFFE`, `standard.token.exchange.enabled=true` | Exchange target; T's audience anchor |
 | 4 | `agent-A-aud` scope | Client Scope + `oidc-audience-mapper` | `aud += A-SPIFFE`; assigned as **default** on U's client | Lets U obtain a token that A's inbound will accept |
@@ -543,7 +543,7 @@ client_audience_targets:
 ## 15. RBAC End-to-End: Full Object Map
 
 ```
-Keycloak Realm: kagenti
+Keycloak Realm: rossoctl
 │
 ├── Realm Roles
 │   ├── UR  ──composite──► agent-A:github-agent
@@ -690,7 +690,7 @@ The following Keycloak objects and configuration steps from the RBAC model (§9�
 ## 20. Minimal Keycloak Configuration (OPA Model)
 
 ```
-Realm: kagenti
+Realm: rossoctl
 │
 ├── Clients
 │   ├── kagenti-ui  (or per-user client)
