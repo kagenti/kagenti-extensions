@@ -26,7 +26,7 @@ def main() -> None:
     note(f"service id: {service_id}")
 
     say("2", "4", "Onboard (POST /apply/service/{id}) — this drives the PRB and can take minutes")
-    with port_forward(cfg.controller_target, namespace=cfg.controller_namespace, local_port=cfg.controller_local_port, remote_port=cfg.controller_remote_port) as base_url:
+    with port_forward(cfg.controller_target, namespace=cfg.controller_namespace, local_port=cfg.controller_local_port, remote_port=cfg.controller_remote_port, ready_url=f"http://127.0.0.1:{cfg.controller_local_port}/health") as base_url:
         onboard(cfg, base_url, service_id)
     ok("onboarding call returned 200")
 

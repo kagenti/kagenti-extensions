@@ -486,6 +486,7 @@ def onboarded_stack(workloads: list[str], *, rego_subdir: str) -> Iterator[dict]
             namespace=CONTROLLER_NAMESPACE,
             local_port=CONTROLLER_LOCAL_PORT,
             remote_port=CONTROLLER_REMOTE_PORT,
+            ready_url=f"http://127.0.0.1:{CONTROLLER_LOCAL_PORT}/health",
         ) as base_url:
             for service_id in service_ids:  # onboard in the rung's order
                 onboard(base_url, service_id)
