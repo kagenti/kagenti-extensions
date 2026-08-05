@@ -8,7 +8,7 @@ class ServiceType(str, Enum):
     """Canonical service-type vocabulary, shared by the IdP library, the IdP service, and the
     AIAC agent sub-agents. Values are capitalized (``Agent``/``Tool``) to match the Keycloak
     ``client.type`` attribute; as a ``str`` enum, ``ServiceType.AGENT == "Agent"`` holds, so it
-    is a drop-in for the former ``Literal["Agent", "Tool"]``. The operator's ``kagenti.io/type``
+    is a drop-in for the former ``Literal["Agent", "Tool"]``. The operator's ``rossoctl.io/type``
     pod label is lowercase (``agent``/``tool``) and is normalized to a member via
     ``ServiceType(label.capitalize())`` at classification time."""
 
@@ -134,7 +134,7 @@ class Service(BaseModel):
         # Keycloak ``client.type`` attribute (plain string ∈ {Agent,Tool}) → None. A
         # list-valued or unrecognized attribute fails the string check → None. clientId
         # shape (e.g. ``spiffe://``) is not consulted: it signals SPIRE-enablement, not
-        # agent-vs-tool — the operator's ``kagenti.io/type`` label (persisted as
+        # agent-vs-tool — the operator's ``rossoctl.io/type`` label (persisted as
         # ``client.type``) is the authoritative type signal.
         if data.get("type") is None:
             attrs = data.get("attributes") or {}

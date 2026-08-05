@@ -428,7 +428,7 @@ func (p *OPA) OnRequest(ctx context.Context, pctx *pipeline.Context) pipeline.Ac
 	}
 
 	path := p.decisionPath(pctx, "request")
-	input := buildInput(pctx, p.inc)
+	input := buildInput(pctx, p.inc, p.agentID)
 	result, err := s.decider.Decision(ctx, sdk.DecisionOptions{
 		Path:  path,
 		Input: input,
@@ -476,7 +476,7 @@ func (p *OPA) OnResponse(ctx context.Context, pctx *pipeline.Context) pipeline.A
 	}
 
 	path := p.decisionPath(pctx, "response")
-	input := buildInput(pctx, p.inc)
+	input := buildInput(pctx, p.inc, p.agentID)
 	input["response"] = map[string]any{
 		"status_code": pctx.StatusCode,
 		"headers":     flattenHeaders(pctx.ResponseHeaders),
@@ -517,7 +517,7 @@ func (p *OPA) OnResponse(ctx context.Context, pctx *pipeline.Context) pipeline.A
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-func buildInput(pctx *pipeline.Context, inc includeSet) map[string]any {
+func buildInput(pctx *pipeline.Context, inc includeSet, agentID string) map[string]any {
 	input := map[string]any{
 		"direction": pctx.Direction.String(),
 		"method":    pctx.Method,
@@ -531,11 +531,22 @@ func buildInput(pctx *pipeline.Context, inc includeSet) map[string]any {
 			"client_id": pctx.Identity.ClientID(),
 			"scopes":    pctx.Identity.Scopes(),
 		}
+	} else if pctx.Extensions.Delegation != nil {
+		// Outbound leg: no validated JWT to build identity from, but
+		// token-exchange recorded a delegation hop. Surface it in the SAME
+		// shape as the inbound identity so policies can branch on
+		// input.identity uniformly across both legs. input.delegation (the
+		// full multi-hop chain) is still emitted below for policies that
+		// need per-hop detail.
+		input["identity"] = buildOutboundIdentity(pctx.Extensions.Delegation, agentID)
 	}
 	if pctx.Agent != nil {
 		input["agent"] = map[string]any{
 			"client_id": pctx.Agent.ClientID,
 		}
+	}
+	if pctx.Extensions.Delegation != nil {
+		input["delegation"] = buildDelegationInput(pctx.Extensions.Delegation)
 	}
 
 	if pctx.Extensions.A2A != nil {
@@ -549,6 +560,75 @@ func buildInput(pctx *pipeline.Context, inc includeSet) map[string]any {
 	}
 
 	return input
+}
+
+// buildOutboundIdentity mirrors the inbound input.identity shape on the
+// outbound leg, where there is no validated JWT. Values come from the
+// token-exchange delegation hop:
+//
+//	subject    = the delegated caller (chain origin)
+//	client_id  = this agent's own client (the party performing the exchange)
+//	scopes     = the scopes the downstream token was minted with (last hop)
+//	service_id = the downstream service the token was minted for (last hop's target audience)
+//
+// scopes and service_id are omitted when the last hop recorded none, matching
+// the inbound branch where an empty value simply isn't asserted. service_id
+// lets an outbound policy key on the exchange target the same way the inbound
+// identity exposes audience (jwt-validation surfaces the JWT's audience) — e.g.
+// gating a requested function against target_scopes[input.identity.service_id].
+func buildOutboundIdentity(d *pipeline.DelegationExtension, agentID string) map[string]any {
+	id := map[string]any{"subject": d.Origin, "client_id": agentID}
+	if chain := d.Chain(); len(chain) > 0 {
+		last := chain[len(chain)-1]
+		if len(last.Scopes) > 0 {
+			id["scopes"] = last.Scopes
+		}
+		if last.Audience != "" {
+			id["service_id"] = last.Audience
+		}
+	}
+	return id
+}
+
+// buildDelegationInput exposes the token-delegation chain recorded by
+// token-exchange (RFC 8693) so outbound policy can reason about WHAT a
+// token was minted for and WITH WHICH scopes.
+//
+// Unlike input.identity — which requires a validated JWT on this leg and
+// is therefore normally absent outbound — the delegation chain is
+// populated by the auth plugin itself as a side effect of the exchange
+// (see tokenexchange.recordDelegationHop). It is available on the
+// outbound REQUEST path as soon as token-exchange runs, with no re-parse
+// of the minted token and without a fail-closed gate that would reject
+// passthrough traffic. Put OPA after token-exchange in the outbound
+// pipeline to read it.
+func buildDelegationInput(d *pipeline.DelegationExtension) map[string]any {
+	del := map[string]any{
+		"origin": d.Origin,
+		"actor":  d.Actor,
+		"depth":  d.Depth(),
+	}
+	chain := d.Chain()
+	if len(chain) > 0 {
+		hops := make([]map[string]any, len(chain))
+		for i, h := range chain {
+			hop := map[string]any{
+				"subject_id": h.SubjectID,
+				"audience":   h.Audience,
+				"strategy":   h.Strategy,
+				"from_cache": h.FromCache,
+			}
+			if len(h.Scopes) > 0 {
+				hop["scopes"] = h.Scopes
+			}
+			if !h.Timestamp.IsZero() {
+				hop["timestamp"] = h.Timestamp.UTC().Format(time.RFC3339)
+			}
+			hops[i] = hop
+		}
+		del["chain"] = hops
+	}
+	return del
 }
 
 func buildA2AInput(ext *pipeline.A2AExtension, inc includeSet) map[string]any {

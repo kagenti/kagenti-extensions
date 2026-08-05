@@ -28,7 +28,7 @@ Per-rung flow (spec § Per-rung flow): **Keycloak cleanup → onboard agent → 
 end state → Keycloak cleanup**. Deployment + client registration are **preconditions**, not test
 steps. *Onboard + evaluate — no A2A traffic, no live enforcement* (phase-1 out of scope).
 
-Run (needs a live Kagenti/Kind cluster with the AIAC stack + OPA filesystem-stub writer, the demo
+Run (needs a live rossoctl/Kind cluster with the AIAC stack + OPA filesystem-stub writer, the demo
 workloads deployed + registered into ``AIAC_TEST_REALM``, a real LLM in-pod, and ``opa`` on PATH or
 ``$OPA_BIN``):
 

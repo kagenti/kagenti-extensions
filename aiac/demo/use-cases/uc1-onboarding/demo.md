@@ -51,8 +51,8 @@ touches source — exactly the two-line policy, and nothing it didn't say.
 ## Running it
 
 Everything below is a real cluster, a real Keycloak, a real LLM call, and a real RFC 8693 token
-exchange — there is no offline mode. Bring up a Kagenti cluster with SPIRE + Keycloak + the
-kagenti operator first (see [../../assets/INSTALL.md](../../assets/INSTALL.md) and
+exchange — there is no offline mode. Bring up a rossoctl cluster with SPIRE + Keycloak + the
+rossoctl operator first (see [../../assets/INSTALL.md](../../assets/INSTALL.md) and
 [../../../k8s/aiac-deployment-guide.md](../../../k8s/aiac-deployment-guide.md) for reference, not as a
 manual checklist — `make prereqs` below verifies and, where safe, installs what's missing) and
 export `KEYCLOAK_URL` / `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD`.

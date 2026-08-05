@@ -10,7 +10,7 @@
 #   workload name == Service name == "github-tool"
 #   analyze_tool endpoint: http://github-tool.team1.svc.cluster.local:9090/mcp
 #
-# kagenti.io/type=tool is applied by the kagenti-operator when it reconciles
+# rossoctl.io/type=tool is applied by the rossoctl-operator when it reconciles
 # the AgentRuntime below; do not hand-set it here.
 #
 # In-cluster PORT override (9095, not the image's default 9090): the
@@ -99,7 +99,7 @@ spec:
           emptyDir: {}
 ---
 # Service — exposes /mcp as the first (and only) port.
-# The protocol.kagenti.io/mcp label is a deploy-time prerequisite:
+# The protocol.rossoctl.io/mcp label is a deploy-time prerequisite:
 # analyze_tool returns 502 if this label is absent.
 # The operator does NOT stamp it; it must be set explicitly here.
 apiVersion: v1
@@ -108,7 +108,7 @@ metadata:
   name: github-tool
   namespace: team1
   labels:
-    protocol.kagenti.io/mcp: "true"
+    protocol.rossoctl.io/mcp: "true"
 spec:
   selector:
     app: github-tool
@@ -118,11 +118,11 @@ spec:
       targetPort: 9095
   type: ClusterIP
 ---
-# AgentRuntime — enrolls the workload so the kagenti-operator:
-#   - applies kagenti.io/type=tool to the pod (read by classify_service), and
+# AgentRuntime — enrolls the workload so the rossoctl-operator:
+#   - applies rossoctl.io/type=tool to the pod (read by classify_service), and
 #   - registers a Keycloak client with client.name = "team1/github-tool"
 #     (so analyze_tool derives scopes github-tool.{source-read,...}).
-apiVersion: agent.kagenti.dev/v1alpha1
+apiVersion: agent.rossoctl.dev/v1alpha1
 kind: AgentRuntime
 metadata:
   name: github-tool

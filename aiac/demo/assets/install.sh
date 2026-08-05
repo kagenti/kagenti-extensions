@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Idempotent installer for the demo/assets workloads (github-tool, github-agent) into a
-# Kagenti/Kind cluster. See INSTALL.md for the manual steps this automates and the
+# rossoctl/Kind cluster. See INSTALL.md for the manual steps this automates and the
 # non-obvious invariants (MCP service label, async Keycloak registration, etc).
 #
 # This script does NOT wait for Keycloak client registration — that needs Keycloak
@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CLUSTER_NAME="${CLUSTER_NAME:-kagenti}"
+CLUSTER_NAME="${CLUSTER_NAME:-rossoctl}"
 NAMESPACE="${NAMESPACE:-team1}"
 # Tags must carry the localhost/ prefix to match the Deployment manifests' image refs
 # (image: localhost/github-*:latest, imagePullPolicy: IfNotPresent). docker does not auto-prefix
@@ -69,12 +69,12 @@ preflight() {
 
   if ! kubectl get namespace "$NAMESPACE" >/dev/null 2>&1; then
     log "ERROR: namespace '$NAMESPACE' does not exist."
-    log "This script does not create cluster-owned resources — run the Rossoctl/Kagenti installer first."
+    log "This script does not create cluster-owned resources — run the Rossoctl installer first."
     exit 1
   fi
 
-  if ! kubectl get crd agentruntimes.agent.kagenti.dev >/dev/null 2>&1; then
-    log "ERROR: AgentRuntime CRD not found. Is the kagenti-operator installed?"
+  if ! kubectl get crd agentruntimes.agent.rossoctl.dev >/dev/null 2>&1; then
+    log "ERROR: AgentRuntime CRD not found. Is the rossoctl-operator installed?"
     exit 1
   fi
 }

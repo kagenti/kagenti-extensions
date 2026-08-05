@@ -1,6 +1,6 @@
 # AIAC Codebase Guide
 
-All paths below are relative to `kagenti-extensions/aiac/`.
+All paths below are relative to `cortex/aiac/`.
 
 ## Requirements / PRD docs
 
@@ -100,10 +100,10 @@ Exercises all `Configuration` methods — run `ls test/idp/configuration/` to se
 
 ## Python environment
 
-Virtual environment: `kagenti-extensions/aiac/.venv`
+Virtual environment: `cortex/aiac/.venv`
 
-Activate: `source kagenti-extensions/aiac/.venv/bin/activate`
-Run directly: `kagenti-extensions/aiac/.venv/bin/python` / `kagenti-extensions/aiac/.venv/bin/pytest`
+Activate: `source cortex/aiac/.venv/bin/activate`
+Run directly: `cortex/aiac/.venv/bin/python` / `cortex/aiac/.venv/bin/pytest`
 
 Always use this venv for any Python execution, test runs, or dependency checks.
 

@@ -55,16 +55,26 @@ pipeline:
           bundle_url: "http://bundle-server.rossoctl.svc:8080"
   outbound:
     plugins:
+      - name: token-exchange
+        config: { ... }
       - name: opa
         config:
           bundle_url: "http://bundle-server.rossoctl.svc:8080"
-      - name: token-exchange
-        config: { ... }
 ```
 
 With this config, policies can decide based on caller identity, tool names,
 model names, hosts, and methods — without any bulk content crossing the OPA
 evaluation boundary.
+
+> **Outbound ordering matters.** Place `opa` *after* `token-exchange` on the
+> outbound leg. `token-exchange` records the target audience and granted
+> scopes of the token it mints into the delegation chain, which OPA then
+> exposes as both `input.delegation` and a synthesized `input.identity` (see
+> below). If `opa` runs first, that signal is not yet populated. On inbound,
+> `input.identity` comes from a validated JWT; on outbound no JWT is validated,
+> so `input.identity` is synthesized from the delegation hop — letting policies
+> branch on `input.identity` on either leg — while `input.delegation` remains
+> available for full-chain detail.
 
 ### Example: content-filtering policy
 
@@ -246,12 +256,84 @@ On the response path the document also includes:
 | `path` | always | Request URL path |
 | `host` | always | HTTP `Host` header value |
 | `headers` | always | Flattened request headers (lowercase keys, multi-values joined with `,`). Credential headers (`authorization`, `proxy-authorization`, `cookie`, `set-cookie`) are redacted — use `input.identity` for auth decisions. |
-| `identity` | when jwt-validation ran | Subject, client ID, and scopes from the validated JWT |
+| `identity` | when jwt-validation ran, **or** synthesized outbound from the delegation hop | Inbound: `subject`, `client_id`, and `scopes` from the validated JWT. Outbound: the same shape synthesized from the token-exchange hop (`subject` = delegated caller, `client_id` = the agent's own client, `scopes` = the exchanged scopes) so policies can read `input.identity` uniformly on both legs — see the outbound section below. |
 | `agent` | when agent identity is set | The agent's own client ID |
+| `delegation` | when token-exchange minted/served a token on this leg | The RFC 8693 delegation chain: `origin`, `actor`, `depth`, and `chain[]` of `{subject_id, audience, scopes, strategy, from_cache, timestamp}`. This is the outbound identity signal — see below. |
 | `a2a` | when a2a-parser ran | A2A protocol metadata (method, session_id, task_id, role) |
 | `mcp` | when mcp-parser ran | MCP method + filtered params |
 | `inference` | when inference-parser ran | Model, stream, max_tokens, tool names |
 | `response` | response path only | Status code and response headers |
+
+### Outbound identity + delegation input
+
+On the outbound leg there is no inbound JWT to validate. When `token-exchange`
+mints (or cache-serves) a downstream token it records a hop in the delegation
+chain, and OPA surfaces that hop **two ways**:
+
+1. **`input.identity`** — synthesized in the *same shape* as the inbound
+   identity so a policy can branch on `input.identity.subject` /
+   `input.identity.client_id` / `input.identity.scopes` uniformly on both legs:
+
+   ```json
+   {
+     "identity": {
+       "subject": "dev-user",
+       "client_id": "github-agent",
+       "scopes": ["openid", "agent-team1-github-tool-aud"]
+     }
+   }
+   ```
+
+   - `subject` = the delegated caller (the delegation chain's `origin`).
+   - `client_id` = **the agent's own client** (the party performing the
+     exchange), read from `/shared/client-id.txt` — *not* the target audience.
+   - `scopes` = the scopes the downstream token was minted with (the last hop);
+     omitted when the hop recorded none.
+
+   A validated inbound `input.identity` always takes precedence: this
+   synthesized form only appears when no JWT was validated on the leg.
+
+2. **`input.delegation`** — the full RFC 8693 chain, kept alongside
+   `input.identity` for policies that need per-hop detail (multi-hop depth,
+   per-hop audience/strategy/cache):
+
+```json
+{
+  "delegation": {
+    "origin": "agent-team1",
+    "actor": "agent-team1",
+    "depth": 1,
+    "chain": [
+      {
+        "subject_id": "agent-team1",
+        "audience": "github-tool",
+        "scopes": ["openid", "github-tool-aud", "github-full-access"],
+        "strategy": "token-exchange",
+        "from_cache": false,
+        "timestamp": "2026-08-03T12:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+- `origin` — subject of the first hop (the original caller).
+- `actor` — subject of the most recent hop.
+- `depth` — number of hops recorded so far.
+- `chain[]` — one entry per exchange. `audience` and `scopes` are what the
+  token was minted for; `strategy` is `"token-exchange"` today; `from_cache`
+  reports whether the token was served from the exchange cache.
+
+`subject_id` (and therefore `origin` / `actor` and the synthesized
+`input.identity.subject`) is best-effort: the outbound leg has no validated
+identity, so token-exchange decodes the `sub` claim of the incoming bearer —
+the token it uses as the RFC 8693 `subject_token` — **without** signature
+verification, purely to enrich policy input. It falls back to empty when no
+usable bearer is present. The `audience` / `scopes` / `strategy` / `from_cache`
+fields are always known from the exchange result. Requires `opa` to run
+**after** `token-exchange` (see the ordering note above); a host that matches
+no route carries no hop, so both `input.delegation` and the synthesized
+`input.identity` are absent for passthrough traffic.
 
 ## Policy contract
 
@@ -361,6 +443,51 @@ has_dangerous_combo if {
 
 has_value(arr, val) if {
     arr[_] == val
+}
+```
+
+### Scope-of-delegation control — outbound request (uses `input.delegation`)
+
+Restrict which exchanged scopes an agent may use against a downstream target.
+Because OPA runs after `token-exchange`, the minted token's audience and
+scopes are visible in `input.delegation.chain`:
+
+```rego
+package authbridge.outbound.request
+
+default allow := {"allow": false, "reason": "default deny"}
+
+# Agents allowed to wield elevated GitHub scopes.
+privileged_agents := {"admin-agent", "release-bot"}
+
+# No exchange happened (passthrough egress, e.g. LLM inference) — allow.
+allow := {"allow": true} if {
+    not input.delegation
+}
+
+# An exchange happened: enforce scope policy on the minted token.
+allow := {"allow": true} if {
+    hop := input.delegation.chain[_]
+    hop.audience == "github-tool"
+    not uses_full_access(hop)
+}
+
+allow := {"allow": true} if {
+    hop := input.delegation.chain[_]
+    hop.audience == "github-tool"
+    uses_full_access(hop)
+    privileged_agents[input.delegation.actor]
+}
+
+uses_full_access(hop) if {
+    hop.scopes[_] == "github-full-access"
+}
+
+allow := {"allow": false, "reason": "github-full-access requires a privileged agent"} if {
+    hop := input.delegation.chain[_]
+    hop.audience == "github-tool"
+    uses_full_access(hop)
+    not privileged_agents[input.delegation.actor]
 }
 ```
 

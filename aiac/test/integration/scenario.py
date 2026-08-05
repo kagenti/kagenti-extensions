@@ -19,7 +19,7 @@ from __future__ import annotations
 
 # MUST be a throwaway realm: this suite's ``provision_keycloak_admin`` does ``delete_realm`` +
 # ``create_realm`` on it every run, so pointing it (via ``AIAC_TEST_REALM``) at a shared realm like
-# ``kagenti`` DESTROYS that realm's contents. UC-1 uses its own realm (``scenario_uc1.REALM_DEFAULT``).
+# ``rossoctl`` DESTROYS that realm's contents. UC-1 uses its own realm (``scenario_uc1.REALM_DEFAULT``).
 REALM_DEFAULT = "aiac-pp"
 AGENT_ID = "github-agent"
 TOOL_ID = "github-tool"

@@ -42,7 +42,7 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get"]
-  - apiGroups: ["agent.kagenti.dev"]
+  - apiGroups: ["agent.rossoctl.dev"]
     resources: ["agentcards"]
     verbs: ["list"]
 

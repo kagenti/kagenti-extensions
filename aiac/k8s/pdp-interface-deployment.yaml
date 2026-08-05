@@ -14,7 +14,7 @@ metadata:
   namespace: aiac-system
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
-  KEYCLOAK_REALM: "kagenti"
+  KEYCLOAK_REALM: "rossoctl"
   KEYCLOAK_ADMIN_REALM: "master"
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"

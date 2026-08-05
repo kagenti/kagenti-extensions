@@ -55,24 +55,24 @@ def _run(service=None, pods=None, get_service_exc=None, list_pods_exc=None):
 
 class TestClassifyServiceHappyPaths:
     def test_agent_label_routes_to_agent_and_sets_identity(self):
-        result = _run(service=_service(), pods=[_pod({"kagenti.io/type": "agent"})])
+        result = _run(service=_service(), pods=[_pod({"rossoctl.io/type": "agent"})])
         assert result["service_id"] == ENTITY
         assert result["namespace"] == "team-a"
         assert result["workload_name"] == "weather"
         assert result["service_type"] is ServiceType.AGENT
 
     def test_tool_label_routes_to_tool(self):
-        result = _run(service=_service(), pods=[_pod({"kagenti.io/type": "tool"})])
+        result = _run(service=_service(), pods=[_pod({"rossoctl.io/type": "tool"})])
         assert result["service_type"] is ServiceType.TOOL
         assert result["namespace"] == "team-a"
         assert result["workload_name"] == "weather"
 
     def test_service_id_stored_from_trigger_entity_id(self):
-        result = _run(service=_service(), pods=[_pod({"kagenti.io/type": "agent"})])
+        result = _run(service=_service(), pods=[_pod({"rossoctl.io/type": "agent"})])
         assert result["service_id"] == ENTITY
 
     def test_statefulset_owner_matched_by_exact_name(self):
-        pod = _pod({"kagenti.io/type": "tool"}, owner_kind="StatefulSet", owner_name="weather")
+        pod = _pod({"rossoctl.io/type": "tool"}, owner_kind="StatefulSet", owner_name="weather")
         result = _run(service=_service(), pods=[pod])
         assert result["service_type"] is ServiceType.TOOL
 
@@ -83,16 +83,16 @@ class TestClassifyService502s:
             _run(service=_service(), pods=[_pod({})])
         assert ei.value.status_code == 502
         assert "weather" in ei.value.detail
-        assert "kagenti.io/type" in ei.value.detail
+        assert "rossoctl.io/type" in ei.value.detail
 
     def test_label_unknown_value_is_502(self):
         with pytest.raises(HTTPException) as ei:
-            _run(service=_service(), pods=[_pod({"kagenti.io/type": "sidecar"})])
+            _run(service=_service(), pods=[_pod({"rossoctl.io/type": "sidecar"})])
         assert ei.value.status_code == 502
 
     def test_client_name_without_slash_is_502(self):
         with pytest.raises(HTTPException) as ei:
-            _run(service=_service(name="no-slash-name"), pods=[_pod({"kagenti.io/type": "agent"})])
+            _run(service=_service(name="no-slash-name"), pods=[_pod({"rossoctl.io/type": "agent"})])
         assert ei.value.status_code == 502
 
     def test_config_api_down_is_502(self, monkeypatch):
@@ -108,7 +108,7 @@ class TestClassifyService502s:
         assert ei.value.status_code == 502
 
     def test_no_pod_owned_by_workload_is_502(self):
-        unrelated = _pod({"kagenti.io/type": "agent"}, owner_name="other-xyz")
+        unrelated = _pod({"rossoctl.io/type": "agent"}, owner_name="other-xyz")
         with pytest.raises(HTTPException) as ei:
             _run(service=_service(), pods=[unrelated])
         assert ei.value.status_code == 502

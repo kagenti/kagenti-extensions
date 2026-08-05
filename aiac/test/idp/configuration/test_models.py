@@ -285,7 +285,7 @@ class TestServiceTypeResolution:
     def test_type_none_from_spiffe_clientId_without_attribute(self):
         # A spiffe:// clientId means the workload is SPIRE-enabled, not that it is an
         # agent. Without a client.type attribute the type stays None regardless of
-        # clientId shape; the operator's kagenti.io/type label (persisted as client.type)
+        # clientId shape; the operator's rossoctl.io/type label (persisted as client.type)
         # is the authoritative agent/tool signal.
         s = Service.model_validate(
             {
@@ -352,16 +352,16 @@ class TestKeycloakRealWorldPayloads:
             {
                 "id": "d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f90",
                 "username": "alice",
-                "email": "alice@kagenti.org",
+                "email": "alice@rossoctl.org",
                 "firstName": "Alice",
-                "lastName": "Kagenti",
+                "lastName": "Rossoctl",
                 "enabled": True,
                 "emailVerified": True,
                 "createdTimestamp": 1700000000,
                 "roles": [
                     {
                         "id": "r-admin-uuid",
-                        "name": "kagenti-admin",
+                        "name": "rossoctl-admin",
                         "composite": False,
                         "clientRole": False,
                     }
@@ -370,12 +370,12 @@ class TestKeycloakRealWorldPayloads:
         )
         assert s.id == "d4e5f6a7-b8c9-0d1e-2f3a-4b5c6d7e8f90"
         assert s.username == "alice"
-        assert s.email == "alice@kagenti.org"
+        assert s.email == "alice@rossoctl.org"
         assert s.firstName == "Alice"
-        assert s.lastName == "Kagenti"
+        assert s.lastName == "Rossoctl"
         assert s.enabled is True
         assert len(s.roles) == 1
-        assert s.roles[0].name == "kagenti-admin"
+        assert s.roles[0].name == "rossoctl-admin"
 
     def test_role_keycloak_composite_with_child_and_scope(self):
         r = Role.model_validate(
@@ -385,7 +385,7 @@ class TestKeycloakRealWorldPayloads:
                 "description": "Developer lead with admin and viewer permissions",
                 "composite": True,
                 "clientRole": False,
-                "containerId": "kagenti",
+                "containerId": "rossoctl",
                 "childRoles": [
                     {
                         "id": "r-dev-uuid",
@@ -410,7 +410,7 @@ class TestKeycloakRealWorldPayloads:
         assert not hasattr(r, "mappedScopes")
 
     def test_service_keycloak_system_client_account(self):
-        """Keycloak system 'account' client: placeholder name resolved, no kagenti type."""
+        """Keycloak system 'account' client: placeholder name resolved, no rossoctl type."""
         s = Service.model_validate(
             {
                 "id": "account-client-uuid",

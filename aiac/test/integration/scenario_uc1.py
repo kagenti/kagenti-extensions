@@ -33,10 +33,10 @@ from __future__ import annotations
 # --- Realm + deployment identifiers ---------------------------------------------------------
 
 # The realm the deployed AIAC stack operates on (the cluster's ``aiac-pdp-config`` ConfigMap sets
-# ``KEYCLOAK_REALM=kagenti`` on the Controller + IdP-config pods, so the UC-1 harness must resolve
+# ``KEYCLOAK_REALM=rossoctl`` on the Controller + IdP-config pods, so the UC-1 harness must resolve
 # and provision against the same realm). Never deleted/recreated; the operator registers the demo
 # namespace's clients into it. Override with ``AIAC_TEST_REALM`` if the stack runs on another realm.
-REALM_DEFAULT = "kagenti"
+REALM_DEFAULT = "rossoctl"
 
 # Namespace the demo workloads deploy into (operator registers clients as "{ns}/{workload}").
 DEMO_NAMESPACE_DEFAULT = "team1"
