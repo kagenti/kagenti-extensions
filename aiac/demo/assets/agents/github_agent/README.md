@@ -1,6 +1,6 @@
 # github-agent
 
-An autonomous A2A agent that acts on a user's behalf against GitHub **source repositories** and an **issue/PR tracker**, using the [`github-tool-mcp`](https://github.com/kagenti/kagenti-extensions) MCP server.
+An autonomous A2A agent that acts on a user's behalf against GitHub **source repositories** and an **issue/PR tracker**, using the [`github-tool-mcp`](https://github.com/rossoctl/cortex) MCP server.
 
 This agent implements the canonical `github-agent` used by the AIAC policy-pipeline integration test — the two skills match the policy scenario's `source_operations` and `issue_operations` roles.
 
@@ -68,7 +68,7 @@ curl -s localhost:8000/.well-known/agent-card.json | python3 -m json.tool
 
 Optionally, run `expect -f test_startup.exp` instead to check startup automatically.
 
-## Deploying to Kagenti (Kind cluster)
+## Deploying to Rossoctl (Kind cluster)
 
 See [`../../INSTALL.md`](../../INSTALL.md) — the single install guide for this agent and the
 `github_tool` stub together (build, `kind load`, manifests, invariants, verification).

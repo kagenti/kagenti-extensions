@@ -21,8 +21,8 @@ from .kube import list_agentcards, list_pods, read_service
 from .state import OnboardingProvisionState
 from .types import RoleDefinition, ScopeDefinition, ServiceProvision
 
-_TYPE_LABEL = "kagenti.io/type"
-_MCP_LABEL = "protocol.kagenti.io/mcp"
+_TYPE_LABEL = "rossoctl.io/type"
+_MCP_LABEL = "protocol.rossoctl.io/mcp"
 
 
 # --------------------------------------------------------------------------- #
@@ -83,7 +83,7 @@ def _select_pod(pods, workload_name: str):
 # Nodes                                                                        #
 # --------------------------------------------------------------------------- #
 def classify_service(state: OnboardingProvisionState) -> dict:
-    """Resolve identity and determine service type from the operator's `kagenti.io/type`
+    """Resolve identity and determine service type from the operator's `rossoctl.io/type`
     pod label (authoritative — not the entity_id format)."""
     service_id = state.trigger.entity_id
 

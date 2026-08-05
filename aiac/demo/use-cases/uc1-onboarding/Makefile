@@ -5,7 +5,7 @@
 #   make demo   # prereqs -> clear -> setup -> onboard-agent -> show -> onboard-tool -> show
 #   make dev    # drive dev-user's intents through the after-tool snapshot
 #
-# Prereqs: a Kagenti/kind cluster with SPIRE + Keycloak + the kagenti operator (see
+# Prereqs: a rossoctl/kind cluster with SPIRE + Keycloak + the rossoctl operator (see
 # ../../assets/INSTALL.md and ../../../k8s/aiac-deployment-guide.md), and KEYCLOAK_URL /
 # KEYCLOAK_ADMIN_USERNAME / KEYCLOAK_ADMIN_PASSWORD in the environment.
 

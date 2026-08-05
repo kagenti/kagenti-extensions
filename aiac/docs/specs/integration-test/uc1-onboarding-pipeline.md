@@ -51,7 +51,7 @@ generated Rego decides correctly using the standalone `opa eval` binary as the o
 
 Phase-1 is explicit that **live enforcement / live traffic is out of scope** — correctness is shown by
 **evaluating the generated rules**, not by routing requests. So each rung is *onboard + evaluate*: the
-workloads are really deployed and really discovered by UC-1 (classify from the `kagenti.io/type` label,
+workloads are really deployed and really discovered by UC-1 (classify from the `rossoctl.io/type` label,
 read the AgentCard / MCP `tools/list`, provision roles/scopes into Keycloak, model access, emit Rego), but
 **no A2A message is ever sent through the agent**.
 
@@ -59,7 +59,7 @@ The generated Rego is the **artifact under test** — the LLM/PCE that produced 
 tests never trust it. Expected verdicts are **computed from** the `scenario_uc1.py` pair-lists (the
 intended policy). A mismatch fails the test and names the exact cell.
 
-Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, they are
+Because they need a live rossoctl cluster + operator + Keycloak + a real LLM, they are
 `@pytest.mark.integration` (out of the default unit run, `-m "not integration"`) and additionally
 `pytest.skip` when no `opa` binary is found.
 
@@ -84,7 +84,7 @@ Because they need a live Kagenti cluster + operator + Keycloak + a real LLM, the
 - **Workloads deployed + registered.** Both `github-agent` and simplified `github-tool` are **already
   deployed** in `AIAC_DEMO_NAMESPACE` and **already registered as Keycloak clients**
   (`client.name = "{ns}/{workload}"`) into `AIAC_TEST_REALM`. The tests do **not** `kubectl apply`
-  manifests or wait for operator registration / `kagenti.io/type` labels / AgentCard / `tools/list` — that
+  manifests or wait for operator registration / `rossoctl.io/type` labels / AgentCard / `tools/list` — that
   is deployment's job.
   > **Resolving `{service_id}`.** The `POST /apply/service/{service_id}` route is a **single path
   > segment**, and the Controller resolves the trigger via `admin.get_client(service_id)` — which keys
@@ -222,7 +222,7 @@ workloads.
 
 | Element | Value |
 |---------|-------|
-| Realm | `AIAC_TEST_REALM` (must match the deployed stack's `KEYCLOAK_REALM`; default `kagenti`) |
+| Realm | `AIAC_TEST_REALM` (must match the deployed stack's `KEYCLOAK_REALM`; default `rossoctl`) |
 | Agent | `github-agent` — **discovered** per-skill operator roles `github-agent.source_operations`, `github-agent.issue_operations` (mirroring the scopes); scopes `github-agent.source_operations`, `github-agent.issue_operations` (from AgentCard skills) |
 | Tool | `github-tool` (simplified) — **discovered** scopes `github-tool.{source-read, source-write, issues-read, issues-write}` (from MCP `tools/list`) |
 | Users | `dev-user` (`developer`), `test-user` (`tester`), `devops-user` (`devops`) |
@@ -234,12 +234,12 @@ workloads.
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `KUBECONFIG` | Kubeconfig for the live Kagenti/Kind cluster | — (required) |
+| `KUBECONFIG` | Kubeconfig for the live rossoctl/Kind cluster | — (required) |
 | `AIAC_DEMO_NAMESPACE` | Namespace the demo workloads are deployed in (precondition) | `team1` |
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds (user/realm-role provisioning + cleanup) | — (required) |
-| `AIAC_TEST_REALM` | Realm the tests resolve/provision against. **Must match the deployed AIAC stack's `KEYCLOAK_REALM`** — the in-cluster Controller resolves the onboarding trigger in *its own* realm, so a harness on a different realm resolves a client UUID the Controller can't find (404 → onboard 502). The demo namespace's clients are registered into it. | `kagenti` |
+| `AIAC_TEST_REALM` | Realm the tests resolve/provision against. **Must match the deployed AIAC stack's `KEYCLOAK_REALM`** — the in-cluster Controller resolves the onboarding trigger in *its own* realm, so a harness on a different realm resolves a client UUID the Controller can't find (404 → onboard 502). The demo namespace's clients are registered into it. | `rossoctl` |
 | `AIAC_CONTROLLER_URL` | Base URL of the in-cluster AIAC Controller (via port-forward) for `POST /apply/service/{id}` | `http://127.0.0.1:7070` |
 | `AIAC_OPA_POD` / `AIAC_OPA_SELECTOR` | OPA-writer pod (or label selector) to `kubectl cp` `.rego` from | — (resolved from labels) |
 | `AIAC_OPA_REGO_PATH` | Writer output dir inside the pod | `/rego` |
@@ -253,12 +253,12 @@ workloads.
 
 ## Runbook
 
-Runnable against a live Kagenti/Kind cluster (operator + Keycloak + SPIRE) with the AIAC stack running the
+Runnable against a live rossoctl/Kind cluster (operator + Keycloak + SPIRE) with the AIAC stack running the
 **OPA filesystem-stub writer**, `github-agent` + `github-tool` **already deployed and registered** into
 `AIAC_TEST_REALM`, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 
 ```bash
-# env: KUBECONFIG + KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to kagenti (match the stack's KEYCLOAK_REALM); opa on PATH or $OPA_BIN
+# env: KUBECONFIG + KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to rossoctl (match the stack's KEYCLOAK_REALM); opa on PATH or $OPA_BIN
 .venv/bin/pytest test/integration/ -m integration -k uc1_onboard -v
 # A failing node names the exact cell, e.g.:
 #   test_outbound[test-user-github-tool.source-read] — expected deny, opa allowed
@@ -287,10 +287,10 @@ The suite `pytest.skip`s when no `opa` binary is found.
 - **Grant sets, semantic.** Equivalence is re-derived from the Rego data maps and compared as sets — the
   semantic-similarity guarantee, not byte-identity.
 - **Stack's realm, leave-in-place; per-rung cleanup.** UC-1 resolves/provisions against the deployed
-  stack's `KEYCLOAK_REALM` (default `kagenti`) and **never deletes** the realm/users/roles; only the
+  stack's `KEYCLOAK_REALM` (default `rossoctl`) and **never deletes** the realm/users/roles; only the
   provisioned agent/tool roles/scopes are cleaned up per rung so onboarding runs from a clean slate.
   (Contrast `5.3 policy-pipeline`, which owns a **throwaway** realm it `delete_realm`s + recreates each
-  run — that suite must never point `AIAC_TEST_REALM` at `kagenti`, or it destroys the demo clients.)
+  run — that suite must never point `AIAC_TEST_REALM` at `rossoctl`, or it destroys the demo clients.)
 - **LLM nondeterminism, contained.** PRB LLM pinned `temperature=0`; both cell-level and grant-set
   assertions; `@pytest.mark.integration`, out of default CI.
 - **Prior art, shared not copied.** Reuses the `5.3` shape (`opa` discovery/skip, scenario-as-oracle,
@@ -328,7 +328,7 @@ Tracking issues: `testing/5.4-uc1-onboarding-integration-test.md` (epic) + `5.4.
 
 **Functional** inputs — the PRB reads the descriptions and the `policy.md` to produce the role→scope
 mappings. Descriptions are **generic and keyword-free**; client `type` is set by UC-1 from the
-`kagenti.io/type` label.
+`rossoctl.io/type` label.
 
 ### Discovered entities (what UC-1 provisions)
 

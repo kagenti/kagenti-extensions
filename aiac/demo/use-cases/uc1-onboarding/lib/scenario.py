@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 # --- Realm + deployment identifiers ---------------------------------------------------------
 
-REALM_DEFAULT = "kagenti"
+REALM_DEFAULT = "rossoctl"
 DEMO_NAMESPACE_DEFAULT = "team1"
 AGENT_WORKLOAD = "github-agent"
 TOOL_WORKLOAD = "github-tool"
