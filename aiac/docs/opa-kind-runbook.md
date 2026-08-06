@@ -54,10 +54,53 @@ read the delegation chain (see [Part B](#part-b--outbound-token-exchange--opa)).
   - `ROSSOCTL_DIR` → `rossoctl/rossoctl` clone, i.e. the Helm chart
     (default: `../rossoctl`)
 - `kubectl`, `helm`, `kind`, and `docker` (or `podman`) on `PATH`.
+  - If `kubectl` reports `connection refused` reaching the API server, the Kind
+    node was likely restarted and reassigned its API-server host port, leaving
+    the exported kubeconfig stale. Re-export it:
+    `kind export kubeconfig --name rossoctl`. (The
+    [`scripts/opa-kind-driver.sh`](../../scripts/opa-kind-driver.sh) driver does
+    this automatically in preflight.)
 - The `rossoctl` Keycloak realm has `dev-user` and `alice` users with
   **password == username**, and the `rossoctl` client has Direct Access Grants
-  enabled plus a `username → sub` protocol mapper. In this cluster this is
-  already done cluster-wide — it is a one-time Keycloak change, not per-agent.
+  enabled plus a `username → sub` protocol mapper. This is a one-time Keycloak
+  change, not per-agent — but a freshly (re)provisioned realm may not have it,
+  in which case token minting fails with `unauthorized_client` (grants disabled),
+  `invalid_grant` (wrong/unset password), or a token whose `sub` is absent
+  (mapper missing). To establish it:
+
+  ```bash
+  KC=http://keycloak.localtest.me:8080
+  ADMIN=$(curl -s -X POST "$KC/realms/master/protocol/openid-connect/token" \
+    -d client_id=admin-cli -d username=admin -d password=admin -d grant_type=password \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+
+  # 1. rossoctl client: enable Direct Access Grants + add username->sub mapper
+  CID=$(curl -s -H "Authorization: Bearer $ADMIN" "$KC/admin/realms/rossoctl/clients?clientId=rossoctl" \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+  curl -s -H "Authorization: Bearer $ADMIN" "$KC/admin/realms/rossoctl/clients/$CID" \
+    | python3 -c 'import sys,json;d=json.load(sys.stdin);d["directAccessGrantsEnabled"]=True;print(json.dumps(d))' \
+    | curl -s -o /dev/null -w "enable DAG HTTP %{http_code}\n" -X PUT -H "Authorization: Bearer $ADMIN" \
+      -H "Content-Type: application/json" "$KC/admin/realms/rossoctl/clients/$CID" --data-binary @-
+  curl -s -o /dev/null -w "add sub mapper HTTP %{http_code}\n" -X POST -H "Authorization: Bearer $ADMIN" \
+    -H "Content-Type: application/json" \
+    "$KC/admin/realms/rossoctl/clients/$CID/protocol-mappers/models" \
+    -d '{"name":"username-to-sub","protocol":"openid-connect",
+         "protocolMapper":"oidc-usermodel-property-mapper",
+         "config":{"user.attribute":"username","claim.name":"sub","jsonType.label":"String",
+                   "id.token.claim":"true","access.token.claim":"true","userinfo.token.claim":"true"}}'
+
+  # 2. set each user's password == username (non-temporary)
+  for u in dev-user alice; do
+    UID_=$(curl -s -H "Authorization: Bearer $ADMIN" "$KC/admin/realms/rossoctl/users?username=$u&exact=true" \
+      | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["id"])')
+    curl -s -o /dev/null -w "reset $u HTTP %{http_code}\n" -X PUT -H "Authorization: Bearer $ADMIN" \
+      -H "Content-Type: application/json" \
+      "$KC/admin/realms/rossoctl/users/$UID_/reset-password" \
+      -d "{\"type\":\"password\",\"value\":\"$u\",\"temporary\":false}"
+  done
+  ```
+
+  Verify with A.1 below — a good token decodes to `sub = dev-user`.
 
 All commands below are run from the repo root (`cortex/`).
 
