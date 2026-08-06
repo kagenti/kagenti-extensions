@@ -40,6 +40,10 @@
 #   SKIP_ENABLE    if set to 1, skip Step 1's image rebuild + opa-kind-enable.sh
 #                  and only verify OPA is already wired (fast path when iterating
 #                  on the policy CR against an already-enabled cluster).
+#   KIND_CLUSTER   name of the Kind cluster                (default: rossoctl).
+#                  Preflight uses this to re-export the kubeconfig if the cluster
+#                  is unreachable — a Kind node reassigns its API-server host port
+#                  on restart, which leaves the exported kubeconfig stale.
 #
 # Run from the repo root (cortex/):
 #   OPERATOR_DIR=../operator ROSSOCTL_DIR=../rossoctl ./scripts/opa-kind-driver.sh
@@ -62,6 +66,7 @@ SYS_NS="${SYS_NS:-rossoctl-system}"
 KC="${KC:-http://keycloak.localtest.me:8080}"
 REALM="${REALM:-rossoctl}"
 POLL_SECS="${POLL_SECS:-150}"
+KIND_CLUSTER="${KIND_CLUSTER:-rossoctl}"
 
 AGENT_LABEL="app.kubernetes.io/name=github-agent"
 EXPECTED_SPIFFE="spiffe://localtest.me/ns/${NS}/sa/github-agent"
@@ -108,23 +113,47 @@ require_cmd() {
 }
 
 # ── Keycloak helpers (from runbook A.1 / A.2 / B.2) ──────────────────────────
-# mint_token <user>  — password grant, prints the access_token
+# mint_token <user>  — password grant, prints the access_token. On failure it
+# surfaces Keycloak's actual error/error_description (e.g. unauthorized_client,
+# invalid_grant) instead of guessing, and points at the exact prerequisite that
+# is usually missing.
 mint_token() {
-  local user="$1" tok
-  tok=$(curl -s -X POST "${KC}/realms/${REALM}/protocol/openid-connect/token" \
+  local user="$1" resp tok err
+  resp=$(curl -s -X POST "${KC}/realms/${REALM}/protocol/openid-connect/token" \
           -d client_id=rossoctl -d "username=${user}" -d "password=${user}" \
-          -d grant_type=password -d scope=openid \
-        | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)
-  [ -n "$tok" ] || die "could not mint a token for user '${user}' at ${KC} (is Keycloak reachable and does the user exist?)"
+          -d grant_type=password -d scope=openid || true)
+  tok=$(printf '%s' "$resp" | python3 -c 'import sys,json
+try: print(json.load(sys.stdin).get("access_token","") or "")
+except Exception: print("")' 2>/dev/null || true)
+  if [ -z "$tok" ]; then
+    err=$(printf '%s' "$resp" | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin)
+    print((d.get("error","?")+": "+d.get("error_description","")).strip())
+except Exception:
+    print("no/invalid JSON from the token endpoint (is Keycloak reachable at the URL above?)")' 2>/dev/null || true)
+    die "could not mint a token for user '${user}' at ${KC} — Keycloak said: ${err}
+     Keycloak Prerequisites (aiac/docs/opa-kind-runbook.md): in realm '${REALM}' the
+     'rossoctl' client needs Direct Access Grants enabled + a username->sub protocol
+     mapper, and users must exist with password == username."
+  fi
   printf '%s' "$tok"
 }
 
-# token_sub <token>  — decode the JWT payload and print the 'sub' claim
+# token_sub <token>  — decode the JWT payload and print the 'sub' claim.
+# Tolerates an empty/malformed token (prints nothing) rather than throwing a
+# Python traceback, so a caller's own assertion produces the failure message.
 token_sub() {
   printf '%s' "$1" | python3 -c '
 import sys,json,base64
-t=sys.stdin.read().split(".")[1]; t+="="*(-len(t)%4)
-print(json.loads(base64.urlsafe_b64decode(t)).get("sub",""))'
+t=sys.stdin.read().strip().split(".")
+if len(t) < 2:
+    print(""); raise SystemExit(0)
+p=t[1]; p+="="*(-len(p)%4)
+try:
+    print(json.loads(base64.urlsafe_b64decode(p)).get("sub","") or "")
+except Exception:
+    print("")'
 }
 
 # admin_token  — realm master admin token for Keycloak admin API (B.2)
@@ -214,7 +243,19 @@ require_cmd
 [ -f "$POLICY_FILE" ]    || die "policy CR not found: ${POLICY_FILE}"
 [ -x "$ENABLE_SCRIPT" ]  || die "enable script not found/executable: ${ENABLE_SCRIPT}"
 [ -x "$RESTORE_SCRIPT" ] || die "restore script not found/executable: ${RESTORE_SCRIPT}"
-kubectl cluster-info >/dev/null 2>&1 || die "kubectl cannot reach a cluster (is the Kind cluster up and KUBECONFIG set?)"
+# A Kind node container reassigns its API-server host port on restart, which
+# leaves the previously exported kubeconfig pointing at a stale port ("connection
+# refused"). If the cluster is unreachable but the named Kind cluster exists,
+# re-export its kubeconfig and retry before giving up — self-heals the common
+# "cluster was restarted" case instead of failing preflight.
+if ! kubectl cluster-info >/dev/null 2>&1; then
+  if command -v kind >/dev/null 2>&1 && kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER"; then
+    info "cluster unreachable — re-exporting kubeconfig for Kind cluster '${KIND_CLUSTER}' (API-server host port may have changed on restart)"
+    kind export kubeconfig --name "$KIND_CLUSTER" >/dev/null 2>&1 || true
+  fi
+  kubectl cluster-info >/dev/null 2>&1 \
+    || die "kubectl cannot reach a cluster (is the Kind cluster '${KIND_CLUSTER}' up and KUBECONFIG set? try: kind export kubeconfig --name ${KIND_CLUSTER})"
+fi
 pass "tooling present, policy CR + helper scripts found, cluster reachable"
 
 # ── Step 1 — Enable OPA in both legs ─────────────────────────────────────────
@@ -287,7 +328,11 @@ expect_eq "github-agent SPIFFE ID" "$CLIENT_ID" "$EXPECTED_SPIFFE"
 printf '\n%s%s====== Part A — Inbound authorization ======%s\n' "$C_BLD" "$C_CYN" "$C_RST"
 
 step "A.1 — dev-user token carries sub=dev-user"
-DEV_SUB=$(token_sub "$(mint_token dev-user)")
+# Mint first (mint_token dies with Keycloak's real error if the grant fails),
+# then decode — so a mint failure aborts here under set -e rather than feeding
+# an empty token into token_sub.
+DEV_TOKEN="$(mint_token dev-user)"
+DEV_SUB="$(token_sub "$DEV_TOKEN")"
 info "decoded sub claim: ${DEV_SUB}"
 expect_eq "dev-user token sub claim" "$DEV_SUB" "dev-user"
 
