@@ -54,20 +54,30 @@ Everything below is a real cluster, a real Keycloak, a real LLM call, and a real
 exchange — there is no offline mode. Bring up a rossoctl cluster with SPIRE + Keycloak + the
 rossoctl operator first (see [../../assets/INSTALL.md](../../assets/INSTALL.md) and
 [../../../k8s/aiac-deployment-guide.md](../../../k8s/aiac-deployment-guide.md) for reference, not as a
-manual checklist — `make prereqs` below verifies and, where safe, installs what's missing) and
-export `KEYCLOAK_URL` / `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD`.
+manual checklist — `make prereqs` below verifies and, where safe, installs what's missing).
+
+You do **not** need to export the Keycloak variables by hand. `make keycloak`
+(`init/00-discover-keycloak.sh`) port-forwards the in-cluster Keycloak to a local port and reads the
+admin credentials from the `keycloak-admin-secret`, exporting `KEYCLOAK_URL` /
+`KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` for the step that runs it. Every
+Keycloak-touching target self-runs it first, so you rarely call it directly — the forward is set up
+once and reused across the run. If you already export those three variables (e.g. to point at a
+Keycloak this can't reach), your values win.
 
 ```bash
+make keycloak  # (optional) port-forward Keycloak + discover admin creds; the targets below self-run it
 make prereqs   # verify/install cluster + AIAC stack + demo workloads; wait for Keycloak registration
 make clear     # reset to a clean slate
 make setup     # provision demo users/roles, mount policy.md, configure token exchange
 ```
 
+To tear down the port-forward afterwards: `pkill -f 'port-forward .*keycloak-service'`.
+
 **Pause 1 — baseline.** `make show` reports three users with roles, no `github-*` roles or scopes
 yet, and no generated `.rego` at all. Nothing has been onboarded; there is nothing to enforce yet.
 
 ```bash
-make onboard-agent   # AIAC discovers github-agent, reads policy.md, generates the inbound gate
+make agent   # AIAC discovers github-agent, reads policy.md, generates the inbound gate
 make show
 ```
 
@@ -76,7 +86,7 @@ the agent's discovered scopes. The outbound gate exists but every map in it is s
 there's no tool yet for the agent to act on.
 
 ```bash
-make onboard-tool    # AIAC discovers github-tool's capabilities and completes the agent's outbound gate
+make tool    # AIAC discovers github-tool's capabilities and completes the agent's outbound gate
 make show
 ```
 
@@ -98,8 +108,31 @@ Each target does a real `grant_type=password` login, checks the inbound gate, pe
 result table. `devops-user`'s inbound denial is the intended story, not a failure: nothing in the
 policy grants devops-user access to the agent at all.
 
-Run `make demo` for the whole provisioning ladder (`prereqs` through the second `show`) in one
-shot, then drive the three users separately.
+### One-shot: `make demo`
+
+The individual targets above are grouped into three phase aggregates, so you can run a whole phase
+at once or the entire demo end to end:
+
+| Phase target | Steps | What it does |
+|--------------|-------|--------------|
+| `make init`    | `00`–`03` | discover Keycloak → verify prereqs → clear → setup |
+| `make onboard` | `04`–`05` | onboard the agent, then the tool |
+| `make run`     | —         | drive all three users (developer, tester, devops) |
+
+`make demo` chains all three (`init → onboard → run`) with no narrated pauses — use it when you just
+want the full run:
+
+```bash
+make demo     # init (00-03) -> onboard (04-05) -> run (dev/test/devops)
+```
+
+Or drive one phase — or one user — at a time:
+
+```bash
+make init     # or step-by-step: make prereqs / clear / setup
+make onboard  # or: make agent / make tool
+make run      # or a single user: make dev / make test / make devops
+```
 
 ## Architecture
 
@@ -128,14 +161,14 @@ does not itself sit in the request path (see the appendix).
 - **`make prereqs` hangs waiting on client registration** — Keycloak client registration is async
   after the operator injects a workload; give it a couple of minutes, then check the operator's
   webhook logs.
-- **`make onboard-agent`/`make onboard-tool` times out** — onboarding drives the Policy Rules
+- **`make agent`/`make tool` times out** — onboarding drives the Policy Rules
   Builder's LLM calls and can genuinely take minutes; re-run with a larger `AIAC_ONBOARD_TIMEOUT` if
   your LLM endpoint is slow.
 - **`make setup` / `make dev` fails with a Keycloak profile error** — Keycloak 26's declarative user
-  profile requires `email`/`firstName`/`lastName` before `grant_type=password` succeeds; `02-setup.py`
+  profile requires `email`/`firstName`/`lastName` before `grant_type=password` succeeds; `03-setup.py`
   sets these, so this points at a realm that was provisioned some other way.
 - **A `run-*` target aborts with "no policy found"** — the drivers always run against
-  `generated/02-after-tool/`; run `make onboard-agent && make onboard-tool` first.
+  `generated/02-after-tool/`; run `make agent && make tool` first.
 
 ## Appendix: known gaps
 

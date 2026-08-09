@@ -10,17 +10,20 @@ from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
 import pytest
+from openai import APIConnectionError, APITimeoutError
 
 from aiac.agent.policy_rules_builder.graph import (
     AuditVerdict,
     PolicyRulesBuilderError,
     RoleSelection,
     ScopeSelection,
+    _build_llm,
     build_role_rules,
     build_scope_rules,
 )
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule
+from aiac.shared.upstream import is_transient
 
 
 # --------------------------------------------------------------------------- #
@@ -217,3 +220,73 @@ def test_llm_unavailable_raises_after_upstream_max_retries(monkeypatch):
             build_role_rules(_role(), [_scope("s-write", "write")])
 
     assert invoke.call_count == 2
+
+
+# --------------------------------------------------------------------------- #
+# Slice 10 — request-timeout robustness. The openai/langchain_openai timeout    #
+# and dropped-connection exceptions must be classified transient so the         #
+# _structured_call retry wrapper self-heals instead of letting /apply hang.     #
+# --------------------------------------------------------------------------- #
+def _openai_request():
+    import httpx
+
+    return httpx.Request("POST", "https://llm.example/v1/chat/completions")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        APITimeoutError(request=_openai_request()),
+        APIConnectionError(request=_openai_request()),
+    ],
+)
+def test_openai_timeout_and_connection_errors_are_transient(exc):
+    assert is_transient(exc) is True
+
+
+def test_llm_timeout_is_retried_then_reraised(monkeypatch):
+    """A never-returning LLM that raises APITimeoutError is retried UPSTREAM_MAX_RETRIES
+    times and then surfaces — proving the timeout path self-heals rather than wedging."""
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "2")
+
+    invoke = MagicMock(side_effect=APITimeoutError(request=_openai_request()))
+    runnable = MagicMock()
+    runnable.invoke = invoke
+    llm = MagicMock()
+    llm.with_structured_output.return_value = runnable
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
+        stack.enter_context(patch("time.sleep"))
+        with pytest.raises(APITimeoutError):
+            build_role_rules(_role(), [_scope("s-write", "write")])
+
+    assert invoke.call_count == 2
+
+
+# --------------------------------------------------------------------------- #
+# Slice 11 — _build_llm sources a non-None request timeout from                 #
+# LLM_REQUEST_TIMEOUT and disables the client's own retries (tenacity owns      #
+# retry). Without a timeout a stalled socket never raises.                      #
+# --------------------------------------------------------------------------- #
+def test_build_llm_sets_request_timeout_from_env(monkeypatch):
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT", "45")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    with patch("aiac.agent.policy_rules_builder.graph.ChatOpenAI") as mk:
+        _build_llm()
+
+    kwargs = mk.call_args.kwargs
+    assert kwargs["timeout"] == 45
+    assert kwargs["max_retries"] == 0
+
+
+def test_build_llm_defaults_timeout_on_bad_env(monkeypatch):
+    monkeypatch.setenv("LLM_REQUEST_TIMEOUT", "not-a-number")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    with patch("aiac.agent.policy_rules_builder.graph.ChatOpenAI") as mk:
+        _build_llm()
+
+    assert mk.call_args.kwargs["timeout"] == 120

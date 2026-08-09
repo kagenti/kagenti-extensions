@@ -17,6 +17,11 @@ data:
   LLM_BASE_URL: "https://openai-compatible-endpoint.example.com/v1"
   LLM_MODEL: "your-model-name"
   AIAC_AC_MODEL: "RBAC"
+  # Per-request LLM timeout (seconds): a stalled connection raises after this instead
+  # of wedging /apply forever. Timeouts are transient, so _structured_call retries them
+  # up to UPSTREAM_MAX_RETRIES (default 3) with exponential backoff before surfacing.
+  LLM_REQUEST_TIMEOUT: "120"
+  UPSTREAM_MAX_RETRIES: "3"
 
 ---
 # Prerequisites: create this Secret before applying this manifest:

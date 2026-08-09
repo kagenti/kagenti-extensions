@@ -26,6 +26,19 @@ from .prompts import build_auditor_messages, build_proposer_messages
 
 logger = logging.getLogger(__name__)
 MAX_AUDIT_RETRIES = 3
+_DEFAULT_LLM_REQUEST_TIMEOUT = 120.0
+
+
+def _request_timeout() -> float:
+    """Per-request LLM timeout (seconds) from ``LLM_REQUEST_TIMEOUT`` (default 120),
+    tolerant of an unset or non-numeric value — a bad value must not crash the request,
+    it falls back to the default (mirrors ``aiac.shared.upstream.max_retries``). Without
+    it a stalled connection never raises and the whole ``/apply`` request wedges forever."""
+    try:
+        value = float(os.getenv("LLM_REQUEST_TIMEOUT", str(_DEFAULT_LLM_REQUEST_TIMEOUT)))
+    except (TypeError, ValueError):
+        return _DEFAULT_LLM_REQUEST_TIMEOUT
+    return value if value > 0 else _DEFAULT_LLM_REQUEST_TIMEOUT
 
 
 class _Selection(BaseModel):
@@ -77,6 +90,10 @@ def _build_llm() -> ChatOpenAI:  # lazy -- NEVER called at import
         model=os.getenv("LLM_MODEL", ""),
         api_key=SecretStr(os.getenv("LLM_API_KEY", "")),
         temperature=0,
+        # Fail fast on a stalled socket; retries are owned by _structured_call's tenacity
+        # Retrying, so disable the client's own so attempts don't multiply.
+        timeout=_request_timeout(),
+        max_retries=0,
     )
 
 

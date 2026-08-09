@@ -5,7 +5,7 @@ Every step is wrapped so an already-satisfied condition prints a note rather tha
 demo runs against both the freshly-installed cluster (where none of this exists yet) and the
 already-configured one this was developed against (where all of it is already true).
 
-Not a standalone script — imported by ``02-setup.py``, its sole caller (unlike ``scenario.py``/
+Not a standalone script — imported by ``03-setup.py``, its sole caller (unlike ``scenario.py``/
 ``_lib.py``, which are shared across ``init/``/``onboard/``/``run/`` and live in ``lib/``).
 """
 
@@ -57,8 +57,8 @@ def ensure_default_audience_scope(admin, cfg: Config, client_uuid: str, client_n
     explicitly.
 
     Returns ``True`` when the scope is now assigned (added here or already present) and ``False``
-    when the scope does not exist yet, so the scope was skipped. The ``02-setup.py`` path calls this
-    before the tool is onboarded, where ``False`` is expected; the ``04-onboard-tool.py`` path calls
+    when the scope does not exist yet, so the scope was skipped. The ``03-setup.py`` path calls this
+    before the tool is onboarded, where ``False`` is expected; the ``05-onboard-tool.py`` path calls
     it afterwards, where ``False`` means the token-exchange audience is missing and onboarding must
     not report success."""
     admin.change_current_realm(cfg.realm)

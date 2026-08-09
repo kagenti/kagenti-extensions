@@ -3,7 +3,7 @@
 Policy Store (non-optional — its SQLite survives on a PV and onboarding appends with
 ``override=False``), and clear both the writer pod's ``/rego`` and the local ``generated/`` copy.
 
-Kept separate from ``02-setup.py`` so a presenter can re-run just the reset between takes.
+Kept separate from ``03-setup.py`` so a presenter can re-run just the reset between takes.
 """
 
 from __future__ import annotations

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Provision the demo's Keycloak users/roles, mount the PRB's policy.md on the Controller, run the
 token-exchange Keycloak setup, and resolve + print both workloads' internal client UUIDs (the
-trigger ids ``03-onboard-agent.py``/``04-onboard-tool.py`` need — the ``clientId`` is a slash-bearing
+trigger ids ``04-onboard-agent.py``/``05-onboard-tool.py`` need — the ``clientId`` is a slash-bearing
 SPIFFE URI the single-segment ``/apply/service/{id}`` route can't carry).
 """
 
