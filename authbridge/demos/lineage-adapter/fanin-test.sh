@@ -1,22 +1,25 @@
 #!/usr/bin/env bash
-# Same-trace fan-in concurrency test — demonstrates the wire-observer blind spot
-# BEFORE any fix, and shows that cross-trace concurrency is unaffected.
+# Same-trace fan-in concurrency test — the exact-pairing proof for the
+# tracestate stamp (wire contract v1.2+; single-channel since v1.5). This
+# harness originally demonstrated the wire-observer blind spot before the
+# stamp existed; both modes now expect N/N.
 #
 # Topology (deploy first — see header of agent-examples/a2a/fanin_probe/):
 #   driver -> fanin-agent (mid-chain: holds HOLD_MS, then calls downstream)
 #          -> fanin-echo  (leaf)
 #
 # Two modes, same N concurrent tagged requests, differing ONLY in trace ids:
-#   MODE=distinct  every request gets its OWN trace id (the proven E3 shape).
+#   MODE=distinct  every request gets its OWN trace id (the cross-trace shape).
 #                  Expect N/N: each fanin-agent outbound span is parented on
 #                  the inbound span carrying the SAME tag.
 #   MODE=shared    every request carries ONE trace id with distinct parent
 #                  span ids — the shape an upstream orchestrator's sidecar
 #                  produces when it fans out to the same agent within one
 #                  turn. The app holds all inbounds open (HOLD_MS) so every
-#                  outbound fires while all N inbounds are in flight. The
-#                  sidecar's trace-keyed map then has ONE entry for the trace
-#                  — expect ~1/N: outbounds collapse onto one inbound.
+#                  outbound fires while all N inbounds are in flight. Trace
+#                  membership cannot disambiguate here — only the tracestate
+#                  stamp couriered through the app's shim can. Expect N/N;
+#                  a collapse toward ~1/N means the stamp chain is broken.
 #
 # Ground truth is the tag in url.path: the sidecar records url.path on every
 # request span (no parser dependency), so for each outbound request span of
@@ -120,11 +123,12 @@ run_mode() {
   echo "---------------------------------------------------------------"
   echo "MODE=$mode : CORRECT PAIRING ${ok}/${total}  (fired $N)"
   if [ "$mode" = "distinct" ]; then
-    echo "expected: $N/$N — distinct traces, the trace-keyed map is exact"
+    echo "expected: $N/$N — distinct traces; in-process context propagation is exact"
   else
-    echo "expected: ~1/$N — one trace, the map holds ONE inbound; all"
-    echo "          outbounds collapse onto it. The bodies/tags are all"
-    echo "          captured correctly — only the parentage is wrong."
+    echo "expected: $N/$N — one trace, N in-flight inbounds; only the"
+    echo "          tracestate stamp can pair each outbound to its exact"
+    echo "          inbound. A collapse toward 1/$N means the stamp chain"
+    echo "          (sidecar re-stamp -> app shim courier) is broken."
   fi
   if [ "$mode" = "distinct" ]; then RESULT_DISTINCT="${ok}/${total}"; else RESULT_SHARED="${ok}/${total}"; fi
 }
