@@ -1,18 +1,33 @@
-"""Generalized policy-pipeline evaluation harness — Scenarios 1, 3, 4 (spec: ``docs/specs/
-integration-test/policy-eval-scenarios.md``).
+"""Generalized policy-pipeline evaluation harness — Scenarios 1, 3, 4, 6-10 (spec: ``docs/specs/
+integration-test/policy-eval-scenarios.md``). Scenario numbers 2 and 5 are reserved for the
+light guardrail tests (``test_guardrail_conflicts.py``/``test_guardrail_injection.py``, out of
+scope here) and are deliberately skipped in this sequence.
 
 Companion to ``test_policy_pipeline.py`` (which drives the fixed single-agent/single-tool
 ``github-agent`` scenario as a regression baseline — untouched by this file). This harness drives
 the same identity->policy pipeline (Keycloak -> real Policy Rules Builder -> real Policy
-Computation Engine -> OPA Policy Writer, nothing mocked) against three independently-authored,
-multi-entity scenarios:
+Computation Engine -> OPA Policy Writer, nothing mocked) against eight independently-authored,
+single-aspect scenarios, each in its own non-code domain (except ``baseline``, the one code
+scenario):
 
-  - ``scenario_eval_baseline`` (Scenario 1)     — 5 users / 3 agents / 4 tools, clean and
-    unambiguous, includes one legitimate agent-to-agent target grant.
-  - ``scenario_eval_unreachable`` (Scenario 3)  — 5 users / 3 agents / 4 tools, silent gaps
-    producing emergent unreachable agents/tools and zero-access users.
-  - ``scenario_eval_adversarial`` (Scenario 4)  — 5 users / 2 agents / 3 tools, misleading
-    names/descriptions plus an identity/boundary-confusion probe.
+  - ``scenario_eval_baseline`` (Scenario 1)               — software eng.; 3 users / 2 agents / 2
+    tools, clean and unambiguous regression baseline at UC1 scale (reuses UC1's
+    developer/tester/devops roles).
+  - ``scenario_eval_agent_delegation`` (Scenario 3)       — logistics/shipping; 2 users / 2 agents
+    / 1 tool, isolates the agent-to-agent ``target_scopes`` delegation mechanism. Lives under
+    ``test/integration/`` (not ``eval/`` like the rest) — see the note below.
+  - ``scenario_eval_unreachable_resources`` (Scenario 4)  — healthcare/clinic; 1 user / 2 agents /
+    2 tools, silent gaps producing emergent unreachable agents and tools.
+  - ``scenario_eval_ambiguous_clause`` (Scenario 6)       — education/registrar; 1 user / 1 agent /
+    1 tool, one genuinely multi-interpretable policy clause.
+  - ``scenario_eval_wildcard_grant`` (Scenario 7)         — retail/inventory; 1 user / 1 agent / 1
+    tool, wildcard-phrased grant expansion.
+  - ``scenario_eval_misleading_descriptions`` (Scenario 8) — hospitality/hotel; 2 users / 1 agent /
+    1 tool, a name-bait role and an inert scary-named scope.
+  - ``scenario_eval_confusable_agents`` (Scenario 9)      — sports/coaching; 2 users / 2 agents / 2
+    tools, a confusable agent-name pair plus an identity/boundary-confusion probe.
+  - ``scenario_eval_empty_descriptions`` (Scenario 10)    — agriculture/irrigation; 1 user / 1
+    agent / 1 tool, every entity/role/scope description is empty.
 
 Unlike ``test_policy_pipeline.py`` (hardcoded to the literal ``github_agent`` slug and a single
 tool id), every path/query here is derived from each scenario module's own agent/tool ids via
@@ -20,10 +35,15 @@ tool id), every path/query here is derived from each scenario module's own agent
 generalized ``probe_eval.rego`` (parameterized by ``input.agent_id``) rather than the fixed
 ``probe.rego``. ``launcher.py`` is reused unmodified.
 
+``scenario_eval_agent_delegation``'s data file is the one exception to the "everything lives in
+``eval/``" rule — it sits at ``test/integration/scenario_eval_agent_delegation.py`` (sibling of
+``launcher.py``/``scenario_uc1.py``), so each scenario's ``POLICY_FILE`` is resolved relative to
+*that scenario module's own directory*, not the fixed ``eval/`` directory.
+
 Run (needs KEYCLOAK_URL + admin creds + LLM_* exported, ``opa`` on PATH):
     .venv/bin/pytest test/integration/eval/test_policy_pipeline_eval.py -m integration_extended -v
 Without ``-m integration_extended`` the suite is skipped; without ``opa`` each node skips at
-runtime. This suite is heavier than ``test_policy_pipeline.py`` (three full pipeline runs, more
+runtime. This suite is heavier than ``test_policy_pipeline.py`` (eight full pipeline runs, more
 PRB/LLM calls) hence the separate marker.
 """
 
@@ -50,9 +70,18 @@ SRC = REPO_ROOT / "src"
 sys.path.insert(0, str(REPO_ROOT))  # so ``import test.integration.*`` resolves
 sys.path.insert(0, str(SRC))  # so ``import aiac.*`` resolves
 
-from test.integration.eval import scenario_eval_adversarial as scn_adversarial  # noqa: E402
+from test.integration import scenario_eval_agent_delegation as scn_agent_delegation  # noqa: E402
+from test.integration.eval import scenario_eval_ambiguous_clause as scn_ambiguous_clause  # noqa: E402
 from test.integration.eval import scenario_eval_baseline as scn_baseline  # noqa: E402
-from test.integration.eval import scenario_eval_unreachable as scn_unreachable  # noqa: E402
+from test.integration.eval import scenario_eval_confusable_agents as scn_confusable_agents  # noqa: E402
+from test.integration.eval import scenario_eval_empty_descriptions as scn_empty_descriptions  # noqa: E402
+from test.integration.eval import (  # noqa: E402
+    scenario_eval_misleading_descriptions as scn_misleading_descriptions,
+)
+from test.integration.eval import (  # noqa: E402
+    scenario_eval_unreachable_resources as scn_unreachable_resources,
+)
+from test.integration.eval import scenario_eval_wildcard_grant as scn_wildcard_grant  # noqa: E402
 from test.integration.launcher import (  # noqa: E402
     Service,
     require_env,
@@ -78,8 +107,13 @@ log = logging.getLogger(__name__)
 
 SCENARIOS: dict[str, ModuleType] = {
     "baseline": scn_baseline,
-    "unreachable": scn_unreachable,
-    "adversarial": scn_adversarial,
+    "agent_delegation": scn_agent_delegation,
+    "unreachable_resources": scn_unreachable_resources,
+    "ambiguous_clause": scn_ambiguous_clause,
+    "wildcard_grant": scn_wildcard_grant,
+    "misleading_descriptions": scn_misleading_descriptions,
+    "confusable_agents": scn_confusable_agents,
+    "empty_descriptions": scn_empty_descriptions,
 }
 
 
@@ -486,8 +520,8 @@ def pipeline() -> dict[str, dict]:
 
     Each scenario gets its own realm (``scenario.REALM_DEFAULT``) and its own fresh IdP/Store/OPA
     subprocess trio — unlike ``test_policy_pipeline.py``'s two variants (which share one realm and
-    reuse a single IdP process), these three scenarios' realms differ, so nothing can safely be
-    kept warm across them.
+    reuse a single IdP process), these scenarios' realms differ, so nothing can safely be kept warm
+    across them.
     """
     require_env(
         "KEYCLOAK_URL",
@@ -514,7 +548,8 @@ def pipeline() -> dict[str, dict]:
         for stale in rego_dir.glob("*.rego"):
             stale.unlink()
         db_path = Path(tempfile.mkdtemp(prefix=f"aiac-store-eval-{name}-")) / "policy_model.db"
-        os.environ["AIAC_POLICY_FILE"] = str(HERE / scenario.POLICY_FILE)
+        scenario_dir = Path(scenario.__file__).resolve().parent
+        os.environ["AIAC_POLICY_FILE"] = str(scenario_dir / scenario.POLICY_FILE)
         log.info(
             "scenario %s: realm=%s policy=%s rego_dir=%s",
             name, scenario.REALM_DEFAULT, os.environ["AIAC_POLICY_FILE"], rego_dir,
@@ -543,7 +578,7 @@ def pipeline() -> dict[str, dict]:
         # compute_and_apply is fire-and-forget: it swallows every dependency error and logs it, so
         # a failed IdP/store/PDP interaction (or an empty derived agent set) silently writes no
         # rego. Assert every agent's rego actually landed here at setup — EXCEPT agents the
-        # scenario itself declares as deliberately/emergently unreachable (Scenario 3), so a real
+        # scenario itself declares as deliberately/emergently unreachable (Scenario 4), so a real
         # pipeline failure still surfaces as one clear error instead of cryptic per-test skips.
         allow_missing = {a.replace("-", "_") for a in getattr(scenario, "EXPECT_NO_REGO", frozenset())}
         expected = [
@@ -737,7 +772,7 @@ def test_grant_set_matches_truth_table(pipeline: dict[str, dict], scenario_name:
 
 @pytest.mark.parametrize("scenario_name", _scenario_ids())
 def test_identity_confusion_probes(pipeline: dict[str, dict], scenario_name: str) -> None:
-    """Optional per-scenario hook (Scenario 4): ``scenario.IDENTITY_CONFUSION_PROBES`` is a list of
+    """Optional per-scenario hook (Scenario 9): ``scenario.IDENTITY_CONFUSION_PROBES`` is a list of
     ``(subject, agent_id, expected)`` triples where ``subject`` is another agent's own
     service-account identity, asserting the inbound gate doesn't accidentally admit an agent
     identity that looks like a subject. Scenarios that define no probes are skipped."""

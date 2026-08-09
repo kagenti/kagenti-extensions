@@ -15,15 +15,27 @@
 
 Two independent groups of files, split by cost tier:
 
-**Heavy scenarios (1, 3, 4) — full pipeline, new marker — under `aiac/test/integration/eval/`:**
+**Heavy scenarios (1, 3, 4, 6-10) — full pipeline, new marker — under `aiac/test/integration/eval/`,
+except `agent_delegation`:**
 - `aiac/test/integration/eval/test_policy_pipeline_eval.py` — the test module, `@pytest.mark.integration_extended`.
-- `aiac/test/integration/eval/scenario_eval_baseline.py`, `scenario_eval_unreachable.py`,
-  `scenario_eval_adversarial.py` — pure-data scenario modules for Scenarios 1, 3, and 4 respectively
-  (mirroring `scenario.py`'s shape, generalized to lists/dicts of many entities).
-- `aiac/test/integration/eval/policy.eval_baseline.md`, `policy.eval_unreachable.md`,
-  `policy.eval_adversarial.md` — the three scenarios' policy text, read by the PRB via
-  `AIAC_POLICY_FILE` (these **are** load-bearing at runtime, unlike the two light-scenario `.md`
-  files below).
+- `aiac/test/integration/eval/scenario_eval_baseline.py` (Scenario 1),
+  `scenario_eval_unreachable_resources.py` (Scenario 4), `scenario_eval_ambiguous_clause.py`
+  (Scenario 6), `scenario_eval_wildcard_grant.py` (Scenario 7),
+  `scenario_eval_misleading_descriptions.py` (Scenario 8), `scenario_eval_confusable_agents.py`
+  (Scenario 9), `scenario_eval_empty_descriptions.py` (Scenario 10) — pure-data scenario modules
+  (mirroring `scenario.py`'s shape, generalized to lists/dicts of many entities), each isolating
+  exactly one aspect at the minimal entity count that aspect needs.
+- **`aiac/test/integration/scenario_eval_agent_delegation.py`** (Scenario 3) — the one exception:
+  lives at the **top level** of `test/integration/` (sibling of `launcher.py`/`scenario_uc1.py`),
+  not under `eval/` like the other seven. It isolates the agent-to-agent `target_scopes`
+  delegation mechanism, which is conceptually closer to the top-level fixed-scenario family than to
+  the `eval/` catalog's silent-gap/ambiguity/adversarial-authoring aspects. The harness's `pipeline`
+  fixture resolves each scenario's `AIAC_POLICY_FILE` relative to *that scenario module's own
+  directory* (`Path(scenario.__file__).resolve().parent / scenario.POLICY_FILE`), not a fixed
+  `eval/` path, specifically to accommodate this.
+- A matching `policy.eval_<name>.md` next to each scenario module above — the scenario's policy
+  text, read by the PRB via `AIAC_POLICY_FILE` (these **are** load-bearing at runtime, unlike the
+  two light-scenario `.md` files below).
 - `aiac/test/integration/eval/probe_eval.rego` — a generalized outbound probe, parameterized by
   `input.agent_id`, serving every agent in every heavy scenario (see
   [Testing Decisions](#testing-decisions)).
@@ -39,7 +51,7 @@ Two independent groups of files, split by cost tier:
 - `aiac/test/agent/policy_rules_builder/policy.eval_conflicts.md`,
   `policy.eval_injection.md` — **human-readable mirrors only** (see the callout below).
 
-> **These two `.md` files are not read at runtime.** Unlike the three heavy-scenario `.md` files
+> **These two `.md` files are not read at runtime.** Unlike the eight heavy-scenario `.md` files
 > above (and unlike `policy-pipeline.md`'s `policy.explicit.md`/`policy.abstract.md`), each light
 > guardrail test defines its policy text as an inline Python string constant (`_POLICY`), which it
 > writes to a `tempfile.NamedTemporaryFile` at fixture setup and points `AIAC_POLICY_FILE` at —
@@ -53,55 +65,69 @@ Two independent groups of files, split by cost tier:
 
 ## Description
 
-This is not a single test but a **catalog of five independently-authored scenarios**, each
+This is not a single test but a **catalog of ten independently-authored scenarios**, each
 evaluating a different way the real **Keycloak → Policy Rules Builder (PRB) → Policy Computation
 Engine (PCE) → OPA Policy Writer** pipeline can be exercised, beyond the one clean, fixed scenario
 `policy-pipeline.md` already covers. Where that test proves the pipeline works end-to-end on a
 single, carefully-controlled case, this family asks: does it still behave correctly (or, for
 Scenarios 2/5, does *anything* in the codebase catch a bad document) when the input is bigger, has
-names decoupled from roles, has silent gaps, is deliberately misleading, is self-contradictory, or
-contains adversarial content?
+names decoupled from roles, has a silent gap, is genuinely ambiguous, uses a wildcard phrase,
+lies with a name, has a confusable agent pair, has no descriptions at all, is self-contradictory,
+or contains adversarial content? Each of the eight heavy scenarios isolates exactly **one** such
+aspect at the minimal entity count that aspect needs, and — apart from `baseline`, deliberately the
+one code-flavored scenario — each uses a distinct non-code domain, so no two heavy scenarios share
+both an aspect and a domain.
 
-| # | Name | Users | Agents | Tools | Character | Marker | Assertion shape |
-|---|------|---|---|---|---|---|---|
-| 1 | Baseline-scale | 5 | 3 | 4 | Clean, unambiguous, fully specified. Names decoupled from roles. Includes one legitimate **agent→agent** delegation grant. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 2 | Ambiguous-and-contradictory | 2 (conceptual) | — | — | Policy text that both grants and permanently revokes the same `(role, scope)` pair — a direct, unresolvable contradiction. | `integration` | Single whole-document-reject `xfail` |
-| 3 | Missing-details | 5 | 3 | 4 | Silent authoring gaps → **emergent** unreachable agent/tool and a zero-access user, under deny-by-default. Plus one genuinely multi-interpretable clause and two wildcard-phrased grants. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 4 | Adversarial-authoring | 5 | 2 | 3 | Misleading role/scope names baiting a name-pattern-matching LLM, plus an identity/boundary-confusion probe. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 5 | Adversarial-injection-and-edge-cases | (conceptual) | — | — | A literal prompt-injection string embedded in a clause, plus a duplicate-role-name structural edge case. | `integration` | Whole-document-reject `xfail` + one plain (non-xfail) over-grant assertion |
+| # | Name | Users | Agents | Tools | Domain | Character | Marker | Assertion shape |
+|---|------|---|---|---|---|---|---|---|
+| 1 | Baseline-scale | 3 | 2 | 2 | Software engineering | Clean, unambiguous, fully specified, at UC1 scale — reuses UC1's `developer`/`tester`/`devops` roles verbatim. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 2 | Ambiguous-and-contradictory | 2 (conceptual) | — | — | — | Policy text that both grants and permanently revokes the same `(role, scope)` pair — a direct, unresolvable contradiction. | `integration` | Single whole-document-reject `xfail` |
+| 3 | Agent-to-agent delegation | 2 | 2 | 1 | Logistics/shipping | Isolates the `target_scopes` delegation mechanism: one agent owns a target scope delegated to it via another agent's role, with no tools of its own. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 4 | Unreachable resources | 1 | 2 | 2 | Healthcare/clinic | Silent authoring gaps → **emergent** unreachable agent and unreachable tool, under deny-by-default. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 5 | Adversarial-injection-and-edge-cases | (conceptual) | — | — | — | A literal prompt-injection string embedded in a clause, plus a duplicate-role-name structural edge case. | `integration` | Whole-document-reject `xfail` + one plain (non-xfail) over-grant assertion |
+| 6 | Ambiguous clause | 1 | 1 | 1 | Education/registrar | One genuinely multi-interpretable (non-contradictory) clause. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 7 | Wildcard grant | 1 | 1 | 1 | Retail/inventory | A wildcard-phrased grant ("all inventory operations") that must expand to the correct concrete scope set. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 8 | Misleading descriptions | 2 | 1 | 1 | Hospitality/hotel | A name-bait role (broad-sounding name, narrow description) and an inert, scary-named scope that grants nothing beyond itself. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 9 | Confusable agents | 2 | 2 | 2 | Sports/coaching | Two agents with deliberately similar names and non-overlapping access, plus an identity/boundary-confusion probe. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 10 | Empty descriptions | 1 | 1 | 1 | Agriculture/irrigation | Every entity/role/scope description is the empty string; only the policy document's plain grant sentences carry meaning. | `integration_extended` | Full per-cell `opa eval` truth table |
 
 Ground-truth rules used throughout, all mechanical (no per-cell subjective calls):
 - **Direct conflicts → deny-wins.** (Scenario 2's intended future contract.)
-- **Genuinely multi-interpretable phrasing → most-restrictive-reading-wins.** (Scenario 3's one
+- **Genuinely multi-interpretable phrasing → most-restrictive-reading-wins.** (Scenario 6's
   ambiguous clause.)
-- **Silence → existing deny-by-default.** (Scenarios 1/3/4's unreachable/zero-access cases, and the
-  baseline pipeline's own `devops-user`.)
+- **Wildcard phrases → expand to the full named scope set.** (Scenario 7.)
+- **Silence → existing deny-by-default.** (Scenario 4's unreachable agent/tool, and the baseline
+  pipeline's own `devops` role.)
+- **Empty descriptions do not change grants either way.** (Scenario 10 — explicit named grants in
+  the policy text are honored regardless of absent descriptions, and no access is invented from
+  the absence either.)
 
-### What it does — heavy scenarios (1, 3, 4)
+### What it does — heavy scenarios (1, 3, 4, 6-10)
 
 `test_policy_pipeline_eval.py` drives the same pipeline as `test_policy_pipeline.py`, generalized
-from one agent/tool to N, and run **once per scenario module** (three full pipeline runs per
+from one agent/tool to N, and run **once per scenario module** (eight full pipeline runs per
 session, each against its own realm):
 
 1. **Env setup, same ordering constraint as `policy-pipeline.md`.** Service URLs are set via
    `os.environ.setdefault` before the `aiac` libraries are imported.
 2. **Spawn the three services per scenario** via `launcher.py`'s `Service`/`running_services` —
-   unmodified from `policy-pipeline.md`. Because the three scenarios use three different realms,
-   nothing is kept warm across them (unlike `policy-pipeline.md`'s two variants, which share one
-   realm and one IdP process).
+   unmodified from `policy-pipeline.md`. Because every scenario uses its own realm, nothing is kept
+   warm across them (unlike `policy-pipeline.md`'s two variants, which share one realm and one IdP
+   process).
 3. **Provision Keycloak**, generalized to loop over every entry in the scenario module's
    `USERS`/`USER_ROLES`/`AGENTS`/`TOOLS` dicts (`provision_keycloak_admin`), then create every
    scope/role and its service mapping through the IdP `Configuration` library
    (`provision_via_config`). Each agent's `inbound_scopes` **and** `target_scopes` are mapped onto
    the *same* Keycloak client — this single fact is the root cause of a finding documented in
-   [Further Notes](#further-notes).
+   [Further Notes](#further-notes), and the reason Scenario 3 (`agent_delegation`) exists as its own
+   isolated scenario.
 4. **Run the PRB** (`orchestrate_prb`), generalized from `policy-pipeline.md`'s three fixed loops
    to loop over every agent's inbound scope, every tool/agent-target scope, and every agent role.
-   Agent-to-agent target scopes (e.g. `code-delegation`, owned by `scribe-agent`) are folded into
-   the same "target" candidate set as tool scopes — from the PRB/PCE's perspective a target scope
-   owned by another agent is handled identically to one owned by a tool.
+   Agent-to-agent target scopes (Scenario 3: `customs-clearance`, owned by `customs-agent`) are
+   folded into the same "target" candidate set as tool scopes — from the PRB/PCE's perspective a
+   target scope owned by another agent is handled identically to one owned by a tool.
 5. **Run the PCE** (`compute_and_apply`) and assert every expected `.rego` file actually landed on
-   disk — **except** agents a scenario declares in `EXPECT_NO_REGO` (Scenario 3's `archive-agent`).
+   disk — **except** agents a scenario declares in `EXPECT_NO_REGO` (Scenario 4's `billing-agent`).
    `compute_and_apply` is fire-and-forget and swallows dependency errors, so this check turns a
    silent pipeline failure into a clear `RuntimeError` naming the missing file(s), rather than a
    confusing wall of unrelated per-test failures.
@@ -121,8 +147,9 @@ session, each against its own realm):
      cannot see.
    - **Unknown-target and soft-match-overbreadth guards** — one node per scenario asserting an
      otherwise-plausible call to an unknown target, or a function name matching no scope, is denied.
-   - **Identity-confusion probes** (Scenario 4 only) — `scenario.IDENTITY_CONFUSION_PROBES`, asserted
-     via `test_identity_confusion_probes`; skipped for scenarios that define none.
+   - **Identity-confusion probes** (Scenario 9, `confusable_agents`, only) —
+     `scenario.IDENTITY_CONFUSION_PROBES`, asserted via `test_identity_confusion_probes`; skipped
+     for scenarios that define none.
 
 ### What it does — light scenarios (2, 5)
 
@@ -169,74 +196,106 @@ cost tier in the same directory — and skip via `pytest.skip` when `LLM_BASE_UR
 
 ### Scenario 1 — baseline-scale
 
-Realm `aiac-pp-eval-baseline`. 5 users, 3 agents (`scribe-agent`, `librarian-agent`,
-`concierge-agent`), 4 tools (`quill-tool`, `ledger-tool`, `beacon-tool`, `vault-tool`). Names are
-deliberately decoupled from roles (e.g. `tester-user` actually holds `code-editor`, which edits
-source; `hr-user` holds `deploy-manager`, which orchestrates deployment) so a passing truth table
-demonstrates the pipeline keys off declared facts, not name resemblance.
+Realm `aiac-pp-eval-baseline`. 3 users, 2 agents (`repo-agent`, `tracker-agent`), 2 tools
+(`repo-tool`, `tracker-tool`). Reuses UC1's exact 3 roles verbatim (`developer`, `tester`,
+`devops`, from `scenario_uc1.py`), scaled to 2 agents × 2 tools. `devops` is granted nothing —
+deny-by-default, mirroring UC1's own `devops-user`.
 
-**Inbound allow** (user may call the agent — see [Further Notes](#further-notes) for why this table
-includes target-scope holders, not just `INBOUND_PAIRS`):
+**Inbound allow** (user may call the agent):
 
-| Subject (role) | scribe-agent | librarian-agent | concierge-agent |
-|---|---|---|---|
-| tester-user (code-editor) | ✅ | ❌ | ❌ |
-| hr-user (deploy-manager) | ✅ *(via `code-delegation` target grant)* | ❌ | ✅ |
-| finance-user (issue-triager) | ❌ | ✅ | ❌ |
-| intern-user (read-only-observer) | ✅ | ✅ | ❌ |
-| sales-user (security-reviewer) | ❌ | ❌ | ✅ |
+| Subject (role) | repo-agent | tracker-agent |
+|---|---|---|
+| developer | ✅ | ✅ |
+| tester | ❌ | ✅ |
+| devops | ❌ | ❌ |
 
-**Outbound allow** — per `OUTBOUND_SUBJECT_PAIRS` × `OUTBOUND_PAIRS`, including the one
-agent-to-agent grant: `concierge-agent`'s `orchestration_operations` role holds `code-delegation`
-(owned by `scribe-agent`, not a tool), and `deploy-manager` (`hr-user`) is entitled to it as a
-subject — so `hr-user` may reach `code-delegation` **through `concierge-agent`**.
+**Outbound allow** — per `OUTBOUND_SUBJECT_PAIRS` × `OUTBOUND_PAIRS`: `developer` reaches
+`repo-read`/`repo-write`/`tracker-read`; `tester` reaches `tracker-read`/`tracker-write`; `devops`
+reaches nothing.
 
 Files left on disk per agent under `test/integration/eval/rego_out/policy_pipeline_eval/baseline/`:
-`scribe_agent.{inbound,outbound}.rego`, `librarian_agent.{inbound,outbound}.rego`,
-`concierge_agent.{inbound,outbound}.rego`. `concierge_agent.outbound.rego`'s `target_scopes` map
-includes `"scribe-agent": ["code-delegation"]` alongside `beacon-tool`/`vault-tool` — direct
-confirmation that an Agent-typed and Tool-typed target produce identical shape (per
-`pdp-policy-writer-opa.md` and `engine.py`'s `is_agent(agent_id)` gate).
+`repo_agent.{inbound,outbound}.rego`, `tracker_agent.{inbound,outbound}.rego`.
 
-### Scenario 3 — missing-details
+### Scenario 3 — agent-to-agent delegation
 
-Realm `aiac-pp-eval-unreachable`. 5 users, 3 agents (`service-desk-agent`, `release-agent`,
-`archive-agent`), 4 tools (`ticket-tool`, `deploy-tool`, `wiki-tool`, `credentials-tool`).
+Realm `aiac-pp-eval-agent-delegation`. 2 users, 2 agents (`dispatch-agent`, `customs-agent`), 1
+tool (`manifest-tool`). `customs-agent` deliberately has **zero `inbound_scopes` of its own** —
+its only scope, `customs-clearance`, is a `target_scopes` entry on `dispatch-agent`, delegated
+through it. `shipment-coordinator` holds `customs-clearance` as a subject; `dock-worker` does not.
 
-- **`archive-agent` produces no `.rego` at all** (`EXPECT_NO_REGO`) — provisioned like any other
+Because `customs-clearance` is one of `customs-agent`'s owned Keycloak-client scopes regardless of
+whether it arrived via `inbound_scopes` or `target_scopes` (see [Further
+Notes](#further-notes)), `shipment-coordinator` also passes `customs-agent`'s own inbound gate
+directly — this is the cleanest demonstration in the suite of that system property, since
+`customs-agent` has no inbound scopes of its own to confuse the picture.
+
+### Scenario 4 — unreachable resources
+
+Realm `aiac-pp-eval-unreachable-resources`. 1 user (`front-desk-clerk`), 2 agents (`intake-agent`,
+`billing-agent`), 2 tools (`records-tool`, `insurance-tool`).
+
+- **`billing-agent` produces no `.rego` at all** (`EXPECT_NO_REGO`) — provisioned like any other
   agent (real client, inbound scope, client role) but never mentioned in the policy document's
   grant sections, and no other agent has a `target_scopes` entry pointing at it. `test_inbound`/
   `test_outbound` special-case this: when the expected `.rego` file is absent, they assert ground
   truth agrees no one reaches it, rather than skipping silently.
-- **`credentials-tool`** exists with a real scope (`credentials-read`) that no agent role is ever
-  granted — unreachable, but its *owning agent* (there is none directly; it's a tool) still
-  produces normal `.rego`; the scope simply never appears in any `target_scopes` map.
-- **`auditor-user`** (role `compliance-auditor`) is a zero-access user: present in neither
-  `INBOUND_PAIRS` nor `OUTBOUND_SUBJECT_PAIRS`, denied everywhere by deny-by-default alone.
-- **Ambiguous clause**: `release-coordinator` is granted "access to deployment status information."
-  Ground truth encodes only the narrow reading (`deploy-status`), per most-restrictive-reading-wins.
-  A real PRB run landing on the broader reading (also `deploy-rollback`) is a **legitimate finding**
-  for this cell, not evidence the scenario is authored wrong.
-- **Wildcard grants**: "all deployment operations" (both the user-facing and agent-facing halves)
-  is ground-truthed to the full three-scope expansion (`deploy-trigger`, `deploy-status`,
-  `deploy-rollback`), checking whether the real PRB expands a wildcard phrase correctly.
+- **`insurance-tool`** exists with a real scope (`insurance-verify`) that no agent role is ever
+  granted anywhere in the policy text — unreachable, but `insurance-tool` isn't itself an agent, so
+  there's no `.rego` file for it to be missing from; the scope simply never appears in any
+  `target_scopes` map.
 
-### Scenario 4 — adversarial-authoring
+### Scenario 6 — ambiguous clause
 
-Realm `aiac-pp-eval-adversarial`. 5 users, 2 agents (`release-agent`, `release-auditor-agent`), 3
-tools (`citadel-tool`, `archive-tool`, `strongbox-tool`). Three misdirection devices (see
-`scenario_eval_adversarial.py`'s module docstring for full detail): broad-sounding role names with
-narrow descriptions (`admin-liaison`, `super-user-support` both resolve to the same narrow grant as
-the honestly-named `ticket-viewer`); a scary-sounding but inert scope (`admin-override`, a no-op
-diagnostic flag); and a confusable agent-name pair (`release-agent` vs. `release-auditor-agent`)
-with deliberately non-overlapping access. Ground truth always follows the **description**, never
-the **name**.
+Realm `aiac-pp-eval-ambiguous-clause`. 1 user (`enrollment-advisor`), 1 agent
+(`registrar-agent`), 1 tool (`enrollment-tool`, scopes `enrollment-status` + `enrollment-history`).
+`enrollment-advisor` is granted "access to enrollment information" — a genuinely
+multi-interpretable, non-contradictory clause. Ground truth encodes only the narrow reading
+(`enrollment-status`), per most-restrictive-reading-wins. A real PRB run landing on the broader
+reading (also `enrollment-history`) is a **legitimate finding** for this cell, not evidence the
+scenario is authored wrong. The agent's own role (`registrar_operations`) is granted both scopes,
+so the ambiguity lives entirely on the subject side.
 
-Also carries the suite's **identity/boundary-confusion probe**
-(`IDENTITY_CONFUSION_PROBES`): Keycloak auto-creates a `service-account-<clientId>` user for each
-confidential client with `serviceAccountsEnabled`. That user is real but holds no realm role, so
-under deny-by-default it must be refused by **every** agent's inbound gate — including the *other*
-agent's, asserted in both directions.
+### Scenario 7 — wildcard grant
+
+Realm `aiac-pp-eval-wildcard-grant`. 1 user (`inventory-manager`), 1 agent (`inventory-agent`), 1
+tool (`inventory-tool`, scopes `inventory-check`/`inventory-adjust`/`inventory-reorder`). Both the
+user-facing and agent-facing grant text use the wildcard phrase "all inventory operations" rather
+than an enumerated list. Ground truth expands the phrase to all three concrete scopes on both
+sides of the per-scope AND gate, checking whether the real PRB expands a wildcard phrase correctly.
+
+### Scenario 8 — misleading descriptions
+
+Realm `aiac-pp-eval-misleading-descriptions`. 2 users (`vip-manager`, `front-desk-staff`), 1 agent
+(`guest-services-agent`), 1 tool (`reservation-tool`, scopes `reservation-read` +
+`guest-notes-read` + `master-override`). `vip-manager` is a name-bait role: the name suggests
+broad/elevated authority, but its description confines it to the same reads as
+`front-desk-staff`, plus the scary-sounding-but-inert `master-override` scope, which grants no
+real capability beyond itself. `vip-manager` and `front-desk-staff` end up with *functionally
+identical* real access. Ground truth always follows the **description**, never the **name**.
+
+### Scenario 9 — confusable agents
+
+Realm `aiac-pp-eval-confusable-agents`. 2 users (`team-trainer`, `performance-analyst`), 2 agents
+(`coach-agent`, `coach-review-agent`), 2 tools (`roster-tool`, `evaluation-tool`). The two agent
+names differ by only one word; their access is entirely non-overlapping (`team-trainer` reaches
+only `coach-agent`/`roster-tool`, `performance-analyst` reaches only
+`coach-review-agent`/`evaluation-tool`).
+
+Also carries the suite's **identity/boundary-confusion probe** (`IDENTITY_CONFUSION_PROBES`):
+Keycloak auto-creates a `service-account-<clientId>` user for each confidential client with
+`serviceAccountsEnabled`. That user is real but holds no realm role, so under deny-by-default it
+must be refused by **every** agent's inbound gate — including the *other* agent's, asserted in
+both directions (`service-account-coach-agent` against `coach-review-agent`'s gate and vice versa).
+
+### Scenario 10 — empty descriptions
+
+Realm `aiac-pp-eval-empty-descriptions`. 1 user (`field-operator`), 1 agent
+(`irrigation-agent`), 1 tool (`valve-tool`, scopes `valve-open`/`valve-close`). Every entity, role,
+and scope description is the empty string — the PRB has no semantic content to infer intent from
+beyond the bare identifiers, so every (role, scope) pair is named explicitly in
+`policy.eval_empty_descriptions.md`'s grant sentences. Ground truth: the explicitly named grants
+are still honored despite the absent descriptions, and no extra access is invented from their
+absence either.
 
 ### Scenarios 2 and 5
 
@@ -246,12 +305,17 @@ above for the exact assertions.
 ## Scenario
 
 See each scenario module's own module docstring (`scenario_eval_baseline.py`,
-`scenario_eval_unreachable.py`, `scenario_eval_adversarial.py`) for the full entity list and
-role→access facts — these are the single source of truth (`INBOUND_PAIRS`/`OUTBOUND_SUBJECT_PAIRS`/
-`OUTBOUND_PAIRS`, plus `EXPECT_NO_REGO`/`IDENTITY_CONFUSION_PROBES` where applicable), not a second
-hand-maintained copy in this document. Scenarios 2 and 5's cast is defined inline in their test
-modules' `_POLICY`/`_USER_ROLES`/`_ROLES` constants — see [Location](#location) for why the
-standalone `.md` mirrors are not what the tests actually read.
+`scenario_eval_agent_delegation.py`, `scenario_eval_unreachable_resources.py`,
+`scenario_eval_ambiguous_clause.py`, `scenario_eval_wildcard_grant.py`,
+`scenario_eval_misleading_descriptions.py`, `scenario_eval_confusable_agents.py`,
+`scenario_eval_empty_descriptions.py`) for the full entity list and role→access facts — these are
+the single source of truth (`INBOUND_PAIRS`/`OUTBOUND_SUBJECT_PAIRS`/`OUTBOUND_PAIRS`, plus
+`EXPECT_NO_REGO`/`IDENTITY_CONFUSION_PROBES` where applicable), not a second hand-maintained copy in
+this document. Note that `scenario_eval_agent_delegation.py` lives at the top level of
+`test/integration/`, not under `eval/` like the other seven (see [Location](#location)). Scenarios
+2 and 5's cast is defined inline in their test modules' `_POLICY`/`_USER_ROLES`/`_ROLES` constants —
+see [Location](#location) for why the standalone `.md` mirrors are not what the tests actually
+read.
 
 ## Configuration (env)
 
@@ -262,8 +326,8 @@ scenarios (`KEYCLOAK_URL`, `KEYCLOAK_ADMIN_USERNAME`/`PASSWORD`, `AIAC_PDP_CONFI
 
 | Variable | Difference from `policy-pipeline.md` |
 |----------|----------------------------------------|
-| `KEYCLOAK_REALM` | Set per scenario module (`scenario.REALM_DEFAULT`), not a single fixed realm — three distinct realms across the session. |
-| `AIAC_POLICY_FILE` | Set per scenario to `test/integration/eval/<scenario.POLICY_FILE>` (heavy scenarios only). |
+| `KEYCLOAK_REALM` | Set per scenario module (`scenario.REALM_DEFAULT`), not a single fixed realm — eight distinct realms across the session. |
+| `AIAC_POLICY_FILE` | Set per scenario to `<scenario module's own directory>/<scenario.POLICY_FILE>` (heavy scenarios only) — resolved relative to that module's `__file__`, not a fixed `eval/` path, since `scenario_eval_agent_delegation.py` lives one level up from the rest (see [Location](#location)). |
 
 The light scenarios (2, 5) need only `LLM_BASE_URL`/`LLM_MODEL`/`LLM_API_KEY` — no Keycloak, store,
 or OPA URLs, no `opa` binary.
@@ -274,9 +338,10 @@ or OPA URLs, no `opa` binary.
 # Heavy scenarios (needs KEYCLOAK_URL + admin creds + LLM_* + opa on PATH):
 .venv/bin/pytest test/integration/eval/test_policy_pipeline_eval.py -m integration_extended -v
 # A failing node names the exact scenario/agent/subject(/scope) cell, e.g.:
-#   test_inbound[baseline-scribe-agent-hr-user] — expected allow, opa denied
+#   test_inbound[baseline-repo-agent-tester-user] — expected allow, opa denied
 # .rego left on disk per scenario for eyeballing:
-#   test/integration/eval/rego_out/policy_pipeline_eval/{baseline,unreachable,adversarial}/{slug}.{inbound,outbound}.rego
+#   test/integration/eval/rego_out/policy_pipeline_eval/{baseline,agent_delegation,unreachable_resources,
+#     ambiguous_clause,wildcard_grant,misleading_descriptions,confusable_agents,empty_descriptions}/{slug}.{inbound,outbound}.rego
 # A pass/fail/skip/error report for the run is written alongside it:
 #   test/integration/eval/reports/report_<DD_MM_HH_MM>.md (Asia/Jerusalem local time; see Test report below)
 
@@ -312,8 +377,8 @@ marker.
   spotting which cell did what. Instead of the docstring + crash-message fallback, each entry
   shows:
   - **What it tests:** a concrete sentence naming the actual subject/agent(/scope) under test
-    (e.g. `Can 'clerk-user' (subject, role 'audit-clerk') access 'release-agent' (agent) in the
-    'adversarial' scenario?`).
+    (e.g. `Can 'analyst-user' (subject, role 'performance-analyst') access 'coach-agent' (agent) in
+    the 'confusable_agents' scenario?`).
   - **Expected output:** `True`/`False` plus a short mechanical explanation derived from the
     scenario's truth table (which `INBOUND_PAIRS`/`OUTBOUND_PAIRS`/`OUTBOUND_SUBJECT_PAIRS` row
     matched, or that none did).
@@ -345,13 +410,13 @@ scenarios; the heavy scenarios additionally need Keycloak + `opa`, same discover
   serving as an independent regression baseline — a break in either suite is unrelated to a break in
   the other by construction.
 - **Slug-derived paths and queries, not hardcoded ids.** `test_policy_pipeline.py` hardcodes literal
-  `"github_agent"` strings. Because this harness runs three scenarios with many agents each, every
+  `"github_agent"` strings. Because this harness runs eight scenarios with many agents each, every
   `.rego` path and `opa eval` query is instead derived from each scenario's own agent id via
   `agent_id.replace("-", "_")`, matching `slugify()`'s behavior in
   `src/aiac/pdp/service/policy/opa/rego.py`.
 - **A generalized probe, parameterized by agent id.** `probe.rego` hardcodes `github_agent`. The new
   `probe_eval.rego` takes `input.agent_id` and reads `data.authz[input.agent_id].outbound`, so one
-  probe file serves every agent across all three heavy scenarios rather than needing one probe per
+  probe file serves every agent across all eight heavy scenarios rather than needing one probe per
   agent. Same token soft-match logic (split on `[._-]+`, lowercase, set equality).
   `outbound_subject_pairs`/`agent_allowed` are unioned as OPA `contains` sets — since the outbound
   package's `subject_role_scopes`/`agent_role_scopes` gates can never distinguish "may reach the
@@ -365,18 +430,19 @@ scenarios; the heavy scenarios additionally need Keycloak + `opa`, same discover
   this client owns," full stop. Because provisioning necessarily maps both an agent's
   `inbound_scopes` and its `target_scopes` onto the **same** Keycloak client (there is no second
   client to put them on), any role granted a `target_scope` for delegation purposes through another
-  agent **also, unavoidably, passes the owning agent's own inbound gate**. Concretely: in Scenario 1,
-  `hr-user` (role `deploy-manager`) is granted `code-delegation` so it can reach `scribe-agent`
-  *through* `concierge-agent` — but because `code-delegation` is one of `scribe-agent`'s owned
-  scopes, `hr-user` also passes `scribe-agent`'s own inbound gate directly, with no delegation
-  involved. `expected_inbound()` in `test_policy_pipeline_eval.py` encodes this correctly (unions
+  agent **also, unavoidably, passes the owning agent's own inbound gate**. Concretely: in Scenario 3
+  (`agent_delegation`), `shipment-coordinator` is granted `customs-clearance` so it can have customs
+  clearance carried out *through* `dispatch-agent` — but because `customs-clearance` is one of
+  `customs-agent`'s owned (target) scopes, `shipment-coordinator` also passes `customs-agent`'s own
+  inbound gate directly, with no delegation involved and no `dispatch-agent` call required.
+  `expected_inbound()` in `test_policy_pipeline_eval.py` encodes this correctly (unions
   `inbound_scopes ∪ target_scopes` when computing which roles may call an agent) — a truth table that
   encoded only `INBOUND_PAIRS` here would be *wrong*, not stricter.
-- **The pipeline fixture provisions all three heavy scenarios unconditionally.** The `pipeline`
+- **The pipeline fixture provisions all eight heavy scenarios unconditionally.** The `pipeline`
   fixture is session-scoped and, on first use, provisions all of `SCENARIOS.items()` — even if a
   `-k`/`-m` filter would otherwise only select tests from one scenario. This keeps the fixture simple
   (one setup pass, one `RuntimeError` guard for silent pipeline failure) at the cost of always paying
-  for three full pipeline runs once any heavy-scenario test runs at all.
+  for eight full pipeline runs once any heavy-scenario test runs at all.
 - **No guardrail exists; the two light scenarios document that gap rather than paper over it.**
   Exhaustive grep during planning found no whole-document pre-flight validator anywhere in this
   codebase. Rather than skip Scenarios 2/5 entirely or invent a guardrail as a side effect of writing
@@ -396,16 +462,16 @@ scenarios; the heavy scenarios additionally need Keycloak + `opa`, same discover
 
 ## Relationship to other integration tests
 
-This is **one** integration-test spec (covering five scenarios across two test modules) among
+This is **one** integration-test spec (covering ten scenarios across two test modules) among
 several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test specifications*).
 
 - **Companion to, not a replacement for, [policy-pipeline.md](policy-pipeline.md).** That test's
   fixed `github-agent` scenario remains the reviewable, hand-checkable regression baseline; this
-  family generalizes the same pipeline+`opa eval` approach to scale, ambiguity, adversarial input,
-  and the guardrail gap, using new files only.
+  family generalizes the same pipeline+`opa eval` approach to scale, delegation, ambiguity,
+  adversarial input, and the guardrail gap, using new files only.
 - **Heavy scenarios share the `@pytest.mark.integration` + `opa eval` oracle flavor** with
   `policy-pipeline.md`, under the new `integration_extended` marker (registered in `pyproject.toml`)
-  to signal the added cost (three full pipeline runs, many more PRB/LLM calls per session) rather
+  to signal the added cost (eight full pipeline runs, many more PRB/LLM calls per session) rather
   than conflating it with the existing single-run suite.
 - **Light scenarios share the direct-PRB-call, no-Keycloak/no-opa flavor** with
   `test_auditor_dimension_integration.py`, staying on the plain `integration` marker since their cost
@@ -438,26 +504,31 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
   agent `target_scopes` and an agent's own `inbound_scopes` are **indistinguishable** once
   provisioned into Keycloak — see [Testing Decisions](#testing-decisions) for the full mechanism.
   This was originally mistaken, during this suite's own development, for a test bug (an early
-  version of `expected_inbound()` checked only `INBOUND_PAIRS`, and failed Scenario 1's
-  `hr-user`/`scribe-agent` cell identically across repeated runs — ruled out as LLM nondeterminism
-  precisely *because* it was 100% reproducible). Root-caused by reading the actual generated
-  `scribe_agent.inbound.rego` (its `agent_scopes` list includes `code-delegation`, a target scope,
-  not just `code-access`), cross-referencing `pdp-policy-writer-opa.md`'s spec text (`agent_scopes`
-  = "scopes this agent exposes," resolved from the IdP `Service` record, with no inbound/target
-  split), and confirming via `engine.py` and `idp/configuration/models.py` that no such split exists
-  anywhere in the data model. The fix landed in the test's own oracle (`expected_inbound()`), not in
-  any pipeline code — the pipeline was behaving exactly as designed.
-- **Adversarial-scenario failures are the intended signal, not a defect to chase.** Unlike the
-  baseline finding above, mismatches on Scenario 4's misdirection-device cells (e.g. whether the LLM
-  correctly resists the `admin-liaison`/`super-user-support` name-bait, or correctly keeps
-  `release-agent`/`release-auditor-agent` separate) may vary run-to-run — that variability is exactly
-  what this scenario is designed to surface, and is expected to need re-confirmation across runs
-  rather than being "fixed" by rewording the scenario.
-- **The ambiguous clause in Scenario 3 is a deliberate risk, not a bug.** A real LLM-backed PRB run
-  landing on the broader reading of `release-coordinator`'s "access to deployment status
-  information" (i.e. also granting `deploy-rollback`) is a legitimate finding for that cell to
-  surface, not evidence Scenario 3 itself is authored incorrectly. Ground truth encodes only the
-  narrower reading per this suite's most-restrictive-reading-wins convention.
+  version of `expected_inbound()` checked only `INBOUND_PAIRS`, and failed the delegation scenario's
+  `shipment-coordinator`/`customs-agent` cell identically across repeated runs — ruled out as LLM
+  nondeterminism precisely *because* it was 100% reproducible). Root-caused by reading the actual
+  generated `customs_agent.inbound.rego` (its `agent_scopes` list includes `customs-clearance`, a
+  target scope, despite `customs-agent` having no `inbound_scopes` of its own), cross-referencing
+  `pdp-policy-writer-opa.md`'s spec text (`agent_scopes` = "scopes this agent exposes," resolved from
+  the IdP `Service` record, with no inbound/target split), and confirming via `engine.py` and
+  `idp/configuration/models.py` that no such split exists anywhere in the data model. The fix landed
+  in the test's own oracle (`expected_inbound()`), not in any pipeline code — the pipeline was
+  behaving exactly as designed. This is now Scenario 3 (`agent_delegation`)'s dedicated purpose; see
+  its module docstring for the full write-up.
+- **Adversarial-scenario failures are the intended signal, not a defect to chase.** Mismatches on
+  Scenario 8 (`misleading_descriptions`)'s name-bait cell (whether the LLM correctly resists
+  `vip-manager`'s scary-sounding-but-inert `master-override` scope and still grants it only the same
+  real access as `front-desk-staff`) or on Scenario 9 (`confusable_agents`)'s identity-confusion
+  probes (whether `coach-agent`'s and `coach-review-agent`'s service-account identities stay refused
+  through each other's inbound gate despite the two agent names differing by only one word) may vary
+  run-to-run — that variability is exactly what these scenarios are designed to surface, and is
+  expected to need re-confirmation across runs rather than being "fixed" by rewording the scenario.
+- **The ambiguous clause in Scenario 6 (`ambiguous_clause`) is a deliberate risk, not a bug.** A real
+  LLM-backed PRB run landing on the broader reading of `enrollment-advisor`'s "access to enrollment
+  information" (i.e. also granting `enrollment-history`, not just `enrollment-status`) is a
+  legitimate finding for that cell to surface, not evidence Scenario 6 itself is authored
+  incorrectly. Ground truth encodes only the narrower reading per this suite's
+  most-restrictive-reading-wins convention.
 
 ## Blocked-by
 
