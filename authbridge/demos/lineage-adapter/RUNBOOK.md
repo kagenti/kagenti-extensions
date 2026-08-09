@@ -6,8 +6,11 @@ per-request execution forest** for it under concurrency — target 6/6 pairing.*
 
 Proven across 7 apps (trivia, currency_converter, contact_extractor, git_issue,
 slack_researcher→slack_tool, reservation_service→reservation_tool,
-wiki_memory_tool). Full reasoning + per-scenario results: `DESIGN.md §10.5,
-§10.10`. This runbook is the operational recipe; STUDY is the why.
+wiki_memory_tool). Why the method works: `DESIGN.md`. Per-app empirical
+results: the expectation cards in `validation/`. The consumer side — what the
+DG service derives from these spans and how to read its UI — lives in the
+sibling repo: `lab-data-governance/docs/REVIEWER-QUICKSTART.md` (this kit
+assumes the two repos, plus `agent-examples`, are cloned side by side).
 
 ---
 
@@ -20,7 +23,7 @@ caused it without a `traceparent` that travels *through the app* in-process
 The fix is a **deploy-time, propagate-only OpenTelemetry shim**: auto-instrument
 the app's HTTP libraries to extract the inbound `traceparent` and inject it on
 outbound calls, **exporting nothing** (so DG stays sidecar-only). Zero app-source
-changes. The caller must supply the initial `traceparent` (DESIGN §10.9).
+changes. The caller must supply the initial `traceparent` (DESIGN §4).
 
 ## Precondition (the envelope)
 
@@ -40,10 +43,38 @@ a **CLI subprocess** (`claude_agent`) or a **local subprocess** such as git
 | `attach-lineage.sh` | Emits (stdout) a full Deployment+Service+lineage-ConfigMap: OTEL-wrapped app container + `proxy-init` initContainer + `envoy-proxy` sidecar. Per-app: `NAME`, `IMAGE`, `SELF_ID`, `APP_ENTRYPOINT`, `ENV_VARS`. |
 | `concurrency-test-interactions.sh` (A2A) / `concurrency-test-mcp-interactions.sh` (MCP tool) | In-cluster driver: N concurrent turns, distinct caller-minted traceparent each; asserts per-trace **interaction forests** in the DG Postgres (+ optional `EXPECT_KINDS`). Target **N/N**. |
 
-Prereqs already in the cluster (DESIGN §8.5): the sidecar images
-`docker.io/library/authbridge-envoy:latest` and `proxy-init:latest`, the
+No cluster yet? `CLUSTER-FROM-ZERO-windows.md` in this directory takes a bare
+Windows machine to a working kagenti kind cluster with a verified weather agent
+(macOS/Linux users: skip Phase 0 and swap the package manager; the kagenti
+phases are identical).
+
+Prereqs already in the cluster: the sidecar images (build recipe below), the
 platform `envoy-config` ConfigMap in `team1`, the DG pod fed by the patched
-collector, and host Ollama (`qwen2.5:7b`) at `host.containers.internal:11434`.
+collector (`lab-data-governance/deploy/patch-kagenti-collector.sh` — see
+REVIEWER-QUICKSTART §2 there), and host Ollama (`qwen2.5:7b`) at
+`host.containers.internal:11434`.
+
+### Building the sidecar images
+
+`attach-lineage.sh` references `docker.io/library/authbridge-envoy:latest` and
+`docker.io/library/proxy-init:latest` with `imagePullPolicy: IfNotPresent` —
+build them from this repo and load them into kind under exactly those names
+(the repo's other builders, e.g. `local-build-and-test.sh`, tag under
+`ghcr.io/rossoctl/cortex/*` and will NOT satisfy the manifests):
+
+```bash
+cd authbridge
+podman build -f cmd/authbridge-envoy/Dockerfile -t docker.io/library/authbridge-envoy:latest .
+podman save -o /tmp/abe.tar docker.io/library/authbridge-envoy:latest
+KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive /tmp/abe.tar --name kagenti
+
+cd proxy-init
+make docker-build-init KIND_CLUSTER_NAME=kagenti && make load-image KIND_CLUSTER_NAME=kagenti
+```
+
+(The proxy-init Makefile handles podman's `localhost/` → `docker.io/library/`
+tag mismatch inside the kind node; for authbridge-envoy the explicit
+`docker.io/library/` tag before the archive-load does the same job.)
 
 ---
 
@@ -123,7 +154,12 @@ SELF_ID=<self_id> \
 ```
 Expect **6/6 clean**. (Drive from IN-cluster only — `kubectl port-forward` uses
 pod-loopback, which the iptables rules exclude, so it bypasses the sidecar inbound
-listener — DESIGN §10.7.)
+listener — DESIGN §5.)
+
+Then look at the result: DG UI at `http://dg.localtest.me:8080/ui/traces` —
+open a trace's `/flow` for the interactions tree, `/spans` for the raw spans.
+What to expect there (and what NOT to — e.g. every trace shows a dangling wire
+parent by design): `lab-data-governance/docs/REVIEWER-QUICKSTART.md` §5–6.
 
 For a per-app **validation run**, fill an expectation card BEFORE firing:
 copy `validation/TEMPLATE-expectation-card.md`, state the expected entities,
@@ -157,11 +193,10 @@ OUTBOUND_PORTS_EXCLUDE=<export port> \
 — the endpoint re-supplies what the platform would have injected, and the port
 exclusion routes export traffic past the proxy so it flows untouched (and isn't
 observed as a lineage hop). Live pattern: weather-service excludes its export
-port `8335` (`lineage-sidecar/weather-service-sidecar-patch.yaml` in the
-umbrella workspace). The shim itself stays propagation-only — no exporter
-packages, no export modes.
+port `8335`. The shim itself stays propagation-only — no exporter packages, no
+export modes.
 
-## Troubleshooting (all seen in practice — DESIGN §10.10)
+## Troubleshooting (all seen in practice)
 
 | Symptom | Cause → fix |
 |---|---|

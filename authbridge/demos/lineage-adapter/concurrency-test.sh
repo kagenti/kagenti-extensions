@@ -16,7 +16,7 @@
 # Usage:
 #   SELF_ID=trivia-agent TARGET=trivia-agent.team1.svc.cluster.local:8080 \
 #   PROMPT='Ask one trivia question about the planet {TOKEN} only.' \
-#   lineage-sidecar/concurrency-test.sh
+#   demos/lineage-adapter/concurrency-test.sh
 #
 # Variables:
 #   SELF_ID   (required) the lineage self_id — span names are <SELF_ID>.inbound / .llm / .mcp*.

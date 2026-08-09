@@ -1,7 +1,7 @@
 // Package lineage provides the lineage-telemetry authbridge plugin.
 //
-// Two-span model (see docs/sidecar-wire-contract.md — the law this file
-// implements). Each HTTP exchange through the sidecar produces TWO OTLP spans:
+// Two-span model (see docs/sidecar-wire-contract.md in the lab-data-governance
+// repo, the consumer side — the law this file implements). Each HTTP exchange through the sidecar produces TWO OTLP spans:
 //
 //   - a request span, emitted as soon as the request has been seen and
 //     forwarded, carrying caller-side facts + input.value; and

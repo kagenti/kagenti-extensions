@@ -17,7 +17,7 @@
 #   FRONT=wiki-mcp BACKEND=wiki-service \
 #   MCP_URL=http://wiki-mcp.team1.svc.cluster.local:8000/mcp \
 #   TOOL=wiki_query DRIVER_IMAGE=docker.io/library/wiki_memory_tool-otel:latest \
-#   lineage-sidecar/concurrency-test-mcp.sh
+#   demos/lineage-adapter/concurrency-test-mcp.sh
 #
 # Variables:
 #   FRONT     (required) self_id of the MCP front (span names <FRONT>.inbound/.http).

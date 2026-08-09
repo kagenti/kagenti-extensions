@@ -11,6 +11,10 @@ command stands the whole fleet up.
 
 - **Why the sidecar alone isn't enough, and what the shim does:** [`DESIGN.md`](DESIGN.md)
 - **Step-by-step for a single app:** [`RUNBOOK.md`](RUNBOOK.md)
+- **No cluster yet:** [`CLUSTER-FROM-ZERO-windows.md`](CLUSTER-FROM-ZERO-windows.md)
+- **The consumer side** (what DG derives from the spans, and how to read its UI):
+  `docs/REVIEWER-QUICKSTART.md` in the sibling `lab-data-governance` repo; the wire
+  between producer and consumer is `docs/sidecar-wire-contract.md` there.
 
 ## The two things we add to an app
 
