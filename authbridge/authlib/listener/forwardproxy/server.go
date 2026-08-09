@@ -329,15 +329,31 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		r.Header.Set("Authorization", "Bearer "+auth.ExtractBearer(newAuth))
 	}
 
-	// Propagate the lineage plugin's trace-context rewrite to the wire:
-	// it re-stamps the forwarded tracestate with its outbound request span
-	// (wire contract v1.5; traceparent is carried through unchanged).
-	// Plugins write to pctx.Headers; r.Header is what this proxy actually
-	// forwards.
-	for _, hdr := range []string{"traceparent", "tracestate"} {
-		if v := pctx.Headers.Get(hdr); v != "" {
-			r.Header.Set(hdr, v)
+	// Propagate every header mutation the outbound pipeline made to the
+	// forwarded request. pctx.Headers started as a clone of r.Header, so
+	// plugins' set / replace / delete operations on it are the intended
+	// upstream-facing header set. Only Authorization used to be forwarded,
+	// silently dropping any other injected header (e.g. static-inject's
+	// x-api-key). Content-Length / Content-Encoding are managed by the
+	// body-rewrite block below and the transport, so leave them untouched;
+	// Authorization keeps the dedicated path above, which normalises the
+	// bearer form. Mirrors reverseproxy's forwarded-request header sync.
+	skip := func(k string) bool {
+		return k == "Content-Length" || k == "Content-Encoding" || k == "Authorization"
+	}
+	for k := range r.Header {
+		if skip(k) {
+			continue
 		}
+		if _, ok := pctx.Headers[k]; !ok {
+			r.Header.Del(k) // plugin removed it
+		}
+	}
+	for k, vv := range pctx.Headers {
+		if skip(k) {
+			continue
+		}
+		r.Header[k] = append([]string(nil), vv...) // set / overwrite
 	}
 
 	// If a WritesBody plugin rewrote pctx.Body, ship the new bytes

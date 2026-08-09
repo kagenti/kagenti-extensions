@@ -12,15 +12,18 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
 )
 
-// traceRewriterPlugin mimics a pipeline plugin's trace-header writes — the
-// lineage plugin's tracestate stamp today (wire contract v1.5), plus a
-// traceparent rewrite to prove the diff mechanism covers it too. Used to
-// assert the listener forwards trace-header rewrites as SetHeaders
-// mutations: before headerDiffSetHeaders such rewrites died in
-// pctx.Headers (inert on the wire — the phantom-root forests).
+// traceRewriterPlugin mimics a pipeline plugin's header writes — the lineage
+// plugin's tracestate stamp today (wire contract v1.5), a traceparent rewrite
+// to prove the mechanism is not stamp-specific, and arbitrary set/delete to
+// prove it is not trace-specific either (static-inject's x-api-key is the
+// upstream case). Used to assert the listener forwards plugin header writes
+// as mutations: before withHeaderMutation everything but Authorization died
+// in pctx.Headers (inert on the wire — the phantom-root forests).
 type traceRewriterPlugin struct {
 	traceparent string
 	tracestate  string
+	set         map[string]string
+	del         []string
 	readsBody   bool
 }
 
@@ -34,6 +37,12 @@ func (p *traceRewriterPlugin) OnRequest(_ context.Context, pctx *pipeline.Contex
 	}
 	if p.tracestate != "" {
 		pctx.Headers.Set("tracestate", p.tracestate)
+	}
+	for k, v := range p.set {
+		pctx.Headers.Set(k, v)
+	}
+	for _, k := range p.del {
+		pctx.Headers.Del(k)
 	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
@@ -173,6 +182,107 @@ func TestExtProc_Outbound_UnchangedTraceHeadersEmitNothing(t *testing.T) {
 		}
 		if v := mutationHeaderValue(hm, "tracestate"); v != "" {
 			t.Errorf("unexpected tracestate mutation %q on unchanged header", v)
+		}
+	}
+}
+
+// mutationRemovesHeader reports whether hm removes key.
+func mutationRemovesHeader(hm *extprocv3.HeaderMutation, key string) bool {
+	if hm == nil {
+		return false
+	}
+	for _, rh := range hm.RemoveHeaders {
+		if rh == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestExtProc_Outbound_ArbitraryHeaderReachesWire: the sync is generic — a
+// plugin injecting any header (static-inject's x-api-key is the upstream
+// case) must reach the wire, not just the trace headers.
+func TestExtProc_Outbound_ArbitraryHeaderReachesWire(t *testing.T) {
+	srv := traceRewriterServer(t, &traceRewriterPlugin{
+		set: map[string]string{"x-api-key": "secret-value"},
+	})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			outboundRequest(makeHeaders(":authority", "fanin-echo")),
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(stream.responses))
+	}
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	if got := mutationHeaderValue(rh.Response.HeaderMutation, "x-api-key"); got != "secret-value" {
+		t.Errorf("x-api-key mutation = %q, want %q (injected header dropped)", got, "secret-value")
+	}
+}
+
+// TestExtProc_Outbound_DeletedHeaderIsRemoved: a plugin deleting a header
+// must emit RemoveHeaders — the narrow two-name diff could not express this.
+func TestExtProc_Outbound_DeletedHeaderIsRemoved(t *testing.T) {
+	srv := traceRewriterServer(t, &traceRewriterPlugin{del: []string{"x-drop-me"}})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			outboundRequest(makeHeaders(":authority", "fanin-echo", "x-drop-me", "present")),
+		},
+	}
+	_ = srv.Process(stream)
+
+	if len(stream.responses) != 1 {
+		t.Fatalf("expected 1 response, got %d", len(stream.responses))
+	}
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	if !mutationRemovesHeader(rh.Response.HeaderMutation, "x-drop-me") {
+		t.Errorf("expected x-drop-me in RemoveHeaders, got %+v", rh.Response.HeaderMutation)
+	}
+}
+
+// TestExtProc_Outbound_PseudoHeadersNeverEmitted: headerMapToHTTP copies the
+// HTTP/2 pseudo-headers into pctx.Headers (Go's canonicaliser leaves
+// ":"-prefixed keys alone). Emitting a mutation for :authority would rewrite
+// routing, so the sync must skip them even while emitting a real change.
+func TestExtProc_Outbound_PseudoHeadersNeverEmitted(t *testing.T) {
+	srv := traceRewriterServer(t, &traceRewriterPlugin{
+		set: map[string]string{"x-api-key": "secret-value"},
+	})
+
+	stream := &mockStream{
+		ctx: context.Background(),
+		requests: []*extprocv3.ProcessingRequest{
+			outboundRequest(makeHeaders(
+				":authority", "fanin-echo",
+				":method", "POST",
+				":path", "/rpc",
+			)),
+		},
+	}
+	_ = srv.Process(stream)
+
+	rh := stream.responses[0].GetRequestHeaders()
+	if rh == nil || rh.Response == nil || rh.Response.HeaderMutation == nil {
+		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
+	}
+	for _, pseudo := range []string{":authority", ":method", ":path", ":scheme"} {
+		if got := mutationHeaderValue(rh.Response.HeaderMutation, pseudo); got != "" {
+			t.Errorf("pseudo-header %s emitted as %q — would rewrite routing", pseudo, got)
+		}
+		if mutationRemovesHeader(rh.Response.HeaderMutation, pseudo) {
+			t.Errorf("pseudo-header %s emitted in RemoveHeaders", pseudo)
 		}
 	}
 }
