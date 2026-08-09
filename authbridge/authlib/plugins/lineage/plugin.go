@@ -491,7 +491,7 @@ func baseAttrs(pctx *pipeline.Context, self, protocol string) []attribute.KeyVal
 	return attrs
 }
 
-// appendRequestFacts adds the request-only facts: HTTP method/path, the
+// appendRequestFacts adds the request-only facts: HTTP method/path/scheme, the
 // protocol-specific parsed facts, validated-JWT principal (inbound only), and
 // input.value when capture_io is on. protocolOf guarantees the matching
 // extension pointer is non-nil.
@@ -501,6 +501,9 @@ func (p *LineageTelemetry) appendRequestFacts(attrs []attribute.KeyValue, pctx *
 	}
 	if pctx.Path != "" {
 		attrs = append(attrs, attribute.String("url.path", pctx.Path))
+	}
+	if pctx.Scheme != "" {
+		attrs = append(attrs, attribute.String("url.scheme", pctx.Scheme))
 	}
 	switch protocol {
 	case "a2a":

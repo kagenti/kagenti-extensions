@@ -490,6 +490,7 @@ func TestRequestFacts_MCPWithCapture(t *testing.T) {
 	pctx := fakeContext(pipeline.Outbound, http.Header{})
 	pctx.Host = "weather-tool-mcp.team1.svc:8000"
 	pctx.Path = "/mcp"
+	pctx.Scheme = "http"
 	pctx.Extensions.MCP = &pipeline.MCPExtension{
 		Method: "tools/call",
 		Params: map[string]any{"name": "get_weather", "arguments": map[string]any{"city": "Tokyo"}},
@@ -504,6 +505,7 @@ func TestRequestFacts_MCPWithCapture(t *testing.T) {
 	checkAttr(t, req, "mcp.tool", "get_weather")
 	checkAttr(t, req, "http.method", "POST")
 	checkAttr(t, req, "url.path", "/mcp")
+	checkAttr(t, req, "url.scheme", "http")
 	checkAttr(t, req, "lineage.self.id", "weather-service")
 	checkAttr(t, req, "lineage.peer.host", "weather-tool-mcp.team1.svc:8000")
 	checkAttr(t, req, "lineage.direction", "outbound")
@@ -531,6 +533,9 @@ func TestRequestFacts_A2AAndInference(t *testing.T) {
 	checkAttr(t, areq, "lineage.protocol", "a2a")
 	checkAttr(t, areq, "a2a.method", "message/send")
 	checkAttr(t, areq, "a2a.session_id", "sess-123")
+	if _, ok := findAttr(areq, "url.scheme"); ok {
+		t.Error("url.scheme present although the context carried no scheme")
+	}
 	if areq.Name != "weather-service a2a message/send" {
 		t.Errorf("a2a span name = %q", areq.Name)
 	}
