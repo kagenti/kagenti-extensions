@@ -53,6 +53,7 @@ file header.
 | `sidecar-patch.sh` | Attach the sidecar to an EXISTING (operator-managed) Deployment — for natively-instrumented apps that need no shim (weather pair, UI-imported apps). |
 | `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + external HTTP/HTTPS legs + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM + the `/echo` cross-session writer, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, exact inbound→outbound pairing, external-egress presence AND absence, and tool identity echo. |
 | `probe-cross-validate.sh` | The **cross-session probe**: trace A stashes bytes at rest (shared PVC file + redis), a later trace B reads and re-sends them; asserts the two disconnected trees, the invisible-hop absences, and the content-hash join (see below). |
+| `probe-lineage-validate.md` | **Agent-runnable validation playbook**: prereqs → deploy → both validators → exact expected shapes, triage guide, and the report format. Hand this file to an agent; it needs nothing else. |
 | `container-runtime.sh` | Shared docker/podman auto-detection + `kind_load` (sourced by the build scripts; override with `CONTAINER_TOOL`). |
 | `concurrency-test.sh` / `concurrency-test-mcp.sh` | The A2A / MCP concurrency verifiers. |
 | `overlays/` | Per-app upstream-defect fixes applied on top of the shim (not part of the method). |
