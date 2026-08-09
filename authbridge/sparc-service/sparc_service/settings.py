@@ -98,6 +98,10 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8090
 
+    # Request logging / arg-stripping (see api.py).
+    log_requests: bool = False
+    strip_tool_arg_keys: frozenset = field(default_factory=frozenset)
+
     # Validation errors collected at load time (provider creds missing, etc.).
     errors: tuple[str, ...] = field(default_factory=tuple)
 
@@ -152,6 +156,12 @@ class Settings:
                 f"provider={provider} requires SPARC_MODEL (e.g. azure/<deployment> or anthropic/claude-3-5-sonnet)"
             )
 
+        strip_tool_arg_keys: frozenset[str] = frozenset(
+            k.strip()
+            for k in os.getenv("SPARC_STRIP_TOOL_ARG_KEYS", "").split(",")
+            if k.strip()
+        )
+
         return cls(
             provider=provider,
             model=model,
@@ -171,5 +181,7 @@ class Settings:
             llm_registry_id=os.getenv("SPARC_LLM_REGISTRY_ID", "").strip(),
             host=os.getenv("HOST", "0.0.0.0"),
             port=_int_env("PORT", 8090),
+            log_requests=_truthy(os.getenv("SPARC_LOG_REQUESTS", "")),
+            strip_tool_arg_keys=strip_tool_arg_keys,
             errors=tuple(errors),
         )
