@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # verify-fleet.sh — drive every entry point in the fleet under concurrency and
-# print the HARMONY TABLE: app -> correct inbound/outbound pairing (target N/N).
-# A2A agents are driven via concurrency-test.sh; the wiki MCP front (2-service)
-# via concurrency-test-mcp.sh. Downstream tools (slack-tool, reservation-tool)
-# are exercised through their agent's cross-service call, not driven directly.
+# print the HARMONY TABLE: app -> clean per-trace interaction forests in the DG
+# Postgres (target N/N). A2A agents are driven via
+# concurrency-test-interactions.sh; the wiki MCP front via
+# concurrency-test-mcp-interactions.sh. Downstream tools (slack-tool,
+# reservation-tool) are exercised through their agent's cross-service call, not
+# driven directly.
 #
 # Usage:
 #   ./verify-fleet.sh                       # all entry points
@@ -40,15 +42,15 @@ for spec in "${SPECS[@]}"; do
   if [ "$kind" = "a2a" ]; then
     out=$(SELF_ID="$name" TARGET="${name}.${NAMESPACE}.svc.cluster.local:8080" \
           PROMPT="$payload" SETTLE="$settle" N="$N" NAMESPACE="$NAMESPACE" \
-          "${SCRIPT_DIR}/concurrency-test.sh" 2>&1) || rc=$?
-    score=$(printf '%s\n' "$out" | grep -oE 'CORRECT PAIRING: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
+          "${SCRIPT_DIR}/concurrency-test-interactions.sh" 2>&1) || rc=$?
+    score=$(printf '%s\n' "$out" | grep -oE 'CLEAN FORESTS: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
   else
-    out=$(FRONT=wiki-mcp BACKEND=wiki-service \
+    out=$(SELF_ID=wiki-mcp \
           MCP_URL="http://wiki-mcp.${NAMESPACE}.svc.cluster.local:8000/mcp" \
           TOOL="$payload" DRIVER_IMAGE=docker.io/library/wiki_memory_tool-otel:latest \
           SETTLE="$settle" N="$N" NAMESPACE="$NAMESPACE" \
-          "${SCRIPT_DIR}/concurrency-test-mcp.sh" 2>&1) || rc=$?
-    score=$(printf '%s\n' "$out" | grep -oE 'CORRECT 2-SERVICE PROPAGATION: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
+          "${SCRIPT_DIR}/concurrency-test-mcp-interactions.sh" 2>&1) || rc=$?
+    score=$(printf '%s\n' "$out" | grep -oE 'CLEAN TURNS: [0-9]+/[0-9]+' | tail -1 | grep -oE '[0-9]+/[0-9]+' || true)
   fi
   if [ "$rc" -ne 0 ] && [ -z "$score" ]; then
     echo "---- test CRASHED (exit $rc); full output: ----"
@@ -70,7 +72,7 @@ fi
 
 echo ""
 echo "================= HARMONY TABLE ================="
-printf '%-26s %s\n' "ENTRY POINT" "PAIRING (target ${N}/${N})"
+printf '%-26s %s\n' "ENTRY POINT" "CLEAN (target ${N}/${N})"
 printf '%-26s %s\n' "--------------------------" "--------------------"
 allpass=1
 for r in "${results[@]}"; do

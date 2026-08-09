@@ -134,6 +134,7 @@ Drive N **concurrent** requests from **inside the cluster** (not `kubectl
 port-forward` — loopback bypasses the sidecar's inbound listener), each with a
 distinct `traceparent` and an identifying tag. Then query DG's Postgres: for each
 request, does the outbound hop carrying its tag share the trace of the inbound
-carrying the same tag? Metric: matches / N, target **N/N**. `concurrency-test.sh`
-(A2A) and `concurrency-test-mcp.sh` (2-service MCP) implement this; `verify-fleet.sh`
-runs it across the whole fleet.
+carrying the same tag? Metric: matches / N, target **N/N**.
+`concurrency-test-interactions.sh` (A2A) and `concurrency-test-mcp-interactions.sh`
+(MCP) implement this at the derived-interaction level; `verify-fleet.sh` runs it
+across the whole fleet.

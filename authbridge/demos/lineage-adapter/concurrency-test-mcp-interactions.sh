@@ -78,6 +78,13 @@ EXPECT_KINDS="${EXPECT_KINDS:-}"
 EXPECT_ROOTS="${EXPECT_ROOTS:-}"
 
 # ---- ensure a driver pod with the mcp SDK exists (IfNotPresent: works offline) ----
+# A pod that exists but isn't Running (e.g. left in Unknown/Failed by a node
+# restart) can't be exec'd into — recreate it rather than crash on exec.
+phase="$(kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+if [ -n "$phase" ] && [ "$phase" != "Running" ]; then
+  echo ">> driver pod $DRIVER_POD is $phase — recreating"
+  kubectl delete pod -n "$NAMESPACE" "$DRIVER_POD" --wait=true >/dev/null
+fi
 if ! kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" >/dev/null 2>&1; then
   echo ">> creating driver pod $DRIVER_POD in $NAMESPACE"
   kubectl run "$DRIVER_POD" -n "$NAMESPACE" --image="$DRIVER_IMAGE" \
