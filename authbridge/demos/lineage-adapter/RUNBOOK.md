@@ -7,10 +7,10 @@ per-request execution forest** for it under concurrency — target 6/6 pairing.*
 Proven across 7 apps (trivia, currency_converter, contact_extractor, git_issue,
 slack_researcher→slack_tool, reservation_service→reservation_tool,
 wiki_memory_tool). Why the method works: `DESIGN.md`. Per-app empirical
-results: the expectation cards in `validation/`. The consumer side — what the
-DG service derives from these spans and how to read its UI — lives in the
-sibling repo: `lab-data-governance/docs/REVIEWER-QUICKSTART.md` (this kit
-assumes the two repos, plus `agent-examples`, are cloned side by side).
+results: the expectation cards in `validation/`. The consumer side lives in the
+sibling repo `lab-data-governance`; the wire between the two is its
+`docs/sidecar-wire-contract.md` (this kit assumes the two repos, plus
+`agent-examples`, are cloned side by side).
 
 ---
 
@@ -50,8 +50,9 @@ phases are identical).
 
 Prereqs already in the cluster: the sidecar images (build recipe below), the
 platform `envoy-config` ConfigMap in `team1`, the DG pod fed by the patched
-collector (`lab-data-governance/deploy/patch-kagenti-collector.sh` — see
-REVIEWER-QUICKSTART §2 there), and host Ollama (`qwen2.5:7b`) at
+collector (`lab-data-governance/deploy/patch-kagenti-collector.sh`, or the
+declarative `deploy/kagenti-collector-dg-values.yaml` overlay there), and host
+Ollama (`qwen2.5:7b`) at
 `host.containers.internal:11434`.
 
 ### Building the sidecar images
@@ -157,9 +158,12 @@ pod-loopback, which the iptables rules exclude, so it bypasses the sidecar inbou
 listener — DESIGN §5.)
 
 Then look at the result: DG UI at `http://dg.localtest.me:8080/ui/traces` —
-open a trace's `/flow` for the interactions tree, `/spans` for the raw spans.
-What to expect there (and what NOT to — e.g. every trace shows a dangling wire
-parent by design): `lab-data-governance/docs/REVIEWER-QUICKSTART.md` §5–6.
+open a trace's `/flow` for the interactions tree (`?showInfra=1` reveals the
+MCP plumbing hidden by default), `/spans` for the raw spans. Things there that
+look wrong but are correct by design: every trace shows a "missing parent"
+(the entry exchange's wire parent is the caller's span, which DG never
+receives — the derivation never guesses parents), multi-sidecar topologies are
+multi-root, and HTTPS legs derive no interaction (TLS passthrough).
 
 For a per-app **validation run**, fill an expectation card BEFORE firing:
 copy `validation/TEMPLATE-expectation-card.md`, state the expected entities,
