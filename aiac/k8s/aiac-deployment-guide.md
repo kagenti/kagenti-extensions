@@ -8,7 +8,8 @@ This guide covers the full AIAC deployment in the `aiac-system` namespace.
 |---|---|---|
 | `pdp-interface-deployment.yaml` | Rossoctl Interface Pod (IdP Configuration Service + PDP Policy Writer **Phase 1 rego-file mock** `aiac-pdp-policy-opa`) + 2 ClusterIP Services | 7071, 7072 |
 | `policy-model-store-statefulset.yaml` | Policy Model Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
-| `agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent) + ClusterIP Service | 7070 |
+| `event-broker-deployment.yaml` | NATS JetStream Event Broker Deployment + ClusterIP Service | 4222 |
+| `agent-deployment.yaml` | Agent Pod Deployment (`aiac-init` init container + AIAC Agent) + ClusterIP Service | 7070 |
 
 ## Prerequisites
 
@@ -18,7 +19,12 @@ This guide covers the full AIAC deployment in the `aiac-system` namespace.
 
 ## 1 — Build the images
 
-Run from the repo root (`cortex/`):
+Run from the repo root (`cortex/`).
+
+> **Build context differs per image.** The two `keycloak` services are self-contained
+> (their Dockerfiles `COPY requirements.txt .` / `COPY main.py .`), so their build context
+> is the Dockerfile's own directory. The `opa`, `policy-model-store`, and `agent` images bundle the
+> `aiac` package tree (`COPY . /app/src`), so their context is `aiac/src/`.
 
 ```bash
 # IdP Configuration Service (Interface Pod container 1)
@@ -33,14 +39,16 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
   -t localhost/aiac-pdp-policy-opa:local \
   aiac/src/
 
-# Policy Model Store
+# Policy Model Store — context: aiac/src/ (bundles the aiac package)
 docker build -f aiac/src/aiac/policy/model_store/service/Dockerfile \
   -t localhost/aiac-policy-model-store:local aiac/src/
 
-# AIAC Agent
+# AIAC Agent (also used as the aiac-init init container, via a command override) — context: aiac/src/
 docker build -f aiac/src/aiac/agent/controller/Dockerfile \
   -t localhost/aiac-agent:local aiac/src/
 ```
+
+The Event Broker uses the stock `nats:latest` image — no build step.
 
 ## 2 — Load images into the cluster
 
@@ -51,6 +59,15 @@ kind load docker-image localhost/aiac-pdp-config:local       --name <cluster-nam
 kind load docker-image localhost/aiac-pdp-policy-opa:local    --name <cluster-name>
 kind load docker-image localhost/aiac-policy-model-store:local     --name <cluster-name>
 kind load docker-image localhost/aiac-agent:local            --name <cluster-name>
+```
+
+For a fully air-gapped Kind cluster (no outbound network access), also pull and load the
+NATS image; `event-broker-deployment.yaml` uses `imagePullPolicy: IfNotPresent`, so a
+networked cluster can skip this and pull it directly:
+
+```bash
+docker pull nats:latest
+kind load docker-image nats:latest --name <cluster-name>
 ```
 
 **Remote registry** — tag, push, then update the `image:` fields in the manifests to match.
@@ -114,9 +131,12 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
 | `AIAC_POLICY_MODEL_STORE_URL` | `http://aiac-policy-model-store-service:7074` | Agent |
 | `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Model Store |
-| `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent, `aiac-init` — Event Broker ClusterIP address |
 | `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
 | `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |
+
+`aiac-init` treats `AIAC_RAG_INGEST_URL` as optional and skips the RAG Ingest health check
+when it is unset (the current phase has no RAG pod deployed yet).
 
 ## 5 — Deploy
 
@@ -126,10 +146,13 @@ Apply in dependency order:
 # 1. Interface Pod — creates the namespace, ConfigMap, Secret, and ClusterIP Services
 kubectl apply -f aiac/k8s/pdp-interface-deployment.yaml
 
-# 2. Policy Model Store — needs the aiac-system namespace
+# 2. Event Broker — NATS JetStream, no dependencies
+kubectl apply -f aiac/k8s/event-broker-deployment.yaml
+
+# 3. Policy Model Store — needs the aiac-system namespace
 kubectl apply -f aiac/k8s/policy-model-store-statefulset.yaml
 
-# 3. Agent — depends on the Interface Pod + Policy Model Store already being healthy
+# 4. Agent — aiac-init waits for NATS + Interface Pod + Policy Model Store to be healthy
 kubectl apply -f aiac/k8s/agent-deployment.yaml
 ```
 
@@ -137,6 +160,7 @@ Wait for all pods to be ready:
 
 ```bash
 kubectl wait deployment/aiac-interface     -n aiac-system --for=condition=Available --timeout=120s
+kubectl wait deployment/aiac-event-broker  -n aiac-system --for=condition=Available --timeout=120s
 kubectl wait statefulset/aiac-policy-model-store -n aiac-system --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s
 kubectl wait deployment/aiac-agent         -n aiac-system --for=condition=Available --timeout=120s
 ```
@@ -166,7 +190,27 @@ kubectl port-forward svc/aiac-agent-service 7070:7070 -n aiac-system &
 curl http://localhost:7070/health
 # {"status":"ok"}
 
+# Clean up all the tunnels opened to the cluster
 pkill -f "port-forward"
+```
+
+### NATS Event Broker — end-to-end check
+
+Requires the [`nats` CLI](https://github.com/nats-io/natscli).
+
+```bash
+kubectl port-forward svc/aiac-event-broker-service 4222:4222 -n aiac-system &
+nats context save aiac --server nats://localhost:4222
+nats context select aiac
+
+# Publish a test service-onboarding event (use a real IdP client UUID to see it
+# processed end to end; any string will demonstrate delivery either way):
+nats pub aiac.apply.service.<test-uuid> '{"id":"<test-uuid>"}'
+
+# Confirm the Agent processed and acked it (no redelivery):
+kubectl logs deployment/aiac-agent -n aiac-system -c aiac-agent --tail=50
+
+pkill -f "port-forward.*4222"
 ```
 
 Run the IdP data smoke test:
@@ -181,9 +225,10 @@ pkill -f "port-forward.*7071"
 ## Redeploying after a code change
 
 ```bash
-# Rebuild the changed image, e.g. IdP Configuration Service:
+# Rebuild the changed image, e.g. IdP Configuration Service (context: the service dir):
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
-  -t localhost/aiac-pdp-config:local aiac/src/
+  -t localhost/aiac-pdp-config:local \
+  aiac/src/aiac/idp/service/configuration/keycloak/
 kind load docker-image localhost/aiac-pdp-config:local --name <cluster-name>
 
 # Restart the affected deployment:

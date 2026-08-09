@@ -1,0 +1,43 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiac-event-broker
+  namespace: aiac-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiac-event-broker
+  template:
+    metadata:
+      labels:
+        app: aiac-event-broker
+    spec:
+      containers:
+        - name: nats
+          image: nats:latest
+          imagePullPolicy: IfNotPresent
+          args: ["-js", "-sd", "/data/jetstream"]
+          ports:
+            - containerPort: 4222
+          volumeMounts:
+            - name: jetstream-data
+              mountPath: /data/jetstream
+      volumes:
+        - name: jetstream-data
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiac-event-broker-service
+  namespace: aiac-system
+spec:
+  selector:
+    app: aiac-event-broker
+  ports:
+    - name: nats
+      port: 4222
+      targetPort: 4222

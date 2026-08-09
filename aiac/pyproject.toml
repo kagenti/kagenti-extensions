@@ -1,3 +1,32 @@
+[project]
+name = "aiac"
+version = "0.1.0"
+description = "AIAC — IdP configuration, PDP policy writer, and policy store services for Rossoctl."
+requires-python = ">=3.12"
+# Runtime dependencies — union of the per-service requirements.txt files under src/aiac/.
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "python-keycloak",
+    "python-dotenv",
+    "requests",
+    "kubernetes",
+    "nats-py",
+    "httpx",
+    "langgraph",
+    "langchain-openai",
+    "chromadb",
+    "tenacity",
+    "pytest>=9.1.1",
+]
+
+[project.optional-dependencies]
+# Test/dev tooling — install with: uv pip install -e ".[test]"
+test = [
+    "pytest",
+]
+
 [tool.ruff]
 line-length = 120
 target-version = "py312"
