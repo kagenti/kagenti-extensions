@@ -12,6 +12,8 @@ command stands the whole fleet up.
 - **Why the sidecar alone isn't enough, and what the shim does:** [`DESIGN.md`](DESIGN.md)
 - **Step-by-step for a single app:** [`RUNBOOK.md`](RUNBOOK.md)
 - **No cluster yet:** [`CLUSTER-FROM-ZERO-windows.md`](CLUSTER-FROM-ZERO-windows.md)
+- **Cluster running, no lineage yet:** [`LINEAGE-FROM-ZERO-windows.md`](LINEAGE-FROM-ZERO-windows.md)
+  — collector + DG service + sidecar on the stock weather pair, end to end (WSL2/docker)
 - **The consumer side** (what DG derives from the spans): the sibling
   `lab-data-governance` repo; the wire between producer and consumer is
   `docs/sidecar-wire-contract.md` there, and the DG UI lives at
@@ -48,6 +50,9 @@ file header.
 | `Dockerfile.otel-shim` | The propagate-only shim (all mainstream instrumentors + threading). |
 | `build-otel-shim.sh` | Build the shim on an app image + kind-load it. |
 | `attach-lineage.sh` | Emit a full Deployment+Service+lineage-ConfigMap (app + sidecar). |
+| `sidecar-patch.sh` | Attach the sidecar to an EXISTING (operator-managed) Deployment — for natively-instrumented apps that need no shim (weather pair, UI-imported apps). |
+| `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, and exact inbound→outbound pairing. |
+| `container-runtime.sh` | Shared docker/podman auto-detection + `kind_load` (sourced by the build scripts; override with `CONTAINER_TOOL`). |
 | `concurrency-test.sh` / `concurrency-test-mcp.sh` | The A2A / MCP concurrency verifiers. |
 | `overlays/` | Per-app upstream-defect fixes applied on top of the shim (not part of the method). |
 
