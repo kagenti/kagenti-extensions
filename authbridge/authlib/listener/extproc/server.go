@@ -161,6 +161,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
@@ -186,6 +187,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
@@ -464,15 +466,12 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		Direction: pipeline.Outbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      getHeader(headers, ":authority"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
-	}
-	if pctx.Host == "" {
-		pctx.Host = getHeader(headers, "host")
 	}
 
 	// SkipHosts short-circuit: forward the request as a transparent
@@ -509,15 +508,12 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		Direction: pipeline.Outbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      getHeader(headers, ":authority"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
-	}
-	if pctx.Host == "" {
-		pctx.Host = getHeader(headers, "host")
 	}
 
 	// SkipHosts short-circuit: see handleOutbound for rationale. The
@@ -750,6 +746,17 @@ func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Conte
 	cr.HeaderMutation.SetHeaders = append(cr.HeaderMutation.SetHeaders, set...)
 	cr.HeaderMutation.RemoveHeaders = append(cr.HeaderMutation.RemoveHeaders, del...)
 	return resp
+}
+
+// authorityOf returns the request's authority: the HTTP/2 :authority
+// pseudo-header, falling back to the HTTP/1 Host header. Both directions
+// need it — outbound it names the service being called, inbound the address
+// this workload was reached on (see pipeline.SessionEvent.Host).
+func authorityOf(headers *corev3.HeaderMap) string {
+	if a := getHeader(headers, ":authority"); a != "" {
+		return a
+	}
+	return getHeader(headers, "host")
 }
 
 func headerMapToHTTP(headers *corev3.HeaderMap) http.Header {
