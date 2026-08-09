@@ -60,7 +60,7 @@ ConfigMap contracts are documented in
 - **Default deployment**: use `authbridge-proxy`. No iptables, no
   Envoy, observable via abctl.
 - **Need ambient/transparent interception via Envoy**: use
-  `authbridge-envoy`. Requires the [`proxy-init`](../authproxy/)
+  `authbridge-envoy`. Requires the [`proxy-init`](../proxy-init/)
   iptables init container.
 - **Size-constrained, no protocol-aware events needed**: use the
   `authbridge-lite` image — the `authbridge-proxy` binary built with

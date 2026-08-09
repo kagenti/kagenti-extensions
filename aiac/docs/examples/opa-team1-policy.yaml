@@ -1,0 +1,137 @@
+# Example Rossoctl OPA AuthorizationPolicy (client-scoped, github-agent)
+#
+# A single, client-scoped policy CR that enforces one rule for exactly one
+# workload in the `team1` namespace — the github-agent.
+#
+#   INBOUND — deny user "alice" from reaching the github-agent. Every other
+#   authenticated user (e.g. "dev-user") stays allowed.
+#
+#   OUTBOUND — gate the agent's token-exchanged call to a tool on both the
+#   delegated user's role and the exchange target audience.
+#
+# It carries a rego file per tier (inbound/request + outbound/request). The
+# bundle-service composes each with the shipped global policy: for a tier the
+# global combiner allows only when `ns_ok AND client_ok`, and `client_ok`
+# comes from THIS package's `allow`. (A tier left undefined instead falls back
+# to allow via the combiner's `client_ok if not data.authbridge.client.<tier>`
+# rule — that is what happens when only one tier is present.)
+#
+# NOTE — outbound gating fields: the outbound rego below keys on
+# `input.identity.subject`, `input.identity.service_id`, and
+# `input.mcp.params.name` — all of which the live AuthBridge OPA plugin
+# populates on the outbound leg (see opa-kind-runbook.md Part B.5).
+# `input.identity.service_id` is the downstream service the exchanged token was
+# minted for (the last delegation hop's target audience — here the github-tool
+# SPIFFE ID). `input.mcp.params.name` is the specific tool being invoked, so the
+# rule gates PER TOOL: it allows only when the delegated user's role AND the
+# target service both admit the invoked tool. The `subject_role_scopes` /
+# `target_scopes` maps below are keyed by the actual MCP tool names exposed by
+# the deployed github-tool (aiac/demo/assets/tools/github_tool): `source-read`,
+# `source-write`, `issues-read`, `issues-write`. Note that MCP methods which do
+# not invoke a specific tool (e.g. a `tools/list` discovery request) carry no
+# `params.name`, so they never match and are denied.
+#
+# IMPORTANT — how client-scope targeting actually works: bundle-service looks
+# up a client-scope CR by **metadata.name + metadata.namespace**, matched
+# against the ServiceAccount segment of the caller's SPIFFE ID (`spiffe://
+# <trust-domain>/ns/<namespace>/sa/<name>` -> namespace=<namespace>,
+# name=<name>) — see operator/internal/bundleservice/identity/identity.go and
+# watcher.go's `GetPolicy(name, namespace)`. `spec.clientID` is NOT consulted
+# by that lookup (it's print-column metadata only); this CR is named
+# `github-agent` — matching the `sa/github-agent` segment of
+# `spiffe://localtest.me/ns/team1/sa/github-agent` — because that's what
+# actually scopes it to this one workload. `clientID` below is set to the
+# same short name purely for documentation/`kubectl get` display, and must
+# satisfy the CRD's DNS-label-style validation regex (no `spiffe://`, no
+# `/`).
+#
+# Identity note: on the INBOUND leg the OPA plugin exposes
+# input.identity.{subject, client_id, scopes}, plus audience when the validated
+# JWT carries it. On the OUTBOUND leg there is no validated JWT, so the plugin
+# synthesizes input.identity from the token-exchange delegation hop: subject
+# (delegated caller), client_id (this agent), scopes, and service_id (the
+# downstream service the exchanged token targets — the last hop's audience).
+# `subject` is the JWT `sub` claim. In this cluster the
+# rossoctl-realm tokens carry the username in `sub` (via a username->sub
+# protocol mapper on the `rossoctl` client — see A.1 in opa-kind-runbook.md,
+# already applied cluster-wide).
+apiVersion: agent.rossoctl.dev/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: github-agent
+  namespace: team1
+spec:
+  scope: client
+  clientID: "github-agent"
+  policies:
+    - path: "inbound/request.rego"
+      content: |
+        package authbridge.client.inbound.request
+        import rego.v1
+
+        agent_scopes := ["github-agent.issue_operations", "github-agent.source_operations"]
+
+        subject_roles := {
+            "dev-user": ["developer"],
+            "test-user": ["tester"],
+        }
+
+        source_roles := {}
+
+        role_scopes := {
+            "developer": ["github-agent.issue_operations", "github-agent.source_operations"],
+            "tester": ["github-agent.issue_operations"],
+        }
+
+        subject_ok if {
+            some role in subject_roles[input.identity.subject]
+            some scope in role_scopes[role]
+            scope in agent_scopes
+        }
+
+        source_ok if { not input.identity.client_id }
+        source_ok if { input.identity.client_id == "rossoctl"}
+        source_ok if {
+            some role in source_roles[input.identity.client_id]
+            some scope in role_scopes[role]
+            scope in agent_scopes
+        }
+
+        default allow := false
+        allow if { subject_ok; source_ok }
+
+    - path: "outbound/request.rego"
+      content: |
+        package authbridge.client.outbound.request
+        import rego.v1
+
+        agent_roles := ["github-agent.issue_operations", "github-agent.source_operations"]
+        subject_roles := {
+            "dev-user": ["developer"],
+            "test-user": ["tester"]
+        }
+        # The deployed github-tool (aiac/demo/assets/tools/github_tool) exposes
+        # exactly four MCP tools — source-read, source-write, issues-read,
+        # issues-write — one per skill. These names ARE the values that arrive in
+        # input.mcp.params.name when a specific tool is invoked, so the maps
+        # below key on them.
+        subject_role_scopes := {
+            "developer": ["issues-read", "source-write", "source-read"],
+            "tester": ["issues-read", "issues-write"],
+        }
+        agent_role_scopes := {
+            "github-agent.issue_operations": ["issues-read", "issues-write"],
+            "github-agent.source_operations": ["source-write", "source-read"],
+        }
+        target_scopes := {
+            "spiffe://localtest.me/ns/team1/sa/github-tool": ["source-read", "source-write", "issues-read", "issues-write"],
+        }
+        subject_ok if {
+            some role in subject_roles[input.identity.subject]
+            input.mcp.params.name in subject_role_scopes[role]
+        }
+        target_ok if {
+            input.mcp.params.name in target_scopes[input.identity.service_id]
+        }
+        default allow := false
+        allow if { subject_ok; target_ok }

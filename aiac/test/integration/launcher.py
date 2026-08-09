@@ -6,7 +6,7 @@ and ``test/integration/test_policy_pipeline.py`` (5.3).
 
 The cluster half — ``kubectl`` cp, ``kubectl port-forward``, ``resolve_pod``, and the ``opa``
 oracle — is used by the UC-1 onboarding ladder (``test/integration/test_uc1_onboard_agent_only.py``
-and its rung-2/3 siblings, 5.4), which drives a real Kagenti/Kind cluster rather than in-process
+and its rung-2/3 siblings, 5.4), which drives a real rossoctl/Kind cluster rather than in-process
 subprocesses.
 
 It imports only the standard library and ``requests`` — never ``aiac`` — so a launcher may import
@@ -231,7 +231,7 @@ def port_forward(target: str, *, namespace: str, local_port: int, remote_port: i
     ``target`` is a kubectl port-forward target (``svc/aiac-controller``, ``deploy/...``, ``pod/...``).
     The forward is not yielded until it is actually up: if ``ready_url`` is given it is polled until
     it answers (any HTTP status); otherwise the tunnel's own ``Forwarding from ...`` line is awaited
-    (the Controller exposes no ``/health``). A background thread drains the merged stdout/stderr the
+    (used for targets that expose no HTTP readiness path). A background thread drains the merged stdout/stderr the
     whole time — both to detect that line and so the OS pipe buffer can never fill and deadlock
     kubectl — and its captured output is surfaced if the forward exits early or never comes up.
     """

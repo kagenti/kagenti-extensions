@@ -1,67 +1,50 @@
-# Rossoctl Extensions
+# Cortex
 
-Kubernetes security extensions for the [Rossoctl](https://github.com/rossoctl/rossoctl) ecosystem, providing **zero-trust authentication** for workloads through transparent token exchange and dynamic Keycloak client registration using SPIFFE/SPIRE identities.
+Cortex delivers easy-to-use platform services to agentic workloads. It runs in a workload's request path — a sidecar in Kubernetes, or a standalone binary anywhere else — and provides:
 
-## AuthBridge
+- **Identity & access** — a verifiable identity for each workload, authentication and authorization of its calls, and the right credentials for each downstream service.
+- **Guardrails** — block agent actions that stray from the user's intent or aren't grounded in the conversation.
+- **Observability** — decrypt and parse a workload's model, tool, and agent-to-agent traffic into a live view.
+- **Egress control** — govern which external services a workload can reach.
+- **Optimizations** — trim the model context a workload sends and cap its spend, to cut latency and cost.
 
-[AuthBridge](./authbridge/) provides end-to-end authentication for Kubernetes workloads with [SPIFFE/SPIRE](https://spiffe.io) integration. It consists of:
+It ships as a single binary; the identity and access layer is **AuthBridge**, and the code lives under [`authbridge/`](./authbridge/).
 
-- **[Authlib](./authbridge/authlib/)** — shared Go library: JWT validation, RFC 8693 token exchange, plugin pipeline, listener implementations.
-- **Mode-specific binaries** under [`authbridge/cmd/`](./authbridge/cmd/):
-  - [`authbridge-proxy`](./authbridge/cmd/authbridge-proxy/) — proxy-sidecar (default): HTTP forward + reverse proxies, full plugin set.
-  - [`authbridge-envoy`](./authbridge/cmd/authbridge-envoy/) — envoy-sidecar: ext_proc gRPC server hooked into Envoy, full plugin set.
-  - `authbridge-lite` — **not a separate binary**: the `authbridge-lite` image is `authbridge-proxy` built with `exclude_plugin_*` tags (auth-only: jwt-validation + token-exchange), for size-constrained deployments. See [`authbridge-proxy`](./authbridge/cmd/authbridge-proxy/).
-- **[proxy-init](./authbridge/proxy-init/)** — iptables init container used by envoy-sidecar mode for transparent traffic interception.
-- **[Keycloak Sync](./authbridge/keycloak_sync.py)** — Declarative tool for synchronizing Keycloak configuration.
+## Quick start (local, no Kubernetes)
 
-Keycloak client registration runs in the [operator](https://github.com/rossoctl/operator) (separate repo, post-#411 / operator#361 — no in-pod registration sidecar).
+Watch an AI agent's traffic — its model, tool, and agent-to-agent calls — decrypted and parsed live on your laptop.
 
-See the [AuthBridge README](./authbridge/README.md) for architecture details and the [demos index](./authbridge/demos/README.md) for getting started.
+1. **Install and start the demo** (macOS/Linux). Downloads two small binaries and starts the proxy in the background:
 
-## Container Images
+   ```sh
+   curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install-demo.sh | sh
+   ```
 
-All images are published to `ghcr.io/rossoctl/cortex/`. After
-cortex#411 the unified binary was split into three
-mode-specific combined images, and the per-component sidecars
-(`client-registration`, standalone `spiffe-helper`) were retired:
+2. **Open the live viewer** in another terminal:
 
-| Image | Description |
-|-------|-------------|
-| `authbridge` | proxy-sidecar combined (default): authbridge-proxy + bundled spiffe-helper, full plugin set |
-| `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper, full plugin set |
-| `authbridge-lite` | `authbridge-proxy` built with `exclude_plugin_*` tags — auth-only (jwt-validation + token-exchange, OPA + parsers dropped), for size-constrained deployments. A build variant, not a separate binary |
-| `proxy-init` | Alpine + iptables init container (envoy-sidecar mode only) |
+   ```sh
+   abctl --endpoint http://localhost:47601
+   ```
 
-`spiffe-helper` is bundled inside each combined image and gated per
-workload by the `SPIRE_ENABLED` env var. Client registration is
-handled by the operator's `ClientRegistrationReconciler` and
-no longer ships as a separate image. The legacy `authbridge-unified`,
-`authbridge-light`, `client-registration`, and standalone `spiffe-helper`
-images are no longer published; older release tags continue to
-publish the previous shape.
+3. **Send an agent's traffic through it** — e.g. Claude Code, from the directory where you started the demo:
 
-## Development
+   ```sh
+   HTTPS_PROXY=http://localhost:47600 \
+     NODE_EXTRA_CA_CERTS="$PWD/cortex-ca/ca.crt" \
+     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+     claude
+   ```
 
-```bash
-# Install pre-commit hooks
-make pre-commit
+   Its calls stream into `abctl`, decrypted and parsed.
 
-# Run formatters
-make fmt
+## Running on Kubernetes
 
-# Build the proxy-init iptables init container image
-make build-proxy-init
+In a cluster, Cortex sidecars are injected automatically by the [operator](https://github.com/rossoctl/operator), with Keycloak + SPIFFE/SPIRE for identity and token exchange. Start with the end-to-end **[Weather Agent walkthrough](./authbridge/demos/weather-agent/demo-ui.md)** (or the [`abctl` version](./authbridge/demos/weather-agent/demo-with-abctl.md)); see the [demos index](./authbridge/demos/README.md) and the [architecture reference](./authbridge/README.md) for all modes and details.
 
-# Run local testing (requires Kind cluster)
-./local-build-and-test.sh
-```
+## Related repositories
 
-See [LOCAL_TESTING_GUIDE.md](./LOCAL_TESTING_GUIDE.md) for the full local development setup.
-
-## Related Repositories
-
-- [rossoctl](https://github.com/rossoctl/rossoctl) — Core Rossoctl platform
-- [operator](https://github.com/rossoctl/operator) — Kubernetes operator for sidecar injection (includes the admission webhook)
+- [rossoctl](https://github.com/rossoctl/rossoctl) — core platform
+- [operator](https://github.com/rossoctl/operator) — sidecar injection + admission webhook
 
 ## License
 

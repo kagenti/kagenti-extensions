@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -33,10 +32,10 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
-	"github.com/rossoctl/cortex/authbridge/authlib/observe"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -59,44 +58,12 @@ import (
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
 
-var logLevel = new(slog.LevelVar)
-
-func initLogging() {
-	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		logLevel.Set(slog.LevelInfo)
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-func startSignalToggle() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGUSR1)
-	go func() {
-		for range sigCh {
-			if logLevel.Level() == slog.LevelDebug {
-				logLevel.Set(slog.LevelInfo)
-				slog.Info("log level toggled to INFO (send SIGUSR1 to switch back to DEBUG)")
-			} else {
-				logLevel.Set(slog.LevelDebug)
-				slog.Info("log level toggled to DEBUG (send SIGUSR1 to switch back to INFO)")
-			}
-		}
-	}()
-}
-
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
 
-	initLogging()
-	startSignalToggle()
+	runtimeutil.InitLogging("authbridge-envoy")
+	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
 		log.Fatal("--config is required and must point to a YAML file")
@@ -235,7 +202,10 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
 
 	// Warm the plugin catalog at boot so any factory that violates the
 	// constructor contract surfaces here rather than on the first
@@ -259,29 +229,12 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-envoy starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
-			slog.Warn("health server failed", "error", err)
-		}
-	}()
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	if healthErr != nil {
+		log.Fatalf("health server listen: %v", healthErr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -299,6 +252,7 @@ func main() {
 		srv.GracefulStop()
 	}
 	statSrv.Shutdown(shutdownCtx)
+	healthSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
@@ -331,18 +285,6 @@ func startGRPCExtProc(inbound, outbound *pipeline.Holder, sessions *session.Stor
 		slog.Info("ext_proc gRPC listening", "addr", addr)
 		if err := srv.Serve(lis); err != nil {
 			log.Fatalf("ext_proc serve: %v", err)
-		}
-	}()
-	return srv
-}
-
-func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
-	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
 		}
 	}()
 	return srv

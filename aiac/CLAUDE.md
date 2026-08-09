@@ -1,6 +1,6 @@
 # AIAC Codebase Guide
 
-All paths below are relative to `kagenti-extensions/aiac/`.
+All paths below are relative to `cortex/aiac/`.
 
 ## Requirements / PRD docs
 
@@ -15,11 +15,30 @@ When a document under `docs/specs/` contains a markdown link to another file, us
 
 ## Issue tracking
 
-Issues are tracked as local markdown files under `docs/issues/`, not on GitHub.
-Never use `gh` commands to create, update, or list issues — always read/write the local files directly.
+Issues are tracked as **GitHub issues** on the `s-and-p-team/cortex` repo,
+organized in the org-level **AIAC** Project (Projects v2):
+<https://github.com/orgs/s-and-p-team/projects/1>. Use `gh` to read and manage
+them.
 
-`docs/issues/implementation-plan.md` — overall implementation plan.
-For current issue list, `ls` the subdirectories under `docs/issues/`.
+Note: `s-and-p-team/cortex` is the AIAC team's fork of the canonical upstream
+`rossoctl/cortex`. Tracking issues on the fork (not upstream) is deliberate —
+PRs still target upstream, but issue tracking stays on the team fork, so the
+`-R s-and-p-team/cortex` scoping below is intentional.
+
+Hierarchy: the Project groups **Feature**-typed container issues — one per
+component area, nested via GitHub **native sub-issues** to form the tree — over
+**Task**-typed leaf issues. Every issue carries the `aiac` label plus cumulative
+`area:<path>` labels; open issues also carry a `status:<value>` label, and the
+Project's built-in **Status** field mirrors that value.
+
+```bash
+# list / view (filter to the AIAC set)
+gh issue list -R s-and-p-team/cortex --label aiac --state all
+gh issue view <number> -R s-and-p-team/cortex
+```
+
+Filtered web list:
+<https://github.com/s-and-p-team/cortex/issues?q=is%3Aissue+label%3Aaiac>
 
 ## Issue tracking — codebase inspection policy
 
@@ -31,23 +50,18 @@ Per-task handoff documents live under `docs/handoffs/` — one markdown file per
 
 ## Source code
 
-`src/aiac/` — Python package root (`__init__.py` is empty).
+`src/aiac/` — Python package root (`__init__.py` is empty). It is organized by
+subsystem: an IdP configuration layer, a PDP policy-writer layer, the AIAC Agent
+layer (built on the SPM/APM model — a Controller dispatching to use-case
+sub-agents and a policy-rules builder), and a two-layer policy stack (models, a
+model store, and the Policy Computation Engine).
 
-Key stable structure:
-- `idp/` — IdP configuration service and models
-- `pdp/` — PDP policy writer service and library
-- `agent/` — the AIAC Agent layer (rebuilt on the SPM/APM model):
-  - `agent/controller/` — FastAPI Controller (`routes.py` + Dockerfile); `/apply/*` routes dispatch to the UC sub-agents and make the single `compute_and_apply` (PCE) call
-  - `agent/uc/` — use-case sub-agents: `onboarding/` (provision + policy_builder + orchestrator), `policy_update/` (build/rebuild), `role_update/`
-  - `agent/policy_rules_builder/` — PRB: `build_role_rules` / `build_scope_rules` emit `list[PolicyRule]`
-  - `agent/shared/` — shared helpers (`roles.py`, e.g. `flatten_role`)
-  - `agent/onboarding.old/` — archived prior implementation (built on the superseded `ProposedDiff` model); not part of the active build
-- `policy/` — the two-layer policy stack (all implemented):
-  - `policy/model/` — `PolicyRule`, `ServicePolicyModel` (SPM), `AgentPolicyModel` (APM), `PolicyModel`
-  - `policy/store/` — Policy Store service + library (SPM CRUD)
-  - `policy/computation/` — Policy Computation Engine (`compute_and_apply`, SPM-based)
+Discover the concrete layout live rather than relying on a memorized tree:
 
-For current file list, `ls` or `find` under `src/aiac/`.
+```bash
+find src/aiac -maxdepth 2 -type d      # subsystems and their immediate children
+ls src/aiac/<subsystem>/               # drill into any layer
+```
 
 ## Tests
 
@@ -59,13 +73,12 @@ For current file list, `ls` or `find` under `src/aiac/`.
 .venv/bin/pytest test/ -m "not integration"
 ```
 
-The whole `test/` tree (including `test/policy/`) collects and runs green. The Policy
-Computation Engine (`aiac.policy.computation.engine`) was migrated to the SPM store surface in
-**Wave 3 / Handoff 05**, so the earlier PCE-chain collection failures (which required ignoring
-`test/policy/computation`, `test/agent/controller/test_routes.py`, and
-`test/integration/test_policy_pipeline.py`) are resolved — no `--ignore` flags are needed.
+The whole `test/` tree collects and runs green — no `--ignore` flags are needed.
+(This wasn't always true: the Policy Computation Engine was migrated to the SPM
+store surface in Wave 3, which resolved the earlier PCE-chain collection
+failures.)
 
-Use `ls test/` to discover current test directories.
+Use `ls test/` / `find test -type d` to discover current test directories.
 
 **Integration tests** (`-m integration`) need live config — Keycloak + admin creds + an LLM
 endpoint (`opa` on PATH for the policy-pipeline suite). Those variables live in
@@ -87,10 +100,10 @@ Exercises all `Configuration` methods — run `ls test/idp/configuration/` to se
 
 ## Python environment
 
-Virtual environment: `kagenti-extensions/aiac/.venv`
+Virtual environment: `cortex/aiac/.venv`
 
-Activate: `source kagenti-extensions/aiac/.venv/bin/activate`
-Run directly: `kagenti-extensions/aiac/.venv/bin/python` / `kagenti-extensions/aiac/.venv/bin/pytest`
+Activate: `source cortex/aiac/.venv/bin/activate`
+Run directly: `cortex/aiac/.venv/bin/python` / `cortex/aiac/.venv/bin/pytest`
 
 Always use this venv for any Python execution, test runs, or dependency checks.
 
@@ -98,15 +111,17 @@ Always use this venv for any Python execution, test runs, or dependency checks.
 
 Config: `k8s/`, `pyproject.toml`, `pyrightconfig.json`
 
-Docker images:
+Docker images: each service ships a `Dockerfile` next to its service code (build
+context is `src/`, except `rag-ingest/`, which is a separate top-level
+directory). Discover the current set of images and their Dockerfiles live:
 
-| Image | Dockerfile location |
-|-------|-------------------|
-| `aiac-agent` | `src/aiac/agent/controller/Dockerfile` (build context `src/`) |
-| `aiac-pdp-config` | `src/aiac/idp/service/configuration/keycloak/Dockerfile` |
-| `aiac-pdp-policy-opa` | `src/aiac/pdp/service/policy/opa/Dockerfile` |
-| `aiac-policy-store` | `src/aiac/policy/store/service/Dockerfile` |
-| `aiac-rag-ingest` | `rag-ingest/` (separate directory) |
+```bash
+find src -name Dockerfile          # per-service Dockerfiles under src/
+ls rag-ingest/                     # the out-of-tree ingest image
+```
+
+Image names and build contexts are declared in the build/CI config and the
+`k8s/` manifests — grep there for the authoritative name→Dockerfile mapping.
 
 ### Non-root container / volume-ownership pattern
 
@@ -133,9 +148,12 @@ spec:
     fsGroup: 10001   # makes the mounted volume group-writable by UID 10001
 ```
 
-Services requiring this today:
-- **Policy store** — PVC at `/data` (SQLite backend), `policy-store-statefulset.yaml`
-- **PDP policy OPA writer** — emptyDir at `/rego` (`REGO_OUTPUT_DIR`), `pdp-interface-deployment.yaml`
+This applies to any service that writes to a mounted volume (a PVC or an
+emptyDir). Find them live by grepping the manifests for volume mounts / claims:
+
+```bash
+grep -rlniE 'volumeMounts|volumeClaimTemplates|emptyDir|persistentVolumeClaim' k8s/
+```
 
 Services that mount no volumes still need the Dockerfile `USER` directive; the
 pod-level `fsGroup`/volume-chown block above is only required for those that
@@ -178,3 +196,17 @@ demo workloads, which don't) and CPU/memory requests + limits.
 ## External references
 
 - [Kagenti Developer Guide](https://github.com/kagenti/kagenti/blob/main/docs/dev-guide.md) — upstream Kagenti dev guide: per-persona workflows (agent, tool, extensions developers, MCP gateway operators), Git/PR process, pre-commit hooks, feature flags, local Kagenti UI v2 development (React frontend + FastAPI backend, building/deploying images to Kubernetes), and HyperShift-based testing on ephemeral OpenShift clusters (cluster lifecycle, cost management, troubleshooting).
+
+## Agent skills
+
+### Issue tracker
+
+GitHub issues on `s-and-p-team/cortex`, filtered by the `aiac` label, tracked in the org-level AIAC Project. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Issue status is tracked with `status:<value>` labels; the board's built-in **Status** field carries the same values. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context, scoped to `aiac/` (`CONTEXT.md` + `docs/adr/` at the `aiac/` root). See `docs/agents/domain.md`.

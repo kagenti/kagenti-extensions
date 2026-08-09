@@ -20,10 +20,20 @@ import (
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/tui"
 )
 
+// version is the abctl build version, overridden at release time via
+// -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
+var version = "dev"
+
 func main() {
 	endpoint := flag.String("endpoint", "",
 		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl opens a Namespaces → Pods picker.")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println("abctl", version)
+		return
+	}
 
 	// Best-effort sweep of edit-tempfiles older than 24h. Tempfiles are
 	// intentionally left in place on every exit path (success / abort /

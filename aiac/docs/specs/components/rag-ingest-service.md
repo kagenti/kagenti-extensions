@@ -1,7 +1,9 @@
 # Component PRD: RAG Ingest Service
 
 ## Description
-A FastAPI REST service co-located with ChromaDB in the RAG Pod. Accepts knowledge documents for any configured collection, chunks and embeds them, and writes the resulting vectors into the ChromaDB instance in the same Pod. Supports both access control policies (`aiac-policies`) and org/business domain context (`aiac-domain-knowledge`) through a single collection-parameterized API surface. Developer-driven ingestion is performed via `kubectl port-forward`.
+A FastAPI REST service co-located with ChromaDB and the Policy Guardrails Agent in the RAG Pod. Accepts knowledge documents for any configured collection, chunks and embeds them, and writes the resulting vectors into the ChromaDB instance in the same Pod. Supports both access control policies (`aiac-policies`) and org/business domain context (`aiac-domain-knowledge`) through a single collection-parameterized API surface. Developer-driven ingestion is performed via `kubectl port-forward`.
+
+Before any document is written to ChromaDB, the service calls the co-located **Policy Guardrails Agent** to verify it. See [Guardrails pre-flight verification](#guardrails-pre-flight-verification) below.
 
 After every successful ingest operation the service publishes a trigger event to the **Event Broker** (NATS JetStream) on the `aiac.apply.policy.build` subject. This causes the AIAC Agent to recompute and apply the updated policy against the live PDP state. All three ingest semantics (replace, update, delete) publish `build`; `rebuild` is an explicit operator-only command issued directly to the Agent and is never triggered by the ingest service.
 
@@ -37,6 +39,16 @@ The `{collection}` path segment must be a slug from `AIAC_RAG_COLLECTIONS` (defa
 
 **Delete** is the only path that removes content from a collection. `/update/*` endpoints never delete as a side effect.
 
+## Guardrails pre-flight verification
+
+Before writing any document to ChromaDB, the service sends it to the co-located **Policy Guardrails Agent** (`localhost:7075`) for verification. Full contract: [policy-guardrails-agent.md](policy-guardrails-agent.md).
+
+- Applies to all 12 write endpoints above (`replace` and `update`, each across `text`/`file`/`url`), for every collection slug. `DELETE` is exempt.
+- One verification call per document. All documents in a request are verified before any ChromaDB mutation for that request occurs.
+- **All-or-nothing:** if any document is rejected, the whole request fails and nothing is written to ChromaDB — the collection is left exactly as it was before the request.
+- **Fail-closed:** if the Policy Guardrails Agent is unreachable, times out, or errors, the request fails and nothing is written. Set `AIAC_GUARDRAILS_ENABLED=false` to disable verification entirely (e.g. for local development or initial corpus bootstrap) — this is a deliberate operator choice, distinct from an unavailable agent.
+- This gate does not change the `aiac.apply.policy.build` publish behavior below: it only happens on a successful ingest, so a fail-closed rejection means the event is simply never published for that request.
+
 ## Post-ingest Event Broker notification
 
 After every successful ingest operation (replace, update, or delete), the service publishes `{"id": ""}` to `aiac.apply.policy.build` on the Event Broker (`NATS_URL`). The publish is non-blocking: ingest success is reported to the caller before the NATS publish completes. Publish failures are logged but do not cause the ingest endpoint to return an error. This preserves ingest availability even when the Event Broker is temporarily unavailable.
@@ -67,6 +79,9 @@ The AIAC Agent's durable consumer receives the event and acknowledges it after s
 | `EMBEDDING_BASE_URL` | — | ConfigMap |
 | `EMBEDDING_MODEL` | — | ConfigMap |
 | `EMBEDDING_API_KEY` | — | Kubernetes Secret |
+| `AIAC_GUARDRAILS_URL` | `http://localhost:7075` | ConfigMap |
+| `AIAC_GUARDRAILS_ENABLED` | `true` | ConfigMap |
+| `AIAC_GUARDRAILS_TIMEOUT_SECONDS` | — | ConfigMap |
 
 Adding a third collection is a configuration-only change: add a new slug to `AIAC_RAG_COLLECTIONS` and a corresponding entry in the slug→name map. No code modification required.
 

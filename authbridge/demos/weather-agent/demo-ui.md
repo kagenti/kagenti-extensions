@@ -88,7 +88,7 @@ plugin pipeline in real time while chatting with the agent, see
 ## Prerequisites
 
 Ensure you have completed the Rossoctl platform setup as described in the
-[Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md),
+[Installation Guide](https://www.rossoctl.dev/docs/getting-started/install),
 including the Rossoctl UI.
 
 You should also have:
@@ -789,7 +789,7 @@ kubectl delete namespace team1
 
 - **Advanced Demo**: See the [GitHub Issue Agent demo](../github-issue/demo.md) for
   outbound token exchange, scope-based access control, and Alice vs Bob scenarios
-- **AuthBridge Binary**: See the [AuthBridge README](../../cmd/authbridge/README.md) for inbound
+- **AuthBridge Binary**: See the [AuthBridge README](../../cmd/README.md) for inbound
   JWT validation and outbound token exchange internals
 - **Token-Exchange Routes**: See the [routes-configuration guide](../token-exchange-routes/README.md) for
   route-based token exchange to multiple tool services

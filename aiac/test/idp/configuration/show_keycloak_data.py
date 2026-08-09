@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import Role, Scope, Service, Subject
 
-REALM = "kagenti"
+REALM = "rossoctl"
 
 
 def _fmt_roles(roles: list[Role], indent: int = 4) -> str:

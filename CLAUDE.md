@@ -260,7 +260,7 @@ cd authbridge && podman build -f cmd/authbridge-proxy/Dockerfile \
 
 ### Running the Full Demo
 
-1. Set up a Kind cluster with SPIRE + Keycloak (use [Rossoctl Ansible installer](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md))
+1. Set up a Kind cluster with SPIRE + Keycloak (use [Rossoctl installer](https://www.rossoctl.dev/docs/overview/quickstart))
 2. Deploy the webhook via [operator](https://github.com/rossoctl/operator)
 3. See the [AuthBridge demos index](authbridge/demos/README.md) for a recommended learning path:
    - **Getting started**: `authbridge/demos/weather-agent/demo-ui.md` (inbound validation, UI deployment)

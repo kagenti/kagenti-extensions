@@ -26,16 +26,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
-	"github.com/rossoctl/cortex/authbridge/authlib/observe"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -55,37 +55,17 @@ import (
 	// authbridge-lite image excludes all but jwt-validation + token-exchange.
 )
 
-var logLevel = new(slog.LevelVar)
+// version is the authbridge-proxy build version, overridden at release time
+// via -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
+var version = "dev"
 
-func initLogging() {
-	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		logLevel.Set(slog.LevelInfo)
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-func startSignalToggle() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGUSR1)
-	go func() {
-		for range sigCh {
-			if logLevel.Level() == slog.LevelDebug {
-				logLevel.Set(slog.LevelInfo)
-				slog.Info("log level toggled to INFO (send SIGUSR1 to switch back to DEBUG)")
-			} else {
-				logLevel.Set(slog.LevelDebug)
-				slog.Info("log level toggled to DEBUG (send SIGUSR1 to switch back to INFO)")
-			}
-		}
-	}()
-}
+// demoMode is set by --demo. It suppresses listeners that only make sense with
+// iptables enforce-redirect: the demo uses cooperative HTTPS_PROXY, so nothing
+// is ever REDIRECTed to the transparent listener and opening it would just be
+// an idle port. The forward-role preset defaults transparent_proxy_addr to
+// :8082, and config can't unset it (the preset refills an empty value), so this
+// gate is the only way to keep the demo to the listeners it actually uses.
+var demoMode bool
 
 // spiffeProviderNeeded reports whether any configured feature actually consumes
 // the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
@@ -141,13 +121,49 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
+	showVersion := flag.Bool("version", false, "print version and exit")
+	demo := flag.Bool("demo", false,
+		"run a built-in local demo (forward-only TLS bridge + protocol parsers) that decrypts and parses an agent's egress; no --config, cluster, Keycloak, or SPIRE needed")
+	caDir := flag.String("ca-dir", "",
+		"CA directory for --demo (auto-generated); defaults to ./"+demoCADirDefault)
 	flag.Parse()
 
-	initLogging()
-	startSignalToggle()
+	if *showVersion {
+		fmt.Println("authbridge-proxy", version)
+		return
+	}
+
+	runtimeutil.InitLogging("authbridge-proxy")
+	runtimeutil.StartSignalToggle()
+
+	if *demo {
+		demoMode = true
+		if *configPath != "" {
+			log.Fatal("--demo and --config are mutually exclusive")
+		}
+		dir := *caDir
+		if dir == "" {
+			dir = demoCADirDefault // relative to cwd — no absolute path baked in
+		}
+		abs, aerr := filepath.Abs(dir)
+		if aerr != nil {
+			log.Fatalf("--demo: resolving --ca-dir %q: %v", dir, aerr)
+		}
+		// Write the built-in config next to the CA and drive the normal
+		// file-based load + hot-reload path — so editing the file reloads live.
+		p, werr := writeDemoConfig(abs)
+		if werr != nil {
+			log.Fatalf("--demo: %v", werr)
+		}
+		*configPath = p
+		slog.Info("demo mode — wrote built-in config next to the CA; edit it to hot-reload",
+			"config", p, "ca_dir", abs)
+	} else if *caDir != "" {
+		log.Fatal("--ca-dir only applies with --demo")
+	}
 
 	if *configPath == "" {
-		log.Fatal("--config is required and must point to a YAML file")
+		log.Fatal("--config is required (or use --demo for the local demo)")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The
@@ -373,7 +389,11 @@ func main() {
 			log.Fatalf("creating reverse proxy: %v", rerr)
 		}
 		rpSrv.Shared = sharedStore
-		httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
+		rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
+		if rerr != nil {
+			log.Fatalf("reverse-proxy listen: %v", rerr)
+		}
+		httpServers = append(httpServers, rpHTTP)
 	}
 
 	// The transparent (enforce-redirect) listener rides with the forward proxy;
@@ -395,13 +415,20 @@ func main() {
 		fpSrv.SkipHosts = skipHosts
 		fpSrv.TLSBridge = bridge
 		fpSrv.Shared = sharedStore
-		httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+		fpHTTP, herr := runtimeutil.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr)
+		if herr != nil {
+			log.Fatalf("forward-proxy listen: %v", herr)
+		}
+		httpServers = append(httpServers, fpHTTP)
 
 		// Outbound transparent listener (enforce-redirect mode). It shares the
 		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
 		// HTTP_PROXY egress and iptables-REDIRECTed bypass egress are gated and
 		// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
-		transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+		// Skipped in --demo: no iptables there, so nothing is ever REDIRECTed to it.
+		if !demoMode {
+			transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
+		}
 	}
 
 	_ = mtlsMetrics // TODO Phase 2: surface metrics through /stats
@@ -411,7 +438,10 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
 
 	// Warm the plugin catalog at boot so any factory that violates the
 	// constructor contract surfaces here rather than on the first
@@ -435,29 +465,12 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-proxy starting", "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-proxy starting", "version", version, "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
-			slog.Warn("health server failed", "error", err)
-		}
-	}()
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	if healthErr != nil {
+		log.Fatalf("health server listen: %v", healthErr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -474,6 +487,7 @@ func main() {
 		_ = transparentLn.Close()
 	}
 	statSrv.Shutdown(shutdownCtx)
+	healthSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
@@ -484,48 +498,6 @@ func main() {
 	if sessions != nil {
 		sessions.Close()
 	}
-}
-
-func startHTTPServer(name string, handler http.Handler, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
-}
-
-// startReverseProxyServer mirrors startHTTPServer but uses the
-// reverseproxy.Server's Listen() method so the byte-peek TLS-sniffing
-// listener is wired in when mTLS is enabled. With mTLS off, Listen
-// returns a plain net.Listen and behavior matches startHTTPServer.
-//
-// Logged "mtls" attribute makes the listener mode visible at startup;
-// operators expecting a separate :8443 port for TLS get a clear hint
-// that this is the same :8080 with byte-peek detection.
-func startReverseProxyServer(name string, rp *reverseproxy.Server, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           rp.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := rp.Listen(addr)
-	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
-	}
-	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr, "mtls", rp.MTLSEnabled())
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
 }
 
 // startTransparentProxy binds the outbound transparent listener and serves it
@@ -554,16 +526,4 @@ func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListene
 		}
 	}()
 	return ln
-}
-
-func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
-	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
-		}
-	}()
-	return srv
 }

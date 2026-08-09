@@ -54,7 +54,7 @@ the UC-1 ladder's `rego_out/uc1/`). `opa eval` then asserts the
 scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
 
 1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
-   `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `KEYCLOAK_REALM` *before* importing the aiac
+   `AIAC_POLICY_MODEL_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `KEYCLOAK_REALM` *before* importing the aiac
    libraries — the libraries read env at import time. This is the pattern
    `test/pdp/policy/generate_rego.py` already follows. (The PCE resolves its realm via
    `Configuration.for_default_realm()`, the single source of truth reading `KEYCLOAK_REALM`; the
@@ -62,9 +62,9 @@ scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below
 2. **Spawn the three services as `uvicorn` subprocesses** (no Docker) and poll each `GET /health`
    until ready, with a bounded timeout:
    - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
-   - Policy Store — its ASGI app on `7074`, with `AGENTPOLICY_DB_PATH` pointed at a fresh temp dir.
+   - Policy Model Store — its ASGI app on `7074`, with `SERVICEPOLICY_DB_PATH` pointed at a fresh temp dir.
    - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR`
-     (pointed at the current variant's `rego_out/policy_pipeline/<variant>/`) and the Policy Store DB path in its env.
+     (pointed at the current variant's `rego_out/policy_pipeline/<variant>/`) and the Policy Model Store DB path in its env.
 3. **Provision Keycloak** (idempotent — delete-if-exists the realm first, then create):
    - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
      users `dev-user`, `test-user`, and `devops-user`; create realm roles `developer`, `tester`, and
@@ -213,16 +213,16 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `AIAC_TEST_REALM` | Realm the test provisions | `aiac-pp` |
 | `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-pp` |
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
-| `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
+| `AIAC_POLICY_MODEL_STORE_URL` | Policy Model Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
 | `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/policy_pipeline/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
-| `AGENTPOLICY_DB_PATH` | Policy Store DB path for the subprocess (fresh temp dir) | temp |
+| `SERVICEPOLICY_DB_PATH` | Policy Model Store DB path for the subprocess (fresh temp dir) | temp |
 | `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant fed to the PRB; the test sets it per variant (`policy.explicit.md`, `policy.abstract.md`) | `/etc/aiac/policy.md` |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`) | — (required) |
 | `OPA_BIN` | Path to the standalone `opa` binary used as the verification oracle; else `PATH` (`shutil.which`), else the test `pytest.skip`s | — (optional; PATH lookup) |
 
-> When the test is written, confirm the Policy Store's ASGI import path and its DB-path env-var
-> name against the Policy Store component spec / issue — `AGENTPOLICY_DB_PATH` is the placeholder used
+> When the test is written, confirm the Policy Model Store's ASGI import path and its DB-path env-var
+> name against the Policy Model Store component spec / issue — `SERVICEPOLICY_DB_PATH` is the placeholder used
 > here; use the real one. `AIAC_POLICY_FILE` selects which `policy.md` variant (see
 > *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*) the PRB reads.
 
@@ -246,7 +246,7 @@ Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 The suite `pytest.skip`s when no `opa` binary is found (`$OPA_BIN` → `PATH`). Eyeball the persisted
 Rego against the adjusted package shapes in
 [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md); optionally inspect the
-Policy Store DB and the provisioned Keycloak realm.
+Policy Model Store DB and the provisioned Keycloak realm.
 
 ## Testing Decisions
 
@@ -273,7 +273,7 @@ Policy Store DB and the provisioned Keycloak realm.
   the test reads each service back via `Configuration.get_service` and asserts its `.type` before
   running the pipeline, aborting on mismatch. This is a **provisioning** sanity check, distinct from the
   Rego-decision assertions.
-- **Self-contained subprocess lifecycle.** The test spawns IdP (7071), Policy Store (7074), and OPA
+- **Self-contained subprocess lifecycle.** The test spawns IdP (7071), Policy Model Store (7074), and OPA
   (7072) as `uvicorn` subprocesses, polls each `GET /health` before use, and tears them all down in
   `finally`. Keycloak and the LLM are **external** (reached via env); `opa` is an external binary.
 - **LLM nondeterminism, contained.** The PRB LLM is pinned to `temperature=0`, and the **explicit**
@@ -366,7 +366,7 @@ are **resolved**, so this test is ready to be written. Component prerequisites:
 - OPA filesystem stub — `pdp-policy-writer/1.14-pdp-policy-writer-opa-stub.md`
 - Rego package generator — `pdp-policy-writer/1.10-rego-package-generator.md`
 - pdp-policy library — `library/pdp/8.9-pdp-policy-library-rename.md`
-- Policy Store library / service — `policy/store/8.7-policy-store-library.md` /
+- Policy Model Store library / service — `policy/store/8.7-policy-store-library.md` /
   `policy/store/8.5-policy-store-service.md`
 
 ## Scenario inputs (PRB functional inputs)
@@ -381,7 +381,7 @@ The descriptions are **generic and keyword-free** — they describe what each en
 carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
 cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
 description prose: the test sets each client's `client.type` attribute directly — as a plain string
-`"Agent"` / `"Tool"` written onto the client — rather than discovering it from a `kagenti.io/type`
+`"Agent"` / `"Tool"` written onto the client — rather than discovering it from a `rossoctl.io/type`
 label, so `Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
 tags each client from the attribute without touching the TEMP description-keyword fallback.
 

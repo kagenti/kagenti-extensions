@@ -33,7 +33,7 @@ All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Ad
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `KEYCLOAK_URL` | Yes | Keycloak base URL, e.g. `http://keycloak-service.keycloak.svc:8080` |
-| `KEYCLOAK_REALM` | Yes | Realm name, e.g. `kagenti` |
+| `KEYCLOAK_REALM` | Yes | Realm name, e.g. `rossoctl` |
 | `KEYCLOAK_ADMIN_USERNAME` | Yes | Admin username (from `keycloak-admin-secret`) |
 | `KEYCLOAK_ADMIN_PASSWORD` | Yes | Admin password (from `keycloak-admin-secret`) |
 
@@ -44,7 +44,7 @@ All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Ad
 - Bind: `0.0.0.0:7072`
 - Base image: `python:3.12-slim`
 - Kubernetes ClusterIP Service: `aiac-pdp-policy-service:7072`
-- Deployment: co-located with IdP Configuration Service as a container in the **Kagenti Interface Pod** (`pdp-interface-deployment.yaml`)
+- Deployment: co-located with IdP Configuration Service as a container in the **Rossoctl Interface Pod** (`pdp-interface-deployment.yaml`)
 
 ## Dependencies (`requirements.txt`)
 

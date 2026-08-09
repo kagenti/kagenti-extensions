@@ -18,14 +18,21 @@ and read individual events as pretty-printed JSON.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-## Build
+## Install
+
+Download a prebuilt `abctl` for your platform (linux/macOS, amd64/arm64) from the
+[Releases page](https://github.com/rossoctl/cortex/releases) — see
+[Download prebuilt binaries](../../README.md#download-prebuilt-binaries) for the download,
+checksum-verify, and macOS quarantine steps — and drop it on your PATH.
+
+Or build from source:
 
 ```sh
 cd authbridge/cmd/abctl
 go build .
 ```
 
-Produces a single static binary (~10 MB).
+Either way you get a single binary (~10 MB; the linux build is fully static).
 
 ## Run
 

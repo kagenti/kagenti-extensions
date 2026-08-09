@@ -81,7 +81,7 @@ def compute_and_apply(rules: list[PolicyRule], override: bool = False) -> None
 def decommission(service_id: str) -> None   # service_id = clientId (SPM key), not the Keycloak UUID
 ```
 
-- **No return value; failures propagate:** on success the caller receives no return value. Both functions log exceptions and **re-raise** them — a failure in IdP resolution, Policy Store I/O, or PDP Policy Writer push surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) rather than being silently swallowed while nothing is applied.
+- **No return value; failures propagate:** on success the caller receives no return value. Both functions log exceptions and **re-raise** them — a failure in IdP resolution, Policy Model Store I/O, or PDP Policy Writer push surfaces to the caller (the Controller returns HTTP 500; a NATS consumer nacks → at-least-once redelivery) rather than being silently swallowed while nothing is applied.
 - **`override`:** selects the merge mode (see [Merge Semantics](#merge-semantics)). `False` (default) appends additively at the SPM layer; `True` authoritatively replaces every input role's mappings **across all SPMs** (role-level revocation). Set by the caller (the Controller) from the producing UC's choice — UC1 = `False`, UC3 = `True`, UC2 Rebuild = `True`, UC2 Build = TBD.
 - **`decommission`:** the authoritative service **offboard** — tears down a decommissioned service's entire policy footprint (see [Decommission (service offboard)](#decommission-service-offboard)). Keyed by the **clientId (SPM key)**, since an offboarded client is gone from `get_services()` and its UUID can no longer be resolved.
 - Import path: `from aiac.policy.computation.engine import compute_and_apply, decommission`
@@ -198,7 +198,7 @@ Steps:
 |--------|---------|
 | `aiac.policy.model` | `PolicyRule`, `ServicePolicyModel`, `AgentPolicyModel`, `PolicyModel` |
 | `aiac.idp.configuration` | `Configuration.get_services` — the **only** runtime IdP read (catalog: `service_type` + own roles/scopes for the P2 seed) |
-| `aiac.policy.store.library` | `get_service_policy` / `get_service_policy_by_scope` (fetch SPM), `get_service_policies_by_role` (SPMs containing a role — override purge + outbound derivation), `apply_service_policy` (persist SPM), `delete_service_policy` (offboard) |
+| `aiac.policy.model_store.library` | `get_service_policy` / `get_service_policy_by_scope` (fetch SPM), `get_service_policies_by_role` (SPMs containing a role — override purge + outbound derivation), `apply_service_policy` (persist SPM), `delete_service_policy` (offboard) |
 | `aiac.pdp.policy.library` | `apply_policy` — partial-upsert derived APMs to OPA; `delete_agent_policy` — remove an offboarded agent's APM/Rego |
 
 Note: the PCE no longer calls `get_services_by_role` / `get_services_by_scope` / `get_subjects_by_role` at routing or classification time — those facts arrive on the rules (input contract) and derivation reads SPMs. The single IdP read is `get_services()` for the identity seed.
@@ -206,7 +206,7 @@ Note: the PCE no longer calls `get_services_by_role` / `get_services_by_scope` /
 ### Not Called By
 
 - PDP Policy Writer — the downstream consumer, not a caller.
-- Policy Store — pure CRUD, no computation.
+- Policy Model Store — pure CRUD, no computation.
 - IdP Configuration Service — no awareness of this module.
 
 ### Not Responsible For
@@ -219,12 +219,12 @@ Note: the PCE no longer calls `get_services_by_role` / `get_services_by_scope` /
 
 ## Testing Decisions
 
-Good tests assert external behavior — what the engine writes to the Policy Store (SPMs) and pushes to the PDP (derived APMs) — not internal merge logic directly.
+Good tests assert external behavior — what the engine writes to the Policy Model Store (SPMs) and pushes to the PDP (derived APMs) — not internal merge logic directly.
 
 **Seam:** mock all downstream dependencies at their module-level import boundary:
 
 - `aiac.idp.configuration` — mock `Configuration.get_services` (the catalog: `service_type` + each service's own roles/scopes for the P2 seed).
-- `aiac.policy.store.library` — mock `get_service_policy` / `get_service_policy_by_scope`, `get_service_policies_by_role`, `apply_service_policy`, `delete_service_policy`.
+- `aiac.policy.model_store.library` — mock `get_service_policy` / `get_service_policy_by_scope`, `get_service_policies_by_role`, `apply_service_policy`, `delete_service_policy`.
 - `aiac.pdp.policy.library` — mock `apply_policy`, `delete_agent_policy`.
 
 **Un-freeze `test/policy/computation/`.** These tests were excluded (frozen imports caused collection errors). With the SPM redesign landed, un-freeze the directory so the suite runs under `pytest test/ -m "not integration"`.
