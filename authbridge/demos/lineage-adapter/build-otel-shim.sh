@@ -10,12 +10,13 @@
 #   ./build-otel-shim.sh a2a_currency_converter:latest
 #   # -> builds+loads docker.io/library/a2a_currency_converter-otel:latest
 #
-# Notes (see RUNBOOK.md / DESIGN.md): podman build + `kind load image-archive`
-# because the docker daemon is off and `kind load docker-image` misbehaves under
-# podman. BRACE "${x}:latest" — zsh applies a :l modifier to $x:latest (this
-# script is bash so it's fine, but keep the habit).
+# Runtime-agnostic: container-runtime.sh picks docker or podman (override with
+# CONTAINER_TOOL) and kind_load does the right load per runtime. BRACE
+# "${x}:latest" — zsh applies a :l modifier to $x:latest (this script is bash
+# so it's fine, but keep the habit).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "${SCRIPT_DIR}/container-runtime.sh"
 
 BASE_IMAGE="${1:?usage: build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid]}"
 # derive default wrapper tag: strip registry/path + tag, append -otel
@@ -31,8 +32,8 @@ case "$BASE_IMAGE" in
   *)   base_ref="docker.io/library/${BASE_IMAGE}" ;;
 esac
 
-echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref}"
-podman build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
+echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref} (${CONTAINER_TOOL})"
+"$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
   --build-arg "BASE_IMAGE=${base_ref}" \
   --build-arg "VENV_PYTHON=${VENV_PYTHON}" \
   --build-arg "APP_UID=${APP_UID}" \
@@ -41,9 +42,7 @@ podman build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
 # alias under docker.io/library so containerd resolves the bare name in manifests
 wrapper_name="${WRAPPER_TAG%%:*}"; wrapper_ver="${WRAPPER_TAG##*:}"
 alias_ref="docker.io/library/${wrapper_name}:${wrapper_ver}"
-podman tag "${WRAPPER_TAG}" "${alias_ref}"
+"$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}"
 
-tar="/tmp/${wrapper_name}-otel.tar"
-podman save -o "${tar}" "${alias_ref}"
-KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "${tar}" --name kagenti
-echo ">> loaded ${alias_ref} into kind cluster kagenti"
+kind_load "${alias_ref}"
+echo ">> loaded ${alias_ref} into kind cluster ${KIND_CLUSTER}"

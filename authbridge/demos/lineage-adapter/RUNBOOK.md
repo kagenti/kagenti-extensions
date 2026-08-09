@@ -214,6 +214,15 @@ export modes.
 
 ## Environment gotchas (macOS/podman/zsh)
 
+> **Docker-engine environments (Linux/WSL2):** the kit's build scripts source
+> `container-runtime.sh`, which auto-detects docker vs podman (override with
+> `CONTAINER_TOOL`, cluster name with `KIND_CLUSTER`). Under docker, images load
+> via plain `kind load docker-image` — the podman-specific notes below
+> (image-archive dance, `KIND_EXPERIMENTAL_PROVIDER`) do not apply. The
+> `host.containers.internal` LLM host is also podman-only: docker/Kind uses the
+> `dockerhost` headless-Service trick (see `CLUSTER-FROM-ZERO-windows.md`
+> Phase 4a) — set the fleet env accordingly.
+
 - **zsh `${x}:latest`** — always brace; bare `$x:latest` silently applies the `:l`
   (lowercase) modifier and corrupts the tag.
 - Build/load via `podman build` + `kind load image-archive` (docker daemon is off;

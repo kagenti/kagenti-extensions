@@ -38,6 +38,7 @@
 # (confirm the real Deployment/container names on the cluster first).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "${SCRIPT_DIR}/container-runtime.sh"
 
 BASE_IMAGE="${1:-ghcr.io/kagenti/kagenti/backend:latest}"
 base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
@@ -47,20 +48,20 @@ WRAPPER_TAG="${2:-${base_name}-otel:latest}"
 VENV_PYTHON="/app/.venv/bin/python"
 APP_UID="999"
 
-command -v podman >/dev/null || { echo "error: podman not on PATH" >&2; exit 1; }
 command -v python3 >/dev/null || { echo "error: python3 not on PATH (needed to build the wrapped Cmd)" >&2; exit 1; }
 
 # 0) Ensure the base image is present locally (the cluster/agent-examples flow
-#    usually has it pulled already; pull if not).
-if ! podman image exists "${BASE_IMAGE}"; then
+#    usually has it pulled already; pull if not). `image inspect` is the
+#    existence check both docker and podman understand.
+if ! "$CONTAINER_TOOL" image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
   echo ">> pulling ${BASE_IMAGE}"
-  podman pull "${BASE_IMAGE}"
+  "$CONTAINER_TOOL" pull "${BASE_IMAGE}"
 fi
 
 # 1) Install the propagate-only instrumentors via the SHARED shim.
 INSTRUMENTED="${base_name}-otel-instrumented:latest"
-echo ">> [1/3] building instrumentor layer ${INSTRUMENTED} FROM ${BASE_IMAGE} (uid=${APP_UID})"
-podman build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
+echo ">> [1/3] building instrumentor layer ${INSTRUMENTED} FROM ${BASE_IMAGE} (uid=${APP_UID}, ${CONTAINER_TOOL})"
+"$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
   --build-arg "VENV_PYTHON=${VENV_PYTHON}" \
   --build-arg "APP_UID=${APP_UID}" \
@@ -70,7 +71,7 @@ podman build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
 #    wrapper, producing an exec-form JSON array for a thin CMD-override layer.
 #    An ENTRYPOINT-based image cannot be wrapped this way (the wrapper would
 #    land in the args, not the command) — refuse rather than mis-wrap.
-BASE_ENTRYPOINT_JSON="$(podman inspect --format '{{json .Config.Entrypoint}}' "${BASE_IMAGE}")"
+BASE_ENTRYPOINT_JSON="$("$CONTAINER_TOOL" inspect --format '{{json .Config.Entrypoint}}' "${BASE_IMAGE}")"
 case "${BASE_ENTRYPOINT_JSON}" in
   null|'""'|'[]') ;;
   *)
@@ -79,7 +80,7 @@ case "${BASE_ENTRYPOINT_JSON}" in
     echo "       (see attach-lineage.sh) or clear the ENTRYPOINT in an overlay." >&2
     exit 1;;
 esac
-BASE_CMD_JSON="$(podman inspect --format '{{json .Config.Cmd}}' "${BASE_IMAGE}")"
+BASE_CMD_JSON="$("$CONTAINER_TOOL" inspect --format '{{json .Config.Cmd}}' "${BASE_IMAGE}")"
 WRAPPED_CMD="$(
   BASE_CMD_JSON="${BASE_CMD_JSON}" python3 - <<'PY'
 import json, os, sys
@@ -121,17 +122,15 @@ ENV OTEL_TRACES_EXPORTER=none \\
     OTEL_LOGS_EXPORTER=none
 CMD ${WRAPPED_CMD}
 EOF
-podman build -f "${WORK_DIR}/Dockerfile.wrap" -t "${WRAPPER_TAG}" "${WORK_DIR}"
+"$CONTAINER_TOOL" build -f "${WORK_DIR}/Dockerfile.wrap" -t "${WRAPPER_TAG}" "${WORK_DIR}"
 
-# 3) Load into the kind cluster (podman path: save + kind load image-archive,
-#    aliased under docker.io/library so containerd resolves the bare name).
+# 3) Load into the kind cluster, aliased under docker.io/library so containerd
+#    resolves the bare name (kind_load handles the docker-vs-podman mechanics).
 wrapper_name="${WRAPPER_TAG%%:*}"; wrapper_ver="${WRAPPER_TAG##*:}"
 alias_ref="docker.io/library/${wrapper_name}:${wrapper_ver}"
-podman tag "${WRAPPER_TAG}" "${alias_ref}"
-tar="/tmp/${wrapper_name}.tar"
-podman save -o "${tar}" "${alias_ref}"
-echo ">> [3/3] loading ${alias_ref} into kind cluster kagenti"
-KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "${tar}" --name kagenti
+"$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}"
+echo ">> [3/3] loading ${alias_ref} into kind cluster ${KIND_CLUSTER}"
+kind_load "${alias_ref}"
 
 cat <<EOF
 
