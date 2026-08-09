@@ -86,8 +86,9 @@ kubectl get svc github-tool -n team1 -o jsonpath='{.metadata.labels.protocol\.ro
 kubectl get pod -l app=github-tool -n team1 -o jsonpath='{.items[0].metadata.labels.rossoctl\.io/type}'
 
 # Agent serves its card with no MCP server present
-kubectl port-forward svc/github-agent 8080:8080 -n team1 &
-curl -s http://localhost:8080/.well-known/agent-card.json | python3 -m json.tool
+# (local port 18080, not 8080 -- rossoctl's Gateway already binds host:8080 on a Kind cluster)
+kubectl port-forward svc/github-agent 18080:8080 -n team1 &
+curl -s http://localhost:18080/.well-known/agent-card.json | python3 -m json.tool
 ```
 
 ## Out of scope

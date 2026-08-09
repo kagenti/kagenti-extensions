@@ -90,9 +90,9 @@ load_image_to_kind() {
   if [ "$RUNTIME" = "podman" ]; then
     local tar_file
     tar_file="$(mktemp "${TMPDIR:-/tmp}/install-image.XXXXXX")"
-    trap 'rm -f "$tar_file"' RETURN
     "$RUNTIME" save "$image" -o "$tar_file"
     kind load image-archive "$tar_file" --name "$CLUSTER_NAME"
+    rm -f "$tar_file"
   else
     kind load docker-image "$image" --name "$CLUSTER_NAME"
   fi
