@@ -57,7 +57,7 @@ metadata:
   namespace: team1
   labels:
     app.kubernetes.io/name: github-agent
-    protocol.kagenti.io/a2a: ""
+    protocol.rossoctl.io/a2a: ""
 spec:
   replicas: 1
   selector:
@@ -67,9 +67,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: github-agent
-        kagenti.io/inject: enabled
-        kagenti.io/spire: enabled
-        protocol.kagenti.io/a2a: ""
+        protocol.rossoctl.io/a2a: ""
     spec:
       serviceAccountName: github-agent
       containers:
@@ -94,34 +92,23 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # LLM configuration - Ollama (local LLM)
-            # Matches upstream .env.ollama from agent-examples repo
+            # LLM configuration - OpenAI-compatible endpoint (litellm proxy)
             - name: TASK_MODEL_ID
-              value: "ollama/ibm/granite4:latest"
-            # Ollama API base URL. Required by litellm (used by crewai >=1.10).
-            # For Docker Desktop / Kind: http://host.docker.internal:11434
-            # For in-cluster Ollama:     http://ollama.ollama.svc:11434
+              value: "Azure/gpt-5-mini-2025-08-07"
             - name: LLM_API_BASE
-              value: "http://host.docker.internal:11434"
-            - name: OLLAMA_API_BASE
-              value: "http://host.docker.internal:11434"
+              value: "https://ete-litellm.ai-models.vpc-int.res.ibm.com/v1"
             - name: LLM_API_KEY
-              value: "ollama"
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: apikey
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: openai-secret
+                  key: apikey
             - name: MODEL_TEMPERATURE
               value: "0"
-            # For OpenAI (uncomment and set your key):
-            # - name: TASK_MODEL_ID
-            #   value: "gpt-4.1-nano"
-            # - name: LLM_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: openai-secret
-            #       key: apikey
-            # - name: OPENAI_API_KEY
-            #   valueFrom:
-            #     secretKeyRef:
-            #       name: openai-secret
-            #       key: apikey
 
             # Agent service settings
             # PORT tells the agent where to listen for A2A traffic.
@@ -141,7 +128,7 @@ spec:
 
             # JWKS URI for validating incoming tokens from Keycloak
             - name: JWKS_URI
-              value: "http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs"
+              value: "http://keycloak-service.keycloak.svc:8080/realms/rossoctl/protocol/openid-connect/certs"
           resources:
             limits:
               cpu: 500m
@@ -199,13 +186,14 @@ spec:
 # client-id.txt and client-secret.txt that the authbridge sidecar
 # mounts at /shared/). The operator also applies kagenti.io/type=agent
 # to the Deployment and Pod template, enabling webhook sidecar injection.
-apiVersion: agent.kagenti.dev/v1alpha1
+apiVersion: agent.rossoctl.dev/v1alpha1
 kind: AgentRuntime
 metadata:
   name: github-agent
   namespace: team1
 spec:
   type: agent
+  mtlsMode: disabled
   targetRef:
     apiVersion: apps/v1
     kind: Deployment

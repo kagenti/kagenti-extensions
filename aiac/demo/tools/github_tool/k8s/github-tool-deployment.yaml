@@ -98,7 +98,7 @@ metadata:
   name: github-tool
   namespace: team1
   labels:
-    protocol.kagenti.io/mcp: "true"
+    protocol.rossoctl.io/mcp: "true"
 spec:
   selector:
     app: github-tool
@@ -112,13 +112,14 @@ spec:
 #   - applies kagenti.io/type=tool to the pod (read by classify_service), and
 #   - registers a Keycloak client with client.name = "team1/github-tool"
 #     (so analyze_tool derives scopes github-tool.{source-read,...}).
-apiVersion: agent.kagenti.dev/v1alpha1
+apiVersion: agent.rossoctl.dev/v1alpha1
 kind: AgentRuntime
 metadata:
   name: github-tool
   namespace: team1
 spec:
   type: tool
+  mtlsMode: disabled
   targetRef:
     apiVersion: apps/v1
     kind: Deployment

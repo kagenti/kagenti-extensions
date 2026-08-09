@@ -12,4 +12,5 @@ testpaths = ["test"]
 pythonpath = ["src"]
 markers = [
     "integration: tests that need live infra — a running Keycloak, Keycloak admin credentials, a real LLM endpoint, and the `opa` binary on PATH (see test/integration/.env)",
+    "integration_extended: heavier multi-scenario policy-pipeline evaluation tests — same live infra as `integration`, but several full pipeline runs and many more PRB/LLM calls per session (see test/integration/test_policy_pipeline_eval.py)",
 ]

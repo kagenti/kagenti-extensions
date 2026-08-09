@@ -10,3 +10,8 @@ test/pdp/policy/rego_out/
 # regenerated per run, left on disk for eyeballing — not source of truth. probe.rego is a
 # committed fixture and is not under rego_out/, so it stays tracked.
 test/integration/rego_out/
+
+# policy-eval-scenarios generated Rego + per-run pass/fail/skip reports
+# (test/integration/eval/test_policy_pipeline_eval.py); regenerated per run.
+test/integration/eval/rego_out/
+test/integration/eval/reports/
