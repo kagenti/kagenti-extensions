@@ -87,7 +87,36 @@ hop. Asserts:
 
 Success line: `CROSS-SESSION VALIDATED ✔`, exit 0.
 
-## 5. Optional visual confirmation
+## 5. Issue-155 read surface — destination / http / identity / feed
+
+The interactions API enriches every interaction at read time from the span
+pair's stored facts (wire contract v1.5.1 + lab-dg commits `c653360`/`ff7ccd3`).
+Validate it against ONE of the main-validation traces (`$TID` = a trace id
+printed by `probe-validate.sh`). Requires the probe sidecars to be on a
+v1.5.1+ image (they emit `url.scheme`) and the DG pod on `ff7ccd3`+.
+
+```bash
+curl -s "http://dg.localtest.me:8080/api/traces/$TID/interactions" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)["interactions"]
+for ix in d:
+    dest=ix["destination"] or {}; http=ix["http"] or {}
+    print((ix["summary"] or "")[:44], "|", dest.get("url"), "| int:", dest.get("internal"),
+          "|", http.get("method"), http.get("status_code"), http.get("outcome"),
+          "| sub:", ix["principal_sub"], "| sess:", ix["session_id"])'
+```
+
+| Field | Exact expectation on a main-validation trace |
+|---|---|
+| `destination.url` | composed `http://…` on ALL 11 outbound interactions; the inbound root has `url=null` with path-only (inbound anchors carry no `lineage.peer.host` — BY DESIGN, not a finding) |
+| `destination.internal` | `false` for `httpbin.org` and for NOTHING else; `true` for `probe-back`/`probe-tool` svc authorities and `host.containers.internal:11434` |
+| `http` | `POST/200/ok` everywhere except the httpbin leg's `GET/200/ok`; any other `outcome` is a finding |
+| `principal_sub` | `null` on EVERY row (no JWT on probe paths) — asserted absence; a value appearing means something fabricates identity |
+| `session_id` | `null` on EVERY row (the probe mints bare `message/send`, no `contextId`) — asserted absence |
+| span names | `/api/traces/$TID/interactions/<iid>/spans` rows carry `name` (e.g. `probe-front a2a message/send`); entity-evidence rows have NO `name` key |
+| feed | `GET /api/interactions?since_seq=0&limit=2` → 2 rows + integer `next_seq`; passing `next_seq` back returns strictly later rows; cursoring reaches all 12 of the trace's interactions; `limit` > 1000 or a non-integer cursor → 400 |
+
+## 6. Optional visual confirmation
 
 - DG UI per trace: `http://dg.localtest.me:8080/ui/traces/<trace_id>/flow`
   (trace ids are printed by the validators). Every trace shows a "missing
@@ -96,7 +125,7 @@ Success line: `CROSS-SESSION VALIDATED ✔`, exit 0.
   the Map should show `service:httpbin.org`; the invisible legs (HTTPS, redis,
   file) do NOT appear anywhere, by definition.
 
-## 6. Triage guide (symptom → where to look)
+## 7. Triage guide (symptom → where to look)
 
 | Symptom | Likely cause |
 |---|---|
@@ -110,12 +139,16 @@ Success line: `CROSS-SESSION VALIDATED ✔`, exit 0.
 | redis rows > 0 | port-exclude bypass broke (`OUTBOUND_PORTS_EXCLUDE=6379` missing from proxy-init) — check `kubectl get pod -n team1 <probe-back-pod> -o yaml \| grep -A2 OUTBOUND_PORTS` |
 | (d) no shared hash | payload capture or content-addressing changed — compare `interaction_legs.payload_hash` per trace manually |
 | stale pods after deploy | probe images are local `IfNotPresent`; re-run deploy-fleet (it restarts + waits). NEVER roll non-probe `:latest` agents casually — they pull upstream on restart |
+| `destination.url` null on OUTBOUND rows | sidecar image predates v1.5.1 (no `url.scheme` on the wire — check the request span's attributes) or the listener supplied no scheme; host+path present with null url is the correct pre-v1.5.1 rendering, not a guess |
+| `internal` flag wrong | consumer-side heuristic drifted (`_host_is_internal` in `retrieval/interactions.py`) — vocabulary bug, not a producer issue |
+| `http.status_code`/`outcome` null with a response leg present | response-span attribute read broke (they live on the RESPONSE span, not the anchor) — consumer regression |
+| feed rows missing / cursor stuck | `interaction_legs.seq` stream issue — compare `GET /api/interactions` against a direct `SELECT max(seq) FROM interaction_legs` |
 
 Isolated failure (one assertion, cause understood, rest of run intact): finish
 the run, report it as a finding. Structural failure (pairing, orphans, guessed
 links): stop and report before touching anything.
 
-## 7. Report format
+## 8. Report format
 
 Produce exactly this:
 
@@ -123,11 +156,12 @@ Produce exactly this:
 LINEAGE PROBE VALIDATION — <date>, image <sidecar image tag if known>
 1. probe-validate.sh:        PASS | FAIL   (paste the final capabilities block)
 2. probe-cross-validate.sh:  PASS | FAIL   (paste the final cross-session block)
-3. Trace ids: main <tid1>,<tid2>; cross A <tidA>, B <tidB>
-4. Findings: NONE | list — each with: assertion violated, observed vs expected,
+3. issue-155 read surface:   PASS | FAIL   (destination/internal/http/nulls/names/feed per §5)
+4. Trace ids: main <tid1>,<tid2>; cross A <tidA>, B <tidB>
+5. Findings: NONE | list — each with: assertion violated, observed vs expected,
    evidence (validator lines / SQL output), isolated-or-structural, your read
    on producer (sidecar) vs consumer (derivation) vs environment.
-5. Environment notes: anything retried, httpbin latency, pod restarts observed.
+6. Environment notes: anything retried, httpbin latency, pod restarts observed.
 ```
 
 Do not summarize green as prose — paste the validators' own final blocks; they
