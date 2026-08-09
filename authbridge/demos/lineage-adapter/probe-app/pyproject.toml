@@ -1,0 +1,18 @@
+[project]
+name = "lineage-probe"
+version = "0.0.1"
+description = "Lineage test app: front (LLM + threaded A2A fan-out), back (held fan-in -> MCP tool + LLM), or MCP tool leaf, selected by ROLE."
+license = { text = "Apache" }
+requires-python = ">=3.11"
+dependencies = [
+    "starlette>=0.37.0",
+    "uvicorn>=0.29.0",
+    "httpx>=0.27.0",
+]
+
+[project.scripts]
+server = "lineage_probe.app:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

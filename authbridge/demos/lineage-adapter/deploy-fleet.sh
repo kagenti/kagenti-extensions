@@ -20,6 +20,7 @@
 #   SKIP_OLLAMA=1   don't attempt the Marvin model alias
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+. "${SCRIPT_DIR}/container-runtime.sh"
 NAMESPACE="${NAMESPACE:-team1}"
 # lineage-adapter -> demos -> authbridge -> kagenti-extensions-snp -> workspace root
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
@@ -36,6 +37,7 @@ base_name_of() {  # image spec -> base image name
   case "$1" in
     ghcr:*)  echo "${1#ghcr:}" ;;
     local:*) local p="${1#local:}"; echo "${p##*/}" ;;
+    kit:*)   local p="${1#kit:}"; echo "${p##*/}" ;;
     *) echo "ERR"; return 1 ;;
   esac
 }
@@ -65,18 +67,22 @@ if [ "$SKIP_BUILD" != "1" ]; then
       case "$image" in
         ghcr:*)
           ref="ghcr.io/kagenti/agent-examples/${bn}:latest"
-          podman pull "$ref"
-          podman tag "$ref" "docker.io/library/${bn}:latest"
-          podman save -o "/tmp/${bn}.tar" "docker.io/library/${bn}:latest"
-          KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "/tmp/${bn}.tar" --name kagenti
+          "$CONTAINER_TOOL" pull "$ref"
+          "$CONTAINER_TOOL" tag "$ref" "docker.io/library/${bn}:latest"
+          kind_load "docker.io/library/${bn}:latest"
           ;;
-        local:*)
-          ctx="${WORKSPACE_ROOT}/${image#local:}"
+        local:*|kit:*)
+          # local: resolves beside this repo (the umbrella/workspace layout);
+          # kit: resolves inside this directory — app sources that SHIP with
+          # the kit (e.g. probe-app) and need no sibling clone.
+          case "$image" in
+            kit:*) ctx="${SCRIPT_DIR}/${image#kit:}" ;;
+            *)     ctx="${WORKSPACE_ROOT}/${image#local:}" ;;
+          esac
           [ -f "${ctx}/Dockerfile" ] || { echo "!! no Dockerfile at ${ctx}"; exit 1; }
-          podman build -f "${ctx}/Dockerfile" -t "${bn}:latest" "${ctx}"
-          podman tag "${bn}:latest" "docker.io/library/${bn}:latest"
-          podman save -o "/tmp/${bn}.tar" "docker.io/library/${bn}:latest"
-          KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "/tmp/${bn}.tar" --name kagenti
+          "$CONTAINER_TOOL" build -f "${ctx}/Dockerfile" -t "${bn}:latest" "${ctx}"
+          "$CONTAINER_TOOL" tag "${bn}:latest" "docker.io/library/${bn}:latest"
+          kind_load "docker.io/library/${bn}:latest"
           ;;
       esac
       "${SCRIPT_DIR}/build-otel-shim.sh" "${bn}:latest"
@@ -85,10 +91,9 @@ if [ "$SKIP_BUILD" != "1" ]; then
     # per-app overlay fix on top of the shim
     if [ "$overlay" != "-" ] && [ -n "$overlay" ]; then
       log "apply overlay $overlay onto ${bn}-otel"
-      podman build -f "${SCRIPT_DIR}/${overlay}" -t "${bn}-otel:latest" "${SCRIPT_DIR}/$(dirname "$overlay")"
-      podman tag "${bn}-otel:latest" "docker.io/library/${bn}-otel:latest"
-      podman save -o "/tmp/${bn}-otel.tar" "docker.io/library/${bn}-otel:latest"
-      KIND_EXPERIMENTAL_PROVIDER=podman kind load image-archive "/tmp/${bn}-otel.tar" --name kagenti
+      "$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/${overlay}" -t "${bn}-otel:latest" "${SCRIPT_DIR}/$(dirname "$overlay")"
+      "$CONTAINER_TOOL" tag "${bn}-otel:latest" "docker.io/library/${bn}-otel:latest"
+      kind_load "docker.io/library/${bn}-otel:latest"
     fi
   done
 fi
