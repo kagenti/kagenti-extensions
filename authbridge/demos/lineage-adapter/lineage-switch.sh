@@ -49,6 +49,11 @@ case "$1" in
     kubectl scale -n "$DG_NS" statefulset data-governance-postgres --replicas=1
     kubectl scale -n "$DG_NS" deploy data-governance-receiver --replicas=2
     kubectl scale -n "$DG_NS" deploy data-governance-ui data-governance-interactions --replicas=1
+    # classification is optional (not deployed on every cluster) — restore it
+    # only where it exists; `off` scales it down via --all either way.
+    if kubectl get deploy -n "$DG_NS" data-governance-classification >/dev/null 2>&1; then
+      kubectl scale -n "$DG_NS" deploy data-governance-classification --replicas=1
+    fi
     kubectl rollout status -n "$DG_NS" statefulset/data-governance-postgres --timeout=120s
     echo ">> [2/2] redeploying fleet instrumented (shim + lineage plugin)"
     SKIP_BUILD=1 "${SCRIPT_DIR}/deploy-fleet.sh"
