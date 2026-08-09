@@ -16,13 +16,24 @@
 #                              must parent on exactly the inbound whose tag it
 #                              carries — trace membership cannot fake this.
 #
+#   (4) external legs         probe-front calls the SAME out-of-cluster
+#       presence AND absence   endpoint twice: plaintext HTTP MUST derive
+#                              exactly one interaction (callee = the peer
+#                              host, e.g. service:httpbin.org); HTTPS MUST
+#                              derive NOTHING (TLS passthrough — the
+#                              documented gap, asserted, not left unsaid).
+#                              Both calls must succeed at app level (200).
+#   (5) tool identity echo     the MCP leaf's callee entity is tool:probe-tool
+#                              (identity echo), never a host-key fallback.
+#
 # Ground truth: the tag in url.path (inbounds, tool outbounds) and in
 # input.value (LLM outbounds). Derived-kind coverage is asserted through the
 # interactions API (dg-api.sh): agent_request / llm_chat_prompt /
 # tool_call_arguments per trace.
 #
 # Env: TARGET (probe-front svc), N (2), LEGS (3), SETTLE (30), NAMESPACE
-#   (team1), DRIVER_POD (lineage-driver2), DG_NS (data-governance).
+#   (team1), DRIVER_POD (lineage-driver2), DG_NS (data-governance),
+#   EXT_HOST (httpbin.org — the expected external callee natural key host).
 set -euo pipefail
 
 TARGET="${TARGET:-probe-front.team1.svc.cluster.local:8080}"
@@ -32,6 +43,7 @@ SETTLE="${SETTLE:-30}"
 NAMESPACE="${NAMESPACE:-team1}"
 DRIVER_POD="${DRIVER_POD:-lineage-driver2}"
 DG_NS="${DG_NS:-data-governance}"
+EXT_HOST="${EXT_HOST:-httpbin.org}"
 
 # ---- ensure an in-cluster driver pod exists (recreate if not Running) ----
 phase="$(kubectl get pod -n "$NAMESPACE" "$DRIVER_POD" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
@@ -56,7 +68,7 @@ for i in $(seq 0 $((N-1))); do
   sid=$(openssl rand -hex 8)
   TIDS[$i]="$tid"; TOKS[$i]="$tok"
   body="{\"jsonrpc\":\"2.0\",\"id\":\"$tok\",\"method\":\"message/send\",\"params\":{\"message\":{\"role\":\"user\",\"messageId\":\"m-$tok\",\"parts\":[{\"kind\":\"text\",\"text\":\"all-capability probe $tok\"}]}}}"
-  script+="curl -s -o /dev/null -w 'req $tok trace ${tid:0:8} -> HTTP %{http_code}\\n' --max-time 180 -X POST http://$TARGET/probe/$tok -H 'Content-Type: application/json' -H 'traceparent: 00-$tid-$sid-01' -d '$body' &"$'\n'
+  script+="curl -s -o /tmp/resp-$tok.json -w 'req $tok trace ${tid:0:8} -> HTTP %{http_code}\\n' --max-time 180 -X POST http://$TARGET/probe/$tok -H 'Content-Type: application/json' -H 'traceparent: 00-$tid-$sid-01' -d '$body' &"$'\n'
 done
 script+='wait'$'\n'
 
@@ -130,6 +142,22 @@ for i in $(seq 0 $((N-1))); do
     printf '%-12s %-14s %-14s %-26s %s\n' "$pod" "$outtag" "$intag" "$opath" "$v"
   done <<<"$rows"
 
+  # -- (4) external legs: app-level BOTH 200; derived EXACTLY ONE external
+  # interaction (the plaintext one). Counting callee=$EXT_HOST rows asserts
+  # presence and absence at once: 0 = the visible leg is missing, 2 = the
+  # HTTPS leg leaked into lineage (TLS passthrough gap closed silently).
+  ext_http=$(kubectl exec -n "$NAMESPACE" "$DRIVER_POD" -- sh -c \
+    "sed -n 's/.*\"ext_http\":\\([0-9]*\\).*/\\1/p' /tmp/resp-$tok.json" 2>/dev/null || true)
+  ext_https=$(kubectl exec -n "$NAMESPACE" "$DRIVER_POD" -- sh -c \
+    "sed -n 's/.*\"ext_https\":\\([0-9]*\\).*/\\1/p' /tmp/resp-$tok.json" 2>/dev/null || true)
+  next=$(psql "SELECT count(*) FROM interactions i JOIN entities e ON e.id=i.callee_entity_id
+    WHERE i.trace_id='$tid' AND e.natural_key='service:${EXT_HOST}'")
+  # -- (5) tool identity echo: every tool interaction's callee IS the tool --
+  ntoolcallee=$(psql "SELECT count(*) FROM interactions i JOIN entities e ON e.id=i.callee_entity_id
+    WHERE i.trace_id='$tid' AND e.natural_key='tool:probe-tool'")
+  printf 'external: app http=%s https=%s | derived %s x service:%s (want 1) | tool callee %s x tool:probe-tool (want %s)\n' \
+    "${ext_http:-?}" "${ext_https:-?}" "${next:-0}" "$EXT_HOST" "${ntoolcallee:-0}" "$LEGS"
+
   # -- derived kind coverage (tools AND LLM present, correctly classified) --
   kinds=$(api_kinds "$tid")
   want_agent=$((1 + LEGS)); want_llm=$((1 + LEGS)); want_tool=$LEGS
@@ -140,12 +168,16 @@ for i in $(seq 0 $((N-1))); do
     "${k_agent:-0}" "$want_agent" "${k_llm:-0}" "$want_llm" "${k_tool:-0}" "$want_tool"
 
   # per-trace verdict: 1 entry root, clean forest, all outbounds paired,
-  # expected outbound count (front: 1 llm + LEGS a2a; back: 2*LEGS), kinds exact
-  want_out=$((1 + LEGS + 2*LEGS))
+  # expected outbound count (front: 1 llm + 1 ext-http + LEGS a2a; back:
+  # 2*LEGS — the HTTPS leg is invisible BY DESIGN and adds 0), kinds exact,
+  # exactly one external interaction, tool callee identity echoed.
+  want_out=$((1 + 1 + LEGS + 2*LEGS))
   if [ "${entryroots:-0}" = "1" ] && [ "${entry_callee:-}" = "agent:probe-front" ] \
      && [ "${orphans:-1}" = "0" ] && [ "${nix:-0}" = "${nanchor:-x}" ] && [ "${dupanchor:-1}" = "0" ] \
      && [ "$ok" = "$total" ] && [ "$total" = "$want_out" ] \
-     && [ "${k_agent:-0}" = "$want_agent" ] && [ "${k_llm:-0}" = "$want_llm" ] && [ "${k_tool:-0}" = "$want_tool" ]; then
+     && [ "${k_agent:-0}" = "$want_agent" ] && [ "${k_llm:-0}" = "$want_llm" ] && [ "${k_tool:-0}" = "$want_tool" ] \
+     && [ "${ext_http:-}" = "200" ] && [ "${ext_https:-}" = "200" ] \
+     && [ "${next:-0}" = "1" ] && [ "${ntoolcallee:-0}" = "$LEGS" ]; then
     echo "trace $tok: CLEAN (pairing $ok/$total)"
   else
     echo "trace $tok: FAIL (pairing $ok/$total, want $want_out outbounds)"
@@ -159,5 +191,7 @@ echo "==============================================================="
 echo "capabilities: (1) $N concurrent traces [distinct=$distinct/$N]"
 echo "              (2) thread propagation at front AND back"
 echo "              (3) same-trace fan-in exact pairing (tool + LLM)"
+echo "              (4) external egress: HTTP derived once, HTTPS invisible (both 200)"
+echo "              (5) MCP callee identity echo (tool:probe-tool)"
 [ "$distinct" = "$N" ] || overall=1
 if [ "$overall" = "0" ]; then echo "ALL CAPABILITIES VALIDATED ✔"; else echo "VALIDATION FAILED"; exit 1; fi

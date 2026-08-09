@@ -38,6 +38,7 @@ base_name_of() {  # image spec -> base image name
     ghcr:*)  echo "${1#ghcr:}" ;;
     local:*) local p="${1#local:}"; echo "${p##*/}" ;;
     kit:*)   local p="${1#kit:}"; echo "${p##*/}" ;;
+    pull:*)  local p="${1#pull:}"; echo "${p%%:*}" ;;   # pull:redis:7 -> redis
     *) echo "ERR"; return 1 ;;
   esac
 }
@@ -62,6 +63,17 @@ if [ "$SKIP_BUILD" != "1" ]; then
     IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$line"
     selected "$name" || continue
     bn="$(base_name_of "$image")"
+    # raw rows deploy a stock image untouched — pull + load, NO shim, NO overlay
+    if [ "$role" = "raw" ]; then
+      if ! printf '%s\n' "${built[@]:-}" | grep -qx "$bn"; then
+        ref="docker.io/library/${image#pull:}"
+        log "prepare raw image: $ref"
+        "$CONTAINER_TOOL" pull "$ref"
+        kind_load "$ref"
+        built+=("$bn")
+      fi
+      continue
+    fi
     if ! printf '%s\n' "${built[@]:-}" | grep -qx "$bn"; then
       log "prepare base image: $bn ($image)"
       case "$image" in
@@ -98,16 +110,76 @@ if [ "$SKIP_BUILD" != "1" ]; then
   done
 fi
 
-# ---- phase 2: deploy (tools first, then agents) ----
+# ---- phase 2: deploy (raw infra, then tools, then agents) ----
+# raw rows: a stock image as-is — no shim, no sidecar, no lineage. The honest
+# statement "this pod is invisible to lineage today" as a deployment shape.
+deploy_raw() {
+  IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$1"
+  local ref="docker.io/library/${image#pull:}"
+  log "deploy raw: $name (image=$ref, no shim, no sidecar)"
+  cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}
+  namespace: ${NAMESPACE}
+  labels: { app.kubernetes.io/name: ${name} }
+spec:
+  ports: [{ name: tcp, port: ${svcport}, protocol: TCP, targetPort: ${port} }]
+  selector: { app.kubernetes.io/name: ${name} }
+  type: ClusterIP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}
+  namespace: ${NAMESPACE}
+  labels: { app.kubernetes.io/name: ${name} }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: ${name} }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ${name}
+        kagenti.io/inject: disabled
+    spec:
+      containers:
+        - name: ${name}
+          image: ${ref}
+          imagePullPolicy: IfNotPresent
+          ports: [{ containerPort: ${port} }]
+          readinessProbe:
+            tcpSocket: { port: ${port} }
+            initialDelaySeconds: 2
+            periodSeconds: 5
+EOF
+  kubectl rollout status -n "$NAMESPACE" "deploy/$name" --timeout=180s
+}
+
 deploy_row() {
   IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$1"
   local bn; bn="$(base_name_of "$image")"
+  # env tokens addressed to the ATTACH layer, not the app: extract them out of
+  # the app env and pass as attach-lineage variables.
+  local app_env="" exclude="" pvc_name="" pvc_mount="" kv
+  for kv in $env; do
+    case "$kv" in
+      OUTBOUND_PORTS_EXCLUDE=*) exclude="${kv#*=}" ;;
+      PVC_NAME=*)  pvc_name="${kv#*=}" ;;
+      PVC_MOUNT=*) pvc_mount="${kv#*=}" ;;
+      *) app_env="${app_env:+$app_env }$kv" ;;
+    esac
+  done
   log "deploy $role: $name (self_id=$self_id, image=${bn}-otel)"
   NAME="$name" KAGENTI_TYPE="$role" \
   IMAGE="docker.io/library/${bn}-otel:latest" \
   APP_PORT="$port" SVC_PORT="$svcport" \
   APP_ENTRYPOINT="$entrypoint" SELF_ID="$self_id" \
-  ENV_VARS="$env" NAMESPACE="$NAMESPACE" \
+  ENV_VARS="$app_env" NAMESPACE="$NAMESPACE" \
+  OUTBOUND_PORTS_EXCLUDE="$exclude" \
+  PVC_NAME="$pvc_name" PVC_MOUNT="$pvc_mount" \
   "${SCRIPT_DIR}/attach-lineage.sh" | kubectl apply -f -
   # A failed restart must fail the deploy: swallowing it lets the following
   # rollout-status green-light STALE pods (fleet says "deployed", runs old
@@ -120,12 +192,12 @@ deploy_row() {
   kubectl rollout status -n "$NAMESPACE" "deploy/$name" --timeout=180s
 }
 
-for want in tool agent; do
+for want in raw tool agent; do
   for line in "${rows[@]}"; do
     IFS='|' read -r name role _ <<< "$line"
     selected "$name" || continue
     [ "$role" = "$want" ] || continue
-    deploy_row "$line"
+    if [ "$want" = "raw" ]; then deploy_raw "$line"; else deploy_row "$line"; fi
   done
 done
 

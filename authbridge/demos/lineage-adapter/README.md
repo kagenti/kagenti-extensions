@@ -51,7 +51,8 @@ file header.
 | `build-otel-shim.sh` | Build the shim on an app image + kind-load it. |
 | `attach-lineage.sh` | Emit a full Deployment+Service+lineage-ConfigMap (app + sidecar). |
 | `sidecar-patch.sh` | Attach the sidecar to an EXISTING (operator-managed) Deployment — for natively-instrumented apps that need no shim (weather pair, UI-imported apps). |
-| `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, and exact inbound→outbound pairing. |
+| `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + external HTTP/HTTPS legs + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM + the `/echo` cross-session writer, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, exact inbound→outbound pairing, external-egress presence AND absence, and tool identity echo. |
+| `probe-cross-validate.sh` | The **cross-session probe**: trace A stashes bytes at rest (shared PVC file + redis), a later trace B reads and re-sends them; asserts the two disconnected trees, the invisible-hop absences, and the content-hash join (see below). |
 | `container-runtime.sh` | Shared docker/podman auto-detection + `kind_load` (sourced by the build scripts; override with `CONTAINER_TOOL`). |
 | `concurrency-test.sh` / `concurrency-test-mcp.sh` | The A2A / MCP concurrency verifiers. |
 | `overlays/` | Per-app upstream-defect fixes applied on top of the shim (not part of the method). |
@@ -101,6 +102,52 @@ Deploy or test a subset:
 Coverage across the catalog: servers Starlette + FastAPI; clients httpx / requests
 / aiohttp; frameworks raw / LangGraph / Marvin / crewai / ag2; topologies single
 LLM hop, agent→REST, agent→MCP-tool (cross-service), 2-service MCP→HTTP.
+
+## Edges of visibility (probed, asserted — never left unmentioned)
+
+The probe topology deliberately walks the boundary of what the sidecar can see,
+and asserts BOTH sides of it (`probe-validate.sh` capability 4, and all of
+`probe-cross-validate.sh`):
+
+- **External plaintext HTTP** (probe-front → `http://httpbin.org`): visible.
+  Derives exactly one interaction, callee `service:httpbin.org`.
+- **The same call over HTTPS**: invisible. TLS passthrough — the sidecar's
+  documented gap (SNI observer is the named follow-up). Asserted as *exactly
+  one* httpbin interaction per trace: 0 = the visible leg broke, 2 = the gap
+  closed silently and the assertion must be updated deliberately.
+- **Redis (RESP, a real non-HTTP datastore)**: invisible *by configuration*.
+  The sidecar's Envoy listener is an HTTP connection manager; raw RESP through
+  the redirect would break, so the client pods carry
+  `OUTBOUND_PORTS_EXCLUDE=6379` — that bypass IS the honest statement "this
+  hop is invisible to lineage today". Asserted: the app-level round-trip
+  works, and zero redis spans/interactions derive.
+- **File I/O on a shared PVC**: invisible — no wire exists at all.
+
+### The cross-session hook (seed of a data-at-rest lineage workstream)
+
+`probe-cross-validate.sh` runs trace A (`/stash/{tag}`: front sends exact bytes
+to back's `/echo`; back persists them to the PVC file AND redis) and a later
+trace B (`/replay/{tag}`: front reads both stores and re-sends the bytes over
+the visible hop). Today this honestly derives **two disconnected trees** — the
+derivation must not guess a link. But DG payload storage is content-addressed
+(`interaction_payloads` is keyed by sha256 of canonical content), so the two
+traces reference the **same content hash**, and this join finds the link:
+
+```sql
+SELECT l.payload_hash, count(DISTINCT i.trace_id)
+FROM interaction_legs l
+JOIN interactions i ON i.id = l.interaction_id
+WHERE i.trace_id IN ('<traceA>', '<traceB>') AND l.payload_hash IS NOT NULL
+GROUP BY l.payload_hash
+HAVING count(DISTINCT i.trace_id) = 2;
+```
+
+That query is the seed of a future *data-at-rest / cross-session lineage*
+workstream: "trace B read the bytes trace A wrote" becomes derivable evidence
+the moment both sides of a store pass through any payload-captured hop — no
+new instrumentation, no guessing, just the content address. Generalizing it
+(store-side identity, time ordering, provenance confidence) is future work,
+deliberately NOT wired into today's derivation.
 
 ## Out-of-envelope (documented exceptions)
 
