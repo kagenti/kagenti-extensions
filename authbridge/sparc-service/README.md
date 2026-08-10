@@ -101,6 +101,8 @@ supports** works by setting the model string and (optionally) extra client kwarg
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | ollama endpoint |
 | `OPENAI_API_KEY` / `OPENAI_BASE_URL` | — | openai creds (LiteLLM also reads provider keys from env: `OPENAI_API_KEY`, `AZURE_API_KEY`, `ANTHROPIC_API_KEY`, …) |
 | `HOST` / `PORT` | `0.0.0.0` / `8090` | bind address |
+| `SPARC_LOG_REQUESTS` | `false` | When `true`, log every incoming `/reflect` request (including tool arguments) at INFO. Off by default because arguments can carry PII, payment ids, and other payload data. |
+| `SPARC_STRIP_TOOL_ARG_KEYS` | — | Comma-separated argument keys to remove from every `tool_calls[].function.arguments` object before SPARC evaluates the call, e.g. `SPARC_STRIP_TOOL_ARG_KEYS=session_id,request_id`. Useful when an agent injects keys that aren't in the tool spec, which would otherwise make SPARC reject the call. |
 
 ### Provider examples
 
