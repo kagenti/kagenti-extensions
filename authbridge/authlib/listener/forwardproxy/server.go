@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
@@ -272,7 +271,6 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		}
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
 	if !skipped {
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 
@@ -324,23 +322,15 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		s.Sessions.Append(sid, ev)
 	}
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		r.Header.Set("Authorization", "Bearer "+auth.ExtractBearer(newAuth))
-	}
-
 	// Propagate every header mutation the outbound pipeline made to the
 	// forwarded request. pctx.Headers started as a clone of r.Header, so
 	// plugins' set / replace / delete operations on it are the intended
 	// upstream-facing header set. Only Authorization used to be forwarded,
 	// silently dropping any other injected header (e.g. static-inject's
 	// x-api-key). Content-Length / Content-Encoding are managed by the
-	// body-rewrite block below and the transport, so leave them untouched;
-	// Authorization keeps the dedicated path above, which normalises the
-	// bearer form. Mirrors reverseproxy's forwarded-request header sync.
-	skip := func(k string) bool {
-		return k == "Content-Length" || k == "Content-Encoding" || k == "Authorization"
-	}
+	// body-rewrite block below and the transport, so leave them untouched.
+	// Mirrors reverseproxy's forwarded-request header sync.
+	skip := func(k string) bool { return k == "Content-Length" || k == "Content-Encoding" }
 	for k := range r.Header {
 		if skip(k) {
 			continue
