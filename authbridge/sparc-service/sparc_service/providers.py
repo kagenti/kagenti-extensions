@@ -42,8 +42,15 @@ def _patch_watsonx_for_reasoning_models(client_cls):
     response'. Injecting the schema into the system prompt (same as ALTK's Ollama
     provider) makes the model return valid JSON in content.
     See: https://github.com/kagenti/kagenti-extensions/issues/676
+
+    Idempotent: uses a sentinel attribute on ``client_cls`` so repeated calls
+    (e.g. once per configured track when ``ReflectionEngine`` builds a new
+    component) don't stack wrappers on the shared ALTK class.
     """
     import functools
+
+    if getattr(client_cls, "_sparc_patched_reasoning", False):
+        return
 
     original_generate = client_cls.generate
     original_generate_async = client_cls.generate_async
@@ -66,6 +73,7 @@ def _patch_watsonx_for_reasoning_models(client_cls):
 
     client_cls.generate = patched_generate
     client_cls.generate_async = patched_generate_async
+    client_cls._sparc_patched_reasoning = True
 
 
 def _patch_empty_response_retry(client_cls, max_retries: int = 3):
@@ -81,9 +89,15 @@ def _patch_empty_response_retry(client_cls, max_retries: int = 3):
     subsequent attempt.
 
     See ISSUE-019 in docs/open-issues.md and upstream ALTK tracker.
+
+    Idempotent: guarded by a sentinel attribute so retry layers don't stack
+    across repeated ``build_llm_client`` calls (per-track lazy build).
     """
     import asyncio
     import functools
+
+    if getattr(client_cls, "_sparc_patched_retry", False):
+        return
 
     original_generate_async = client_cls.generate_async
 
@@ -110,6 +124,7 @@ def _patch_empty_response_retry(client_cls, max_retries: int = 3):
         raise last_exc  # type: ignore[misc]
 
     client_cls.generate_async = patched_generate_async
+    client_cls._sparc_patched_retry = True
 
 
 def _patch_debug_logging(client_cls):
@@ -119,9 +134,15 @@ def _patch_debug_logging(client_cls):
     runs are unaffected. Each log line is prefixed [LLM_DEBUG] for easy grep:
 
         kubectl logs -n kagenti-system deploy/sparc-service | grep LLM_DEBUG
+
+    Idempotent: guarded by a sentinel attribute so debug wrappers don't stack
+    across repeated ``build_llm_client`` calls.
     """
     import functools
     import json as _json
+
+    if getattr(client_cls, "_sparc_patched_debug", False):
+        return
 
     original_generate_async = client_cls.generate_async
 
@@ -152,6 +173,7 @@ def _patch_debug_logging(client_cls):
             raise
 
     client_cls.generate_async = patched_generate_async
+    client_cls._sparc_patched_debug = True
 
 
 def build_llm_client(settings: Settings):
@@ -185,7 +207,12 @@ def build_llm_client(settings: Settings):
             api_base=settings.wx_url,
             timeout=settings.llm_timeout_seconds,
         )
-        _patch_watsonx_for_reasoning_models(client_cls)
+        # Only reasoning models (and the IBM LiteLLM proxy) need system-prompt
+        # schema injection — models like mistral-large-2512 support
+        # ``response_format`` natively, so applying it unconditionally would
+        # silently regress structured output. Gate on SPARC_SCHEMA_IN_PROMPT.
+        if settings.schema_in_prompt:
+            _patch_watsonx_for_reasoning_models(client_cls)
         _patch_empty_response_retry(client_cls, max_retries=settings.retries)
         if debug:
             _patch_debug_logging(client_cls)
@@ -224,9 +251,12 @@ def build_llm_client(settings: Settings):
     # issue as WatsonX reasoning models: ALTK passes schema_field="response_format"
     # explicitly, but the proxy returns an empty content field when response_format
     # is active, causing "No content or tool calls found in response". Apply the same
-    # system-prompt injection patch so the model returns JSON in content.
+    # system-prompt injection patch so the model returns JSON in content — but
+    # only when explicitly opted in via SPARC_SCHEMA_IN_PROMPT, since many
+    # models under the ``litellm`` provider support ``response_format`` natively.
     if settings.provider == "litellm":
-        _patch_watsonx_for_reasoning_models(client_cls)
+        if settings.schema_in_prompt:
+            _patch_watsonx_for_reasoning_models(client_cls)
         _patch_empty_response_retry(client_cls, max_retries=settings.retries)
     if debug:
         _patch_debug_logging(client_cls)

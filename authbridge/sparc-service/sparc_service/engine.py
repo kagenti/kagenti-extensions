@@ -148,20 +148,31 @@ class ReflectionEngine:
                     return str(v)
             return "-"
 
+        # INFO: safe correlation fields only. Tool arguments are caller-controlled
+        # (log-injection risk via embedded newlines — CodeQL alert #179) and can
+        # contain payload data (PII, payment ids, etc.), so they never appear at
+        # INFO. The session_id / track are correlation identifiers, not payload,
+        # and are logged as-is.
         log.info(
-            "reflect ts=%s tool=%s args=%s decision=%s score=%s ms=%s",
-            ts, tool_name, args_str, decision, score_str, ms_str,
+            "reflect ts=%s tool=%s decision=%s score=%s ms=%s track=%s session=%s",
+            ts, tool_name, decision, score_str, ms_str,
+            track, request.session_id or "-",
         )
         log.debug(
-            "reflect ts=%s tool=%s args=%s decision=%s score=%s ms=%s"
+            "reflect ts=%s tool=%s decision=%s score=%s ms=%s"
             " track=%s session=%s tokens_in=%s tokens_out=%s messages=%s",
-            ts, tool_name, args_str, decision, score_str, ms_str,
+            ts, tool_name, decision, score_str, ms_str,
             track,
             request.session_id or "-",
             _tok("tokens_in", "input_tokens"),
             _tok("tokens_out", "output_tokens"),
             len(request.messages),
         )
+        # Raw arguments are only logged when the operator explicitly opts in via
+        # SPARC_LOG_REQUESTS=true, and only at DEBUG. Args are still
+        # attacker-influenced text so DEBUG output should be treated as sensitive.
+        if self._settings.log_requests:
+            log.debug("reflect ts=%s tool=%s args=%s", ts, tool_name, args_str)
 
         return ReflectResponse(
             decision=decision,

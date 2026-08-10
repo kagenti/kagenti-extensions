@@ -104,6 +104,13 @@ class Settings:
     log_requests: bool = False
     strip_tool_arg_keys: frozenset = field(default_factory=frozenset)
 
+    # When true, inject the response schema via the system prompt instead of
+    # relying on the provider's native ``response_format`` parameter. Required
+    # for models that return output only in ``reasoning_content`` (WatsonX
+    # reasoning models, Haiku via IBM LiteLLM proxy). Leave false for models
+    # that support ``response_format`` natively (e.g. mistral-large-2512).
+    schema_in_prompt: bool = False
+
     # Validation errors collected at load time (provider creds missing, etc.).
     errors: tuple[str, ...] = field(default_factory=tuple)
 
@@ -185,5 +192,6 @@ class Settings:
             port=_int_env("PORT", 8090),
             log_requests=_truthy(os.getenv("SPARC_LOG_REQUESTS", "")),
             strip_tool_arg_keys=strip_tool_arg_keys,
+            schema_in_prompt=_truthy(os.getenv("SPARC_SCHEMA_IN_PROMPT", "")),
             errors=tuple(errors),
         )
