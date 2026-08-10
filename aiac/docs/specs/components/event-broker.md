@@ -19,7 +19,7 @@ The Event Broker is a single-node NATS JetStream instance. It owns no business l
 | Consumer type | Durable push consumer with queue group (competing consumers) |
 | Authentication | None — ClusterIP network isolation is the access control mechanism |
 | Dead-letter subject | `aiac.apply.dlq` |
-| Max delivery attempts | 5 — message routed to DLQ after 5 unacknowledged redeliveries |
+| Max delivery attempts | 5 (max_deliver); the consumer republishes to the DLQ subject on the final failed delivery |
 
 ---
 
@@ -30,7 +30,7 @@ The Event Broker is a single-node NATS JetStream instance. It owns no business l
 | `aiac.apply.service.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak `CLIENT_CREATED` event |
 | `aiac.apply.role.{id}` | Keycloak SPI listener | AIAC Agent | Keycloak role created/updated |
 | `aiac.apply.policy.build` | RAG Ingest Service | AIAC Agent | Post-ingest completion (any collection) |
-| `aiac.apply.dlq` | NATS JetStream (automatic) | Operator (manual inspection) | Max delivery attempts exceeded |
+| `aiac.apply.dlq` | AIAC Agent consumer (republish on max-deliver) | Operator (manual inspection) | Max delivery attempts exceeded |
 
 **`rebuild` is not routed through the Event Broker.** It is an operator-only command issued directly via `POST /apply/policy/rebuild` on the AIAC Agent using `kubectl port-forward`.
 
@@ -53,7 +53,7 @@ For `aiac.apply.policy.build`, the payload is empty (`{}`). The AIAC Agent pulls
 - **At-least-once delivery** — NATS redelivers any message not acknowledged within the `AckWait` window.
 - **Exactly-one processing** — the Agent subscribes via a queue group (`aiac-agent-consumer`). Only one Agent pod receives each message; other pods in the group are not notified.
 - **Replay on restart** — `WorkQueuePolicy` retains all unacknowledged messages. A restarted Agent pod automatically receives pending messages on reconnection.
-- **DLQ on repeated failure** — after 5 unacknowledged redeliveries, NATS routes the message to `aiac.apply.dlq` for operator inspection. No message is silently dropped.
+- **DLQ on repeated failure** — after the 5th unacknowledged delivery, the consumer republishes the message to `aiac.apply.dlq` and terminates it. No message is silently dropped.
 
 ---
 
@@ -119,4 +119,4 @@ httpx
 | Init container health-check loop | HTTP 4xx then 200 sequence | Exits 0 only after all four dependencies respond healthy |
 | Init container stream creation | NATS JetStream `add_stream` call | Called with correct stream name, subjects, and retention policy; idempotent on second call |
 | Agent NATS consumer dispatch | NATS message delivery | Correct `/apply/*` handler invoked for each subject pattern; message acked on success; message not acked on handler exception |
-| DLQ routing | NATS max redelivery exceeded | Message appears on `aiac.apply.dlq` after 5 failures |
+| DLQ routing | consumer detects num_delivered == max_deliver | Message appears on `aiac.apply.dlq` after 5 failures |

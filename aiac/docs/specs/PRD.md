@@ -290,7 +290,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 | ChromaDB | RAG Ingest Service (writes), Policy Guardrails Agent (reads, context), AIAC Agent (reads) | — | Policy and domain knowledge vectors |
 | RAG Ingest Service | Developer (via `kubectl port-forward`) | ChromaDB, Policy Guardrails Agent, Embedding API, Event Broker | — |
 | Policy Guardrails Agent (in RAG Pod) | RAG Ingest Service | ChromaDB (context reads) | Verdict per document — contract TBD |
-| Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); NATS JetStream (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
+| Event Broker (NATS JetStream) | Keycloak SPI listener, RAG Ingest Service (publishers); AIAC Agent consumer (DLQ routing) | — | Durable event delivery to AIAC Agent; DLQ on max retries |
 | AIAC Agent | Event Broker (NATS consumer), operator (`/apply/policy/rebuild` HTTP direct) | Service Onboarding / Policy Update / Role Update orchestrators → `aiac.idp.configuration.api`, `aiac.policy.computation`, ChromaDB, LLM API, Kubernetes API | Rego policy written to AuthorizationPolicy CR; structured policy written to Policy Model Store (SQLite); provisioned service permissions/scopes (onboarding) |
 
 ### Key architectural decisions
@@ -316,7 +316,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **`rebuild` bypasses the Event Broker.** It is an operator-only command issued directly via HTTP (`kubectl port-forward`). It is never published to NATS and has no NATS listener.
 - **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
 - **Agent HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
-- **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
+- **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, the consumer republishes them to `aiac.apply.dlq`.
 - **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently. _(Deferred to Phase 2 — issue 4.21; the Phase 1 Agent pod runs without it.)_
 - **All `__init__.py` files under `aiac.*` are empty.** Callers use explicit submodule paths: `from aiac.idp.configuration.models import Subject`, `from aiac.policy.model.models import PolicyModel`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
@@ -338,7 +338,7 @@ The PDP Policy Writer (`aiac-pdp-policy-opa`) writes LLM-generated Rego packages
 
 **AIAC ↔ Event Broker (NATS JetStream)**
 The Agent subscribes to the event stream as a durable consumer with at-least-once delivery.
-Unacknowledged messages survive pod restarts; failed messages are routed to a dead-letter subject.
+Unacknowledged messages survive pod restarts; after the final failed delivery, the consumer republishes the message to a dead-letter subject.
 See Section 7.5 (Event Broker) and Section 8 (Deployment) for subject names and handler mapping.
 
 ---
@@ -403,7 +403,7 @@ Python package at `aiac/src/`. Clean `idp` / `pdp` / `policy` namespace split:
 
 ### 7.6 Event Broker
 
-NATS JetStream pod (`aiac-event-broker-service:4222`). Decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides at-least-once delivery, replay on pod restart via `WorkQueuePolicy`, and a dead-letter subject (`aiac.apply.dlq`) after 5 failed deliveries. No authentication — ClusterIP network isolation is the access control mechanism. Stream: `aiac-events`, subjects `aiac.apply.>`, consumer group `aiac-agent-consumer`.
+NATS JetStream pod (`aiac-event-broker-service:4222`). Decouples event producers (Keycloak SPI listener, RAG Ingest Service) from the AIAC Agent. Provides at-least-once delivery, replay on pod restart via `WorkQueuePolicy`, and a dead-letter subject (`aiac.apply.dlq`) that the consumer republishes to after 5 failed deliveries. No authentication — ClusterIP network isolation is the access control mechanism. Stream: `aiac-events`, subjects `aiac.apply.>`, consumer group `aiac-agent-consumer`.
 
 **Full spec:** [components/event-broker.md](components/event-broker.md)
 
@@ -411,7 +411,7 @@ NATS JetStream pod (`aiac-event-broker-service:4222`). Decouples event producers
 
 ### 7.7 AIAC Agent
 
-FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via the **Event Broker** (NATS JetStream durable consumer, `aiac-agent-consumer` queue group) and the operator-only `rebuild` command directly via HTTP. Structured as a thin **Controller** (`controller/routes.py`) that dispatches `/apply/*` handlers to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents. A **NATS consumer** (asyncio background task in the FastAPI `lifespan` handler) is a thin adapter that receives NATS events and calls the same internal handler functions used by the HTTP endpoints:
+FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via the **Event Broker** (NATS JetStream durable consumer, `aiac-agent-consumer` queue group) and the operator-only `rebuild` command directly via HTTP. Structured as a thin **Controller** (`controller/routes.py`) that dispatches `/apply/*` handlers to three **Orchestrators**, each owning one or more compiled `StateGraph` sub-agents. A **NATS consumer** (asyncio background task in the FastAPI `lifespan` handler, implemented in `eventbus/consumer.py` with shared config in `eventbus/stream.py`) is a thin adapter that receives NATS events and calls the same internal handler functions used by the HTTP endpoints:
 
 | Orchestrator | Trigger(s) | Sub-agents |
 |---|---|---|
@@ -563,7 +563,7 @@ Tests live in `aiac/test/`.
 | `aiac.pdp.policy.library` functions | PDP Policy Writer HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
 | `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.model_store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged and re-raised (propagate to the caller) |
 | Event Broker NATS consumer | NATS message delivery (mock `nats-py` subscription) | Correct handler dispatched per subject; ack issued on success; no ack on handler exception |
-| Event Broker DLQ | NATS max redelivery exceeded | Message routed to `aiac.apply.dlq` after 5 failures |
+| Event Broker DLQ | consumer detects num_delivered == max_deliver | Message republished by the consumer to `aiac.apply.dlq` after 5 failures |
 | Init container health-check | HTTP 4xx then 200 sequence; NATS TCP refused then connected | Exits 0 only after all four dependencies healthy; `add_stream` called with correct config |
 | Policy Guardrails Agent endpoints | ChromaDB (context reads) | TBD — pending the verification endpoint and verdict contract |
 | AIAC Agent | TBD | TBD |

@@ -78,7 +78,7 @@ flowchart TD
 
 ## NATS Consumer
 
-A thin adapter started as an **asyncio background task** in the FastAPI `lifespan` handler. It subscribes to the `aiac.apply.>` wildcard on the `aiac-events` NATS JetStream stream using the `aiac-agent-consumer` durable queue group.
+A thin adapter started as an **asyncio background task** in the FastAPI `lifespan` handler. It subscribes to the `aiac.apply.>` wildcard on the `aiac-events` NATS JetStream stream using the `aiac-agent-consumer` durable queue group. Implemented in `eventbus/consumer.py` (dispatch + lifespan), with shared stream/consumer config in `eventbus/stream.py`.
 
 ### Dispatch table
 
@@ -92,7 +92,7 @@ A thin adapter started as an **asyncio background task** in the FastAPI `lifespa
 
 ### Ack contract
 
-The consumer **awaits** the internal handler before issuing the NATS acknowledgement. On handler success → ack. On handler exception → do not ack; NATS redelivers after `AckWait`. After 5 unacknowledged redeliveries, NATS routes the message to `aiac.apply.dlq`.
+The consumer **awaits** the internal handler before issuing the NATS acknowledgement. On handler success → ack. On handler exception → do not ack; NATS redelivers after `AckWait`. After the 5th unacknowledged delivery, the consumer republishes the message to `aiac.apply.dlq` and terminates it.
 
 Fire-and-forget (`asyncio.create_task`) is explicitly prohibited — acking before handler completion would break at-least-once guarantees.
 
