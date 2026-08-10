@@ -34,6 +34,9 @@
 #                      already exports spans, so that export keeps flowing
 #                      untouched. Do NOT exclude LLM/tool ports — we want those seen.
 #   NAMESPACE          (default team1).
+#   OTEL_ENDPOINT      collector the lineage plugin exports to (default
+#                      otel-collector.kagenti-system.svc.cluster.local:4317;
+#                      rossoctl-branded platforms: otel-collector.rossoctl-system...).
 #   KAGENTI_TYPE       kagenti.io/type label: agent | tool (default agent).
 #   NO_OTEL            if set to 1, run the app command bare (no opentelemetry-
 #                      instrument wrapper) — for a baseline/uninstrumented run.
@@ -56,6 +59,7 @@ OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 PVC_NAME="${PVC_NAME:-}"
 PVC_MOUNT="${PVC_MOUNT:-}"
 NAMESPACE="${NAMESPACE:-team1}"
+OTEL_ENDPOINT="${OTEL_ENDPOINT:-otel-collector.kagenti-system.svc.cluster.local:4317}"
 KAGENTI_TYPE="${KAGENTI_TYPE:-agent}"
 NO_OTEL="${NO_OTEL:-0}"
 NO_LINEAGE="${NO_LINEAGE:-0}"
@@ -140,7 +144,7 @@ if [ "$NO_LINEAGE" != "1" ]; then
   lineage_plugin='
           - name: lineage-telemetry
             config:
-              otel_endpoint: "otel-collector.kagenti-system.svc.cluster.local:4317"
+              otel_endpoint: "'"${OTEL_ENDPOINT}"'"
               capture_io: true
               self_id: "'"${SELF_ID}"'"'
 fi

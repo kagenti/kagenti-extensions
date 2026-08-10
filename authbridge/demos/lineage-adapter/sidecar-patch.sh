@@ -21,6 +21,9 @@
 #   DEPLOY                  target Deployment name (required)
 #   NAMESPACE               default team1
 #   SELF_ID                 lineage self_id (default: $DEPLOY)
+#   OTEL_ENDPOINT           collector the lineage plugin exports to (default
+#                           otel-collector.kagenti-system.svc.cluster.local:4317;
+#                           rossoctl-branded platforms: otel-collector.rossoctl-system...).
 #   OUTBOUND_PORTS_EXCLUDE  comma-separated ports proxy-init must NOT intercept.
 #                           Natively-instrumented kagenti apps export their own
 #                           OTLP to the collector on :8335 — exclude it so that
@@ -36,6 +39,7 @@ set -euo pipefail
 DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
 NAMESPACE="${NAMESPACE:-team1}"
 SELF_ID="${SELF_ID:-$DEPLOY}"
+OTEL_ENDPOINT="${OTEL_ENDPOINT:-otel-collector.kagenti-system.svc.cluster.local:4317}"
 OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 
 kubectl get deploy -n "$NAMESPACE" "$DEPLOY" >/dev/null
@@ -65,7 +69,7 @@ data:
           - name: inference-parser
           - name: lineage-telemetry
             config:
-              otel_endpoint: "otel-collector.kagenti-system.svc.cluster.local:4317"
+              otel_endpoint: "${OTEL_ENDPOINT}"
               capture_io: true
               self_id: "${SELF_ID}"
       outbound:
@@ -75,7 +79,7 @@ data:
           - name: inference-parser
           - name: lineage-telemetry
             config:
-              otel_endpoint: "otel-collector.kagenti-system.svc.cluster.local:4317"
+              otel_endpoint: "${OTEL_ENDPOINT}"
               capture_io: true
               self_id: "${SELF_ID}"
 EOF
