@@ -459,7 +459,7 @@ A custom Keycloak Event Listener SPI (Java) that listens to Keycloak's internal 
 | `CLIENT_CREATED` | `aiac.apply.service.{id}` |
 | Role created/updated | `aiac.apply.role.{id}` |
 
-**Full spec:** TBD (separate PRD).
+**Full spec:** [components/keycloak-spi-listener.md](components/keycloak-spi-listener.md)
 
 ---
 
