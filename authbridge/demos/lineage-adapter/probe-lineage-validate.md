@@ -108,7 +108,7 @@ for ix in d:
 
 | Field | Exact expectation on a main-validation trace |
 |---|---|
-| `destination.url` | composed `http://…` on ALL 11 outbound interactions; the inbound root has `url=null` with path-only (inbound anchors carry no `lineage.peer.host` — BY DESIGN, not a finding) |
+| `destination.url` | composed `http://…` on ALL 12 interactions — the 11 outbound AND the inbound root (`http://probe-front.team1.svc.cluster.local:8080/probe/<tag>`, `internal: true`; the listener records the inbound authority since sidecar v1.5.2). Spans stored by a pre-v1.5.2 sidecar render the inbound row path-only with `url=null` — correct for those spans, not a finding |
 | `destination.internal` | `false` for `httpbin.org` and for NOTHING else; `true` for `probe-back`/`probe-tool` svc authorities and `host.containers.internal:11434` |
 | `http` | `POST/200/ok` everywhere except the httpbin leg's `GET/200/ok`; any other `outcome` is a finding |
 | `principal_sub` | `null` on EVERY row (no JWT on probe paths) — asserted absence; a value appearing means something fabricates identity |
@@ -139,7 +139,7 @@ for ix in d:
 | redis rows > 0 | port-exclude bypass broke (`OUTBOUND_PORTS_EXCLUDE=6379` missing from proxy-init) — check `kubectl get pod -n team1 <probe-back-pod> -o yaml \| grep -A2 OUTBOUND_PORTS` |
 | (d) no shared hash | payload capture or content-addressing changed — compare `interaction_legs.payload_hash` per trace manually |
 | stale pods after deploy | probe images are local `IfNotPresent`; re-run deploy-fleet (it restarts + waits). NEVER roll non-probe `:latest` agents casually — they pull upstream on restart |
-| `destination.url` null on OUTBOUND rows | sidecar image predates v1.5.1 (no `url.scheme` on the wire — check the request span's attributes) or the listener supplied no scheme; host+path present with null url is the correct pre-v1.5.1 rendering, not a guess |
+| `destination.url` null | sidecar image predates the fact it needs — v1.5.1 added `url.scheme` (outbound URLs), v1.5.2 added the inbound authority (inbound URLs); check the request span's attributes to see which is missing. Host+path with null url is the correct rendering for such spans, not a guess |
 | `internal` flag wrong | consumer-side heuristic drifted (`_host_is_internal` in `retrieval/interactions.py`) — vocabulary bug, not a producer issue |
 | `http.status_code`/`outcome` null with a response leg present | response-span attribute read broke (they live on the RESPONSE span, not the anchor) — consumer regression |
 | feed rows missing / cursor stuck | `interaction_legs.seq` stream issue — compare `GET /api/interactions` against a direct `SELECT max(seq) FROM interaction_legs` |
