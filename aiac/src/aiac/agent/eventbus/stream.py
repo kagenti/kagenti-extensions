@@ -23,9 +23,17 @@ CONSUMER_NAME = "aiac-agent-consumer"
 # every aiac.apply.> publish (including aiac.apply.dlq, so dead-lettered
 # messages stay inspectable), but the consumer must not resubscribe to its
 # own DLQ subject or it would reprocess dead-lettered messages forever.
+#
+# The role entry uses the multi-token wildcard ``>`` (not single-token ``*``):
+# Keycloak role names may contain dots, and the SPI publishes
+# ``aiac.apply.role.{name}`` verbatim, so a role like ``foo.bar`` yields the
+# subject ``aiac.apply.role.foo.bar``. A single-token ``*`` would capture only
+# ``aiac.apply.role.foo`` and silently drop dotted names; ``>`` matches the full
+# remainder. Service IDs are dot-free UUIDs, so ``service.*`` stays single-token,
+# and ``policy.build`` is an exact subject. None of these overlap ``aiac.apply.dlq``.
 CONSUMER_FILTER_SUBJECTS = [
     "aiac.apply.service.*",
-    "aiac.apply.role.*",
+    "aiac.apply.role.>",
     "aiac.apply.policy.build",
 ]
 
