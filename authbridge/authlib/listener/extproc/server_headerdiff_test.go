@@ -79,10 +79,10 @@ func mutationHeaderValue(hm *extprocv3.HeaderMutation, key string) string {
 	return ""
 }
 
-// TestExtProc_Outbound_SpliceReachesWire: a plugin rewrite of the outbound
+// TestExtProc_Outbound_TraceRewriteReachesWire: a plugin rewrite of the outbound
 // traceparent/tracestate must be emitted as SetHeaders on the headers-phase
 // response — this is what puts the lineage stamp on the wire.
-func TestExtProc_Outbound_SpliceReachesWire(t *testing.T) {
+func TestExtProc_Outbound_TraceRewriteReachesWire(t *testing.T) {
 	const newTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-aaaaaaaaaaaaaaaa-01"
 	const newTS = "dg-parent=aaaaaaaaaaaaaaaa"
 	srv := traceRewriterServer(t, &traceRewriterPlugin{traceparent: newTP, tracestate: newTS})
@@ -107,17 +107,17 @@ func TestExtProc_Outbound_SpliceReachesWire(t *testing.T) {
 		t.Fatalf("expected HeadersResponse with header mutation, got %+v", stream.responses[0])
 	}
 	if got := mutationHeaderValue(rh.Response.HeaderMutation, "traceparent"); got != newTP {
-		t.Errorf("traceparent mutation = %q, want %q (splice inert on the wire)", got, newTP)
+		t.Errorf("traceparent mutation = %q, want %q (trace rewrite lost on the wire)", got, newTP)
 	}
 	if got := mutationHeaderValue(rh.Response.HeaderMutation, "tracestate"); got != newTS {
 		t.Errorf("tracestate mutation = %q, want %q", got, newTS)
 	}
 }
 
-// TestExtProc_OutboundBody_SpliceReachesWire: same guarantee on the
+// TestExtProc_OutboundBody_TraceRewriteReachesWire: same guarantee on the
 // body-phase path (a ReadsBody plugin defers the pipeline to the body
 // message; the trace-header diff must ride that response instead).
-func TestExtProc_OutboundBody_SpliceReachesWire(t *testing.T) {
+func TestExtProc_OutboundBody_TraceRewriteReachesWire(t *testing.T) {
 	const newTP = "00-4bf92f3577b34da6a3ce929d0e0e4736-bbbbbbbbbbbbbbbb-01"
 	srv := traceRewriterServer(t, &traceRewriterPlugin{traceparent: newTP, readsBody: true})
 
@@ -145,7 +145,7 @@ func TestExtProc_OutboundBody_SpliceReachesWire(t *testing.T) {
 		t.Fatalf("expected RequestBody response with header mutation, got %+v", stream.responses[1])
 	}
 	if got := mutationHeaderValue(rb.Response.HeaderMutation, "traceparent"); got != newTP {
-		t.Errorf("traceparent mutation = %q, want %q (splice inert on the body path)", got, newTP)
+		t.Errorf("traceparent mutation = %q, want %q (trace rewrite lost on the body path)", got, newTP)
 	}
 }
 
