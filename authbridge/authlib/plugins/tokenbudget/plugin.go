@@ -26,7 +26,7 @@ type config struct {
 	OnExceed           string `json:"on_exceed" description:"Action on breach: deny (block) or observe (shadow — log but continue)." default:"deny" enum:"deny,observe"`
 	SessionTTLSeconds  int    `json:"session_ttl_seconds" description:"Redis key TTL; should be >= max_duration_seconds." default:"7200"`
 	RefreshInterval    string `json:"refresh_interval" description:"How often to sync local cache from Redis." default:"5s"`
-	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable." default:"fail_open" enum:"fail_open,fail_closed"`
+	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
 }
 
 type counters struct {
@@ -85,6 +85,15 @@ func (p *TokenBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
 		return fmt.Errorf("token-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
+	if p.cfg.OnExceed != "deny" && p.cfg.OnExceed != "observe" {
+		return fmt.Errorf("token-budget: on_exceed must be \"deny\" or \"observe\" (got %q)", p.cfg.OnExceed)
+	}
+	if d, err := time.ParseDuration(p.cfg.RefreshInterval); err == nil && d <= 0 {
+		return fmt.Errorf("token-budget: refresh_interval must be > 0 (got %q)", p.cfg.RefreshInterval)
+	}
+	if p.cfg.RedisUnavailable == "fail_closed" {
+		return fmt.Errorf("token-budget: redis_unavailable=fail_closed is not yet implemented; use fail_open")
+	}
 	return nil
 }
 
@@ -103,6 +112,7 @@ func (p *TokenBudget) Init(_ context.Context) error {
 	return nil
 }
 
+// In-flight accumulate goroutines get ErrClosed after store.Close — bounded by their 2s ctx.
 func (p *TokenBudget) Shutdown(_ context.Context) error {
 	close(p.stopCh)
 	<-p.stopped
@@ -121,25 +131,29 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 
 	p.mu.RLock()
 	c, ok := p.cache[sessionID]
+	var snap counters
+	if ok {
+		snap = *c
+	}
 	p.mu.RUnlock()
 
 	if !ok {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	if reason := p.evaluate(c); reason != "" {
+	if reason := p.evaluate(&snap); reason != "" {
 		if p.cfg.OnExceed == "observe" {
 			pctx.Observe("shadow_budget_exceeded")
 			p.log.Warn("budget exceeded (shadow mode)",
 				"session", sessionID,
 				"reason", reason,
-				"tokens", c.tokens,
-				"calls", c.calls)
+				"tokens", snap.tokens,
+				"calls", snap.calls)
 			return pipeline.Action{Type: pipeline.Continue}
 		}
 		return pipeline.DenyWithDetails("budget.exceeded", reason, map[string]any{
-			"spent_tokens": c.tokens,
-			"spent_calls":  c.calls,
+			"spent_tokens": snap.tokens,
+			"spent_calls":  snap.calls,
 			"limit_tokens": p.cfg.MaxTokens,
 			"limit_calls":  p.cfg.MaxCalls,
 		})
@@ -164,7 +178,7 @@ func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	}
 
 	inf := pctx.Extensions.Inference
-	if inf == nil || inf.TotalTokens == 0 {
+	if inf == nil {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -209,13 +223,18 @@ func (p *TokenBudget) accumulate(sessionID string, tokens int64) {
 	key := p.redisKey(sessionID)
 	ttl := time.Duration(p.cfg.SessionTTLSeconds) * time.Second
 
-	_, err := p.store.HashIncr(ctx, key, "tokens", tokens)
-	if err != nil {
-		p.log.Warn("redis HashIncr tokens failed", "session", sessionID, "err", err)
-		return
+	if tokens > 0 {
+		if _, err := p.store.HashIncr(ctx, key, "tokens", tokens); err != nil {
+			p.log.Warn("redis HashIncr tokens failed", "session", sessionID, "err", err)
+			return
+		}
 	}
 
-	_, _ = p.store.HashIncr(ctx, key, "calls", 1)
+	_, err := p.store.HashIncr(ctx, key, "calls", 1)
+	if err != nil {
+		p.log.Warn("redis HashIncr calls failed", "session", sessionID, "err", err)
+		return
+	}
 
 	set, _ := p.store.HashSetNX(ctx, key, "started_at", strconv.FormatInt(time.Now().Unix(), 10))
 	if set {
@@ -253,11 +272,7 @@ func (p *TokenBudget) refreshCache() {
 		cancel()
 
 		if err != nil {
-			// TODO: fail_closed should deny requests when Redis is unreachable
-			// and the local cache has no data. Currently both modes retain stale cache.
-			if p.cfg.RedisUnavailable != "fail_open" {
-				p.log.Warn("redis refresh failed", "session", sessionID, "err", err)
-			}
+			p.log.Warn("redis refresh failed", "session", sessionID, "err", err)
 			continue
 		}
 

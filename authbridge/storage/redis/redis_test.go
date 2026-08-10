@@ -15,7 +15,11 @@ func setup(t *testing.T) (*Client, *miniredis.Miniredis) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	t.Cleanup(func() { c.Close() })
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("Close: %v", err)
+		}
+	})
 	return c, mr
 }
 
@@ -117,8 +121,12 @@ func TestHashGet(t *testing.T) {
 		t.Errorf("HashGet empty = %v, want empty map", fields)
 	}
 
-	c.HashIncr(ctx, "h1", "tokens", 42)
-	c.HashIncr(ctx, "h1", "calls", 3)
+	if _, err := c.HashIncr(ctx, "h1", "tokens", 42); err != nil {
+		t.Fatalf("HashIncr tokens: %v", err)
+	}
+	if _, err := c.HashIncr(ctx, "h1", "calls", 3); err != nil {
+		t.Fatalf("HashIncr calls: %v", err)
+	}
 
 	fields, err = c.HashGet(ctx, "h1")
 	if err != nil {
@@ -162,7 +170,9 @@ func TestExpire(t *testing.T) {
 	c, mr := setup(t)
 	ctx := context.Background()
 
-	c.HashIncr(ctx, "h1", "tokens", 100)
+	if _, err := c.HashIncr(ctx, "h1", "tokens", 100); err != nil {
+		t.Fatalf("HashIncr: %v", err)
+	}
 	if err := c.Expire(ctx, "h1", 5*time.Second); err != nil {
 		t.Fatalf("Expire: %v", err)
 	}

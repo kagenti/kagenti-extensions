@@ -20,6 +20,14 @@ docker build -f cmd/authbridge-proxy/Dockerfile \
 
 Without the tag, neither token-budget nor go-redis are linked.
 
+The same build tag works for the envoy-sidecar image:
+
+```bash
+docker build -f cmd/authbridge-envoy/Dockerfile \
+  --build-arg GO_BUILD_TAGS="include_plugin_tokenbudget" \
+  -t authbridge-envoy:latest .
+```
+
 ## Configuration
 
 ```yaml
@@ -46,7 +54,7 @@ pipeline:
 | `on_exceed` | no | "deny" | `deny` (block with 403) or `observe` (shadow — log but continue) |
 | `session_ttl_seconds` | no | 7200 | Redis key TTL; should be >= `max_duration_seconds` |
 | `refresh_interval` | no | "5s" | How often to sync local cache from Redis |
-| `redis_unavailable` | no | "fail_open" | `fail_open` (suppress refresh warnings) or `fail_closed` (log warnings; stale cache retained until Redis recovers) |
+| `redis_unavailable` | no | "fail_open" | Only `fail_open` supported (stale cache retained on failure). `fail_closed` reserved. |
 
 At least one of `max_tokens`, `max_calls`, or `max_duration_seconds` must be > 0.
 
@@ -88,7 +96,7 @@ LiteLLM, OpenAI) and buffered JSON responses alike.
 
 ## Redis Key Schema
 
-```
+```text
 token-budget:<session-id>  (Hash, TTL = session_ttl_seconds)
   tokens      int   cumulative TotalTokens
   calls       int   inference call count
@@ -99,10 +107,9 @@ token-budget:<session-id>  (Hash, TTL = session_ttl_seconds)
 
 | Scenario | Behavior |
 |----------|----------|
-| Redis down at startup | Pod fails to start (`Init` error) |
+| Redis down at startup | `Init` succeeds (no connectivity check); enforcement fail-open until first refresh populates cache |
 | Redis fails mid-session | Local cache continues enforcing; writes dropped silently |
 | Pod restarts | First request passes (cold cache); refresh picks up Redis counters within one interval |
-| `fail_closed` + refresh failure | Stale cache retained; enforcement lags until Redis recovers |
 | Provider returns no usage data | `max_tokens` not enforced; `max_calls` and `max_duration_seconds` still work |
 
 **Note on token counting:** Token accumulation requires the LLM provider to

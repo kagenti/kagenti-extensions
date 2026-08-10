@@ -20,6 +20,7 @@ RUN apk add --no-cache git
 WORKDIR /app
 
 COPY authlib/ authlib/
+COPY storage/ storage/
 COPY cmd/authbridge-envoy/ cmd/authbridge-envoy/
 
 ARG GO_BUILD_TAGS=""

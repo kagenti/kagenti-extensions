@@ -265,6 +265,48 @@ func TestAccumulate_WritesToStore(t *testing.T) {
 	}
 }
 
+func TestAccumulate_ZeroTokens(t *testing.T) {
+	p := newTestPlugin(1000, 10, 0)
+	store := newMemStore()
+	p.store = store
+
+	p.accumulate("sess-1", 0)
+
+	fields, _ := store.HashGet(context.Background(), "token-budget:sess-1")
+	if fields["tokens"] != "" {
+		t.Errorf("tokens in store = %q, want empty (no HINCRBY for 0)", fields["tokens"])
+	}
+	if fields["calls"] != "1" {
+		t.Errorf("calls in store = %q, want 1", fields["calls"])
+	}
+	if fields["started_at"] == "" {
+		t.Error("started_at not set in store")
+	}
+}
+
+func TestOnResponseFrame_ZeroTokensCountsCalls(t *testing.T) {
+	p := newTestPlugin(1000, 5, 0)
+	pctx := makePctx("sess-1", 0)
+
+	action := p.OnResponseFrame(context.Background(), pctx, nil, true)
+	if action.Type != pipeline.Continue {
+		t.Fatalf("expected Continue, got %v", action.Type)
+	}
+
+	p.mu.RLock()
+	c := p.cache["sess-1"]
+	p.mu.RUnlock()
+	if c == nil {
+		t.Fatal("expected cache entry for zero-token response")
+	}
+	if c.calls != 1 {
+		t.Errorf("calls = %d, want 1", c.calls)
+	}
+	if c.tokens != 0 {
+		t.Errorf("tokens = %d, want 0", c.tokens)
+	}
+}
+
 func TestConfigure_Validation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -275,6 +317,10 @@ func TestConfigure_Validation(t *testing.T) {
 		{"missing redis_url", `{"max_tokens":100}`, true},
 		{"no limits", `{"redis_url":"redis://localhost"}`, true},
 		{"invalid json", `{broken}`, true},
+		{"zero refresh_interval", `{"redis_url":"redis://localhost","max_tokens":100,"refresh_interval":"0s"}`, true},
+		{"negative refresh_interval", `{"redis_url":"redis://localhost","max_tokens":100,"refresh_interval":"-1s"}`, true},
+		{"fail_closed rejected", `{"redis_url":"redis://localhost","max_tokens":100,"redis_unavailable":"fail_closed"}`, true},
+		{"invalid on_exceed", `{"redis_url":"redis://localhost","max_tokens":100,"on_exceed":"block"}`, true},
 	}
 
 	for _, tt := range tests {

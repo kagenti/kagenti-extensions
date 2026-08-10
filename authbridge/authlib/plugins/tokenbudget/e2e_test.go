@@ -20,9 +20,10 @@ func newE2EPlugin(t *testing.T, maxTokens int64, store *memStore) *TokenBudget {
 	t.Helper()
 	p := New()
 	cfg, _ := json.Marshal(config{
-		RedisURL:        "mem://test",
-		MaxTokens:       maxTokens,
-		RefreshInterval: "30ms",
+		RedisURL:         "mem://test",
+		MaxTokens:        maxTokens,
+		OnExceed:         "deny",
+		RefreshInterval:  "30ms",
 		RedisUnavailable: "fail_open",
 	})
 	if err := p.Configure(cfg); err != nil {
