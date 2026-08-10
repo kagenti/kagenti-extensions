@@ -27,16 +27,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
-	"github.com/rossoctl/cortex/authbridge/authlib/observe"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 	"github.com/rossoctl/cortex/authbridge/authlib/reloader"
+	"github.com/rossoctl/cortex/authbridge/authlib/runtimeutil"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/sessionapi"
 	"github.com/rossoctl/cortex/authbridge/authlib/shared"
@@ -61,44 +60,12 @@ import (
 	_ "github.com/rossoctl/cortex/authbridge/authlib/plugins/tokenexchange"
 )
 
-var logLevel = new(slog.LevelVar)
-
-func initLogging() {
-	switch strings.ToLower(os.Getenv("LOG_LEVEL")) {
-	case "debug":
-		logLevel.Set(slog.LevelDebug)
-	case "warn":
-		logLevel.Set(slog.LevelWarn)
-	case "error":
-		logLevel.Set(slog.LevelError)
-	default:
-		logLevel.Set(slog.LevelInfo)
-	}
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
-}
-
-func startSignalToggle() {
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGUSR1)
-	go func() {
-		for range sigCh {
-			if logLevel.Level() == slog.LevelDebug {
-				logLevel.Set(slog.LevelInfo)
-				slog.Info("log level toggled to INFO (send SIGUSR1 to switch back to DEBUG)")
-			} else {
-				logLevel.Set(slog.LevelDebug)
-				slog.Info("log level toggled to DEBUG (send SIGUSR1 to switch back to INFO)")
-			}
-		}
-	}()
-}
-
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	flag.Parse()
 
-	initLogging()
-	startSignalToggle()
+	runtimeutil.InitLogging("authbridge-cpex")
+	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
 		log.Fatal("--config is required and must point to a YAML file")
@@ -235,8 +202,16 @@ func main() {
 	defer sharedStore.Close()
 	rpSrv.Shared = sharedStore
 	fpSrv.Shared = sharedStore
-	httpServers = append(httpServers, startReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr))
-	httpServers = append(httpServers, startHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr))
+	rpHTTP, err := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
+	if err != nil {
+		log.Fatalf("reverse-proxy listen: %v", err)
+	}
+	httpServers = append(httpServers, rpHTTP)
+	fpHTTP, err := runtimeutil.StartHTTPServer("forward-proxy", fpSrv.Handler(), cfg.Listener.ForwardProxyAddr)
+	if err != nil {
+		log.Fatalf("forward-proxy listen: %v", err)
+	}
+	httpServers = append(httpServers, fpHTTP)
 	_ = mtlsMetrics
 
 	statsProvider := func() *auth.Stats {
@@ -244,7 +219,10 @@ func main() {
 		sources = append(sources, plugins.CollectStats(outboundH.Load())...)
 		return auth.MergeStats(sources...)
 	}
-	statSrv := startStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler())
+	statSrv, statErr := runtimeutil.StartStatServer(cfg, rld.ConfigProvider(), statsProvider, rld.Handler(), cfg.Stats.StatsAddress)
+	if statErr != nil {
+		log.Fatalf("stat server listen: %v", statErr)
+	}
 
 	plugins.WarmCatalog()
 
@@ -265,29 +243,12 @@ func main() {
 		}()
 	}
 
-	slog.Info("authbridge-cpex starting", "mode", cfg.Mode, "logLevel", logLevel.Level().String())
+	slog.Info("authbridge-cpex starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	go func() {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		})
-		mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-			if name := inboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "inbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			if name := outboundH.NotReadyPlugin(); name != "" {
-				http.Error(w, "outbound plugin not ready: "+name, http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-		})
-		slog.Info("health server listening", "addr", ":9091")
-		if err := http.ListenAndServe(":9091", mux); err != nil {
-			slog.Warn("health server failed", "error", err)
-		}
-	}()
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	if healthErr != nil {
+		log.Fatalf("health server listen: %v", healthErr)
+	}
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
@@ -301,6 +262,7 @@ func main() {
 		srv.Shutdown(shutdownCtx)
 	}
 	statSrv.Shutdown(shutdownCtx)
+	healthSrv.Shutdown(shutdownCtx)
 	if sessionAPISrv != nil {
 		sessionAPISrv.Shutdown(shutdownCtx)
 	}
@@ -311,50 +273,4 @@ func main() {
 	if sessions != nil {
 		sessions.Close()
 	}
-}
-
-func startHTTPServer(name string, handler http.Handler, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           handler,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
-}
-
-func startReverseProxyServer(name string, rp *reverseproxy.Server, addr string) *http.Server {
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           rp.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-	listener, err := rp.Listen(addr)
-	if err != nil {
-		log.Fatalf("%s listen: %v", name, err)
-	}
-	go func() {
-		slog.Info("HTTP server listening", "name", name, "addr", addr, "mtls", rp.MTLSEnabled())
-		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("%s serve: %v", name, err)
-		}
-	}()
-	return srv
-}
-
-func startStatServer(cfg *config.Config, cfgProvider observe.ConfigProvider, statsProvider observe.StatsProvider, reloadStatus http.Handler) *observe.StatServer {
-	srv := observe.NewStatServer(cfg.Stats.StatsAddress, cfgProvider, statsProvider,
-		observe.WithReloadStatus(reloadStatus))
-	go func() {
-		slog.Info("stat server listening", "addr", cfg.Stats.StatsAddress)
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("stat server: %v", err)
-		}
-	}()
-	return srv
 }

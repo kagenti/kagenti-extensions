@@ -3,7 +3,7 @@
 **Status**: Draft
 **Date**: April 2026
 
-This document specifies the hook system and plugin runtime for AuthBridge. Hooks provide typed, capability-gated extension points at well-defined stages of the inbound JWT validation and outbound token exchange pipelines. The plugin runtime is built on [CPEX](https://github.com/contextforge-org/contextforge-plugins-framework/tree/main), embedded in-process via Go bindings to the Rust core.
+This document specifies the hook system and plugin runtime for AuthBridge. Hooks provide typed, capability-gated extension points at well-defined stages of the inbound JWT validation and outbound token exchange pipelines. The plugin runtime is built on [CPEX](https://github.com/contextforge-org/cpex/), embedded in-process via Go bindings to the Rust core.
 
 ## How it works
 
@@ -69,7 +69,7 @@ sequenceDiagram
 
 Out of scope:
 
-- CPEX internals (payload dispatch, capability gating, plugin executor). See the [CPEX spec](https://github.com/contextforge-org/contextforge-plugins-framework/blob/main/docs/specs/plugin-framework-spec.md) and [CPEX Go API](https://github.com/contextforge-org/contextforge-plugins-framework/blob/docs/golang_proposal/docs/proposals/cpex-golang-bindings-proposal.md).
+- CPEX internals (payload dispatch, capability gating, plugin executor). See the [CPEX spec](https://github.com/contextforge-org/cpex/blob/main/docs/specs/plugin-framework-spec.md) and [CPEX Go API](https://github.com/contextforge-org/cpex/blob/main/docs/specs/cpex-go-spec.md).
 - Protocol-semantic hooks for MCP, A2A, or LLM payloads. [How protocol-semantic hooks ship later](#133-how-protocol-semantic-hooks-ship-later) explains why they are deferred.
 - Hot-swapping plugins at runtime. Plugins are loaded at startup and released on shutdown.
 
@@ -93,7 +93,7 @@ Out of scope:
 
 ## 2. CPEX Terminology
 
-This section defines CPEX concepts used throughout this spec. For full details, see the [CPEX Plugin Framework Spec](https://github.com/contextforge-org/contextforge-plugins-framework/blob/main/docs/specs/plugin-framework-spec.md) and the [CPEX Go API](https://github.com/contextforge-org/contextforge-plugins-framework/blob/docs/golang_proposal/docs/proposals/cpex-golang-bindings-proposal.md).
+This section defines CPEX concepts used throughout this spec. For full details, see the [CPEX Plugin Framework Spec](https://github.com/contextforge-org/cpex/blob/main/docs/specs/plugin-framework-spec.md) and the [CPEX Go API](https://github.com/contextforge-org/cpex/blob/main/docs/specs/cpex-go-spec.md).
 
 | Term | Definition |
 |---|---|

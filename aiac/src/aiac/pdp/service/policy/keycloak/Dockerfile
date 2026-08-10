@@ -1,0 +1,16 @@
+FROM python:3.12-slim@sha256:d764629ce0ddd8c71fd371e9901efb324a95789d2315a47db7e4d27e78f1b0e9
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY main.py .
+
+# Drop privileges.
+RUN useradd --no-create-home --uid 10001 aiac
+USER 10001
+
+EXPOSE 7072
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "7072"]

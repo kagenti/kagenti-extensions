@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+# Apply excludes even to paths passed explicitly (e.g. by pre-commit / CI).
+force-exclude = true
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+pythonpath = ["src"]
+markers = [
+    "integration: tests that need live infra — a running Keycloak, Keycloak admin credentials, a real LLM endpoint, and the `opa` binary on PATH (see test/integration/.env)",
+]

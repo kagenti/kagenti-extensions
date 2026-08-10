@@ -113,7 +113,7 @@ more AuthBridge capabilities.
 
 All demos require:
 - A Kubernetes cluster with the Rossoctl platform installed
-  ([Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/install.md))
+  ([Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md))
 - Keycloak deployed in the `keycloak` namespace
 - SPIRE deployed (for demos using SPIFFE identity)
 
@@ -145,6 +145,4 @@ pip install -r requirements.txt
 ## Related Documentation
 
 - [AuthBridge Overview](../README.md) — Architecture and design
-- [AuthBridge Binary](../cmd/authbridge/README.md) — Unified authbridge binary
-  supporting ext_proc, ext_authz, and proxy modes
 - [Rossoctl Operator](https://github.com/rossoctl/operator) — Admission webhook for sidecar injection (migrated from this repo)

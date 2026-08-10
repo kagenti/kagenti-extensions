@@ -1,0 +1,252 @@
+# AIAC — Kubernetes Installation Guide
+
+This guide covers the full AIAC deployment in the `aiac-system` namespace.
+
+## Components deployed
+
+| Manifest | Contents | Port(s) |
+|---|---|---|
+| `pdp-interface-deployment.yaml` | Kagenti Interface Pod (IdP Configuration Service + PDP Policy Writer **Phase 1 rego-file mock** `aiac-pdp-policy-opa`) + 2 ClusterIP Services | 7071, 7072 |
+| `policy-store-statefulset.yaml` | Policy Store StatefulSet + 1 Gi PVC + headless Service + ClusterIP Service | 7074 |
+| `agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent) + ClusterIP Service | 7070 |
+
+## Prerequisites
+
+- Kubernetes cluster with `kubectl` configured for the target cluster.
+- Keycloak reachable from within the cluster (default: `http://keycloak-service.keycloak.svc:8080`).
+- For local Kind clusters: `kind` CLI and `docker`.
+
+## 1 — Build the images
+
+Run from the repo root (`kagenti-extensions/`):
+
+```bash
+# IdP Configuration Service (Interface Pod container 1)
+# Build context is the component directory (Dockerfile copies requirements.txt + main.py from there)
+docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
+  -t localhost/aiac-pdp-config:local \
+  aiac/src/aiac/idp/service/configuration/keycloak/
+
+# PDP Policy Writer — Phase 1 OPA rego-file mock (Interface Pod container 2, writes .rego to filesystem)
+# Build context is aiac/src/ (the OPA Dockerfile COPYs the whole tree and sets PYTHONPATH)
+docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
+  -t localhost/aiac-pdp-policy-opa:local \
+  aiac/src/
+
+# Policy Store
+docker build -f aiac/src/aiac/policy/store/service/Dockerfile \
+  -t localhost/aiac-policy-store:local aiac/src/
+
+# AIAC Agent
+docker build -f aiac/src/aiac/agent/controller/Dockerfile \
+  -t localhost/aiac-agent:local aiac/src/
+```
+
+## 2 — Load images into the cluster
+
+**Kind (local development)**
+
+```bash
+kind load docker-image localhost/aiac-pdp-config:local       --name <cluster-name>
+kind load docker-image localhost/aiac-pdp-policy-opa:local    --name <cluster-name>
+kind load docker-image localhost/aiac-policy-store:local     --name <cluster-name>
+kind load docker-image localhost/aiac-agent:local            --name <cluster-name>
+```
+
+**Remote registry** — tag, push, then update the `image:` fields in the manifests to match.
+
+> **Note:** the manifests set `imagePullPolicy: Never` because images are side-loaded
+> into a local Kind cluster (dev only). For a real cluster that pulls from a registry,
+> change these to `imagePullPolicy: IfNotPresent` (or `Always`).
+
+## 3 — Create the admin secret
+
+The Interface Pod requires a `keycloak-admin-secret` Secret. Create it once per cluster before applying the manifests:
+
+```bash
+kubectl create secret generic keycloak-admin-secret \
+  -n aiac-system \
+  --from-literal=KEYCLOAK_ADMIN_USERNAME=<admin-user> \
+  --from-literal=KEYCLOAK_ADMIN_PASSWORD=<admin-password>
+```
+
+> `pdp-interface-deployment.yaml` contains placeholder credentials for reference only.
+> For any non-local environment, create the secret manually and remove the `stringData` block.
+
+## 3b — Configure the Agent LLM (ConfigMap + Secret)
+
+The AIAC Agent's Policy Rules Builder calls an **OpenAI-compatible** LLM endpoint
+(`ChatOpenAI(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY)`). This configuration is
+split across two objects the Agent consumes via `envFrom`, and `agent-deployment.yaml` ships only
+**placeholders** — you must supply the real values per environment:
+
+| Key | Object | Notes |
+|-----|--------|-------|
+| `LLM_BASE_URL` | `aiac-agent-config` ConfigMap | OpenAI-compatible base URL (e.g. a litellm proxy). Placeholder in the manifest. |
+| `LLM_MODEL` | `aiac-agent-config` ConfigMap | Model the endpoint serves. Placeholder in the manifest. |
+| `LLM_API_KEY` | `aiac-agent-secret` Secret | **Not** defined in any manifest — the Deployment only references it. |
+
+```bash
+# API key — create the Secret BEFORE applying agent-deployment.yaml (step 5); the manifest only
+# references it. (To update an existing one, append: --dry-run=client -o yaml | kubectl apply -f -)
+kubectl create secret generic aiac-agent-secret -n aiac-system \
+  --from-literal=LLM_API_KEY=<your-api-key>
+
+# Endpoint + model — patch the LIVE ConfigMap AFTER step 5 (agent-deployment.yaml creates it with
+# placeholders). Do not commit real endpoints/keys to the manifest.
+kubectl patch configmap aiac-agent-config -n aiac-system --type merge \
+  -p '{"data":{"LLM_BASE_URL":"https://<your-openai-compatible-endpoint>/v1","LLM_MODEL":"<model>"}}'
+```
+
+Both are read by the Agent at startup, so a change to either takes effect on the next (re)start:
+`kubectl rollout restart deployment/aiac-agent -n aiac-system`.
+
+## 4 — Configure the environment
+
+Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match your environment:
+
+| Key | Default | Used by |
+|-----|---------|---------|
+| `KEYCLOAK_URL` | `http://keycloak-service.keycloak.svc:8080` | IdP Configuration Service, PDP Policy Writer |
+| `KEYCLOAK_REALM` | `kagenti` | PDP Policy Writer |
+| `KEYCLOAK_ADMIN_REALM` | `master` | IdP Configuration Service |
+| `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | Agent |
+| `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
+| `AIAC_POLICY_STORE_URL` | `http://aiac-policy-store-service:7074` | Agent |
+| `SERVICEPOLICY_DB_PATH` | `/data/policy_model.db` | Policy Store |
+| `NATS_URL` | `nats://aiac-event-broker-service:4222` | Agent — **added in Phase 2** (Event Broker, issue 4.19) |
+| `AIAC_RAG_INGEST_URL` | `http://aiac-rag-service:7073` | Init container — **added in Phase 3** (RAG Pod, issue 4.20) |
+| `AIAC_CHROMADB_URL` | `http://aiac-rag-service:8000` | Agent — **added in Phase 3** (RAG Pod, issue 4.20) |
+
+## 5 — Deploy
+
+Apply in dependency order:
+
+```bash
+# 1. Interface Pod — creates the namespace, ConfigMap, Secret, and ClusterIP Services
+kubectl apply -f aiac/k8s/pdp-interface-deployment.yaml
+
+# 2. Policy Store — needs the aiac-system namespace
+kubectl apply -f aiac/k8s/policy-store-statefulset.yaml
+
+# 3. Agent — depends on the Interface Pod + Policy Store already being healthy
+kubectl apply -f aiac/k8s/agent-deployment.yaml
+```
+
+Wait for all pods to be ready:
+
+```bash
+kubectl wait deployment/aiac-interface     -n aiac-system --for=condition=Available --timeout=120s
+kubectl wait statefulset/aiac-policy-store -n aiac-system --for=jsonpath='{.status.readyReplicas}'=1 --timeout=120s
+kubectl wait deployment/aiac-agent         -n aiac-system --for=condition=Available --timeout=120s
+```
+
+## 6 — Verify
+
+Port-forward each service and check its health endpoint:
+
+```bash
+# IdP Configuration Service
+kubectl port-forward svc/aiac-pdp-config-service 7071:7071 -n aiac-system &
+curl http://localhost:7071/health
+# {"status":"ok"}
+
+# PDP Policy Writer
+kubectl port-forward svc/aiac-pdp-policy-service 7072:7072 -n aiac-system &
+curl http://localhost:7072/health
+# {"status":"ok"}
+
+# Policy Store
+kubectl port-forward svc/aiac-policy-store-service 7074:7074 -n aiac-system &
+curl http://localhost:7074/health
+# {"status":"ok"}
+
+# AIAC Agent
+kubectl port-forward svc/aiac-agent-service 7070:7070 -n aiac-system &
+curl http://localhost:7070/health
+# {"status":"ok"}
+
+pkill -f "port-forward"
+```
+
+Run the IdP data smoke test:
+
+```bash
+kubectl port-forward svc/aiac-pdp-config-service 7071:7071 -n aiac-system &
+cd aiac
+.venv/bin/python test/idp/configuration/show_keycloak_data.py
+pkill -f "port-forward.*7071"
+```
+
+## Redeploying after a code change
+
+```bash
+# Rebuild the changed image, e.g. IdP Configuration Service:
+docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
+  -t localhost/aiac-pdp-config:local aiac/src/
+kind load docker-image localhost/aiac-pdp-config:local --name <cluster-name>
+
+# Restart the affected deployment:
+kubectl rollout restart deployment/aiac-interface -n aiac-system
+```
+
+---
+
+## Phase 2: Upgrading the OPA PDP Policy Writer to the CR-backed implementation
+
+Phase 1 already deploys the OPA PDP Policy Writer (`aiac-pdp-policy-opa`) as a filesystem
+stub that writes `.rego` files to `REGO_OUTPUT_DIR`. Phase 2 upgrades that same container
+in place to the CR-backed implementation, which writes Rego packages to an
+`AuthorizationPolicy` Kubernetes CR instead. The image name, ClusterIP Service name, and
+port are unchanged — no image swap and no Agent reconfiguration required.
+
+See issue [4.18 — K8s: OPA PDP Policy Writer AuthorizationPolicy CR + RBAC upgrade](../docs/issues/deployment/4.18-k8s-opa-authorizationpolicy-rbac.md) for the full procedure (ServiceAccount, ClusterRole, ClusterRoleBinding, CR instance).
+
+```bash
+# Rebuild the OPA PDP Policy Writer image with the Phase 2 (CR-backed) implementation
+docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
+  -t localhost/aiac-pdp-policy-opa:local aiac/src/
+kind load docker-image localhost/aiac-pdp-policy-opa:local --name <cluster-name>
+```
+
+---
+
+## Isolated dev: IdP Configuration Service only
+
+To test the IdP Configuration Service in isolation without deploying the full stack, use the standalone dev pod manifest:
+
+```bash
+kubectl apply -f aiac/k8s/idp-configuration-keycloak-pod.yaml
+kubectl wait pod/idp-configuration-keycloak-pod -n aiac-system \
+  --for=condition=Ready --timeout=60s
+```
+
+See [idp-configuration-keycloak-pod.yaml](idp-configuration-keycloak-pod.yaml) for the minimal ConfigMap and pod spec.
+
+---
+
+## IdP Configuration Service API reference
+
+All endpoints accept a `?realm=<realm>` query parameter. `/health` uses `KEYCLOAK_ADMIN_REALM` directly.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/subjects` | List users |
+| GET | `/roles` | List realm roles |
+| GET | `/services` | List clients |
+| GET | `/scopes` | List client scopes |
+| GET | `/subjects/{subject_id}/assignments` | Realm and service role mappings for a user |
+| GET | `/services/{service_id}/permissions` | Client roles for a service |
+| GET | `/roles/{role_name}/composites` | Composite roles for a realm role |
+| GET | `/health` | Readiness probe — `200 ok` or `503 unavailable` |
+
+All list endpoints return a JSON array. `/subjects/{id}/assignments` returns:
+
+```json
+{
+  "realmMappings": [...],
+  "serviceMappings": { "<clientId>": { "mappings": [...] } }
+}
+```
+
+Errors from Keycloak are returned as `502` with `{"error": "<message>"}`.

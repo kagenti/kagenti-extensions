@@ -1,0 +1,17 @@
+# AIAC working artefacts (regenerated; not source of truth)
+docs/handoffs/
+
+# Matt Pocock engineering-skill config — local per-clone (set up via
+# /setup-matt-pocock-skills); the skills read these, they are not repo source.
+docs/agents/
+
+# PDP policy writer integration-test scratch output (test/pdp/policy/generate_rego.py)
+test/pdp/policy/rego_out/
+
+# policy-pipeline integration-test generated Rego (test/integration/test_policy_pipeline.py);
+# regenerated per run, left on disk for eyeballing — not source of truth. probe.rego is a
+# committed fixture and is not under rego_out/, so it stays tracked.
+test/integration/rego_out/
+
+# uc1-onboarding demo's captured .rego snapshots — regenerated per run, not source of truth.
+demo/use-cases/uc1-onboarding/generated/

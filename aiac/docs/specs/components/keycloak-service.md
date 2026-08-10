@@ -5,6 +5,8 @@
 > - **PDP Policy Writer — Keycloak Implementation** (write endpoints) — see [pdp-policy-keycloak-service.md](pdp-policy-keycloak-service.md)
 >
 > The content below is retained for reference only.
+>
+> **SPM/APM note.** Under the SPM/APM redesign a user's role is a Keycloak **realm role** and an agent's role is surfaced as `kind = Agent` — sourced from the agent client's **client roles** *and* from the `aiac.managed` **realm roles assigned to its service account** (the provisioning path the `Configuration` library uses); the IdP Configuration Service populates `Role.kind`, `Role.actorIds`, and `Scope.serviceId` and fails loud on cross-kind roles (Assumption 1) and multi-owner AIAC-managed scopes (Assumption 2). See [idp-configuration-service.md](idp-configuration-service.md) for the authoritative, current description.
 
 ## Location
 `aiac/src/aiac/keycloak/service/`
@@ -39,7 +41,7 @@ Environment variables (injected via Kubernetes Deployment manifest):
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `KEYCLOAK_URL` | Yes | Keycloak base URL, e.g. `http://keycloak-service.keycloak.svc:8080` |
-| `KEYCLOAK_REALM` | Yes | Realm name, e.g. `rossoctl` |
+| `KEYCLOAK_REALM` | Yes | Realm name, e.g. `kagenti` |
 | `KEYCLOAK_ADMIN_USERNAME` | Yes | Admin username (from `keycloak-admin-secret`) |
 | `KEYCLOAK_ADMIN_PASSWORD` | Yes | Admin password (from `keycloak-admin-secret`) |
 

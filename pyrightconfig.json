@@ -1,0 +1,8 @@
+{
+  "extraPaths": [
+    "aiac/src",
+    "aiac/src/aiac/agent/onboarding/policy"
+  ],
+  "pythonVersion": "3.12",
+  "typeCheckingMode": "basic"
+}

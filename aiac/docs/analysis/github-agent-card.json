@@ -1,0 +1,33 @@
+{
+  "capabilities": {
+    "streaming": true
+  },
+  "defaultInputModes": ["text"],
+  "defaultOutputModes": ["text"],
+  "description": "Answer queries about Github issues",
+  "name": "Github issue agent",
+  "preferredTransport": "JSONRPC",
+  "protocolVersion": "0.3.0",
+  "securitySchemes": {
+    "Bearer": {
+      "bearerFormat": "JWT",
+      "description": "OAuth 2.0 JWT token",
+      "scheme": "bearer",
+      "type": "http"
+    }
+  },
+  "skills": [
+    {
+      "description": "Answer queries about Github issues",
+      "examples": [
+        "Find me the issues with the most comments in kubernetes/kubernetes",
+        "Show all issues assigned to me across any repository"
+      ],
+      "id": "github_issue_agent",
+      "name": "Github issue agent",
+      "tags": ["git", "github", "issues"]
+    }
+  ],
+  "url": "http://github-agent.team1.svc.cluster.local:8000/",
+  "version": "1.0.0"
+}

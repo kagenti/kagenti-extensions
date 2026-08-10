@@ -8,6 +8,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import json
 import logging
 
 from fastapi import FastAPI, HTTPException
@@ -18,6 +19,29 @@ from .models import ReflectRequest, ReflectResponse
 from .settings import Settings
 
 log = logging.getLogger(__name__)
+
+# _LOG_REQUESTS and _STRIP_KEYS are now read from Settings (via Settings.from_env)
+# so all config comes from a single place. See settings.py.
+
+
+def _strip_tool_arg_keys(tool_calls: list[dict], keys: frozenset[str]) -> list[dict]:
+    """Return a copy of tool_calls with the named argument keys removed."""
+    result = []
+    for tc in tool_calls:
+        fn = tc.get("function") or {}
+        if not isinstance(fn, dict):
+            result.append(tc)
+            continue
+        raw_args = fn.get("arguments", "")
+        try:
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            if isinstance(args, dict):
+                args = {k: v for k, v in args.items() if k not in keys}
+            new_args = json.dumps(args) if isinstance(args, dict) else raw_args
+        except (json.JSONDecodeError, TypeError):
+            new_args = raw_args
+        result.append({**tc, "function": {**fn, "arguments": new_args}})
+    return result
 
 
 def create_app(engine: ReflectionEngine | None = None) -> FastAPI:
@@ -51,6 +75,16 @@ def create_app(engine: ReflectionEngine | None = None) -> FastAPI:
 
     @app.post("/reflect", response_model=ReflectResponse)
     async def reflect(request: ReflectRequest) -> ReflectResponse:
+        if settings.log_requests:
+            log.info("incoming reflect request: %s", request.model_dump_json())
+
+        if settings.strip_tool_arg_keys and request.tool_calls:
+            request = request.model_copy(
+                update={"tool_calls": _strip_tool_arg_keys(request.tool_calls, settings.strip_tool_arg_keys)}
+            )
+            if settings.log_requests:
+                log.info("after strip (%s): tool_calls=%s", sorted(settings.strip_tool_arg_keys), request.tool_calls)
+
         # SPARCReflectionComponent.process is synchronous (and CPU/IO bound on the
         # LLM call); run it off the event loop so the service stays responsive.
         try:

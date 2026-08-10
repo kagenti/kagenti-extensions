@@ -396,6 +396,6 @@ All optional. A plugin that doesn't implement them is treated as
 - [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
   composes plugins, the Run / RunResponse dispatch order, and the
   lifecycle hooks.
-- [`pipeline/plugin.go`](../pipeline/plugin.go) — the Plugin interface
+- [`pipeline/plugin.go`](../authlib/pipeline/plugin.go) — the Plugin interface
   and all optional interfaces (Initializer / Shutdowner / Readier /
   Configurable).

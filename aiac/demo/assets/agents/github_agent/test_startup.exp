@@ -1,0 +1,23 @@
+# This script tests if the server has dependencies and reaches the point of starting its server.
+
+# Run with `expect -f test_startup.exp`
+
+set timeout 120
+
+# This is similar to the Dockerfile CMD
+set child_pid [spawn env HOST=localhost PORT=8001 uv run --locked server]
+
+expect {
+    "Uvicorn running on" {
+        # Unlike the other servers, this one opens a child process.
+        # Without the explicit `pkill -P` it would leave a `uv` process running.
+        puts "Spawned pid was $child_pid"
+        exec pkill -P $child_pid
+        puts "Success"; exit 0
+    }
+    timeout {
+        exec pkill -P $child_pid
+        puts "Timed out waiting for startup"; exit 1
+    }
+    eof { puts "Process exited early"; exit 2 }
+}

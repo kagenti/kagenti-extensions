@@ -1,0 +1,7 @@
+.venv
+
+# Secrets — never bake into the image
+.env
+
+# `expect` scripts
+test_startup.exp

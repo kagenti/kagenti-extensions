@@ -27,8 +27,8 @@ This agent generalises it to the scenario's **two capability areas**.
 | Scenario element | This agent |
 |---|---|
 | Agent client `github-agent` (type **Agent**) | This A2A agent |
-| Agent role `source-operator` → agent scope `source-access` | **Skill 1** — Source repository operations |
-| Agent role `issues-operator` → agent scope `issues-access` | **Skill 2** — Issue & PR tracker operations |
+| Agent role `source_operations` → agent scope `source-access` | **Skill 1** — Source repository operations |
+| Agent role `issue_operations` → agent scope `issues-access` | **Skill 2** — Issue & PR tracker operations |
 | Tool `github-tool` scopes `source-read`/`source-write` | Source tool allow-list (see §5) |
 | Tool `github-tool` scopes `issues-read`/`issues-write` | Issue/PR tool allow-list (see §5) |
 
@@ -42,7 +42,7 @@ RFC-8693 token exchange, and the `github-tool` MitM swaps the exchanged token fo
 - Existing (issue-only) agent card: [`../../analysis/github-agent-card.json`](../../analysis/github-agent-card.json)
 - `github-tool` MCP tool catalog (44 tools): [`../../analysis/github-mcp-tools-summary.json`](../../analysis/github-mcp-tools-summary.json)
 - Reference agent: `agent-examples/a2a/git_issue_agent/`
-- Reference deployment: `cortex/authbridge/demos/github-issue/k8s/`
+- Reference deployment: `kagenti-extensions/authbridge/demos/github-issue/k8s/`
 - **Sibling tool spec (UC-1 onboarding fixture):** [`github-tool.md`](github-tool.md) — a simplified
   4-tool stub (`source-read`, `source-write`, `issues-read`, `issues-write`) deployed as Service
   `github-tool`. **This is not the tool this agent connects to.** The agent connects to the production
@@ -57,7 +57,7 @@ Reuse the `git_issue_agent` stack verbatim — do not introduce a new framework:
 
 - **A2A SDK 1.x** server (route factories, `AgentInterface`, snake_case card fields). Binds `0.0.0.0`
   on `PORT` (default **8000**). `create_jsonrpc_routes(..., enable_v0_3_compat=True)` — **required**
-  because Rossoctl uses A2A 0.3 client libraries — plus the agent card at both
+  because Kagenti uses A2A 0.3 client libraries — plus the agent card at both
   `/.well-known/agent-card.json` and legacy `/.well-known/agent.json`.
 - **CrewAI** orchestration (`Agent`/`Crew`/`Task`, `Process.sequential`), LLM via **litellm** (`crewai.LLM`).
 - **`crewai-tools[mcp]` `MCPServerAdapter`** — per-request connection to the MCP tool over
@@ -96,7 +96,7 @@ Built in `a2a_agent.py::get_agent_card()`. Fields:
 
 | id | name | description | tags | examples |
 |---|---|---|---|---|
-| `source_operations` | Source repository operations | Browse and search code; read, create, and modify repository file contents, branches, and commits. | `git, github, source, repositories, files, branches, commits` | "Show the README of rossoctl/rossoctl", "List the branches of owner/repo", "Create a branch and commit a fix to owner/repo" |
+| `source_operations` | Source repository operations | Browse and search code; read, create, and modify repository file contents, branches, and commits. | `git, github, source, repositories, files, branches, commits` | "Show the README of kagenti/kagenti", "List the branches of owner/repo", "Create a branch and commit a fix to owner/repo" |
 | `issue_operations` | Issue & PR tracker operations | Read, search, create, and update issues, comments, sub-issues, and pull requests. | `git, github, issues, pull-requests` | "List open issues in kubernetes/kubernetes", "Open an issue in owner/repo titled …", "Summarise PR #42 in owner/repo" |
 
 > The existing `git_issue_agent` card ([`../../analysis/github-agent-card.json`](../../analysis/github-agent-card.json))
@@ -195,29 +195,17 @@ Config via `github_agent/config.py` (`pydantic-settings`), adapted from the refe
 
 ## 7. Deployment (aiac level)
 
-Manifests live under `aiac/demo/agents/github_agent/k8s/`, adapted from the github-issue demo. Namespace
+Manifests live under `aiac/demo/assets/agents/github_agent/k8s/`, adapted from the github-issue demo. Namespace
 `team1` (installer-provided ConfigMaps/secrets assumed present).
 
 - **`github-agent-deployment.yaml`** — `ServiceAccount` + `Deployment` + `Service` + `AgentRuntime`:
-  - **Deployment labels** (on `metadata.labels` **and** pod template): `protocol.rossoctl.io/a2a: ""`
-    in addition to `app.kubernetes.io/name: github-agent`. The `protocol.rossoctl.io/a2a` label is
-    required by the `AgentCardSyncReconciler` (`shouldSyncWorkload` gate): the operator stamps
-    `rossoctl.io/type=agent` automatically via the `AgentRuntime`, but the protocol label must be set
-    in the manifest. Without it, no `AgentCard` CR is auto-created and `analyze_agent` falls back to
-    the default minimal scope.
-  - Pod labels `rossoctl.io/inject: enabled`, `rossoctl.io/spire: enabled`, `protocol.rossoctl.io/a2a: ""`.
+  - Pod labels `kagenti.io/inject: enabled`, `kagenti.io/spire: enabled`.
   - Container port `8000`; env `MCP_URL=http://github-tool-mcp:9090/mcp`,
-    `JWKS_URI=http://keycloak-service.keycloak.svc:8080/realms/rossoctl/protocol/openid-connect/certs`,
+    `JWKS_URI=http://keycloak-service.keycloak.svc:8080/realms/kagenti/protocol/openid-connect/certs`,
     LLM vars, `PORT`, `LOG_LEVEL`; `/shared` `emptyDir` for operator-mounted client creds.
-  - `Service` (ClusterIP) with **two ports** — port order matters because
-    `AgentCardReconciler.getServicePort()` always takes `Ports[0]`:
-    1. `agent: 8001 → 8001` (first) — direct path to the agent after authbridge port-stealing
-       (`8000 → 8001`); used by the operator's `AgentCardReconciler` to fetch `/.well-known/agent.json`
-       without going through the authbridge reverse proxy (which blocks unauthenticated requests).
-    2. `proxy: 8080 → 8000` (second) — the public/authenticated path through the authbridge reverse
-       proxy; used by A2A clients that carry a valid JWT.
+  - `Service` `8080 → 8000` (ClusterIP).
   - `AgentRuntime{ type: agent, targetRef: this Deployment }` — enrolls the workload (operator applies
-    `rossoctl.io/type=agent`, registers a Keycloak client, injects the AuthBridge sidecar).
+    `kagenti.io/type=agent`, registers a Keycloak client, injects the AuthBridge sidecar).
   - Image `github-agent:latest`, `imagePullPolicy: IfNotPresent` (kind-load; name is a documented knob).
 - **`configmaps.yaml`** — `authbridge-config` (Keycloak URL/realm/issuer) + `authproxy-routes` with the
   outbound token-exchange route:
@@ -228,8 +216,9 @@ Manifests live under `aiac/demo/agents/github_agent/k8s/`, adapted from the gith
   ```
 - **Prerequisite (reused, not created here):** the existing **production** `github-tool` Deployment/Service
   (`authbridge/demos/github-issue/k8s/github-tool-deployment.yaml`, Service name `github-tool-mcp`) +
-  `github-tool-secrets`, a running Rossoctl cluster (Keycloak realm `rossoctl`, namespace `team1`).
-  The sibling UC-1 stub at `demo/tools/github_tool/` (Service `github-tool`) is a separate deployment
+  `github-tool-secrets`, a running Kagenti cluster (Keycloak realm `kagenti`, namespace `team1` —
+  installer-provided and enrolled for AuthBridge injection).
+  The sibling UC-1 stub at `aiac/demo/assets/tools/github_tool/` (Service `github-tool`) is a separate deployment
   for AIAC onboarding discovery and is **not** a runtime dependency of this agent.
 
 **Wiring invariant:** agent `MCP_URL` host (`github-tool-mcp`) == `authproxy-routes` host == tool
@@ -240,7 +229,7 @@ Service name; exchanged audience (`github-tool`) == tool `AUDIENCE`.
 ## 8. Verification
 
 **Local (no cluster — primary gate):**
-1. `cd aiac/demo/agents/github_agent && uv lock && uv sync`.
+1. `cd aiac/demo/assets/agents/github_agent && uv lock && uv sync`.
 2. `podman build -t github-agent:latest .`.
 3. Startup + card: run `uv run --no-sync server` (or `test_startup.exp`), then
    `curl -s localhost:8000/.well-known/agent-card.json | jq '.name, .skills[].id'` →
@@ -248,13 +237,11 @@ Service name; exchanged audience (`github-tool`) == tool `AUDIENCE`.
 4. (Optional; needs a GitHub PAT + reachable LLM) `GITHUB_TOKEN=… MCP_URL=https://api.githubcopilot.com/mcp/`,
    send an A2A `message/send` read query and confirm a grounded, tool-cited answer.
 
-**Cluster (HITL — live Rossoctl + Keycloak + LLM + tool PAT):**
-5. `kind load docker-image github-agent:latest --name rossoctl`.
+**Cluster (HITL — live Kagenti + Keycloak + LLM + tool PAT):**
+5. `kind load docker-image github-agent:latest --name kagenti`.
 6. Ensure `github-tool` + `github-tool-secrets` exist in `team1`.
 7. `kubectl apply -f k8s/configmaps.yaml -f k8s/github-agent-deployment.yaml`.
-8. Confirm AuthBridge injection + `rossoctl.io/type=agent`; confirm the `AgentCard` CR was
-   auto-created (`kubectl get agentcard -n team1` → `github-agent-deployment-card`, `SYNCED=True`).
-   `kubectl port-forward svc/github-agent 8080:8080 -n team1` (proxy port);
+8. Confirm AuthBridge injection + `kagenti.io/type=agent`; `kubectl port-forward svc/github-agent 8080:8080 -n team1`;
    send an authenticated A2A message; verify token exchange reaches `github-tool` and an answer returns.
 
 ---

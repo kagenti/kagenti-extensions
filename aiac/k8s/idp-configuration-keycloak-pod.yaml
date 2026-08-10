@@ -1,0 +1,97 @@
+# DEV / ISOLATED TESTING ONLY
+#
+# This manifest deploys the IdP Configuration Service as a standalone Pod for
+# isolated development and testing.  It does NOT reflect the production topology.
+#
+# In production both interface services run as containers in a single Kagenti Interface Pod
+# defined in pdp-interface-deployment.yaml.
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aiac-system
+
+---
+# NOTE: standalone-specific ConfigMap name. It deliberately does NOT reuse
+# `aiac-pdp-config` (the name used by pdp-interface-deployment.yaml), which
+# carries additional keys (KEYCLOAK_REALM, AIAC_PDP_*_URL). Sharing the name in
+# the same namespace would let `kubectl apply` of this isolated manifest clobber
+# the interface ConfigMap and break a running interface Pod on its next restart.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-pdp-config-standalone
+  namespace: aiac-system
+data:
+  KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
+  KEYCLOAK_ADMIN_REALM: "master"
+
+---
+# keycloak-admin-secret is NOT defined here — it must be pre-provisioned
+# out-of-band before applying this manifest (credentials must NEVER be committed
+# to git). The Pod below references it via secretRef. Create it once:
+#
+#   kubectl create secret generic keycloak-admin-secret \
+#     -n aiac-system \
+#     --from-literal=KEYCLOAK_ADMIN_USERNAME=<admin-user> \
+#     --from-literal=KEYCLOAK_ADMIN_PASSWORD=<admin-password>
+apiVersion: v1
+kind: Pod
+metadata:
+  name: idp-configuration-keycloak-pod
+  namespace: aiac-system
+  labels:
+    app: idp-configuration-keycloak-pod
+spec:
+  # The image runs as non-root UID 10001 (see the idp-configuration Dockerfile).
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: aiac-pdp-config
+      image: localhost/aiac-pdp-config:local
+      imagePullPolicy: Never
+      ports:
+        - containerPort: 7071
+      # readOnlyRootFilesystem is on; temp writes go to the /tmp emptyDir.
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          cpu: 250m
+          memory: 128Mi
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 7071
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 7071
+        initialDelaySeconds: 10
+        periodSeconds: 20
+      envFrom:
+        - configMapRef:
+            name: aiac-pdp-config-standalone
+        - secretRef:
+            name: keycloak-admin-secret
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}

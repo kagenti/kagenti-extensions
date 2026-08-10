@@ -49,19 +49,22 @@ found.
 ### What it does
 
 The pipeline (provision → PRB → PCE → OPA) is driven **once per `policy.md` variant** — `explicit` and
-`abstract` — each writing into its own `rego_out/<variant>/` directory. `opa eval` then asserts the
+`abstract` — each writing into its own `rego_out/policy_pipeline/<variant>/` directory (a sibling of
+the UC-1 ladder's `rego_out/uc1/`). `opa eval` then asserts the
 scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
 
 1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
-   `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `AIAC_REALM` *before* importing the aiac
+   `AIAC_POLICY_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `KEYCLOAK_REALM` *before* importing the aiac
    libraries — the libraries read env at import time. This is the pattern
-   `test/pdp/policy/generate_rego.py` already follows.
+   `test/pdp/policy/generate_rego.py` already follows. (The PCE resolves its realm via
+   `Configuration.for_default_realm()`, the single source of truth reading `KEYCLOAK_REALM`; the
+   former `AIAC_REALM` is retired.)
 2. **Spawn the three services as `uvicorn` subprocesses** (no Docker) and poll each `GET /health`
    until ready, with a bounded timeout:
    - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
    - Policy Store — its ASGI app on `7074`, with `AGENTPOLICY_DB_PATH` pointed at a fresh temp dir.
    - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR`
-     (pointed at the current variant's `rego_out/<variant>/`) and the Policy Store DB path in its env.
+     (pointed at the current variant's `rego_out/policy_pipeline/<variant>/`) and the Policy Store DB path in its env.
 3. **Provision Keycloak** (idempotent — delete-if-exists the realm first, then create):
    - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
      users `dev-user`, `test-user`, and `devops-user`; create realm roles `developer`, `tester`, and
@@ -76,7 +79,7 @@ scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below
      **not** a list — a list fails the `in ("Agent","Tool")` check, resolves the type to `None`, and
      yields empty pipeline output.
    - via the **aiac IdP `Configuration` library** (the real product surface the PCE reads back): create
-     the client roles (`source-operator`, `issues-operator`) and scopes (`source-access`, `issues-access`,
+     the client roles (`source_operations`, `issue_operations`) and scopes (`source-access`, `issues-access`,
      `source-read`, `source-write`, `issues-read`, `issues-write`) with the descriptions in
      *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*, and map roles→services and
      scopes→services so `get_services_by_role` / `get_services_by_scope` and `get_service().roles` /
@@ -157,7 +160,7 @@ user→tool; the agent→tool gate covers all four scopes, so the user gate disc
 | devops-user | ❌ | ❌ | ❌ | ❌ |
 
 Alongside the assertions, each variant leaves exactly **two** files on disk in its
-`rego_out/<variant>/` for eyeballing:
+`rego_out/policy_pipeline/<variant>/` for eyeballing:
 
 - `github_agent.inbound.rego` — package `authz.github_agent.inbound`; the **user→agent** gate.
   `subject_roles` = `{dev-user: [developer], test-user: [tester]}`; `agent_scopes` populated.
@@ -165,7 +168,7 @@ Alongside the assertions, each variant leaves exactly **two** files on disk in i
   denied inbound.)
 - `github_agent.outbound.rego` — package `authz.github_agent.outbound`; `allow if { subject_ok;
   target_ok }`. Its **`subject_ok`** is the new **user→tool** gate (mapping (b), grouped from
-  `outbound_subject_rules` into `outbound_subject_role_scopes`, matched against
+  `outbound_subject_rules` into `subject_role_scopes`, matched against
   `target_scopes[input.target]`); its **`target_ok`** is the **agent→tool** gate (mapping (c), over
   `agent_roles` × `agent_role_scopes`). `agent_roles` and `target_scopes` are populated.
 
@@ -183,8 +186,8 @@ exercises the deny-by-default path.
 
 | Element | Value |
 |---------|-------|
-| Realm | `AIAC_TEST_REALM` (default `aiac-e2e`) |
-| Agent | `github-agent` (client roles `source-operator`, `issues-operator`; scopes `source-access`, `issues-access`) |
+| Realm | `AIAC_TEST_REALM` (default `aiac-pp`) |
+| Agent | `github-agent` (client roles `source_operations`, `issue_operations`; scopes `source-access`, `issues-access`) |
 | Tool | `github-tool` (scopes `source-read`, `source-write`, `issues-read`, `issues-write`) |
 | Users | `dev-user` (role `developer`), `test-user` (role `tester`), `devops-user` (role `devops`) |
 | `developer` | source read/write + issues read |
@@ -207,12 +210,12 @@ Role → access (confirmed with the user; the fixed facts that both `policy.md` 
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds | — (required) |
-| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-e2e` |
-| `AIAC_REALM` | Realm the PCE reads back (= `AIAC_TEST_REALM`) | `aiac-e2e` |
+| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-pp` |
+| `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-pp` |
 | `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
 | `AIAC_POLICY_STORE_URL` | Policy Store base URL (set before import) | `http://127.0.0.1:7074` |
 | `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
-| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
+| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/policy_pipeline/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
 | `AGENTPOLICY_DB_PATH` | Policy Store DB path for the subprocess (fresh temp dir) | temp |
 | `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant fed to the PRB; the test sets it per variant (`policy.explicit.md`, `policy.abstract.md`) | `/etc/aiac/policy.md` |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`) | — (required) |
@@ -229,14 +232,14 @@ Runnable only once the pipeline fixes (handoffs 01 + 02, P1–P5) have landed, a
 Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
 
 ```bash
-# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-e2e; opa on PATH or $OPA_BIN
+# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-pp; opa on PATH or $OPA_BIN
 .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
 # ~30 parametrized nodes (variant × subject inbound; variant × subject × function_name outbound).
 # A failing node names the exact cell, e.g.:
 #   test_outbound[abstract-test-user-source-read] — expected deny, opa allowed
 # The generated Rego is left on disk per variant for eyeballing:
-#   rego_out/explicit/github_agent.{inbound,outbound}.rego
-#   rego_out/abstract/github_agent.{inbound,outbound}.rego
+#   rego_out/policy_pipeline/explicit/github_agent.{inbound,outbound}.rego
+#   rego_out/policy_pipeline/abstract/github_agent.{inbound,outbound}.rego
 #   (no github_tool.*.rego in either)
 ```
 
@@ -339,8 +342,8 @@ Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 - Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
   **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
   output on explicit vs. abstract policy text against the same expected Rego. The abstract variant
-  carries **no** agent-capability bullet; it relies on the elaborated `source-operator` /
-  `issues-operator` role descriptions (provisioned into Keycloak) for mapping (c), so it survives
+  carries **no** agent-capability bullet; it relies on the elaborated `source_operations` /
+  `issue_operations` role descriptions (provisioned into Keycloak) for mapping (c), so it survives
   deny-by-default and both variants reproduce the same Rego.
 - Descriptions are ≤255 characters and written **verbatim** into Keycloak; there is no shortened /
   verbatim split. (Keycloak caps role and client descriptions at 255 chars, and the generic descriptions
@@ -377,9 +380,9 @@ with the user; keep them in sync with the *Scenario* table (see *Further Notes*)
 The descriptions are **generic and keyword-free** — they describe what each entity/role/scope *does*,
 carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
 cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
-description prose: the test provisions each client's `client.type` attribute (the type UC1
-discovers from the agent card / `rossoctl.io/type` label) as a plain string `"Agent"` / `"Tool"`, so
-`Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
+description prose: the test sets each client's `client.type` attribute directly — as a plain string
+`"Agent"` / `"Tool"` written onto the client — rather than discovering it from a `kagenti.io/type`
+label, so `Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
 tags each client from the attribute without touching the TEMP description-keyword fallback.
 
 **`github-agent`** — client (Agent):
@@ -413,9 +416,9 @@ tags each client from the attribute without touching the TEMP description-keywor
 
 **Client roles (agent):**
 
-- `source-operator` — Covers read and write access to source repository contents — listing, reading,
+- `source_operations` — Covers read and write access to source repository contents — listing, reading,
   creating, and modifying files.
-- `issues-operator` — Covers read and write access to the issue tracker — reading, filing, updating,
+- `issue_operations` — Covers read and write access to the issue tracker — reading, filing, updating,
   and commenting on issues and their threads.
 
 **Agent scopes:**
@@ -452,15 +455,15 @@ policy supports it; deny by default.
 - tester may perform issues-read and issues-write.
 
 ## Agent roles → tool operations (outbound target; agent may reach the tool)
-- source-operator may perform source-read and source-write.
-- issues-operator may perform issues-read and issues-write.
+- source_operations may perform source-read and source-write.
+- issue_operations may perform issues-read and issues-write.
 ```
 
 ### `policy.md` — Version 2 (abstract)
 
 Relies on the PRB / LLM to expand "read and modify source" into the concrete scopes. Encodes the same
 role→access facts as Version 1. It carries **no** agent-capability bullet; mapping (c)
-(agent-role→tool-scope) is instead derived from the elaborated `source-operator` / `issues-operator`
+(agent-role→tool-scope) is instead derived from the elaborated `source_operations` / `issue_operations`
 role descriptions (see *Role & scope descriptions*), so it survives the PRB's deny-by-default-on-silence
 rule and both variants reproduce the same Rego.
 

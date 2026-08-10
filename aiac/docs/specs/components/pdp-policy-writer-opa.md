@@ -6,9 +6,9 @@
 ## Description
 A FastAPI web service that translates a **Policy Model** into OPA Rego packages and writes them to an `AuthorizationPolicy` Kubernetes Custom Resource. The OPA plugin embedded in each AuthBridge instance fetches the Rego packages relevant to its pod from this CR at startup.
 
-The service is deployed as a container in the **Rossoctl Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP.
+The service is deployed as a container in the **Kagenti Interface Pod** alongside the IdP Configuration Service, behind the `aiac-pdp-policy-service:7072` ClusterIP.
 
-The service has no dependency on Keycloak. All Keycloak operations (entity reads) are handled by the **IdP Configuration Service** and its library (`aiac.idp.library.configuration`).
+The service has no dependency on Keycloak. All Keycloak operations (entity reads) are handled by the **IdP Configuration Service** and its library (`aiac.idp.configuration`).
 
 ---
 
@@ -51,7 +51,7 @@ Complete policy definition for a single agent (service). Contains two sets of `P
 
 **Outbound rule semantics:** this agent acting as realm role `role` is permitted to request the target scope `scope`. Grouped by role, these rules become the `agent_role_scopes` map (agent role → target scopes) that the outbound package evaluates.
 
-**Outbound subject rule semantics:** a subject holding realm role `role` (a **user** role) is permitted to reach a **tool** exposing scope `scope`. Grouped by role, these rules become the `outbound_subject_role_scopes` map (user role → tool scopes) that the **outbound** package's subject gate evaluates against `target_scopes[input.target]`. This is distinct from `inbound_rules` (user → *agent* scope): the outbound subject gate answers "may this user reach the tool?", not "may this user call the agent?".
+**Outbound subject rule semantics:** a subject holding realm role `role` (a **user** role) is permitted to reach a **tool** exposing scope `scope`. Grouped by role, these rules become the `subject_role_scopes` map (user role → tool scopes) that the **outbound** package's subject gate evaluates against `target_scopes[input.target]`. This is distinct from `inbound_rules` (user → *agent* scope): the outbound subject gate answers "may this user reach the tool?", not "may this user call the agent?".
 
 **Note on `target_scopes` direction:** the map is keyed by **target service id → allowed scopes** (the inverse of the former `scope_targets`, which was `scope → targets`). The outbound Rego generator emits this map **verbatim** and evaluates `target_scopes[input.target]` directly — there is no inversion (see below).
 
@@ -97,7 +97,9 @@ No `?realm=` parameter — the service operates on a Kubernetes CR, not a Keyclo
 
 ## Rego package structure
 
-For each `AgentPolicyModel`, the service generates **two Rego packages**: one for the inbound pipeline and one for the outbound pipeline. The `agent_id` is slugified for use in the package name (hyphens → underscores, lowercase).
+For each `AgentPolicyModel`, the service generates **two Rego packages**: one for the inbound pipeline and one for the outbound pipeline. The `agent_id` is slugified for use in the package name (and filename). `agent_id` is the Keycloak clientId — a SPIFFE URI under SPIRE (`spiffe://host/ns/{ns}/sa/{name}`), or the plain `{ns}/{name}` clientId without it — so slugifying is not a simple hyphen→underscore substitution: the trust domain/host is dropped, the `{ns}/{name}` portion is extracted, and every remaining non-alphanumeric run collapses to a single underscore, lowercased (`aiac.pdp.service.policy.opa.rego.slugify`). This keeps the slug short and identical regardless of whether SPIRE is enabled — e.g. both `spiffe://localtest.me/ns/team1/sa/github-agent` and `team1/github-agent` slugify to `team1_github_agent`.
+
+> **Two identifiers, two layers (no contradiction).** UC-1 onboarding and the Trigger use the internal Keycloak **client UUID** (`service.id` / `Trigger.entity_id`) purely to *look up* a service in the IdP — that UUID **never reaches this writer**. What flows down the policy pipeline into `PolicyRule.scope.serviceId` / `Role.actorIds` and lands as `AgentPolicyModel.agent_id` is the **clientId** (the `{ns}/{name}` / SPIFFE form), which is what this writer slugifies for the Rego package name. The UUID→clientId resolution happens once, in the IdP Configuration Service, before the AgentPolicyModel is ever built.
 
 **Input is identifiers only.** Both packages receive an input document of **IDs**, never roles or scopes: inbound input is `{subject, source}`, outbound input is `{subject, target}` (`subject` is the end-user id, `source` the calling service id, `target` the called service id). Every role/scope mapping is therefore **embedded in the package itself**, and the `allow` logic resolves IDs → roles → scopes internally. Because no per-request scope is supplied, the decision is **coarse**: a principal passes when it has access to **at least one** relevant scope.
 
@@ -107,10 +109,10 @@ The generator embeds these symbols, derived from the `AgentPolicyModel`:
 |-------------|--------|-------|
 | `subject_roles` | `model.subject_roles` | subject id → `[role.name, …]` |
 | `source_roles` | `model.source_roles` | source id → `[role.name, …]` |
-| `agent_scopes` | `model.agent_scopes` | `[scope.name, …]` |
+| `agent_scopes` | `model.agent_scopes` | `[scope.name, …]` — **inbound package only** (the audience gate; outbound decisions do not consider the agent's own scopes) |
 | `agent_roles` | `model.agent_roles` | `[role.name, …]` |
 | `role_scopes` | grouped `model.inbound_rules` | role.name → `[scope.name, …]` (agent scopes granted per subject role) — **inbound package only** |
-| `outbound_subject_role_scopes` | grouped `model.outbound_subject_rules` | role.name → `[scope.name, …]` (tool scopes granted per user role) — **outbound package only** |
+| `subject_role_scopes` | grouped `model.outbound_subject_rules` | role.name → `[scope.name, …]` (tool scopes granted per user role) — **outbound package only** |
 | `agent_role_scopes` | grouped `model.outbound_rules` | role.name → `[scope.name, …]` (tool scopes per agent role) |
 | `target_scopes` | `model.target_scopes` | target id → `[scope.name, …]` |
 
@@ -146,31 +148,27 @@ allow if { subject_ok; source_ok }
 
 ### Outbound package: `authz.{agent_slug}.outbound`
 
-Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target}` (IDs). The gate requires **both** the subject and the agent to pass, but the outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): the subject must hold a role granting at least one **tool** scope the `target` accepts (via `outbound_subject_role_scopes`, grouped from `outbound_subject_rules`), **and** the agent (via its own `agent_roles`) must be permitted at least one scope that the `target` accepts. Both gates match against `target_scopes[input.target]`; `target_scopes` is consumed **directly** (target id → scopes) — it is not inverted. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here.
+Evaluated by the AuthBridge OPA plugin in the **outbound pipeline** — "what this agent may call". Input document: `{subject, target, function_name}` (IDs; `function_name` is the requested target scope). `allow` is a **per-scope AND** keyed on `input.function_name`, requiring **both** gates to pass on that same scope. The outbound **subject** gate is user→**tool** (distinct from the inbound user→agent gate): it passes iff the subject holds a role granted the **requested** `function_name` (via `subject_role_scopes`, grouped from `outbound_subject_rules`). The **capability** gate (`target_ok`) passes iff the requested `function_name` is one of the scopes the `target` accepts — `target_scopes[input.target]`, consumed **directly** (target id → scopes, not inverted). Because both gates test the *same* `function_name`, `allow` is a genuine per-scope intersection: a mismatch (user reaches scope A, agent reaches scope B) denies both. `agent_roles` / `agent_role_scopes` are still emitted (informational / debugging) but `allow` does **not** reference them — `target_scopes[input.target]` already *is* the per-scope capability gate. The inbound `role_scopes`/`agent_scopes` subject gate is **not** used here, and the outbound package does not emit `agent_scopes` at all: outbound decisions never consider the agent's own audience scopes.
 
 ```rego
 package authz.{agent_slug}.outbound
 
 agent_roles  := ["{role.name}", ...]                 # from agent_roles
-agent_scopes := ["{scope.name}", ...]                # from agent_scopes
 
 subject_roles := { "{subject_id}": ["{role.name}", ...], ... }
 
-outbound_subject_role_scopes := { "{role.name}": ["{scope.name}", ...], ... }   # from outbound_subject_rules (user role → tool scopes)
+subject_role_scopes := { "{role.name}": ["{scope.name}", ...], ... }   # from outbound_subject_rules (user role → tool scopes)
 agent_role_scopes            := { "{role.name}": ["{scope.name}", ...], ... }   # from outbound_rules (agent role → tool scopes)
 target_scopes                := { "{target_id}": ["{scope.name}", ...], ... }   # from target_scopes
 
-# user may reach the tool: holds a role granting >=1 tool scope the target accepts
+# user may reach the tool: holds a role granted the REQUESTED scope (input.function_name)
 subject_ok if {
     some role in subject_roles[input.subject]
-    some scope in outbound_subject_role_scopes[role]
-    scope in target_scopes[input.target]
+    input.function_name in subject_role_scopes[role]
 }
-# agent may reach the tool: agent role grants >=1 tool scope the target accepts
+# agent may reach the tool: the requested scope is one the target accepts (direct, per-scope)
 target_ok if {
-    some role in agent_roles
-    some scope in agent_role_scopes[role]
-    scope in target_scopes[input.target]
+    input.function_name in target_scopes[input.target]
 }
 
 default allow := false
@@ -181,7 +179,7 @@ A worked example (agent `github-agent`, users `developer`/`tester`, tool `github
 
 ---
 
-## Library: `aiac.pdp.policy.library`
+## Library: `aiac.pdp.policy.library.api`
 
 HTTP client module wrapping the PDP Policy Writer REST API. Exposes four module-level functions. Service URL is read from the `AIAC_PDP_POLICY_URL` environment variable (default: `http://127.0.0.1:7072`). All functions raise `RuntimeError` on non-2xx response.
 
@@ -242,7 +240,7 @@ For local development, the `kubernetes` client falls back to `~/.kube/config` au
 - Bind: `0.0.0.0:7072`
 - Base image: `python:3.12-slim`
 - Kubernetes ClusterIP Service: `aiac-pdp-policy-service:7072`
-- Deployment: co-located with IdP Configuration Service as a container in the **Rossoctl Interface Pod** (`pdp-interface-deployment.yaml`)
+- Deployment: co-located with IdP Configuration Service as a container in the **Kagenti Interface Pod** (`pdp-interface-deployment.yaml`)
 
 ---
 
@@ -270,11 +268,11 @@ aiac/src/aiac/pdp/service/
         ├── requirements.txt
         └── main.py
 
-aiac/src/aiac/pdp/
+aiac/src/aiac/pdp/policy/
 ├── __init__.py
 └── library/
     ├── __init__.py
-    └── policy.py       # apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
+    └── api.py          # apply_policy, apply_agent_policy, delete_agent_policy, delete_policy
                         # (models now imported from aiac.policy.model.models)
 ```
 
@@ -290,9 +288,9 @@ docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile \
 
 - Load Kubernetes in-cluster config at startup via `kubernetes.config.load_incluster_config()`; fall back to `kubernetes.config.load_kube_config()` for local development.
 - Instantiate a `kubernetes.client.CustomObjectsApi` for all CR operations.
-- `_slugify(agent_id: str) -> str`: replace hyphens with underscores, lowercase — produces a valid Rego package name segment.
+- `_slugify(agent_id: str) -> str`: extract `{namespace}/{name}` from a SPIFFE URI (or use the plain `{ns}/{name}` clientId as-is), then collapse every non-alphanumeric run to `_` and lowercase — produces a valid Rego package name segment, short and SPIRE-independent.
 - `_generate_inbound_rego(model: AgentPolicyModel) -> str`: render the inbound Rego package string. Embeds `agent_scopes`, `subject_roles`, `source_roles`, and a `role_scopes` map (grouping `inbound_rules` by role → agent scope names); emits `subject_ok` (mandatory) and `source_ok` (optional — an absent `input.source` passes); `allow if { subject_ok; source_ok }`.
-- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string. Embeds `agent_roles`, `agent_scopes`, `subject_roles`, `outbound_subject_role_scopes` (from `outbound_subject_rules`), `agent_role_scopes` (from `outbound_rules`), and `target_scopes` (consumed directly, target id → scopes — **no inversion**); emits a user→tool `subject_ok` (matching `scope in target_scopes[input.target]`, **not** `role_scopes`/`agent_scopes`) and `target_ok`; `allow if { subject_ok; target_ok }`. The inbound `role_scopes` map is **not** embedded in the outbound package.
+- `_generate_outbound_rego(model: AgentPolicyModel) -> str`: render the outbound Rego package string. Embeds `agent_roles`, `subject_roles`, `subject_role_scopes` (from `outbound_subject_rules`), `agent_role_scopes` (from `outbound_rules`), and `target_scopes` (consumed directly, target id → scopes — **no inversion**); emits a user→tool `subject_ok` (matching `input.function_name in subject_role_scopes[role]`, **not** the inbound `role_scopes`/`agent_scopes`) and a capability `target_ok` (matching `input.function_name in target_scopes[input.target]`); `allow if { subject_ok; target_ok }` — a per-scope AND on the same `input.function_name`. Neither the inbound `role_scopes` map nor `agent_scopes` is embedded in the outbound package — outbound decisions never consider the agent's own audience scopes.
 - `_upsert_agent(agent_id: str, inbound_rego: str, outbound_rego: str)`: patch the `AuthorizationPolicy` CR to upsert the two packages for `agent_id`. Schema TBD.
 - `_delete_agent(agent_id: str)`: patch the CR to remove all packages for `agent_id`.
 - `_delete_all()`: patch the CR to remove all packages.

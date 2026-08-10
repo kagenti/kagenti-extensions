@@ -2,7 +2,7 @@
 
 ## Abstract
 
-AI-based Access Control (AIAC) is a Rossoctl platform extension that automates RBAC/ABAC policy
+AI-based Access Control (AIAC) is a Kagenti platform extension that automates RBAC/ABAC policy
 enforcement for AI agents running on Kubernetes. A LangGraph-based AI agent continuously translates
 a natural-language access control policy — stored in a vector knowledge base — into concrete
 permission configurations in the active Policy Decision Point (PDP), eliminating manual policy
@@ -14,7 +14,7 @@ management (subjects, roles, services).
 
 ## 1. Problem Description
 
-Rossoctl AI agents call services across a shared platform. Every call must carry a token scoped to
+Kagenti AI agents call services across a shared platform. Every call must carry a token scoped to
 exactly the permissions the caller's role entitles on the target service. Without a dedicated
 policy management layer, access policy ends up scattered across per-deployment configuration,
 creating three compounding problems:
@@ -55,7 +55,7 @@ AIAC enforces a strict three-layer model:
 | **Policy Decision (PDP)** | OPA | Evaluates LLM-generated Rego rules; decides what a caller may access |
 | **Policy Enforcement (PEP)** | AuthBridge | Intercepts traffic; exchanges tokens; carries no policy knowledge |
 
-The PEP (AuthBridge) is a pure enforcement layer. It performs RFC 8693 token exchanges sending only the target `audience` — no `scope` parameter. OPA evaluates the caller's role against the Rego rules and returns exactly the entitlements that role grants on the target service; Keycloak, as the authorization server, issues the token scoped to those entitlements.
+The PEP (AuthBridge) is a pure enforcement layer. It performs RFC 8693 token exchanges sending only the target `audience` — no `scope` parameter. OPA evaluates the caller's role against the Rego rules and returns the entitlements that role grants on the target service; the IdP (Keycloak, via AuthBridge) issues the exchanged token scoped to exactly those entitlements.
 
 This means `token_scopes` is absent from `authproxy-routes`. Route configuration carries routing intent only (`host` → `target_audience`). Policy intent lives entirely in OPA, kept current by AIAC.
 
@@ -125,7 +125,7 @@ Eight components across five Kubernetes Pods plus a Python library layer, all im
                │                      |
     (𝘶𝘴𝘦𝘳𝘴, 𝘳𝘰𝘭𝘦𝘴, 𝘤𝘭𝘪𝘦𝘯𝘵𝘴)    (𝘈𝘶𝘵𝘩𝘰𝘳𝘪𝘻𝘢𝘵𝘪𝘰𝘯𝘗𝘰𝘭𝘪𝘤𝘺 𝘊𝘙)
 ┌──────────────┼──────────────────────┼───────────────────┐
-│  Rossoctl Interface Pod              │                   │
+│  Kagenti Interface Pod              │                   │
 │              │                      │                   │
 │      ┌───────┴──────┐      ┌────────┴───────┐           │
 │      │  IdP Config  │      │  PDP Policy    │           │
@@ -271,10 +271,10 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 | Component | Called by | Calls | Returns |
 |-----------|-----------|-------|---------|
-| IdP Configuration Service (in Rossoctl Interface Pod) | `aiac.idp.configuration.api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
-| PDP Policy Writer — OPA (in Rossoctl Interface Pod) | `aiac.pdp.policy.library` | Kubernetes CR (`AuthorizationPolicy`) | 204 on success |
+| IdP Configuration Service (in Kagenti Interface Pod) | `aiac.idp.configuration.api` | Keycloak Admin REST API | Raw Keycloak JSON (generic endpoint names) |
+| PDP Policy Writer — OPA (in Kagenti Interface Pod) | `aiac.pdp.policy.library` | Kubernetes CR (`AuthorizationPolicy`) | 204 on success |
 | Policy Store (StatefulSet `aiac-policy-store`) | `aiac.policy.store.library` | SQLite (`agent_policies` table, in-memory cache) | `AgentPolicyModel` / `PolicyModel` on read; 204 on write |
-| Policy Computation Engine (`aiac.policy.computation`) | AIAC Agent sub-UC agents | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` | None (fire-and-forget; logs exceptions) |
+| Policy Computation Engine (`aiac.policy.computation`) | AIAC Agent sub-UC agents | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` | `None` on success; exceptions logged and re-raised (propagate to the caller) |
 | `aiac.idp.configuration.models` | `aiac.idp.configuration.api`, `aiac.policy.model`, AIAC Agent | — | Pydantic model definitions for IdP entities (Subject, Role, Service, Scope) |
 | `aiac.idp.configuration.api` | AIAC Agent, Policy Computation Engine, Python scripts | IdP Configuration Service (HTTP) | Typed Pydantic instances (reads and writes IdP configuration entities) |
 | `aiac.policy.model` | `aiac.pdp.policy.library`, `aiac.policy.store.library`, `aiac.policy.computation`, AIAC Agent | — | Pydantic model definitions for policy entities (PolicyRule, AgentPolicyModel, PolicyModel) |
@@ -287,7 +287,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 
 ### Key architectural decisions
 
-- **Stateless PDP services are co-located in the Rossoctl Interface Pod; the stateful Policy Store is separate.** IdP Configuration Service and PDP Policy Writer run as two containers in the Interface Pod, sharing a Kubernetes ServiceAccount. The Policy Store is a dedicated single-replica StatefulSet (`aiac-policy-store`) with its own PVC — decoupled from the Interface Pod's restart lifecycle. Three ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`, `aiac-policy-store-service:7074`) provide stable addressing.
+- **Stateless PDP services are co-located in the Kagenti Interface Pod; the stateful Policy Store is separate.** IdP Configuration Service and PDP Policy Writer run as two containers in the Interface Pod, sharing a Kubernetes ServiceAccount. The Policy Store is a dedicated single-replica StatefulSet (`aiac-policy-store`) with its own PVC — decoupled from the Interface Pod's restart lifecycle. Three ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`, `aiac-policy-store-service:7074`) provide stable addressing.
 - **Policy Computation Engine is a library, not a service.** `aiac.policy.computation` runs in-process within the AIAC Agent pod. It requires no Kubernetes deployment, no container image, and no ClusterIP Service. Sub-agents call `compute_and_apply(rules)` directly.
 - **One CR + one SQLite store, distinct owners, distinct purposes.** The Policy Store owns a SQLite `agent_policies` table (backed by a 1 Gi RWO PVC) holding structured `AgentPolicyModel` data — the source of truth for policy state, served from an in-memory cache. The `AuthorizationPolicy` CR (one total, owned by the PDP Policy Writer) holds derived Rego packages for OPA runtime. The two services have no dependency on each other; both are driven by the PCE via their respective libraries.
 - **`aiac.pdp.policy.library` has one caller: `aiac.policy.computation`.** AIAC Agent sub-agents do not call the PDP Policy Library directly; they call `compute_and_apply()` instead. This centralises all Policy Store ↔ PDP Policy Writer coordination.
@@ -295,7 +295,7 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **`aiac.policy.model` is dependency-free (only `pydantic` + `aiac.idp.configuration.models`).** `PolicyRule`, `AgentPolicyModel`, and `PolicyModel` live in a neutral namespace importable by any consumer — Policy Store library, PDP Policy Library, PCE — without forcing a dependency on any service namespace.
 - **`PolicyRule.role` and `PolicyRule.scope` are typed objects.** They hold `Role` and `Scope` instances from `aiac.idp.configuration.models`, enabling the PCE to call `Configuration.get_services_by_role` and `Configuration.get_services_by_scope` without additional type conversion.
 - **`AgentPolicyModel` relationship maps are keyed by string `id`.** `source_roles`, `subject_roles`, and `target_scopes` use the entity's string `id` as the dict key, so `Service`, `Role`, `Scope`, and `Subject` need no custom hash/eq and keep pydantic's default field-based equality. This also lets the maps serialize to JSON without a custom key serializer.
-- **PCE merge semantics are additive only.** New rules are appended to existing `inbound_rules`/`outbound_rules`; existing rules are never removed. Rule revocation is TBD.
+- **PCE merge semantics are additive, with drift-GC and an authoritative offboard.** The default merge (`override=False`) is additive — new rules are appended to a service's SPM `inbound_rules` (dedup by `role.id + scope.id`); existing edges are preserved. Two mechanisms remove edges: (1) **reconcile drift-GC** prunes each *touched* SPM against the `get_services()` catalog on every write, dropping edges whose scope or agent-role no longer exists and collapsing churned/duplicate user-role generations (order-independent; skipped on a catalog miss so a transient outage never wipes an SPM); and (2) **`decommission(service_id)`** — the authoritative service **offboard** — deletes a decommissioned service's SPM, purges its outbound footprint from other SPMs, deletes its APM/Rego if it was an agent, and re-derives every affected agent (keyed by clientId, since an offboarded client is gone from `get_services()`). Fine-grained **single-rule** revocation is still TBD; `override=True` gives role-level replace.
 - **PDP services bind to `0.0.0.0`.** Exposed as Kubernetes ClusterIP Services so that the Agent Pod can reach them over the cluster network.
 - **RBAC via OPA Rego rules.** AIAC manages role → service permission mappings by writing `AgentPolicyModel` instances to the `AuthorizationPolicy` CR. Each agent pod's OPA plugin fetches its packages from the CR at startup.
 - **RAG Pod is a StatefulSet with persistent ChromaDB storage.** ChromaDB data is stored on a 1 Gi `ReadWriteOnce` PersistentVolumeClaim mounted at `/chroma/chroma` (ChromaDB default). On pod recreation, the StatefulSet rebinds the same PVC and ChromaDB resumes from persisted state without re-ingestion. The pod runs a single replica.
@@ -306,18 +306,18 @@ All inter-pod traffic is Kubernetes ClusterIP. External access is exclusively vi
 - **NATS consumer is a thin adapter.** It receives events from the Event Broker and calls the same internal handler functions used by the debug HTTP endpoints. No business logic lives in the consumer.
 - **Agent HTTP endpoints are retained for debugging.** They are not the primary trigger path; the NATS consumer is. `kubectl port-forward` to the Agent is used only for `rebuild` and debugging.
 - **Event Broker uses WorkQueuePolicy.** Messages are removed from the stream after acknowledgement. Unacknowledged messages survive Agent pod restarts and are redelivered automatically. After 5 failed deliveries, messages are routed to `aiac.apply.dlq`.
-- **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently.
+- **AIAC init container gates Agent startup.** Before the Agent container starts, the init container waits for NATS, IdP Configuration Service, PDP Policy Writer, and RAG Ingest Service to be healthy, then creates the `aiac-events` JetStream stream idempotently. _(Deferred to Phase 2 — issue 4.21; the Phase 1 Agent pod runs without it.)_
 - **All `__init__.py` files under `aiac.*` are empty.** Callers use explicit submodule paths: `from aiac.idp.configuration.models import Subject`, `from aiac.policy.model.models import PolicyModel`.
 - **ChromaDB hosts two collections: `aiac-policies` and `aiac-domain-knowledge`.** Collection slug to ChromaDB name mapping: `policy` → `aiac-policies`, `domain-knowledge` → `aiac-domain-knowledge`.
 - **`user/{id}` trigger not implemented.** OPA rules are role-scoped; individual user creation/update does not require agent intervention — OPA rule evaluation resolves entitlements from the caller's role automatically.
 
 ---
 
-## 6. Rossoctl / Keycloak / OPA Interfaces
+## 6. Kagenti / Keycloak / OPA Interfaces
 
-**AIAC ↔ Rossoctl platform**
+**AIAC ↔ Kagenti platform**
 The AIAC Agent reads `AgentRuntime` and `AgentCard` custom resources from the Kubernetes API to
-extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration` and `aiac.pdp.policy.library` Python packages are the integration surface for other Rossoctl components needing typed access to the IdP and PDP respectively.
+extract service metadata during UC-1 service onboarding. The `aiac.idp.configuration` and `aiac.pdp.policy.library` Python packages are the integration surface for other Kagenti components needing typed access to the IdP and PDP respectively.
 
 **AIAC ↔ Keycloak**
 The IdP Configuration Service proxies Keycloak Admin REST endpoints under generic entity names (subjects, roles, services, scopes, assignments). Read endpoints include per-service role and scope enrichment. The Keycloak SPI listener publishes entity lifecycle events to NATS; it is a separate component outside the AIAC codebase.
@@ -336,7 +336,7 @@ See Section 7.5 (Event Broker) and Section 8 (Deployment) for subject names and 
 
 ### 7.1 IdP Configuration Service
 
-FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Writer in the **Rossoctl Interface Pod**. Manages IdP (Keycloak) entity data (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints except `/health` require a `?realm=<realm>` query parameter; returns `422` if absent. `/health` requires no realm parameter — it uses `KEYCLOAK_ADMIN_REALM` directly. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`.
+FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Writer in the **Kagenti Interface Pod**. Manages IdP (Keycloak) entity data (subjects, roles, services, scopes) via Keycloak Admin REST API. Exposes read and write endpoints for configuration entities. Stateless. All endpoints except `/health` require a `?realm=<realm>` query parameter; returns `422` if absent. `/health` requires no realm parameter — it uses `KEYCLOAK_ADMIN_REALM` directly. `KeycloakAdmin` instances are created lazily per realm and cached in a thread-safe map; the admin always authenticates via the realm in `KEYCLOAK_ADMIN_REALM`.
 
 **Full spec:** [components/idp-configuration-service.md](components/idp-configuration-service.md)
 
@@ -344,7 +344,7 @@ FastAPI service (`0.0.0.0:7071`) co-located with the PDP Policy Writer in the **
 
 ### 7.2 PDP Policy Writer
 
-FastAPI service (`0.0.0.0:7072`, `aiac-pdp-policy-opa`) co-located with the IdP Configuration Service in the **Rossoctl Interface Pod**. Writes LLM-generated Rego packages to an `AuthorizationPolicy` Kubernetes CR. Each AuthBridge OPA plugin instance fetches its Rego packages from the CR at startup.
+FastAPI service (`0.0.0.0:7072`, `aiac-pdp-policy-opa`) co-located with the IdP Configuration Service in the **Kagenti Interface Pod**. Writes LLM-generated Rego packages to an `AuthorizationPolicy` Kubernetes CR. Each AuthBridge OPA plugin instance fetches its Rego packages from the CR at startup.
 
 **Full spec:** [components/pdp-policy-writer-opa.md](components/pdp-policy-writer-opa.md)
 
@@ -362,7 +362,7 @@ FastAPI service (`0.0.0.0:7074`, `aiac-policy-store-service`) deployed as a dedi
 
 Pure Python library module (`aiac.policy.computation`). No FastAPI, no Kubernetes deployment, no container image. Runs in-process within the AIAC Agent pod. AIAC Agent sub-UC agents call `compute_and_apply(rules: list[PolicyRule]) -> None` to translate partial policy rule lists into merged `AgentPolicyModel` objects and push them to OPA.
 
-The PCE is the **single point of coordination** between the Policy Store and PDP Policy Writer: it reads current agent policy state, additively merges new rules, writes back to the Policy Store, then pushes the updated `PolicyModel` to `aiac.pdp.policy.library.apply_policy()`. All exceptions are logged; none propagate to the caller.
+The PCE is the **single point of coordination** between the Policy Store and PDP Policy Writer: it reads current agent policy state, additively merges new rules, writes back to the Policy Store, then pushes the updated `PolicyModel` to `aiac.pdp.policy.library.apply_policy()`. All exceptions from any dependency (IdP, Policy Store, PDP) are logged and **re-raised** so the caller (the Controller / HTTP layer) surfaces the failure — e.g. as a 500 — instead of returning success while silently applying nothing.
 
 **Full spec:** [components/policy-computation-engine.md](components/policy-computation-engine.md)
 
@@ -408,7 +408,7 @@ FastAPI + LangGraph service (`0.0.0.0:7070`). Receives automated triggers via th
 | Policy Update | `aiac.apply.policy.build`, `/apply/policy/rebuild` (HTTP) | Build sub-agent or Rebuild sub-agent (alternative) |
 | Role Update | `aiac.apply.role.{id}` | Role sub-agent |
 
-All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. Sub-UC agents produce `list[PolicyRule]` and call `compute_and_apply(rules)` — they do not call `aiac.policy.store.library` or `aiac.pdp.policy.library` directly. The **Policy Update** sub-agents compute a minimal rule delta between the current ChromaDB policy and live OPA state. The **Rebuild** variant additionally clears the Policy Store and all OPA policy rules before recomputing. The **Role Update** orchestrator computes rules for all services affected by the role change. The **Service Onboarding** orchestrator classifies the new service via the pod's `rossoctl.io/type` label (for agents reads the `AgentCard` CR; for tools calls `tools/list` on the MCP endpoint discovered via K8s Service label lookup), then computes rules and calls `compute_and_apply`. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
+All sub-agent `StateGraph` instances are logically separated modules running within a single pod and process. Sub-UC agents produce `list[PolicyRule]` and call `compute_and_apply(rules)` — they do not call `aiac.policy.store.library` or `aiac.pdp.policy.library` directly. The **Policy Update** sub-agents compute a minimal rule delta between the current ChromaDB policy and live OPA state. The **Rebuild** variant additionally clears the Policy Store and all OPA policy rules before recomputing. The **Role Update** orchestrator computes rules for all services affected by the role change. The **Service Onboarding** orchestrator classifies the new service via the pod's `kagenti.io/type` label (for agents reads the `AgentCard` CR; for tools calls `tools/list` on the MCP endpoint discovered via K8s Service label lookup), then computes rules and calls `compute_and_apply`. Stateless; changes are applied immediately. Integrated retry with differentiated error codes per upstream.
 
 **Full spec:** [components/aiac-agent.md](components/aiac-agent.md)
 
@@ -452,32 +452,32 @@ Four separate manifest files:
 
 | File | Contents |
 |------|----------|
-| `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + Rossoctl Interface Pod Deployment (IdP Configuration Service container + PDP Policy Writer container) + two ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) |
+| `aiac/k8s/pdp-interface-deployment.yaml` | `aiac-pdp-config` ConfigMap + Kagenti Interface Pod Deployment (IdP Configuration Service container + PDP Policy Writer container) + two ClusterIP Services (`aiac-pdp-config-service:7071`, `aiac-pdp-policy-service:7072`) |
 | `aiac/k8s/policy-store-statefulset.yaml` | `aiac-policy-store` StatefulSet (Policy Store container) + `volumeClaimTemplate` (1 Gi, `ReadWriteOnce`, mounted at `/data`) + headless Service + `aiac-policy-store-service:7074` ClusterIP Service |
-| `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (aiac-init container + AIAC Agent container) + ClusterIP Service |
+| `aiac/k8s/agent-deployment.yaml` | Agent Pod Deployment (AIAC Agent container) + ClusterIP Service _(Phase 1; `aiac-init` init container added in Phase 2, issue 4.21)_ |
 | `aiac/k8s/event-broker-deployment.yaml` _(pending)_ | Event Broker Pod Deployment (NATS JetStream) + ClusterIP Service |
 | `aiac/k8s/rag-statefulset.yaml` _(pending)_ | RAG StatefulSet (ChromaDB + RAG Ingest Service containers) + 1 Gi PVC template + ClusterIP Service |
 
-The two Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) and `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) as env vars. The IdP Configuration Service uses `KEYCLOAK_ADMIN_REALM` (admin auth realm) and ignores `KEYCLOAK_REALM`; the PDP Policy Writer uses `KEYCLOAK_REALM` as its default operating realm. The Policy Store container mounts `aiac-policy-store-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
+Both Interface Pod containers mount `aiac-pdp-config` (KEYCLOAK_URL, KEYCLOAK_REALM, KEYCLOAK_ADMIN_REALM) as env vars; only the IdP Configuration Service container also mounts `keycloak-admin-secret` (KEYCLOAK_ADMIN_USERNAME, KEYCLOAK_ADMIN_PASSWORD) and uses `KEYCLOAK_ADMIN_REALM` (ignoring `KEYCLOAK_REALM`). The PDP Policy Writer (`aiac-pdp-policy-opa`, the Phase 1 rego-file mock) needs no Keycloak credentials — it writes `.rego` files to `REGO_OUTPUT_DIR` (default `/rego`, an `emptyDir` volume). The Policy Store container mounts `aiac-policy-store-config` for `AGENTPOLICY_DB_PATH` (default `/data/state.db`) — no Kubernetes API access or RBAC required.
 
 ### Docker images
 
 Built independently. No entry in the repo's `build.yaml` CI matrix.
 
 ```bash
-# Build IdP Configuration Service (Rossoctl Interface Pod container 1)
+# Build IdP Configuration Service (Kagenti Interface Pod container 1)
 docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile -t aiac-pdp-config:latest aiac/src/
 
-# Build PDP Policy Writer — Phase 1 mock (Rossoctl Interface Pod container 2; writes Rego to filesystem)
-docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
-
-# Build PDP Policy Writer — Phase 2 OPA (replaces mock via issue 4.18; writes to AuthorizationPolicy CR)
+# Build PDP Policy Writer — Phase 1 OPA rego-file mock (Kagenti Interface Pod container 2; writes .rego to filesystem)
 docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-policy-opa:latest aiac/src/
+
+# Legacy: PDP Policy Writer — Keycloak composite-role implementation, superseded, not deployed by any current manifest
+docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
 
 # Build Policy Store (deployed as StatefulSet aiac-policy-store)
 docker build -f aiac/src/aiac/policy/store/service/Dockerfile -t aiac-policy-store:latest aiac/src/
 
-# Build Agent (includes aiac-init container)
+# Build Agent (aiac-init init container deferred to Phase 2, issue 4.21)
 docker build -f aiac/src/aiac/agent/controller/Dockerfile -t aiac-agent:latest aiac/src/
 
 # Build RAG Ingest Service
@@ -495,12 +495,14 @@ metadata:
   name: aiac-pdp-config
 data:
   KEYCLOAK_URL: "http://keycloak-service.keycloak.svc:8080"
-  KEYCLOAK_REALM: "rossoctl"
+  KEYCLOAK_REALM: "kagenti"
   KEYCLOAK_ADMIN_REALM: "master"
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_STORE_URL: "http://aiac-policy-store-service:7074"
+  # Added in Phase 2 by issue 4.19 (Event Broker):
   NATS_URL: "nats://aiac-event-broker-service:4222"
+  # Added in Phase 3 by issue 4.20 (RAG Pod):
   AIAC_RAG_INGEST_URL: "http://aiac-rag-service:7073"
   AIAC_CHROMADB_URL: "http://aiac-rag-service:8000"
 ```
@@ -537,7 +539,7 @@ Tests live in `aiac/test/`.
 | `aiac.policy.model` | No mock needed | `extra='ignore'` drops unknown fields; relationship maps keyed by string `id` round-trip through `model_dump(mode="json")` / `model_validate` with typed `Role` / `Scope` values preserved |
 | `aiac.idp.configuration.api` functions | IdP Configuration Service HTTP endpoints | Returns correct Pydantic model instances; `RuntimeError` on non-2xx; default URL fallback; `get_services_by_role` and `get_services_by_scope` issue correct query params |
 | `aiac.pdp.policy.library` functions | PDP Policy Writer HTTP endpoints | Correct serialisation; `RuntimeError` on non-2xx; default URL fallback |
-| `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged, not propagated |
+| `aiac.policy.computation` | `aiac.idp.configuration.api`, `aiac.policy.store.library`, `aiac.pdp.policy.library` (import-boundary mocks) | Correct `apply_agent_policy` calls per resolved service; additive merge preserves existing rules; no duplicate rule insertion; `apply_policy` called once after all writes; exceptions logged and re-raised (propagate to the caller) |
 | Event Broker NATS consumer | NATS message delivery (mock `nats-py` subscription) | Correct handler dispatched per subject; ack issued on success; no ack on handler exception |
 | Event Broker DLQ | NATS max redelivery exceeded | Message routed to `aiac.apply.dlq` after 5 failures |
 | Init container health-check | HTTP 4xx then 200 sequence; NATS TCP refused then connected | Exits 0 only after all four dependencies healthy; `add_stream` called with correct config |
@@ -571,9 +573,9 @@ Beyond the marker-gated pytest tests above, individual integration tests are spe
 |---|---|---|
 | PDP Policy Writer — `generate_rego.py` | Standalone launcher (no Docker) that boots the OPA stub locally, applies a `PolicyModel` through `aiac.pdp.policy.library`, and writes the generated Rego to a known directory for manual inspection. Write-only; not `@pytest.mark.integration`. | [integration-test/pdp-policy-writer.md](integration-test/pdp-policy-writer.md) |
 | `policy-pipeline` — `policy_pipeline.py` | Standalone launcher (no Docker) driving the full identity→policy pipeline — provisions a Keycloak realm + entities, runs the three PRB mappings, applies via the PCE, and writes the generated Rego to a known directory for manual inspection. Write-only; not `@pytest.mark.integration`. | [integration-test/policy-pipeline.md](integration-test/policy-pipeline.md) |
-| `uc1-onboarding-pipeline` — `test_uc1_onboarding_pipeline.py` | Discovery-driven sibling of `policy-pipeline` validating the **phase-1** deliverable: deploys the real `github-agent` + a simplified `github-tool` to a live Rossoctl cluster, drives **real UC-1 onboarding** (`POST /apply/service/{id}`) to infer roles/scopes, and asserts the generated Rego with `opa eval`. Same scenario facts/tables as `policy-pipeline`; Rego is semantically similar (not byte-identical). `@pytest.mark.integration`. | [integration-test/uc1-onboarding-pipeline.md](integration-test/uc1-onboarding-pipeline.md) |
+| `uc1-onboarding-pipeline` — a **ladder** of UC-1 onboarding tests | Discovery-driven sibling of `policy-pipeline` validating the **phase-1** deliverable against **one** in-cluster AIAC stack (OPA filesystem-stub writer, single abstract `policy.md`): with `github-agent` + a simplified `github-tool` **already deployed and registered** as Keycloak clients, three gradual rungs drive **real UC-1 onboarding** (`POST /apply/service/{id}`) — agent-only, agent→tool, tool→agent — and assert the generated Rego with `opa eval` (verdicts from `scenario_uc1.py`). Rungs 2/3 assert onboarding-**order-independence**. A fourth two-policy rung is **deferred** (two-stack topology discarded). Same scenario facts/tables as `policy-pipeline`; Rego semantically similar (not byte-identical). `@pytest.mark.integration`. | [integration-test/uc1-onboarding-pipeline.md](integration-test/uc1-onboarding-pipeline.md) |
 
-Tracking issues: the live-Keycloak pytest integration tests in `testing/5.1-integration-tests.md`; the PDP Policy Writer integration test in `testing/5.2-pdp-writer-integration-test.md`; the policy-pipeline integration test in `testing/5.3-policy-pipeline-integration-test.md`; the UC-1 onboarding pipeline integration test in `testing/5.4-uc1-onboarding-integration-test.md`.
+Tracking issues: the live-Keycloak pytest integration tests in `testing/5.1-integration-tests.md`; the PDP Policy Writer integration test in `testing/5.2-pdp-writer-integration-test.md`; the policy-pipeline integration test in `testing/5.3-policy-pipeline-integration-test.md`; the UC-1 onboarding pipeline integration-test ladder in `testing/5.4-uc1-onboarding-integration-test.md` (epic) with rungs `testing/5.4.1`/`5.4.2`/`5.4.3` and the deferred two-policy `testing/5.4.4`.
 
 ---
 

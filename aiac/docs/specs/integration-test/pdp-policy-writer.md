@@ -63,7 +63,7 @@ Role → access, as encoded by the model's inbound and outbound rules:
 - `tester` — issues read/write.
 
 This user→tool access is encoded in the model's `outbound_subject_rules` (`(user_role, tool_scope)`
-pairs), which the outbound package renders as `outbound_subject_role_scopes`. The model's
+pairs), which the outbound package renders as `subject_role_scopes`. The model's
 `inbound_rules` (user→agent-scope) and `outbound_rules` (agent-role→tool-scope) are unchanged.
 
 Applying this `PolicyModel` produces exactly two files in `REGO_OUTPUT_DIR`:
@@ -76,7 +76,7 @@ Both must match the **ID-only** package shapes in
 (`{subject, source}` inbound, `{subject, target}` outbound); all role/scope maps are embedded in the
 package; the inbound gate is subject-mandatory + source-optional; the outbound gate requires both
 subject and agent to pass, but its **subject** gate is now user→**tool** — it reads
-`outbound_subject_role_scopes` (grouped from `outbound_subject_rules`) and matches against
+`subject_role_scopes` (grouped from `outbound_subject_rules`) and matches against
 `target_scopes[input.target]`, distinct from the inbound user→agent gate — while `target_ok`
 (agent→tool, from `agent_roles` × `agent_role_scopes`) is unchanged; and `target_scopes` is emitted
 verbatim (target id → scopes, no inversion). Because the input carries no per-request scope, the

@@ -1,0 +1,149 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aiac-agent-config
+  namespace: aiac-system
+data:
+  # OpenAI-compatible LLM endpoint for the Policy Rules Builder (ChatOpenAI:
+  # base_url=LLM_BASE_URL, model=LLM_MODEL, api_key from the aiac-agent-secret).
+  # These are PLACEHOLDERS — do not commit real endpoints/keys. Supply the real
+  # values per-environment on the LIVE objects at deploy time (guide step 4):
+  #   kubectl patch configmap aiac-agent-config -n aiac-system --type merge \
+  #     -p '{"data":{"LLM_BASE_URL":"https://<your-endpoint>/v1","LLM_MODEL":"<model>"}}'
+  #   kubectl create secret generic aiac-agent-secret -n aiac-system \
+  #     --from-literal=LLM_API_KEY=<key> --dry-run=client -o yaml | kubectl apply -f -
+  # then: kubectl rollout restart deployment/aiac-agent -n aiac-system
+  LLM_BASE_URL: "https://openai-compatible-endpoint.example.com/v1"
+  LLM_MODEL: "your-model-name"
+  AIAC_AC_MODEL: "RBAC"
+
+---
+# Prerequisites: create this Secret before applying this manifest:
+#
+#   kubectl create secret generic aiac-agent-secret \
+#     -n aiac-system \
+#     --from-literal=LLM_API_KEY=<your-api-key>
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiac-agent
+  namespace: aiac-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiac-agent
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  - apiGroups: ["agent.kagenti.dev"]
+    resources: ["agentcards"]
+    verbs: ["list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiac-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: aiac-agent
+subjects:
+  - kind: ServiceAccount
+    name: aiac-agent
+    namespace: aiac-system
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aiac-agent
+  namespace: aiac-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aiac-agent
+  template:
+    metadata:
+      labels:
+        app: aiac-agent
+    spec:
+      serviceAccountName: aiac-agent
+      # The image runs as non-root UID 10001 (see the controller Dockerfile).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      # aiac-init init container is deferred to Phase 2 (issue 4.21).
+      # It will gate startup on NATS + IdP Config + PDP Policy + RAG Ingest health
+      # and provision the aiac-events JetStream stream.
+      containers:
+        - name: aiac-agent
+          image: localhost/aiac-agent:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 7070
+          # readOnlyRootFilesystem is on; temp writes go to the /tmp emptyDir.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          # The Controller exposes only /apply/* routes (no /health endpoint),
+          # so both probes are gated on the port accepting TCP connections.
+          readinessProbe:
+            tcpSocket:
+              port: 7070
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 7070
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+            - configMapRef:
+                name: aiac-agent-config
+            - secretRef:
+                name: aiac-agent-secret
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aiac-agent-service
+  namespace: aiac-system
+spec:
+  selector:
+    app: aiac-agent
+  ports:
+    - name: agent
+      port: 7070
+      targetPort: 7070
