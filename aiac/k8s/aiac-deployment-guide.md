@@ -61,9 +61,8 @@ kind load docker-image localhost/aiac-policy-model-store:local     --name <clust
 kind load docker-image localhost/aiac-agent:local            --name <cluster-name>
 ```
 
-For a fully air-gapped Kind cluster (no outbound network access), also pull and load the
-NATS image; `event-broker-deployment.yaml` uses `imagePullPolicy: IfNotPresent`, so a
-networked cluster can skip this and pull it directly:
+`event-broker-deployment.yaml` also uses `imagePullPolicy: Never`, so the NATS image must
+be side-loaded too, even though it isn't built — just pulled from Docker Hub first:
 
 ```bash
 docker pull nats:latest
@@ -72,7 +71,7 @@ kind load docker-image nats:latest --name <cluster-name>
 
 **Remote registry** — tag, push, then update the `image:` fields in the manifests to match.
 
-> **Note:** the manifests set `imagePullPolicy: Never` because images are side-loaded
+> **Note:** all manifests set `imagePullPolicy: Never` because images are side-loaded
 > into a local Kind cluster (dev only). For a real cluster that pulls from a registry,
 > change these to `imagePullPolicy: IfNotPresent` (or `Always`).
 

@@ -17,7 +17,7 @@ spec:
       containers:
         - name: nats
           image: nats:latest
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Never
           args: ["-js", "-sd", "/data/jetstream"]
           ports:
             - containerPort: 4222
