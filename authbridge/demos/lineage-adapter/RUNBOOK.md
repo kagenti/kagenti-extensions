@@ -171,9 +171,7 @@ per-turn interaction kinds/counts (including the lifecycle/discovery
 interactions the DG UI hides by default) and the TLS legs expected to produce
 NO interaction, then derive its `EXPECT_KINDS='kind=count,…'` line and pass it
 to either harness to also pin per-trace payload content_kind counts; record
-the outcome in the card's Results section. (The one-span-era
-`concurrency-test.sh` / `concurrency-test-mcp.sh` are retired — their
-assertions grep span attributes the two-span plugin no longer emits.)
+the outcome in the card's Results section.
 
 ---
 

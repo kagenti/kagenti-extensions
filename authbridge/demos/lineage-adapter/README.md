@@ -55,7 +55,6 @@ file header.
 | `probe-cross-validate.sh` | The **cross-session probe**: trace A stashes bytes at rest (shared PVC file + redis), a later trace B reads and re-sends them; asserts the two disconnected trees, the invisible-hop absences, and the content-hash join (see below). |
 | `probe-lineage-validate.md` | **Agent-runnable validation playbook**: prereqs → deploy → both validators → exact expected shapes, triage guide, and the report format. Hand this file to an agent; it needs nothing else. |
 | `container-runtime.sh` | Shared docker/podman auto-detection + `kind_load` (sourced by the build scripts; override with `CONTAINER_TOOL`). |
-| `concurrency-test.sh` / `concurrency-test-mcp.sh` | The A2A / MCP concurrency verifiers. |
 | `overlays/` | Per-app upstream-defect fixes applied on top of the shim (not part of the method). |
 
 ## Quick start
