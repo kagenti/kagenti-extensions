@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# deploy-fleet.sh — plug & play. Stand up the adapted app fleet from fleet.conf so
+# deploy-fleet.sh — plug & play. Stand up the adapted app fleet from fleet.yaml so
 # the whole system produces correct per-request lineage forests, in one command.
+# (fleet-read.py validates the catalog and emits the rows — a malformed stanza
+# refuses to deploy; requires python3 + PyYAML.)
 #
-# For each catalog row it: (1) gets the base image (pull ghcr or podman-build local)
+# For each catalog app it: (1) gets the base image (pull ghcr or podman-build local)
 # and kind-loads it, (2) builds the propagate-only OTEL shim on top (build-otel-shim.sh),
 # (3) applies any per-app overlay fix, (4) deploys app+sidecar (attach-lineage.sh) —
 # TOOLS BEFORE AGENTS so an agent's MCP_URL resolves.
@@ -24,9 +26,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NAMESPACE="${NAMESPACE:-team1}"
 # lineage-adapter -> demos -> authbridge -> kagenti-extensions-snp -> workspace root
 WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-CATALOG="${SCRIPT_DIR}/fleet.conf"
+CATALOG="${SCRIPT_DIR}/fleet.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SELECT=("$@")
+command -v python3 >/dev/null || { echo "error: python3 not on PATH (fleet-read.py needs it)" >&2; exit 1; }
 
 log() { printf '\n\033[1;36m>> %s\033[0m\n' "$*"; }
 selected() {  # $1=name -> 0 if in SELECT (or SELECT empty)
@@ -43,13 +46,11 @@ base_name_of() {  # image spec -> base image name
   esac
 }
 
-# read catalog rows (skip comments/blank)
+# read validated catalog rows (12 pipe fields — fleet-read.py's private interface)
 rows=()
 while IFS= read -r line; do
-  [ -z "$line" ] && continue
-  case "$line" in \#*) continue ;; esac
   rows+=("$line")
-done < "$CATALOG"
+done < <(python3 "${SCRIPT_DIR}/fleet-read.py" "$CATALOG")
 
 # ---- Marvin model alias (best-effort) ----
 if [ "${SKIP_OLLAMA:-0}" != "1" ] && command -v ollama >/dev/null 2>&1; then
@@ -60,7 +61,7 @@ fi
 if [ "$SKIP_BUILD" != "1" ]; then
   declare -a built=()
   for line in "${rows[@]}"; do
-    IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$line"
+    IFS='|' read -r name role image entrypoint self_id port svcport env overlay _ _ _ <<< "$line"
     selected "$name" || continue
     bn="$(base_name_of "$image")"
     # raw rows deploy a stock image untouched — pull + load, NO shim, NO overlay
@@ -114,7 +115,7 @@ fi
 # raw rows: a stock image as-is — no shim, no sidecar, no lineage. The honest
 # statement "this pod is invisible to lineage today" as a deployment shape.
 deploy_raw() {
-  IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$1"
+  IFS='|' read -r name role image entrypoint self_id port svcport env overlay _ _ _ <<< "$1"
   local ref="docker.io/library/${image#pull:}"
   log "deploy raw: $name (image=$ref, no shim, no sidecar)"
   cat <<EOF | kubectl apply -f -
@@ -159,25 +160,14 @@ EOF
 }
 
 deploy_row() {
-  IFS='|' read -r name role image entrypoint self_id port svcport env overlay <<< "$1"
+  IFS='|' read -r name role image entrypoint self_id port svcport env overlay exclude pvc_name pvc_mount <<< "$1"
   local bn; bn="$(base_name_of "$image")"
-  # env tokens addressed to the ATTACH layer, not the app: extract them out of
-  # the app env and pass as attach-lineage variables.
-  local app_env="" exclude="" pvc_name="" pvc_mount="" kv
-  for kv in $env; do
-    case "$kv" in
-      OUTBOUND_PORTS_EXCLUDE=*) exclude="${kv#*=}" ;;
-      PVC_NAME=*)  pvc_name="${kv#*=}" ;;
-      PVC_MOUNT=*) pvc_mount="${kv#*=}" ;;
-      *) app_env="${app_env:+$app_env }$kv" ;;
-    esac
-  done
   log "deploy $role: $name (self_id=$self_id, image=${bn}-otel)"
   NAME="$name" KAGENTI_TYPE="$role" \
   IMAGE="docker.io/library/${bn}-otel:latest" \
   APP_PORT="$port" SVC_PORT="$svcport" \
   APP_ENTRYPOINT="$entrypoint" SELF_ID="$self_id" \
-  ENV_VARS="$app_env" NAMESPACE="$NAMESPACE" \
+  ENV_VARS="$env" NAMESPACE="$NAMESPACE" \
   OUTBOUND_PORTS_EXCLUDE="$exclude" \
   PVC_NAME="$pvc_name" PVC_MOUNT="$pvc_mount" \
   "${SCRIPT_DIR}/attach-lineage.sh" | kubectl apply -f -

@@ -20,7 +20,7 @@
 #     its DG exporter logs connection errors for any spans that still arrive
 #     from self-instrumenting stock apps (e.g. operator-managed weather-service)
 #     — harmless noise, nothing is stored.
-#   - operator-managed agents (not in fleet.conf): they were never adapted.
+#   - operator-managed agents (not in fleet.yaml): they were never adapted.
 #   - Postgres data: scaling the StatefulSet to 0 keeps the PVC; "on" resumes
 #     with all history present.
 set -euo pipefail
@@ -31,8 +31,8 @@ DG_NS="${DG_NS:-data-governance}"
 usage() { echo "usage: $0 on|off|status" >&2; exit 2; }
 [ $# -eq 1 ] || usage
 
-fleet_names() {  # names from fleet.conf (col 1), comments/blanks skipped
-  awk -F'|' '/^[^#[:space:]]/ {print $1}' "${SCRIPT_DIR}/fleet.conf"
+fleet_names() {  # app names from the validated catalog
+  python3 "${SCRIPT_DIR}/fleet-read.py" --names "${SCRIPT_DIR}/fleet.yaml"
 }
 
 case "$1" in

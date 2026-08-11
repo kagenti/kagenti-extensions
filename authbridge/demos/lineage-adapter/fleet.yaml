@@ -1,0 +1,201 @@
+# fleet.yaml — the CATALOG that links each existing Kagenti app to its lineage
+# adaptation. `deploy-fleet.sh` reads this (via fleet-read.py, which validates
+# every stanza — an unknown key or malformed value refuses to deploy);
+# `verify-fleet.sh` tests the result.
+#
+# Plug & play a new app = add ONE stanza.
+#
+# Keys per app:
+#   role        agent | tool | raw. Deploy order is raw -> tools -> agents so
+#               an agent's MCP_URL resolves. raw = stock image untouched: no
+#               shim, no sidecar — the honest "invisible to lineage" shape.
+#   image       ghcr:<name>            pull ghcr.io/kagenti/agent-examples/<name>
+#               local:<path>           podman-build that path under the workspace root
+#               kit:<dir>              build an app that SHIPS with this kit (probe-app)
+#               pull:<ref>             raw registry ref (raw rows)
+#   entrypoint  the app's OWN command AFTER `opentelemetry-instrument`
+#               (see RUNBOOK step 3): console script, `python -m <pkg> ...`,
+#               `python <file.py>`, or `uvicorn <m>:app ...`.
+#   self_id     lineage self_id (default: the app name; span names
+#               <self_id>.inbound/.llm/.mcp*/.http).
+#   port        app container port.   svcport: Service port (default: 8080 for
+#               agents, = port otherwise).
+#   env         app environment (map). Values must not contain spaces.
+#   attach      deploy-layer knobs — NOT app env:
+#     ports_exclude   iptables outbound ports the sidecar must not intercept
+#                     (an app's own OTLP export port; redis 6379).
+#     pvc             { name, mount } — shared claim mounted into the app.
+#   overlay     overlays/<Dockerfile> applied on top of the shim (per-app
+#               upstream fix).
+#
+# LLM repointing: plaintext host Ollama at host.containers.internal:11434,
+# model qwen2.5:7b (aliased to gpt-4o-mini for Marvin's model-name allowlist —
+# deploy-fleet.sh does the alias).
+
+apps:
+
+  # ---- tools (deployed first) ----
+
+  slack-tool:
+    role: tool
+    image: ghcr:slack_tool
+    entrypoint: python slack_tool.py
+    port: 8000
+    env:
+      SLACK_BOT_TOKEN: xoxb-fake-token-for-startup
+
+  reservation-tool:
+    role: tool
+    image: ghcr:reservation_tool
+    entrypoint: python reservation_tool.py
+    port: 8000
+
+  wiki-service:
+    role: tool
+    image: local:agent-examples/mcp/wiki_memory_tool
+    entrypoint: uvicorn wiki_service:app --host 0.0.0.0 --port 8000
+    port: 8000
+    env:
+      JWT_SECRET_KEY: testsecret123
+      WIKI_ROOT: /tmp/wiki
+      GIT_AUTHOR_NAME: wiki
+      GIT_AUTHOR_EMAIL: wiki@example.com
+      GIT_COMMITTER_NAME: wiki
+      GIT_COMMITTER_EMAIL: wiki@example.com
+
+  wiki-mcp:
+    role: tool
+    image: local:agent-examples/mcp/wiki_memory_tool
+    entrypoint: python mcp_server.py
+    port: 8000
+    env:
+      MCP_TRANSPORT: streamable-http
+      MCP_PORT: 8000
+      MCP_HOST: 0.0.0.0
+      WIKI_SERVICE_URL: http://wiki-service.team1.svc.cluster.local:8000
+
+  # ---- lineage-probe: the all-capabilities validation topology ----
+  # One app (probe-app/ in this directory), three roles (probe-validate.sh
+  # drives + asserts it): front = LLM + external HTTP/HTTPS legs + threaded
+  # A2A fan-out; back = held same-trace fan-in -> MCP tool + LLM, plus the
+  # /echo cross-session writer; tool = bare-JSON-RPC MCP leaf. probe-redis is
+  # a RAW stanza: stock redis, no shim, no sidecar — RESP is not HTTP, the
+  # clients exclude port 6379 from the sidecar redirect, and that bypass is
+  # the asserted "invisible to lineage" hop.
+
+  probe-redis:
+    role: raw
+    image: pull:redis:7
+    port: 6379
+
+  probe-tool:
+    role: tool
+    image: kit:probe-app
+    entrypoint: server
+    port: 8000
+    env:
+      ROLE: tool
+
+  # ---- agents ----
+
+  probe-back:
+    role: agent
+    image: kit:probe-app
+    entrypoint: server
+    port: 8000
+    env:
+      ROLE: back
+      TOOL_URL: http://probe-tool.team1.svc.cluster.local:8000
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      HOLD_MS: 2000
+      REDIS_URL: redis://probe-redis.team1.svc.cluster.local:6379
+      SHARE_DIR: /probe-share
+    attach:
+      ports_exclude: 6379
+      pvc: { name: probe-share, mount: /probe-share }
+
+  probe-front:
+    role: agent
+    image: kit:probe-app
+    entrypoint: server
+    port: 8000
+    env:
+      ROLE: front
+      BACK_URL: http://probe-back.team1.svc.cluster.local:8080/probe
+      BACK_ECHO_URL: http://probe-back.team1.svc.cluster.local:8080/echo
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      LEGS: 3
+      EXT_HTTP_URL: http://httpbin.org/anything
+      EXT_HTTPS_URL: https://httpbin.org/anything
+      REDIS_URL: redis://probe-redis.team1.svc.cluster.local:6379
+      SHARE_DIR: /probe-share
+    attach:
+      ports_exclude: 6379
+      pvc: { name: probe-share, mount: /probe-share }
+
+  trivia-agent:
+    role: agent
+    image: local:agent-examples/a2a/trivia_agent
+    entrypoint: server
+    port: 8000
+    env:
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      LLM_API_KEY: ollama
+      AGENT_ENDPOINT: http://trivia-agent.team1.svc.cluster.local:8080/
+
+  a2a-currency-converter:
+    role: agent
+    image: ghcr:a2a_currency_converter
+    entrypoint: python -m app --host 0.0.0.0 --port 8000
+    port: 8000
+    env:
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_MODEL: qwen2.5:7b
+      LLM_API_KEY: ollama
+
+  a2a-contact-extractor:
+    role: agent
+    image: ghcr:a2a_contact_extractor
+    entrypoint: server --host 0.0.0.0 --port 8000
+    port: 8000
+    env:
+      OPENAI_BASE_URL: http://host.containers.internal:11434/v1
+      OPENAI_API_KEY: ollama
+      MARVIN_AGENT_MODEL: openai:gpt-4o-mini
+    overlay: overlays/Dockerfile.contact-extractor-fix
+
+  git-issue-agent:
+    role: agent
+    image: ghcr:git_issue_agent
+    entrypoint: server
+    port: 8000
+    env:
+      TASK_MODEL_ID: openai/qwen2.5:7b
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_API_KEY: ollama
+      MCP_URL: ""
+
+  slack-researcher:
+    role: agent
+    image: ghcr:slack_researcher
+    entrypoint: server
+    port: 8000
+    env:
+      TASK_MODEL_ID: qwen2.5:7b
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_API_KEY: ollama
+      MCP_URL: http://slack-tool.team1.svc.cluster.local:8000/mcp
+
+  reservation-service:
+    role: agent
+    image: ghcr:reservation_service
+    entrypoint: server
+    port: 8000
+    env:
+      LLM_MODEL: qwen2.5:7b
+      LLM_API_BASE: http://host.containers.internal:11434/v1
+      LLM_API_KEY: ollama
+      MCP_URL: http://reservation-tool.team1.svc.cluster.local:8000/mcp
