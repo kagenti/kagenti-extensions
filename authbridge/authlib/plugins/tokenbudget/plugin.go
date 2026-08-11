@@ -88,7 +88,9 @@ func (p *TokenBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.OnExceed != "deny" && p.cfg.OnExceed != "observe" {
 		return fmt.Errorf("token-budget: on_exceed must be \"deny\" or \"observe\" (got %q)", p.cfg.OnExceed)
 	}
-	if d, err := time.ParseDuration(p.cfg.RefreshInterval); err == nil && d <= 0 {
+	if d, err := time.ParseDuration(p.cfg.RefreshInterval); err != nil {
+		return fmt.Errorf("token-budget: invalid refresh_interval %q: %w", p.cfg.RefreshInterval, err)
+	} else if d <= 0 {
 		return fmt.Errorf("token-budget: refresh_interval must be > 0 (got %q)", p.cfg.RefreshInterval)
 	}
 	if p.cfg.RedisUnavailable == "fail_closed" {
@@ -104,10 +106,7 @@ func (p *TokenBudget) Init(_ context.Context) error {
 	}
 	p.store = store
 
-	interval, err := time.ParseDuration(p.cfg.RefreshInterval)
-	if err != nil {
-		interval = 5 * time.Second
-	}
+	interval, _ := time.ParseDuration(p.cfg.RefreshInterval)
 	go p.refreshLoop(interval)
 	return nil
 }
@@ -154,8 +153,8 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 		return pipeline.DenyWithDetails("budget.exceeded", reason, map[string]any{
 			"spent_tokens": snap.tokens,
 			"spent_calls":  snap.calls,
-			"limit_tokens": p.cfg.MaxTokens,
-			"limit_calls":  p.cfg.MaxCalls,
+			"token_limit":  p.cfg.MaxTokens,
+			"call_limit":   p.cfg.MaxCalls,
 		})
 	}
 	return pipeline.Action{Type: pipeline.Continue}
