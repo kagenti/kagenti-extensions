@@ -25,6 +25,7 @@
 #     with all history present.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOLKIT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 NAMESPACE="${NAMESPACE:-team1}"
 DG_NS="${DG_NS:-data-governance}"
 
@@ -32,7 +33,7 @@ usage() { echo "usage: $0 on|off|status" >&2; exit 2; }
 [ $# -eq 1 ] || usage
 
 fleet_names() {  # app names from the validated catalog
-  python3 "${SCRIPT_DIR}/fleet-read.py" --names "${SCRIPT_DIR}/fleet.yaml"
+  python3 "${SCRIPT_DIR}/fleet-read.py" --names "${TOOLKIT_DIR}/fleet.yaml"
 }
 
 case "$1" in

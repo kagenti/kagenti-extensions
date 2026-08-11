@@ -57,7 +57,7 @@ if [ "$FORCE_BAKE" != "1" ]; then
     echo "REFUSING to bake ${base_ref}: no runnable Python at ${VENV_PYTHON}." >&2
     echo "  The image is outside the shim envelope (non-Python, or a different venv path)." >&2
     echo "  -> pass the right venv-python arg, or attach the sidecar only:" >&2
-    echo "     DEPLOY=<name> ./sidecar-patch.sh   (lineage still captures every HTTP hop)" >&2
+    echo "     ./lineage adopt <deployment>   (lineage still captures every HTTP hop)" >&2
     echo "  -> FORCE_BAKE=1 overrides. Probe said: ${probe_out}" >&2
     exit 3
   fi

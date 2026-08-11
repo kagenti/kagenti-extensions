@@ -9,10 +9,10 @@
 # (3) applies any per-app overlay fix, (4) deploys app+sidecar (attach-lineage.sh) —
 # TOOLS BEFORE AGENTS so an agent's MCP_URL resolves.
 #
-# Usage:
-#   ./deploy-fleet.sh                 # whole fleet
-#   ./deploy-fleet.sh slack-tool slack-researcher   # only these (deps: deploy tools too)
-#   SKIP_BUILD=1 ./deploy-fleet.sh    # skip image prep, just (re)apply manifests
+# Usage (via the toolkit CLI):
+#   ./lineage deploy                  # whole fleet
+#   ./lineage deploy slack-tool slack-researcher    # only these (deps: deploy tools too)
+#   SKIP_BUILD=1 ./lineage deploy     # skip image prep, just (re)apply manifests
 #
 # Env:
 #   NAMESPACE       target namespace (default team1)
@@ -22,11 +22,12 @@
 #   SKIP_OLLAMA=1   don't attempt the Marvin model alias
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOLKIT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 . "${SCRIPT_DIR}/container-runtime.sh"
 NAMESPACE="${NAMESPACE:-team1}"
 # lineage-adapter -> demos -> authbridge -> kagenti-extensions-snp -> workspace root
-WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$SCRIPT_DIR/../../../.." && pwd)}"
-CATALOG="${SCRIPT_DIR}/fleet.yaml"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$TOOLKIT_DIR/../../../.." && pwd)}"
+CATALOG="${TOOLKIT_DIR}/fleet.yaml"
 SKIP_BUILD="${SKIP_BUILD:-0}"
 SELECT=("$@")
 command -v python3 >/dev/null || { echo "error: python3 not on PATH (fleet-read.py needs it)" >&2; exit 1; }
@@ -86,10 +87,10 @@ if [ "$SKIP_BUILD" != "1" ]; then
           ;;
         local:*|kit:*)
           # local: resolves beside this repo (the umbrella/workspace layout);
-          # kit: resolves inside this directory — app sources that SHIP with
-          # the kit (e.g. probe-app) and need no sibling clone.
+          # kit: resolves inside the toolkit directory — app sources that SHIP
+          # with the kit (e.g. probe-app) and need no sibling clone.
           case "$image" in
-            kit:*) ctx="${SCRIPT_DIR}/${image#kit:}" ;;
+            kit:*) ctx="${TOOLKIT_DIR}/${image#kit:}" ;;
             *)     ctx="${WORKSPACE_ROOT}/${image#local:}" ;;
           esac
           [ -f "${ctx}/Dockerfile" ] || { echo "!! no Dockerfile at ${ctx}"; exit 1; }
@@ -191,4 +192,4 @@ for want in raw tool agent; do
   done
 done
 
-log "fleet deployed to namespace $NAMESPACE. Verify with:  ./verify-fleet.sh"
+log "fleet deployed to namespace $NAMESPACE. Verify with:  ./lineage verify"

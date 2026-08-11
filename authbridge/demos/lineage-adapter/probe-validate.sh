@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # probe-validate.sh — ONE run over the lineage-probe topology validating every
-# lineage capability at once (deploy first: ./deploy-fleet.sh probe-tool
+# lineage capability at once (deploy first: ./lineage deploy probe-tool
 # probe-back probe-front):
 #
 #   (1) concurrent traces      N (default 2) simultaneous turns, distinct

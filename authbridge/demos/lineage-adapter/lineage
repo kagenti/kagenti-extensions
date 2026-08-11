@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# lineage — the one door to the lineage deploy toolkit.
+#
+# Deploy path (fleet.yaml is the catalog; lib/ holds the machinery):
+#   ./lineage deploy [app...]      stand up the adapted fleet (or a subset)
+#   ./lineage verify [entry...]    drive every entry point -> the harmony table
+#   ./lineage adopt <deployment>   sidecar-only attach to an EXISTING Deployment
+#                                  (operator/UI-owned apps; no shim, no redeploy)
+#   ./lineage stamp-backend        bake the wrapper into the UI backend image
+#   ./lineage on | off | status    the global lineage switch
+#   ./lineage shim <base-image>    bake the propagate-only shim on one image
+#   ./lineage gen                  print a manifest (env-driven, see lib/attach-lineage.sh)
+#
+# Env knobs pass through unchanged: NAMESPACE, SKIP_BUILD, NO_PROPAGATE,
+# NO_EMIT, FORCE_BAKE, OUTBOUND_PORTS_EXCLUDE, SELF_ID, ... — each subcommand's
+# script documents its own. Start at QUICKSTART.md.
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+LIB="${SCRIPT_DIR}/lib"
+
+usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+cmd="${1:-help}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  deploy)         exec "${LIB}/deploy-fleet.sh" "$@" ;;
+  verify)         exec "${SCRIPT_DIR}/verify-fleet.sh" "$@" ;;
+  adopt)          DEPLOY="${1:?usage: ./lineage adopt <deployment>}"
+                  export DEPLOY; shift
+                  [ $# -eq 0 ] || { echo "error: adopt takes one deployment; knobs go via env" >&2; exit 2; }
+                  exec "${LIB}/sidecar-patch.sh" ;;
+  stamp-backend)  exec "${LIB}/stamp-ui-backend.sh" "$@" ;;
+  on|off|status)  exec "${LIB}/lineage-switch.sh" "$cmd" ;;
+  shim)           exec "${LIB}/build-otel-shim.sh" "$@" ;;
+  gen)            exec "${LIB}/attach-lineage.sh" "$@" ;;
+  help|-h|--help) usage 0 ;;
+  *)              echo "error: unknown subcommand '$cmd'" >&2; usage 2 ;;
+esac
