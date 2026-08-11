@@ -6,9 +6,10 @@ lineage sidecar (AuthBridge envoy-sidecar mode) in this repo — with **zero app
 source changes** and minimum friction.
 
 It is the generalization of `../weather-agent/`: instead of one hand-wired agent,
-a **catalog** (`fleet.conf`) links each existing app to its adaptation, and one
+a **catalog** (`fleet.yaml`) links each existing app to its adaptation, and one
 command stands the whole fleet up.
 
+- **Start here — stock app to lineage pod, no script-reading:** [`QUICKSTART.md`](QUICKSTART.md)
 - **Why the sidecar alone isn't enough, and what the shim does:** [`DESIGN.md`](DESIGN.md)
 - **Step-by-step for a single app:** [`RUNBOOK.md`](RUNBOOK.md)
 - **No cluster yet:** [`CLUSTER-FROM-ZERO-windows.md`](CLUSTER-FROM-ZERO-windows.md)
@@ -33,48 +34,48 @@ command stands the whole fleet up.
 Result: under concurrent load, DG reconstructs each request as its own connected
 trace — agent → llm, agent → tool → downstream — instead of collapsing them.
 
-## The link: `fleet.conf`
+## The link: `fleet.yaml`
 
-One line per app maps an **existing** Kagenti app (its ghcr image or local build)
-to **what we add** (shim + sidecar) and **how it's wired** (LLM repoint, MCP_URL
-to its tool). Plug & play app #8 = add one line. Columns are documented in the
-file header.
+One stanza per app maps an **existing** Kagenti app (its ghcr image or local
+build) to **what we add** (shim + sidecar) and **how it's wired** (LLM repoint,
+MCP_URL to its tool, `attach:` knobs). Plug & play app #8 = add one stanza.
+Keys are documented in the file header; `lib/fleet-read.py` schema-checks every
+stanza — a typo refuses to deploy instead of silently mis-adapting.
 
 ## Files
 
+The deploy surface is three files; everything else proves or documents.
+
 | File | Role |
 |---|---|
-| `fleet.conf` | **The catalog** — existing app ↔ adaptation ↔ wiring. |
-| `deploy-fleet.sh` | Plug & play: reads the catalog → pull/build image → `build-otel-shim.sh` → overlay → `attach-lineage.sh`. Tools before agents. |
-| `verify-fleet.sh` | Drives every entry point under concurrency → the **harmony table** (app → N/N). |
-| `Dockerfile.otel-shim` | The propagate-only shim (all mainstream instrumentors + threading). |
-| `build-otel-shim.sh` | Build the shim on an app image + kind-load it. |
-| `attach-lineage.sh` | Emit a full Deployment+Service+lineage-ConfigMap (app + sidecar). |
-| `sidecar-patch.sh` | Attach the sidecar to an EXISTING (operator-managed) Deployment — for natively-instrumented apps that need no shim (weather pair, UI-imported apps). |
+| `lineage` | **The one door.** `deploy · verify · adopt · stamp-backend · on/off/status · shim · gen` — every subcommand dispatches into `lib/`. |
+| `fleet.yaml` | **The catalog** — existing app ↔ adaptation ↔ wiring (`env:` for the app, `attach:` for the deploy layer). Schema-checked on every read. |
+| `QUICKSTART.md` | Stock app → lineage-included pod without reading any script source. |
+| `lib/` | The machinery: `attach-lineage.sh` (the ONE generator — full manifest, `EMIT=cm`, `EMIT=patch`), `Dockerfile.otel-shim` + `build-otel-shim.sh` (shim bake, with the refuse-to-bake interlock), `sidecar-patch.sh` (= `lineage adopt`), `stamp-ui-backend.sh`, `deploy-fleet.sh`, `lineage-switch.sh`, `container-runtime.sh`, `fleet-read.py`, `overlays/`. |
+| `verify-fleet.sh` | Drives every entry point under concurrency → the **harmony table** (app → N/N). Also `lineage verify`. |
 | `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + external HTTP/HTTPS legs + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM + the `/echo` cross-session writer, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, exact inbound→outbound pairing, external-egress presence AND absence, and tool identity echo. |
 | `probe-cross-validate.sh` | The **cross-session probe**: trace A stashes bytes at rest (shared PVC file + redis), a later trace B reads and re-sends them; asserts the two disconnected trees, the invisible-hop absences, and the content-hash join (see below). |
 | `probe-lineage-validate.md` | **Agent-runnable validation playbook**: prereqs → deploy → both validators → exact expected shapes, triage guide, and the report format. Hand this file to an agent; it needs nothing else. |
-| `container-runtime.sh` | Shared docker/podman auto-detection + `kind_load` (sourced by the build scripts; override with `CONTAINER_TOOL`). |
-| `overlays/` | Per-app upstream-defect fixes applied on top of the shim (not part of the method). |
 
 ## Quick start
 
-Prereqs (see DESIGN / RUNBOOK): a Kind cluster `kagenti` (podman) with the Kagenti
-platform, this repo's `authbridge-envoy` + `proxy-init` images loaded, the DG pod
-running and fed by the patched collector, the `envoy-config` ConfigMap in `team1`,
-and host Ollama (`qwen2.5:7b`) reachable at `host.containers.internal:11434`. The
-`agent-examples` clone must sit beside this repo (for `local:` builds).
+Prereqs (see QUICKSTART / RUNBOOK): a Kind cluster `kagenti` (podman) with the
+Kagenti platform, this repo's `authbridge-envoy` + `proxy-init` images loaded,
+the DG pod running and fed by the patched collector, the `envoy-config`
+ConfigMap in `team1`, host Ollama (`qwen2.5:7b`) reachable at
+`host.containers.internal:11434`, and `python3` + PyYAML. The `agent-examples`
+clone must sit beside this repo (for `local:` builds).
 
 ```bash
 cd authbridge/demos/lineage-adapter
-./deploy-fleet.sh          # stand up the whole adapted fleet (one command)
-./verify-fleet.sh          # -> harmony table, target 6/6 each
+./lineage deploy           # stand up the whole adapted fleet (one command)
+./lineage verify           # -> harmony table, target 6/6 each
 ```
 
 Deploy or test a subset:
 ```bash
-./deploy-fleet.sh slack-tool slack-researcher   # a cross-service chain
-./verify-fleet.sh slack-researcher
+./lineage deploy slack-tool slack-researcher   # a cross-service chain
+./lineage verify slack-researcher
 ```
 
 ## The fleet, in harmony

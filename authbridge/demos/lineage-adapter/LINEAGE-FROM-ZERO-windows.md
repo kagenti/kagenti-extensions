@@ -75,7 +75,7 @@ git clone -b feat/interactions-sidecar-algorithm https://github.com/rossoctl/lab
 
 **CHECKPOINT 0**
 ```bash
-ls ~/kagenti-extensions/authbridge/demos/lineage-adapter/sidecar-patch.sh \
+ls ~/kagenti-extensions/authbridge/demos/lineage-adapter/lib/sidecar-patch.sh \
    ~/lab-data-governance/deploy/build-and-load.sh
 ```
 You should see: both file paths printed, no "No such file" error.
@@ -219,8 +219,8 @@ TOOL_DEPLOY=$(kubectl get deploy -n team1 -o name | grep -i weather | grep -v we
 echo "tool deployment discovered: '${TOOL_DEPLOY}'"
 [ -n "$TOOL_DEPLOY" ] || { echo "STOP: no weather tool deployment found — report the deploy list above"; exit 1; }
 
-DEPLOY="$TOOL_DEPLOY"  OTEL_ENDPOINT="$OTEL_EP" OUTBOUND_PORTS_EXCLUDE=8335 ./sidecar-patch.sh
-DEPLOY=weather-service OTEL_ENDPOINT="$OTEL_EP" OUTBOUND_PORTS_EXCLUDE=8335 ./sidecar-patch.sh
+OTEL_ENDPOINT="$OTEL_EP" OUTBOUND_PORTS_EXCLUDE=8335 ./lineage adopt "$TOOL_DEPLOY"
+OTEL_ENDPOINT="$OTEL_EP" OUTBOUND_PORTS_EXCLUDE=8335 ./lineage adopt weather-service
 ```
 Each patch ends with `deployment "..." successfully rolled out` and a
 `>> lineage sidecar attached ...` line.
@@ -257,7 +257,7 @@ BACKEND_CONTAINER=$(kubectl -n rossoctl-system get deploy "$BACKEND_DEPLOY" -o j
 BASE_IMG=$(kubectl -n rossoctl-system get deploy "$BACKEND_DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].image}')
 echo "current backend image: '${BASE_IMG}'"
 
-KIND_CLUSTER="$KC" ./stamp-ui-backend.sh "$BASE_IMG"
+KIND_CLUSTER="$KC" ./lineage stamp-backend "$BASE_IMG"
 
 kubectl -n rossoctl-system set image deploy/"$BACKEND_DEPLOY" \
   "$BACKEND_CONTAINER"=docker.io/library/backend-otel:latest
@@ -331,7 +331,7 @@ output. Never drive this through `kubectl port-forward` — that path bypasses t
 | Weather answers but nothing appears in DG | Walk the chain: `kubectl logs -n team1 deploy/weather-service -c envoy-proxy --tail=30` (recorder emitting? look for export errors — a wrong `OTEL_ENDPOINT` shows here) → `kubectl logs -n rossoctl-system deploy/otel-collector --tail=30` → `kubectl logs -n data-governance deploy/data-governance-receiver --tail=30`. |
 | Weather behaves differently after the restart | Stock weather Deployments pull `:latest` on every restart — upstream may have changed the app. Not lineage-related. |
 | App unreachable right after patching | `kubectl logs -n team1 <pod> -c proxy-init` — iptables errors; the envoy-proxy container must run as UID 1337. |
-| Want it all off / on | `./lineage-switch.sh off` / `on` (DG stack + fleet apps; the weather pair keeps its sidecar either way). |
+| Want it all off / on | `./lineage off` / `on` (DG stack + fleet apps; the weather pair keeps its sidecar either way). |
 
 ---
 
@@ -340,9 +340,9 @@ output. Never drive this through `kubectl port-forward` — that path bypasses t
 Next stage is *your own app*. The recipe splits on one question — is your app already
 OTel-instrumented?
 - **No (typical):** it needs the propagate-only shim (so concurrent requests pair
-  correctly) — the fleet path: a `fleet.conf` row + `deploy-fleet.sh`. See
+  correctly) — the fleet path: a `fleet.yaml` stanza + `./lineage deploy`. See
   [`RUNBOOK.md`](RUNBOOK.md).
-- **Yes (like weather):** `sidecar-patch.sh` on its Deployment is the whole job
+- **Yes (like weather):** `./lineage adopt <deployment>` is the whole job
   (remember `OTEL_ENDPOINT` as in Phase 4).
 
 Either way the app must fit the envelope: Python ASGI server, httpx/requests/aiohttp for

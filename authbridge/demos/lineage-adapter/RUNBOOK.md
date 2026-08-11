@@ -38,9 +38,9 @@ a **CLI subprocess** (`claude_agent`) or a **local subprocess** such as git
 
 | Artifact | What it is |
 |---|---|
-| `Dockerfile.otel-shim` | ONE shim image, `--build-arg BASE_IMAGE=<app>`. Bundles `opentelemetry-distro` + instrumentors `{starlette,asgi,fastapi,httpx,requests,aiohttp-client,threading}`, propagate-only. Same recipe for every app. |
-| `build-otel-shim.sh` | Builds the shim FROM an app image and kind-loads it. |
-| `attach-lineage.sh` | Emits (stdout) a full Deployment+Service+lineage-ConfigMap: OTEL-wrapped app container + `proxy-init` initContainer + `envoy-proxy` sidecar. Per-app: `NAME`, `IMAGE`, `SELF_ID`, `APP_ENTRYPOINT`, `ENV_VARS`. |
+| `lib/Dockerfile.otel-shim` | ONE shim image, `--build-arg BASE_IMAGE=<app>`. Bundles `opentelemetry-distro` + instrumentors `{starlette,asgi,fastapi,httpx,requests,aiohttp-client,threading}`, propagate-only. Same recipe for every app. |
+| `lib/build-otel-shim.sh` | Builds the shim FROM an app image and kind-loads it (`./lineage shim`). Refuses images the shim cannot safely wrap — non-Python layout, or auto-instrumentation already baked (`FORCE_BAKE=1` overrides). |
+| `lib/attach-lineage.sh` | Emits (stdout) a full Deployment+Service+lineage-ConfigMap: OTEL-wrapped app container + `proxy-init` initContainer + `envoy-proxy` sidecar. Per-app: `NAME`, `IMAGE`, `SELF_ID`, `APP_ENTRYPOINT`, `ENV_VARS`. |
 | `concurrency-test-interactions.sh` (A2A) / `concurrency-test-mcp-interactions.sh` (MCP tool) | In-cluster driver: N concurrent turns, distinct caller-minted traceparent each; asserts per-trace **interaction forests** in the DG Postgres (+ optional `EXPECT_KINDS`). Target **N/N**. |
 
 No cluster yet? `CLUSTER-FROM-ZERO-windows.md` in this directory takes a bare
@@ -57,7 +57,7 @@ Ollama (`qwen2.5:7b`) at
 
 ### Building the sidecar images
 
-`attach-lineage.sh` references `docker.io/library/authbridge-envoy:latest` and
+`lib/attach-lineage.sh` references `docker.io/library/authbridge-envoy:latest` and
 `docker.io/library/proxy-init:latest` with `imagePullPolicy: IfNotPresent` —
 build them from this repo and load them into kind under exactly those names
 (the repo's other builders, e.g. `local-build-and-test.sh`, tag under
@@ -81,6 +81,11 @@ tag mismatch inside the kind node; for authbridge-envoy the explicit
 
 ## The recipe (per app)
 
+> **Fleet route (preferred):** add one stanza to `fleet.yaml` and run
+> `./lineage deploy <name>` — it performs steps 1–4 below (validated catalog,
+> pull/build, shim bake with the interlock, attach). The manual steps remain
+> as the same operations one at a time, for one-off or out-of-catalog work.
+
 ### 1. Get the image into kind
 Prebuilt (most agent-examples) — pull, retag under `docker.io/library/`, kind-load:
 ```bash
@@ -96,10 +101,13 @@ gitignored `uv.lock`, run `uv lock` first.
 
 ### 2. Build the propagate-only shim on top of it
 ```bash
-./build-otel-shim.sh <name>:latest
+./lineage shim <name>:latest
 # -> builds + kind-loads docker.io/library/<name>-otel:latest
 ```
-Same command every app; only the base image differs.
+Same command every app; only the base image differs. The build REFUSES an
+image outside the envelope (no python at the expected venv) or one that
+already bakes auto-instrumentation — the message names the sidecar-only
+alternative (`./lineage adopt`); `FORCE_BAKE=1` overrides.
 
 ### 3. Determine the app's own entrypoint (`APP_ENTRYPOINT`)
 This is the app's command tokens that run *after* `opentelemetry-instrument`.
@@ -121,7 +129,7 @@ IMAGE=docker.io/library/<name>-otel:latest \
 APP_PORT=8000 SVC_PORT=8080 \
 APP_ENTRYPOINT='<from step 3>' \
 ENV_VARS='LLM_API_BASE=http://host.containers.internal:11434/v1 LLM_MODEL=qwen2.5:7b LLM_API_KEY=ollama' \
-./attach-lineage.sh | kubectl apply -f -
+./lineage gen | kubectl apply -f -
 kubectl rollout status deploy/<k8s-name> -n team1
 ```
 - `SELF_ID` defaults to `NAME`; only this varies in the lineage config.
@@ -186,7 +194,7 @@ it into every deployed agent via the backend's `DEFAULT_ENV_VARS`) —
 weather-service under the sidecar still ships its 78 app spans per trace, live
 proof.
 
-To **keep** an app's own export when deploying with `attach-lineage.sh`, add
+To **keep** an app's own export when deploying with the generator, add
 both of:
 ```bash
 ENV_VARS='... OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector>:<port>' \
@@ -224,7 +232,7 @@ export modes.
 - **zsh `${x}:latest`** — always brace; bare `$x:latest` silently applies the `:l`
   (lowercase) modifier and corrupts the tag.
 - Build/load via `podman build` + `kind load image-archive` (docker daemon is off;
-  `kind load docker-image` misbehaves under podman) — `build-otel-shim.sh` does this.
+  `kind load docker-image` misbehaves under podman) — `lineage shim` does this.
 - Kind + podman: `KIND_EXPERIMENTAL_PROVIDER=podman` on every `kind` call.
 - kubectl-run driver pods need `--image-pull-policy=IfNotPresent` (kind-loaded
   images aren't in a registry) — the test scripts set this.

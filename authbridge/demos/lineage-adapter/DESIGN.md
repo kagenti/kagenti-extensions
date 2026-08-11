@@ -123,7 +123,7 @@ the initial `traceparent`** (the natural distributed-tracing model — the first
 caller roots the trace, each hop propagates). The sidecar does not seed the root
 for an untraced entry; that gap is deliberately out of scope here.
 
-**Documented exceptions (excluded from `fleet.conf`):**
+**Documented exceptions (excluded from `fleet.yaml`):**
 - Outbound via a **subprocess** — `claude_agent` (CLI), or a **local** subprocess
   with no network hop such as wiki's `git` (its HTTP legs are still covered).
 - **Non-Python** services — `github_tool` (Go).

@@ -39,7 +39,7 @@ If the probe pods are missing or stale, deploy from the kit directory:
 
 ```bash
 cd authbridge/demos/lineage-adapter
-./deploy-fleet.sh probe-redis probe-tool probe-back probe-front
+./lineage deploy probe-redis probe-tool probe-back probe-front
 ```
 
 (Builds the probe image + shim, pulls redis:7, kind-loads under
@@ -138,7 +138,7 @@ for ix in d:
 | kinds include `mcp_lifecycle_*` | something added MCP handshake traffic (client library crept in) — report |
 | redis rows > 0 | port-exclude bypass broke (`OUTBOUND_PORTS_EXCLUDE=6379` missing from proxy-init) — check `kubectl get pod -n team1 <probe-back-pod> -o yaml \| grep -A2 OUTBOUND_PORTS` |
 | (d) no shared hash | payload capture or content-addressing changed — compare `interaction_legs.payload_hash` per trace manually |
-| stale pods after deploy | probe images are local `IfNotPresent`; re-run deploy-fleet (it restarts + waits). NEVER roll non-probe `:latest` agents casually — they pull upstream on restart |
+| stale pods after deploy | probe images are local `IfNotPresent`; re-run `./lineage deploy` (it restarts + waits). NEVER roll non-probe `:latest` agents casually — they pull upstream on restart |
 | `destination.url` null | sidecar image predates the fact it needs — v1.5.1 added `url.scheme` (outbound URLs), v1.5.2 added the inbound authority (inbound URLs); check the request span's attributes to see which is missing. Host+path with null url is the correct rendering for such spans, not a guess |
 | `internal` flag wrong | consumer-side heuristic drifted (`_host_is_internal` in `retrieval/interactions.py`) — vocabulary bug, not a producer issue |
 | `http.status_code`/`outcome` null with a response leg present | response-span attribute read broke (they live on the RESPONSE span, not the anchor) — consumer regression |
