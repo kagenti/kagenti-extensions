@@ -9,10 +9,16 @@
 # patch (lists merge by name: the app container is untouched; interception is
 # transparent iptables — no HTTP_PROXY, no code change, no image change).
 #
+# Every YAML byte comes from attach-lineage.sh, the ONE generator (EMIT=cm for
+# the per-app plugin ConfigMap, EMIT=patch for the sidecar patch) — this script
+# only applies them and waits. CAVEAT the owner keeps owning the object: a
+# platform rewrite of the Deployment silently drops the patch (observed live on
+# weather-tool, 2026-08-11) — re-run this script after any platform-side change.
+#
 # NOTE: natively-instrumented apps (weather_service/weather_tool export their
 # own OTLP) need no shim — in-process context already propagates. Apps that are
 # NOT instrumented still need the shim for correct pairing under concurrency;
-# for those, prefer a fleet.conf row + deploy-fleet.sh (see RUNBOOK.md).
+# for those, prefer a fleet row + deploy-fleet.sh (see RUNBOOK.md).
 #
 # Usage (env-driven, like attach-lineage.sh):
 #   DEPLOY=weather-service OUTBOUND_PORTS_EXCLUDE=8335 ./sidecar-patch.sh
@@ -35,12 +41,11 @@
 # ConfigMap, and the docker.io/library/{authbridge-envoy,proxy-init}:latest
 # images loaded into the cluster (RUNBOOK.md "Build the sidecar images").
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
 NAMESPACE="${NAMESPACE:-team1}"
 SELF_ID="${SELF_ID:-$DEPLOY}"
-OTEL_ENDPOINT="${OTEL_ENDPOINT:-otel-collector.kagenti-system.svc.cluster.local:4317}"
-OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
 
 kubectl get deploy -n "$NAMESPACE" "$DEPLOY" >/dev/null
 kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
@@ -48,97 +53,13 @@ kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
   exit 1
 }
 
-# ---- 1) per-app lineage config ----
-# Pipeline content MUST stay in sync with attach-lineage.sh (the canonical
-# emitter): uniform parser chain in both directions — see the rationale comment
-# there. Only the delivery differs (standalone CM here vs emitted manifest).
-kubectl apply -f - <<EOF
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: authbridge-lineage-config-${DEPLOY}
-  namespace: ${NAMESPACE}
-data:
-  config.yaml: |
-    mode: envoy-sidecar
-    pipeline:
-      inbound:
-        plugins:
-          - name: a2a-parser
-          - name: mcp-parser
-          - name: inference-parser
-          - name: lineage-telemetry
-            config:
-              otel_endpoint: "${OTEL_ENDPOINT}"
-              capture_io: true
-              self_id: "${SELF_ID}"
-      outbound:
-        plugins:
-          - name: a2a-parser
-          - name: mcp-parser
-          - name: inference-parser
-          - name: lineage-telemetry
-            config:
-              otel_endpoint: "${OTEL_ENDPOINT}"
-              capture_io: true
-              self_id: "${SELF_ID}"
-EOF
+gen() {  # $1 = EMIT mode; forwards the shared knobs to the one generator
+  EMIT="$1" NAME="$DEPLOY" SELF_ID="$SELF_ID" NAMESPACE="$NAMESPACE" \
+    "${SCRIPT_DIR}/attach-lineage.sh"
+}
 
-# ---- 2) strategic-merge patch: ADD proxy-init + envoy-proxy + volumes ----
-exclude_env=""
-if [ -n "$OUTBOUND_PORTS_EXCLUDE" ]; then
-  exclude_env="
-            - name: OUTBOUND_PORTS_EXCLUDE
-              value: \"${OUTBOUND_PORTS_EXCLUDE}\""
-fi
-
-kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "
-spec:
-  template:
-    spec:
-      initContainers:
-        - name: proxy-init
-          image: docker.io/library/proxy-init:latest
-          imagePullPolicy: IfNotPresent
-          securityContext:
-            runAsNonRoot: false
-            runAsUser: 0
-            capabilities:
-              add: [\"NET_ADMIN\"]
-          env:
-            - name: POD_IP
-              valueFrom:
-                fieldRef:
-                  fieldPath: status.podIP${exclude_env}
-      containers:
-        # Envoy + authbridge-envoy (ext_proc + lineage plugin). MUST run as
-        # UID 1337 — init-iptables excludes 1337 from the outbound redirect.
-        - name: envoy-proxy
-          image: docker.io/library/authbridge-envoy:latest
-          imagePullPolicy: IfNotPresent
-          args: [\"--config\", \"/etc/authbridge/config.yaml\"]
-          securityContext:
-            runAsNonRoot: false
-            runAsUser: 1337
-            runAsGroup: 1337
-          ports:
-            - { containerPort: 15123, name: envoy-out }
-            - { containerPort: 15124, name: envoy-in }
-            - { containerPort: 9090,  name: ext-proc }
-            - { containerPort: 9901,  name: envoy-admin }
-          volumeMounts:
-            - { name: envoy-config,       mountPath: /etc/envoy }
-            - { name: authbridge-runtime, mountPath: /etc/authbridge }
-      volumes:
-        - name: envoy-config
-          configMap:
-            name: envoy-config
-        - name: authbridge-runtime
-          configMap:
-            name: authbridge-lineage-config-${DEPLOY}
-            items:
-              - { key: config.yaml, path: config.yaml }
-"
+gen cm | kubectl apply -f -
+kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$(gen patch)"
 
 kubectl rollout status -n "$NAMESPACE" "deploy/$DEPLOY" --timeout=180s
 echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"
