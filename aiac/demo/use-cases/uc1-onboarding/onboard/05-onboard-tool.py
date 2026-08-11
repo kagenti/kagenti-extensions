@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Onboard the ``github-tool`` workload: ``POST /apply/service/{uuid}`` behind a port-forward to
-the Controller, then capture the agent's ``.rego`` into ``generated/02-after-tool/`` — the second
-pause's evidence. Onboarding the tool retroactively completes the agent's outbound gate (the tool
-is a pure target: no ``.rego`` is emitted for it directly), so only the agent's two files are
-copied, into a directory separate from ``01-after-agent/`` — the before/after diff is the point."""
+the Controller, then capture the agent's rego from its ``AuthorizationPolicy`` CR into
+``generated/02-after-tool/`` — the second pause's evidence. Onboarding the tool retroactively
+completes the agent's outbound gate (the tool is a pure target: no CR is emitted for it directly),
+so only the agent's CR is captured, into a directory separate from ``01-after-agent/`` — the
+before/after diff is the point."""
 
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import scenario as scn
 import setup_keycloak
-from _lib import GENERATED, abort, capture_rego, connect_admin, load_config, note, ok, onboard, port_forward, resolve_service_id, say, writer_pod
+from _lib import GENERATED, abort, capture_rego, connect_admin, load_config, note, ok, onboard, port_forward, resolve_service_id, say
 
 
 def main() -> None:
@@ -30,10 +31,9 @@ def main() -> None:
         onboard(cfg, base_url, service_id)
     ok("onboarding call returned 200")
 
-    say("3", "4", "Capture generated Rego (agent's, retroactively completed)")
+    say("3", "4", "Capture generated Rego (agent's, retroactively completed — from the CR)")
     rego_dir = GENERATED / "02-after-tool"
-    pod = writer_pod(cfg)
-    capture_rego(cfg, pod, rego_dir)
+    capture_rego(cfg, rego_dir)
     for f in (cfg.inbound_rego, cfg.outbound_rego):
         ok(f"{rego_dir / f}")
 

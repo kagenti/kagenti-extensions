@@ -18,35 +18,44 @@ Grant access on a least-privilege basis: allow only what this policy states; den
 
 ## What comes out the other side
 
-AIAC turns that into two Rego files per agent — one gating who may call it, one gating what it may
-do downstream — derived from the policy text plus the realm-role descriptions already in Keycloak
-and the tool's own discovered capabilities. An excerpt of the generated outbound gate:
+AIAC turns that into two Rego policies per agent — one gating who may call it, one gating what it
+may do downstream — derived from the policy text plus the realm-role descriptions already in
+Keycloak and the tool's own discovered capabilities. Both use the fixed AuthBridge packages
+(`authbridge.client.{inbound,outbound}.request`) the live OPA plugin evaluates, keyed on the
+plugin's real input shape (`input.identity.subject`, `input.identity.service_id`,
+`input.mcp.params.name`). An excerpt of the generated outbound gate:
 
 ```rego
-package authz.team1_github_agent.outbound
+package authbridge.client.outbound.request
+import rego.v1
 
 subject_role_scopes := {
-    "developer": ["github-tool.issues-read", "github-tool.source-write", "github-tool.source-read"],
-    "tester": ["github-tool.issues-write", "github-tool.issues-read"],
+    "developer": ["issues-read", "source-write", "source-read"],
+    "tester": ["issues-read", "issues-write"],
+}
+target_scopes := {
+    "spiffe://localtest.me/ns/team1/sa/github-tool": ["source-read", "source-write", "issues-read", "issues-write"],
 }
 
 subject_ok if {
-    some role in subject_roles[input.subject]
-    input.function_name in subject_role_scopes[role]
+    some role in subject_roles[input.identity.subject]
+    input.mcp.params.name in subject_role_scopes[role]
 }
 
 target_ok if {
-    input.function_name in target_scopes[input.target]
+    input.mcp.params.name in target_scopes[input.identity.service_id]
 }
 
 default allow := false
 allow if { subject_ok; target_ok }
 ```
 
-Every access decision is a two-gate AND: the calling user's role must be granted the scope
-(`subject_ok`), *and* the agent's own discovered capabilities must reach it (`target_ok`). A
-developer can read and write source and read issues; a tester can read and write issues but never
-touches source — exactly the two-line policy, and nothing it didn't say.
+Every access decision is a two-gate AND on the same invoked tool (`input.mcp.params.name`, the
+**bare** MCP tool name such as `source-read`): the calling user's role must be granted the scope
+(`subject_ok`), *and* the target service the exchanged token was minted for must expose it
+(`target_ok`, keyed by the full `input.identity.service_id` SPIFFE id). A developer can read and
+write source and read issues; a tester can read and write issues but never touches source — exactly
+the two-line policy, and nothing it didn't say.
 
 ## Running it
 
@@ -152,9 +161,37 @@ make run      # or a single user: make dev / make test / make devops
         └──────────────────────────────────┴──► github-tool
 ```
 
-The gates are plain Rego, evaluated with `opa eval` against the files AIAC's Policy Computation
-Engine writes — this demo runs them the same way a live enforcement point would query them, but
-does not itself sit in the request path (see the appendix).
+The gates are plain Rego, evaluated with `opa eval` against the policy content AIAC's writer
+produces — this demo runs them the same way a live enforcement point would query them, but does
+not itself sit in the request path (see the appendix).
+
+### How the demo sources the generated Rego
+
+The reworked PDP Policy Writer is **CR-backed**: for each onboarded agent it server-side-applies a
+single `AuthorizationPolicy` custom resource (`agent.rossoctl.dev/v1alpha1`, named
+`<name>` in namespace `<ns>` — here `github-agent` in `team1`) whose `spec.policies[]` carry the
+inbound and outbound Rego as `content`. In production it writes **CRs only** — no `.rego` files on
+disk (`k8s/pdp-interface-deployment.yaml` keeps `POLICY_WRITER_DUMP_REGO` off and mounts no
+`/rego`).
+
+So this demo reads its Rego **straight from the CR** — the same artifact a live enforcement point
+consumes — rather than from a debug file dump:
+
+```bash
+kubectl get authorizationpolicies.agent.rossoctl.dev github-agent -n team1 -o json
+```
+
+`onboard/04`/`05` fetch that CR and write each `spec.policies[].content` into
+`generated/<snapshot>/team1/github-agent/{inbound,outbound}/request.rego` (mirroring the CR's
+`policies[].path`), then `opa eval` those files. `make clear` deletes the CR (a re-onboard
+server-side-applies a fresh one). This keeps the demo honest against the real artifact and needs no
+demo-only deployment overlay to re-enable the optional `.rego` dump.
+
+> The committed snapshots under `generated/` are produced from the **real** reworked generator
+> (`src/aiac/pdp/service/policy/opa/rego.py`) against a hand-built model of this scenario, so they
+> match the CR content the live writer emits (byte-for-byte with `docs/examples/opa-team1-policy.yaml`
+> for the after-tool state, modulo the cluster's actual trust domain). A live `make onboard` against
+> a cluster running the reworked writer overwrites them and is the authoritative source of truth.
 
 ## Troubleshooting
 

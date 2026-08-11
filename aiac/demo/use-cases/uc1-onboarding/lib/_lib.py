@@ -30,6 +30,15 @@ import scenario as scn
 HERE = Path(__file__).resolve().parent.parent  # lib/ -> uc1-onboarding/
 GENERATED = HERE / "generated"
 
+# The reworked PDP Policy Writer (OPA) is CR-backed: it server-side-applies one
+# per-agent AuthorizationPolicy CR (agent.rossoctl.dev/v1alpha1) and, in production, writes
+# NO .rego files (k8s/pdp-interface-deployment.yaml keeps POLICY_WRITER_DUMP_REGO off and mounts
+# no /rego). So this demo sources its rego straight from the CR's spec.policies[].content — the
+# same artifact a live enforcement point consumes — rather than kubectl-cp-ing a dumped file.
+# Fully qualified to disambiguate from Istio's security.istio.io AuthorizationPolicy (same short
+# name): `kubectl get authorizationpolicies.agent.rossoctl.dev/<name> -n <ns>`.
+AUTHZ_POLICY_RESOURCE = "authorizationpolicies.agent.rossoctl.dev"
+
 
 # ======================================================================================
 # Narration — terminal output in the authbridge/demos house style
@@ -112,27 +121,29 @@ class Config:
 
     onboard_timeout: float
 
-    opa_namespace: str
-    opa_selector: str
-    opa_container: str
-    opa_pod: str | None
-    opa_rego_path: str
-
     keycloak_url: str
     keycloak_admin_username: str
     keycloak_admin_password: str
 
     @property
-    def agent_slug(self) -> str:
-        return f"{self.namespace}_{scn.AGENT_WORKLOAD}".replace("-", "_")
+    def cr_name(self) -> str:
+        """The demo agent's ``AuthorizationPolicy`` CR name. The reworked writer places a CR at
+        ``identity_ref(agent_id) -> (namespace, name)`` and bundle-service matches it by
+        name+namespace; for this demo that name is just ``AGENT_WORKLOAD`` (``github-agent``) in
+        ``cfg.namespace`` (``team1``). No per-agent underscore slug any more — the package name is
+        fixed (``authbridge.client.{inbound,outbound}.request``), never per-agent."""
+        return scn.AGENT_WORKLOAD
 
     @property
     def inbound_rego(self) -> str:
-        return f"{self.agent_slug}.inbound.rego"
+        """Snapshot-relative path of the inbound rego, mirroring the CR ``policies[].path`` under
+        the writer's nested ``<ns>/<name>/`` layout (``rego_dir / cfg.inbound_rego`` is the local
+        file ``capture_rego`` writes)."""
+        return f"{self.namespace}/{scn.AGENT_WORKLOAD}/inbound/request.rego"
 
     @property
     def outbound_rego(self) -> str:
-        return f"{self.agent_slug}.outbound.rego"
+        return f"{self.namespace}/{scn.AGENT_WORKLOAD}/outbound/request.rego"
 
 
 def require_env(*names: str) -> dict[str, str]:
@@ -160,11 +171,6 @@ def load_config() -> Config:
         policy_configmap=os.environ.get("AIAC_POLICY_CONFIGMAP", "aiac-policy"),
         policy_mount_path=os.environ.get("AIAC_POLICY_MOUNT_PATH", "/etc/aiac"),
         onboard_timeout=float(os.environ.get("AIAC_ONBOARD_TIMEOUT", "900")),
-        opa_namespace=os.environ.get("AIAC_OPA_NAMESPACE", "aiac-system"),
-        opa_selector=os.environ.get("AIAC_OPA_SELECTOR", "app=aiac-interface"),
-        opa_container=os.environ.get("AIAC_OPA_CONTAINER", "aiac-pdp-policy-opa"),
-        opa_pod=os.environ.get("AIAC_OPA_POD"),
-        opa_rego_path=os.environ.get("AIAC_OPA_REGO_PATH", "/rego"),
         keycloak_url=creds["KEYCLOAK_URL"],
         keycloak_admin_username=creds["KEYCLOAK_ADMIN_USERNAME"],
         keycloak_admin_password=creds["KEYCLOAK_ADMIN_PASSWORD"],
@@ -196,20 +202,6 @@ def kubectl_get_json(resource: str, *, namespace: str | None = None) -> dict:
 
 def kubectl_rollout_status(resource: str, *, namespace: str, timeout: float = 180.0) -> None:
     kubectl("rollout", "status", resource, "-n", namespace, f"--timeout={int(timeout)}s", timeout=timeout + 10)
-
-
-def kubectl_cp(pod: str, remote_path: str, local_path: Path, *, namespace: str, container: str | None = None) -> None:
-    args = ["cp", f"{namespace}/{pod}:{remote_path}", str(local_path)]
-    if container:
-        args += ["-c", container]
-    kubectl(*args, timeout=120.0)
-
-
-def resolve_pod(selector: str, *, namespace: str) -> str:
-    out = kubectl("get", "pods", "-n", namespace, "-l", selector, "-o", "jsonpath={.items[0].metadata.name}")
-    if not out.strip():
-        abort(f"no pod matches selector {selector!r} in namespace {namespace!r}")
-    return out.strip()
 
 
 def terminate(proc: subprocess.Popen) -> None:
@@ -427,24 +419,34 @@ def onboard(cfg: Config, base_url: str, service_id: str) -> None:
         abort(f"onboard {service_id!r} at {base_url}: HTTP {resp.status_code} — {resp.text[:500]}")
 
 
-def writer_pod(cfg: Config) -> str:
-    return cfg.opa_pod or resolve_pod(cfg.opa_selector, namespace=cfg.opa_namespace)
+def clear_writer_rego(cfg: Config) -> None:
+    """Reset the writer's state for the demo agent by deleting its AuthorizationPolicy CR.
 
-
-def clear_writer_rego(cfg: Config, pod: str) -> None:
+    The reworked writer is CR-backed (no ``/rego`` file dump in production), so "clear the
+    writer's rego" means "delete the CR" — the next onboard server-side-applies a fresh one.
+    Idempotent: ``--ignore-not-found`` treats an already-absent CR as success."""
     kubectl(
-        "exec", "-n", cfg.opa_namespace, pod, "-c", cfg.opa_container, "--",
-        "sh", "-c", f"rm -f {cfg.opa_rego_path.rstrip('/')}/*.rego",
+        "delete", AUTHZ_POLICY_RESOURCE, cfg.cr_name,
+        "-n", cfg.namespace, "--ignore-not-found",
     )
 
 
-def capture_rego(cfg: Config, pod: str, rego_dir: Path) -> None:
-    rego_dir.mkdir(parents=True, exist_ok=True)
-    for filename in (cfg.inbound_rego, cfg.outbound_rego):
-        kubectl_cp(
-            pod, f"{cfg.opa_rego_path.rstrip('/')}/{filename}", rego_dir / filename,
-            namespace=cfg.opa_namespace, container=cfg.opa_container,
+def capture_rego(cfg: Config, rego_dir: Path) -> None:
+    """Fetch the agent's generated rego straight from its AuthorizationPolicy CR and write each
+    ``spec.policies[].content`` into ``rego_dir`` under the writer's nested ``<ns>/<name>/<path>``
+    layout, so ``opa eval`` / ``show-state.py`` read the very bytes a live enforcement point would
+    (the CR is production's source of truth — there is no ``/rego`` file to ``kubectl cp``)."""
+    cr = kubectl_get_json(f"{AUTHZ_POLICY_RESOURCE}/{cfg.cr_name}", namespace=cfg.namespace)
+    policies = cr.get("spec", {}).get("policies", [])
+    if not policies:
+        abort(
+            f"AuthorizationPolicy {cfg.cr_name!r} in namespace {cfg.namespace!r} has no "
+            "spec.policies — did the onboard call actually write the CR?"
         )
+    for policy in policies:
+        dest = rego_dir / cfg.namespace / cfg.cr_name / policy["path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(policy["content"])
 
 
 # ======================================================================================
@@ -523,7 +525,13 @@ def drive(username: str) -> None:
     ok("logged in")
 
     say("2", "3", "Inbound gate: may this user call the agent?")
-    inbound_allowed = bool(opa_eval([inbound_rego], f"data.authz.{cfg.agent_slug}.inbound.allow", {"subject": username}))
+    # Fixed package + live-plugin input shape. This demo path is an end-user ROPC login with no
+    # platform source client, so we send NO input.identity.client_id — source_ok is satisfied by
+    # the writer's `source_ok if { not input.identity.client_id }` rule.
+    inbound_allowed = bool(opa_eval(
+        [inbound_rego], "data.authbridge.client.inbound.request.allow",
+        {"identity": {"subject": username}},
+    ))
     expected_in = scn.expected_inbound(username)
     if inbound_allowed != expected_in:
         abort(f"inbound mismatch for subject={username!r}: opa said {inbound_allowed}, expected {expected_in}")
@@ -540,7 +548,9 @@ def drive(username: str) -> None:
     agent_client_id = admin.get_client(agent_uuid)["clientId"]
     secret = client_secret(admin, cfg, agent_uuid)
 
-    target_scopes = opa_eval([outbound_rego], f"data.authz.{cfg.agent_slug}.outbound.target_scopes", {}) or {}
+    # target_scopes is now keyed by the FULL target service id (a SPIFFE id), with bare
+    # de-prefixed scope values. next(iter(...)) still yields the id to exchange for.
+    target_scopes = opa_eval([outbound_rego], "data.authbridge.client.outbound.request.target_scopes", {}) or {}
     if not target_scopes:
         abort(f"outbound rego at {outbound_rego} has no target_scopes — is the tool onboarded?")
     target_uri = next(iter(target_scopes))
@@ -551,8 +561,9 @@ def drive(username: str) -> None:
     rows: list[tuple[str, ...]] = []
     for intent in scn.INTENTS[username]:
         allowed = bool(opa_eval(
-            [outbound_rego], f"data.authz.{cfg.agent_slug}.outbound.allow",
-            {"subject": username, "function_name": intent.function_name, "target": target_uri},
+            [outbound_rego], "data.authbridge.client.outbound.request.allow",
+            {"identity": {"subject": username, "service_id": target_uri},
+             "mcp": {"params": {"name": intent.function_name}}},
         ))
         expected_out = scn.expected_outbound(username, intent.function_name)
         if allowed != expected_out:

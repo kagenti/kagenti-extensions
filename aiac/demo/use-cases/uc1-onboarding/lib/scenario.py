@@ -76,6 +76,11 @@ AGENT_SCOPES: dict[str, str] = {
 
 AGENT_ROLES: dict[str, str] = dict(AGENT_SCOPES)
 
+# The provisioned Keycloak client-scope NAMES stay owner-prefixed (that is what Keycloak holds).
+# The reworked writer de-prefixes them into the outbound Rego / CR — so the BARE tail
+# (``source-read`` …) is the value that arrives in ``input.mcp.params.name`` and the value the
+# outbound maps below key on. Keep this distinction in mind: prefixed here (Keycloak), bare in the
+# oracle pair-lists and INTENTS (Rego / the invoked MCP tool name).
 TOOL_SCOPES: dict[str, str] = {
     "github-tool.source-read": "Read source repository contents: file listings and file bodies. Read-only.",
     "github-tool.source-write": "Create, modify, or delete source repository contents; commit file changes.",
@@ -91,19 +96,22 @@ INBOUND_PAIRS: list[tuple[str, str]] = [
     ("tester", "github-agent.issue_operations"),
 ]
 
+# Tool scopes here are BARE (de-prefixed) — they must match the outbound Rego's de-prefixed map
+# values and the bare ``input.mcp.params.name`` the drivers send. (Agent-side operator roles keep
+# their owner prefix; only the tool-scope value de-prefixes.)
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("developer", "github-tool.source-read"),
-    ("developer", "github-tool.source-write"),
-    ("developer", "github-tool.issues-read"),
-    ("tester", "github-tool.issues-read"),
-    ("tester", "github-tool.issues-write"),
+    ("developer", "source-read"),
+    ("developer", "source-write"),
+    ("developer", "issues-read"),
+    ("tester", "issues-read"),
+    ("tester", "issues-write"),
 ]
 
 OUTBOUND_TARGET_PAIRS: list[tuple[str, str]] = [
-    ("github-agent.source_operations", "github-tool.source-read"),
-    ("github-agent.source_operations", "github-tool.source-write"),
-    ("github-agent.issue_operations", "github-tool.issues-read"),
-    ("github-agent.issue_operations", "github-tool.issues-write"),
+    ("github-agent.source_operations", "source-read"),
+    ("github-agent.source_operations", "source-write"),
+    ("github-agent.issue_operations", "issues-read"),
+    ("github-agent.issue_operations", "issues-write"),
 ]
 
 # --- The single abstract policy.md the PRB reads (verbatim; also shown in demo.md) -----------
@@ -121,20 +129,22 @@ Grant access on a least-privilege basis: allow only what this policy states; den
 @dataclass(frozen=True)
 class Intent:
     label: str  # what the driver script prints before asking the tool
-    function_name: str | None  # the tool scope this intent maps to (None = inbound-only denial case)
+    # The BARE invoked MCP tool name this intent maps to — the value that arrives in
+    # ``input.mcp.params.name`` (None = inbound-only denial case, no tool call reached).
+    function_name: str | None
 
 
 INTENTS: dict[str, list[Intent]] = {
     "dev-user": [
-        Intent("read a file from the repo", "github-tool.source-read"),
-        Intent("commit a small fix", "github-tool.source-write"),
-        Intent("check an issue for repro steps", "github-tool.issues-read"),
-        Intent("close out the issue", "github-tool.issues-write"),
+        Intent("read a file from the repo", "source-read"),
+        Intent("commit a small fix", "source-write"),
+        Intent("check an issue for repro steps", "issues-read"),
+        Intent("close out the issue", "issues-write"),
     ],
     "test-user": [
-        Intent("check an issue for repro steps", "github-tool.issues-read"),
-        Intent("file a new bug", "github-tool.issues-write"),
-        Intent("read a file from the repo", "github-tool.source-read"),
+        Intent("check an issue for repro steps", "issues-read"),
+        Intent("file a new bug", "issues-write"),
+        Intent("read a file from the repo", "source-read"),
     ],
     "devops-user": [
         Intent("ask the agent anything", None),  # inbound denial — no function_name reached

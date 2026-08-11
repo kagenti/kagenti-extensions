@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Onboard the ``github-agent`` workload: ``POST /apply/service/{uuid}`` behind a port-forward to
-the Controller, then capture the generated ``.rego`` into ``generated/01-after-agent/`` — the first
-pause's evidence (before the tool exists, the agent's outbound gate is still empty)."""
+the Controller, then capture the generated rego from the agent's ``AuthorizationPolicy`` CR into
+``generated/01-after-agent/`` — the first pause's evidence (before the tool exists, the agent's
+outbound gate is still empty)."""
 
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
 import scenario as scn
-from _lib import GENERATED, capture_rego, connect_admin, load_config, note, ok, onboard, port_forward, resolve_service_id, say, writer_pod
+from _lib import GENERATED, capture_rego, connect_admin, load_config, note, ok, onboard, port_forward, resolve_service_id, say
 
 
 def main() -> None:
@@ -27,10 +28,9 @@ def main() -> None:
         onboard(cfg, base_url, service_id)
     ok("onboarding call returned 200")
 
-    say("3", "3", "Capture generated Rego")
+    say("3", "3", "Capture generated Rego (from the AuthorizationPolicy CR)")
     rego_dir = GENERATED / "01-after-agent"
-    pod = writer_pod(cfg)
-    capture_rego(cfg, pod, rego_dir)
+    capture_rego(cfg, rego_dir)
     for f in (cfg.inbound_rego, cfg.outbound_rego):
         ok(f"{rego_dir / f}")
 
