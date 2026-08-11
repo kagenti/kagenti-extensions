@@ -18,7 +18,7 @@
 # NOTE: natively-instrumented apps (weather_service/weather_tool export their
 # own OTLP) need no shim — in-process context already propagates. Apps that are
 # NOT instrumented still need the shim for correct pairing under concurrency;
-# for those, prefer a fleet row + deploy-fleet.sh (see RUNBOOK.md).
+# for those, prefer a fleet stanza + ./lineage deploy (see docs/RUNBOOK.md).
 #
 # Usage (env-driven, like attach-lineage.sh):
 #   DEPLOY=weather-service OUTBOUND_PORTS_EXCLUDE=8335 ./sidecar-patch.sh
@@ -39,7 +39,7 @@
 #
 # Requires in the target namespace: the platform-rendered `envoy-config`
 # ConfigMap, and the docker.io/library/{authbridge-envoy,proxy-init}:latest
-# images loaded into the cluster (RUNBOOK.md "Build the sidecar images").
+# images loaded into the cluster (docs/RUNBOOK.md "Build the sidecar images").
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 

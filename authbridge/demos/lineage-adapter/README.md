@@ -10,10 +10,10 @@ a **catalog** (`fleet.yaml`) links each existing app to its adaptation, and one
 command stands the whole fleet up.
 
 - **Start here — stock app to lineage pod, no script-reading:** [`QUICKSTART.md`](QUICKSTART.md)
-- **Why the sidecar alone isn't enough, and what the shim does:** [`DESIGN.md`](DESIGN.md)
-- **Step-by-step for a single app:** [`RUNBOOK.md`](RUNBOOK.md)
-- **No cluster yet:** [`CLUSTER-FROM-ZERO-windows.md`](CLUSTER-FROM-ZERO-windows.md)
-- **Cluster running, no lineage yet:** [`LINEAGE-FROM-ZERO-windows.md`](LINEAGE-FROM-ZERO-windows.md)
+- **Why the sidecar alone isn't enough, and what the shim does:** [`docs/DESIGN.md`](docs/DESIGN.md)
+- **Step-by-step for a single app:** [`docs/RUNBOOK.md`](docs/RUNBOOK.md)
+- **No cluster yet:** [`docs/CLUSTER-FROM-ZERO-windows.md`](docs/CLUSTER-FROM-ZERO-windows.md)
+- **Cluster running, no lineage yet:** [`docs/LINEAGE-FROM-ZERO-windows.md`](docs/LINEAGE-FROM-ZERO-windows.md)
   — collector + DG service + sidecar on the stock weather pair, end to end (WSL2/docker)
 - **The consumer side** (what DG derives from the spans): the sibling
   `lab-data-governance` repo; the wire between producer and consumer is
@@ -22,7 +22,7 @@ command stands the whole fleet up.
 
 ## The two things we add to an app
 
-1. **A propagate-only OpenTelemetry shim** (`Dockerfile.otel-shim`). Layered on the
+1. **A propagate-only OpenTelemetry shim** (`lib/Dockerfile.otel-shim`). Layered on the
    app image, it auto-instruments the app's HTTP libs to **extract** the inbound
    `traceparent` and **inject** it on outbound calls — and **exports nothing**
    (so DG stays sidecar-only). This is the in-process context propagation the
@@ -52,14 +52,12 @@ The deploy surface is three files; everything else proves or documents.
 | `fleet.yaml` | **The catalog** — existing app ↔ adaptation ↔ wiring (`env:` for the app, `attach:` for the deploy layer). Schema-checked on every read. |
 | `QUICKSTART.md` | Stock app → lineage-included pod without reading any script source. |
 | `lib/` | The machinery: `attach-lineage.sh` (the ONE generator — full manifest, `EMIT=cm`, `EMIT=patch`), `Dockerfile.otel-shim` + `build-otel-shim.sh` (shim bake, with the refuse-to-bake interlock), `sidecar-patch.sh` (= `lineage adopt`), `stamp-ui-backend.sh`, `deploy-fleet.sh`, `lineage-switch.sh`, `container-runtime.sh`, `fleet-read.py`, `overlays/`. |
-| `verify-fleet.sh` | Drives every entry point under concurrency → the **harmony table** (app → N/N). Also `lineage verify`. |
-| `probe-app/` + `probe-validate.sh` | The **all-capabilities probe**: one shipped app (front = LLM + external HTTP/HTTPS legs + threaded A2A fan-out, back = held same-trace fan-in → MCP tool + LLM + the `/echo` cross-session writer, tool = MCP leaf) and the one-command validation of concurrent traces, thread propagation, exact inbound→outbound pairing, external-egress presence AND absence, and tool identity echo. |
-| `probe-cross-validate.sh` | The **cross-session probe**: trace A stashes bytes at rest (shared PVC file + redis), a later trace B reads and re-sends them; asserts the two disconnected trees, the invisible-hop absences, and the content-hash join (see below). |
-| `probe-lineage-validate.md` | **Agent-runnable validation playbook**: prereqs → deploy → both validators → exact expected shapes, triage guide, and the report format. Hand this file to an agent; it needs nothing else. |
+| `test/` | Everything that proves it: `verify-fleet.sh` (= `lineage verify`, the harmony table), the two interaction harnesses, `fanin-test.sh`, the probe (`probe-app/` + `probe-validate.sh` + `probe-cross-validate.sh` + the agent playbook `probe-lineage-validate.md`), `dg-api.sh`, and `validation/` expectation cards. |
+| `docs/` | The deep docs: `RUNBOOK.md` (per-app recipe), `DESIGN.md` (why the shim), the two FROM-ZERO walkthroughs. |
 
 ## Quick start
 
-Prereqs (see QUICKSTART / RUNBOOK): a Kind cluster `kagenti` (podman) with the
+Prereqs (see QUICKSTART / docs/RUNBOOK.md): a Kind cluster `kagenti` (podman) with the
 Kagenti platform, this repo's `authbridge-envoy` + `proxy-init` images loaded,
 the DG pod running and fed by the patched collector, the `envoy-config`
 ConfigMap in `team1`, host Ollama (`qwen2.5:7b`) reachable at
@@ -107,8 +105,8 @@ LLM hop, agent→REST, agent→MCP-tool (cross-service), 2-service MCP→HTTP.
 ## Edges of visibility (probed, asserted — never left unmentioned)
 
 The probe topology deliberately walks the boundary of what the sidecar can see,
-and asserts BOTH sides of it (`probe-validate.sh` capability 4, and all of
-`probe-cross-validate.sh`):
+and asserts BOTH sides of it (`test/probe-validate.sh` capability 4, and all of
+`test/probe-cross-validate.sh`):
 
 - **External plaintext HTTP** (probe-front → `http://httpbin.org`): visible.
   Derives exactly one interaction, callee `service:httpbin.org`.
@@ -126,7 +124,7 @@ and asserts BOTH sides of it (`probe-validate.sh` capability 4, and all of
 
 ### The cross-session hook (seed of a data-at-rest lineage workstream)
 
-`probe-cross-validate.sh` runs trace A (`/stash/{tag}`: front sends exact bytes
+`test/probe-cross-validate.sh` runs trace A (`/stash/{tag}`: front sends exact bytes
 to back's `/echo`; back persists them to the PVC file AND redis) and a later
 trace B (`/replay/{tag}`: front reads both stores and re-sends the bytes over
 the visible hop). Today this honestly derives **two disconnected trees** — the

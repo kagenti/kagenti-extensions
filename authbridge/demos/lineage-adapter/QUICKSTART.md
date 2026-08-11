@@ -71,7 +71,7 @@ sidecar):
 
 ```bash
 SELF_ID=my-agent TARGET=my-agent.team1.svc.cluster.local:8080 \
-  PROMPT='Say hi. Reference code {TOKEN}.' ./concurrency-test-interactions.sh
+  PROMPT='Say hi. Reference code {TOKEN}.' ./test/concurrency-test-interactions.sh
 ```
 
 Then open `http://dg.localtest.me:8080/ui/traces` — a trace's `/flow` shows the
@@ -97,5 +97,5 @@ scaled to 0, data kept). Per-app: `NO_PROPAGATE=1` (context stops flowing
 through the app) and/or `NO_EMIT=1` (sidecar emits nothing), passed to
 `./lineage deploy`.
 
-Deeper: `RUNBOOK.md` (per-app recipe + troubleshooting), `DESIGN.md` (why the
-shim exists), `README.md` (map of everything).
+Deeper: `docs/RUNBOOK.md` (per-app recipe + troubleshooting), `docs/DESIGN.md`
+(why the shim exists), `README.md` (map of everything).

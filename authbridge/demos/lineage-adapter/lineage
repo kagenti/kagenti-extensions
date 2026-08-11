@@ -24,7 +24,7 @@ cmd="${1:-help}"
 [ $# -gt 0 ] && shift
 case "$cmd" in
   deploy)         exec "${LIB}/deploy-fleet.sh" "$@" ;;
-  verify)         exec "${SCRIPT_DIR}/verify-fleet.sh" "$@" ;;
+  verify)         exec "${SCRIPT_DIR}/test/verify-fleet.sh" "$@" ;;
   adopt)          DEPLOY="${1:?usage: ./lineage adopt <deployment>}"
                   export DEPLOY; shift
                   [ $# -eq 0 ] || { echo "error: adopt takes one deployment; knobs go via env" >&2; exit 2; }

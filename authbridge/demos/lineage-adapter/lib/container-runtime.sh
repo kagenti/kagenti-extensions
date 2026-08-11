@@ -13,7 +13,7 @@
 #   docker -> `kind load docker-image` (the direct path; works on Linux/WSL2).
 #   podman -> save + `kind load image-archive` under KIND_EXPERIMENTAL_PROVIDER=podman
 #             (the docker daemon is off and `kind load docker-image` misbehaves
-#             under podman v5 — see RUNBOOK.md gotchas).
+#             under podman v5 — see docs/RUNBOOK.md gotchas).
 #
 # KIND_CLUSTER: target kind cluster name (default kagenti).
 

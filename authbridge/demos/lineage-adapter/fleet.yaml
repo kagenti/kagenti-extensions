@@ -75,7 +75,7 @@ apps:
       WIKI_SERVICE_URL: http://wiki-service.team1.svc.cluster.local:8000
 
   # ---- lineage-probe: the all-capabilities validation topology ----
-  # One app (probe-app/ in this directory), three roles (probe-validate.sh
+  # One app (test/probe-app/), three roles (test/probe-validate.sh
   # drives + asserts it): front = LLM + external HTTP/HTTPS legs + threaded
   # A2A fan-out; back = held same-trace fan-in -> MCP tool + LLM, plus the
   # /echo cross-session writer; tool = bare-JSON-RPC MCP leaf. probe-redis is
@@ -90,7 +90,7 @@ apps:
 
   probe-tool:
     role: tool
-    image: kit:probe-app
+    image: kit:test/probe-app
     entrypoint: server
     port: 8000
     env:
@@ -100,7 +100,7 @@ apps:
 
   probe-back:
     role: agent
-    image: kit:probe-app
+    image: kit:test/probe-app
     entrypoint: server
     port: 8000
     env:
@@ -117,7 +117,7 @@ apps:
 
   probe-front:
     role: agent
-    image: kit:probe-app
+    image: kit:test/probe-app
     entrypoint: server
     port: 8000
     env:

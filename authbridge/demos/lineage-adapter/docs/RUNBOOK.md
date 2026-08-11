@@ -6,8 +6,8 @@ per-request execution forest** for it under concurrency — target 6/6 pairing.*
 
 Proven across 7 apps (trivia, currency_converter, contact_extractor, git_issue,
 slack_researcher→slack_tool, reservation_service→reservation_tool,
-wiki_memory_tool). Why the method works: `DESIGN.md`. Per-app empirical
-results: the expectation cards in `validation/`. The consumer side lives in the
+wiki_memory_tool). Why the method works: `DESIGN.md` (this directory). Per-app empirical
+results: the expectation cards in `../test/validation/`. The consumer side lives in the
 sibling repo `lab-data-governance`; the wire between the two is its
 `docs/sidecar-wire-contract.md` (this kit assumes the two repos, plus
 `agent-examples`, are cloned side by side).
@@ -41,9 +41,9 @@ a **CLI subprocess** (`claude_agent`) or a **local subprocess** such as git
 | `lib/Dockerfile.otel-shim` | ONE shim image, `--build-arg BASE_IMAGE=<app>`. Bundles `opentelemetry-distro` + instrumentors `{starlette,asgi,fastapi,httpx,requests,aiohttp-client,threading}`, propagate-only. Same recipe for every app. |
 | `lib/build-otel-shim.sh` | Builds the shim FROM an app image and kind-loads it (`./lineage shim`). Refuses images the shim cannot safely wrap — non-Python layout, or auto-instrumentation already baked (`FORCE_BAKE=1` overrides). |
 | `lib/attach-lineage.sh` | Emits (stdout) a full Deployment+Service+lineage-ConfigMap: OTEL-wrapped app container + `proxy-init` initContainer + `envoy-proxy` sidecar. Per-app: `NAME`, `IMAGE`, `SELF_ID`, `APP_ENTRYPOINT`, `ENV_VARS`. |
-| `concurrency-test-interactions.sh` (A2A) / `concurrency-test-mcp-interactions.sh` (MCP tool) | In-cluster driver: N concurrent turns, distinct caller-minted traceparent each; asserts per-trace **interaction forests** in the DG Postgres (+ optional `EXPECT_KINDS`). Target **N/N**. |
+| `test/concurrency-test-interactions.sh` (A2A) / `test/concurrency-test-mcp-interactions.sh` (MCP tool) | In-cluster driver: N concurrent turns, distinct caller-minted traceparent each; asserts per-trace **interaction forests** in the DG Postgres (+ optional `EXPECT_KINDS`). Target **N/N**. |
 
-No cluster yet? `CLUSTER-FROM-ZERO-windows.md` in this directory takes a bare
+No cluster yet? `CLUSTER-FROM-ZERO-windows.md` beside this file takes a bare
 Windows machine to a working kagenti kind cluster with a verified weather agent
 (macOS/Linux users: skip Phase 0 and swap the package manager; the kagenti
 phases are identical).
@@ -152,14 +152,14 @@ A2A-entry agent:
 ```bash
 SELF_ID=<self_id> TARGET=<name>.team1.svc.cluster.local:8080 \
   PROMPT='<a prompt that embeds {TOKEN}>' \
-  ./concurrency-test-interactions.sh
+  ./test/concurrency-test-interactions.sh
 ```
 MCP-entry tool (streamable-http tools/call):
 ```bash
 SELF_ID=<self_id> \
   MCP_URL=http://<name>.team1.svc.cluster.local:8000/mcp TOOL=<tool_name> \
   DRIVER_IMAGE=docker.io/library/<name>-otel:latest \
-  ./concurrency-test-mcp-interactions.sh
+  ./test/concurrency-test-mcp-interactions.sh
 ```
 Expect **6/6 clean**. (Drive from IN-cluster only — `kubectl port-forward` uses
 pod-loopback, which the iptables rules exclude, so it bypasses the sidecar inbound
@@ -174,7 +174,7 @@ receives — the derivation never guesses parents), multi-sidecar topologies are
 multi-root, and HTTPS legs derive no interaction (TLS passthrough).
 
 For a per-app **validation run**, fill an expectation card BEFORE firing:
-copy `validation/TEMPLATE-expectation-card.md`, state the expected entities,
+copy `test/validation/TEMPLATE-expectation-card.md`, state the expected entities,
 per-turn interaction kinds/counts (including the lifecycle/discovery
 interactions the DG UI hides by default) and the TLS legs expected to produce
 NO interaction, then derive its `EXPECT_KINDS='kind=count,…'` line and pass it
