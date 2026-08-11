@@ -188,7 +188,8 @@ func TestE2E_PodRestart(t *testing.T) {
 	p := newE2EPlugin(t, 200, store)
 
 	ctx := context.Background()
-	store.HashIncr(ctx, "token-budget:s", "tokens", 190)
+	// Pre-seed Redis above the limit (210 > 200).
+	store.HashIncr(ctx, "token-budget:s", "tokens", 210)
 	store.HashIncr(ctx, "token-budget:s", "calls", 8)
 	store.HashSetNX(ctx, "token-budget:s", "started_at", "1700000000")
 
@@ -197,11 +198,11 @@ func TestE2E_PodRestart(t *testing.T) {
 		t.Fatalf("cold cache: expected Continue, got %v", a.Type)
 	}
 
-	// Seed cache entry so refresh picks up this session.
-	respond(p, "s", 15)
+	// Seed cache entry so refresh discovers this session key.
+	respond(p, "s", 5)
 
-	// Wait for refresh (30ms interval, 80ms is ~2.6x margin).
-	time.Sleep(80 * time.Millisecond)
+	// Directly invoke refresh (deterministic, no timing dependency).
+	p.refreshCache()
 
 	if a := request(p, "s"); a.Type != pipeline.Reject {
 		t.Fatalf("after refresh: expected Reject, got %v", a.Type)

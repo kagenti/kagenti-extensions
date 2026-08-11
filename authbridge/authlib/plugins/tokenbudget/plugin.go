@@ -291,6 +291,19 @@ func (p *TokenBudget) refreshCache() {
 		}
 
 		p.mu.Lock()
+		if existing, ok := p.cache[sessionID]; ok {
+			// Take the max of local and Redis to avoid regressing counters when
+			// in-flight accumulate goroutines haven't committed to Redis yet.
+			if tokens < existing.tokens {
+				tokens = existing.tokens
+			}
+			if calls < existing.calls {
+				calls = existing.calls
+			}
+			if startedAt.IsZero() && !existing.startedAt.IsZero() {
+				startedAt = existing.startedAt
+			}
+		}
 		p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
 		p.mu.Unlock()
 	}

@@ -2,9 +2,13 @@ package storage
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+var testSeq atomic.Int64
 
 type nopStore struct{}
 
@@ -20,11 +24,12 @@ func (nopStore) Expire(context.Context, string, time.Duration) error { return ni
 func (nopStore) Close() error                                        { return nil }
 
 func TestRegisterAndOpen(t *testing.T) {
-	Register("test-scheme", func(url string) (Store, error) {
+	scheme := fmt.Sprintf("test-scheme-%d", testSeq.Add(1))
+	Register(scheme, func(url string) (Store, error) {
 		return nopStore{}, nil
 	})
 
-	s, err := Open("test-scheme", "test://addr")
+	s, err := Open(scheme, scheme+"://addr")
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -41,11 +46,12 @@ func TestOpen_UnknownScheme(t *testing.T) {
 }
 
 func TestRegister_Duplicate(t *testing.T) {
+	scheme := fmt.Sprintf("dup-scheme-%d", testSeq.Add(1))
 	defer func() {
 		if r := recover(); r == nil {
 			t.Error("expected panic on duplicate Register")
 		}
 	}()
-	Register("dup-scheme", func(url string) (Store, error) { return nopStore{}, nil })
-	Register("dup-scheme", func(url string) (Store, error) { return nopStore{}, nil })
+	Register(scheme, func(url string) (Store, error) { return nopStore{}, nil })
+	Register(scheme, func(url string) (Store, error) { return nopStore{}, nil })
 }
