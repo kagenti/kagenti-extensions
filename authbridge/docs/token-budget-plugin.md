@@ -1,10 +1,12 @@
 # token-budget Plugin
 
 Enforces per-session lifetime budgets on tokens, inference calls, and
-wall-clock duration. Runs in the outbound pipeline alongside `inference-parser`.
-Uses Redis for cross-pod durable counters; evaluates limits from a local
-cache with zero I/O on the hot path. Returns HTTP 403 on breach (lifetime
-cap is permanently exhausted; retrying won't help).
+wall-clock duration. Supports `observe` (shadow — log without blocking) and
+`deny` (return 403) modes. Uses Redis for cross-pod durable counters;
+evaluates limits from a local cache with zero I/O on the hot path.
+
+A "session" maps to the AuthBridge session ID (typically one A2A conversation
+or agent task invocation).
 
 ## Build Tag
 
@@ -58,6 +60,9 @@ pipeline:
 
 At least one of `max_tokens`, `max_calls`, or `max_duration_seconds` must be > 0.
 
+**Local Redis/Valkey** for development: `docker run -d --name valkey -p 6379:6379 valkey/valkey:latest`.
+Use `redis://localhost:6379` or `redis://host.docker.internal:6379` (container mode).
+
 ## Shadow Mode
 
 Set `on_exceed: "observe"` to run the plugin in shadow mode. The plugin
@@ -88,8 +93,8 @@ LiteLLM, OpenAI) and buffered JSON responses alike.
   "details": {
     "spent_tokens": 50200,
     "spent_calls": 42,
-    "limit_tokens": 50000,
-    "limit_calls": 100
+    "token_limit": 50000,
+    "call_limit": 100
   }
 }
 ```
