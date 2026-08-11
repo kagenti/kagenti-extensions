@@ -69,11 +69,10 @@ Because they need a live rossoctl cluster + operator + Keycloak + a real LLM, th
   Store + **OPA Policy Writer (filesystem stub)**, mounting the **single abstract** `policy.md`. AIAC runs
   in-cluster so UC-1's `analyze_tool` can reach the tool's MCP endpoint at its cluster-internal DNS name
   (`github-tool.{ns}.svc.cluster.local`); the tests trigger over `kubectl port-forward`.
-- **OPA filesystem-stub writer, not the legacy Keycloak composite writer.** The stack must run
+- **OPA filesystem-stub writer.** The stack must run
   `aiac-pdp-policy-opa` (the filesystem stub: writes `{slug}.inbound.rego` + `{slug}.outbound.rego` to
   `REGO_OUTPUT_DIR`, default `/rego`) — this is what the K8s Phase 1 Interface Pod actually deploys.
-  **Not** the superseded `aiac-pdp-policy-keycloak` composite writer, which manages Keycloak composite
-  roles and emits **no Rego at all**, and is not deployed by any current manifest. The `.rego` files are
+  The `.rego` files are
   the artifact under test; without the OPA writer there is nothing to capture.
 - **Rego capture.** `kubectl cp` the writer's `/rego` to a per-rung host dir (a `rung{1,2,3}` subfolder
   under the gitignored `test/integration/rego_out/uc1/` tree, so artifacts stay in the project for
@@ -105,7 +104,7 @@ Because they need a live rossoctl cluster + operator + Keycloak + a real LLM, th
    provisioned realm roles + client scopes, leaving the clients registered exactly as before the first
    run; clear the writer's `/rego`. This gives every rung a clean slate and makes reruns converge. (With
    the OPA writer there are no composites — the only Keycloak mutations are the roles/scopes the onboarding
-   agent provisions — but cleaning both is harmless and future-proofs against the Keycloak writer.)
+   agent provisions — but cleaning both is harmless.)
 2. **Onboard** in the rung's order via `POST /apply/service/{service_id}`, where `{service_id}` is the
    internal Keycloak UUID (`Service.id`), **not** the clientId — the onboard route is keyed on the UUID.
    - `POST /apply/service/{github-tool id}` → UC-1 classifies it a **Tool**, reads the MCP manifest,
@@ -277,8 +276,7 @@ The suite `pytest.skip`s when no `opa` binary is found.
 - **Deployment is a precondition.** The tests do not deploy or wait for registration; they cleanup →
   onboard → validate → cleanup, so reruns are hermetic and cheap.
 - **One stack, one policy, OPA filesystem stub.** Rungs 1–3 need only one AIAC stack; the OPA writer's
-  `/rego` output is what makes the pipeline observable. The Keycloak composite writer emits no Rego and is
-  not used.
+  `/rego` output is what makes the pipeline observable.
 - **Onboarding-order-independence is asserted, not assumed** (rungs 2 vs 3). A divergence is a bug.
 - **Per-scope two-gate AND.** UC-1's per-skill operator roles are mapped to the tool scopes by
   capability-match, so `target_ok` is populated; the outbound probe binds the real per-scope AND

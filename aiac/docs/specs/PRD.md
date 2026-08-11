@@ -490,9 +490,6 @@ docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile -t a
 # Build PDP Policy Writer — Phase 1 OPA rego-file mock (Rossoctl Interface Pod container 2; writes .rego to filesystem)
 docker build -f aiac/src/aiac/pdp/service/policy/opa/Dockerfile -t aiac-pdp-policy-opa:latest aiac/src/
 
-# Legacy: PDP Policy Writer — Keycloak composite-role implementation, superseded, not deployed by any current manifest
-docker build -f aiac/src/aiac/pdp/service/policy/keycloak/Dockerfile -t aiac-pdp-policy-keycloak:latest aiac/src/
-
 # Build Policy Model Store (deployed as StatefulSet aiac-policy-model-store)
 docker build -f aiac/src/aiac/policy/model_store/service/Dockerfile -t aiac-policy-model-store:latest aiac/src/
 

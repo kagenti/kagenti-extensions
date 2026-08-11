@@ -123,8 +123,8 @@ Edit the `aiac-pdp-config` ConfigMap in `pdp-interface-deployment.yaml` to match
 
 | Key | Default | Used by |
 |-----|---------|---------|
-| `KEYCLOAK_URL` | `http://keycloak-service.keycloak.svc:8080` | IdP Configuration Service, PDP Policy Writer |
-| `KEYCLOAK_REALM` | `rossoctl` | PDP Policy Writer |
+| `KEYCLOAK_URL` | `http://keycloak-service.keycloak.svc:8080` | IdP Configuration Service |
+| `KEYCLOAK_REALM` | `rossoctl` | IdP Configuration Service |
 | `KEYCLOAK_ADMIN_REALM` | `master` | IdP Configuration Service |
 | `AIAC_PDP_CONFIG_URL` | `http://aiac-pdp-config-service:7071` | Agent |
 | `AIAC_PDP_POLICY_URL` | `http://aiac-pdp-policy-service:7072` | Agent |
