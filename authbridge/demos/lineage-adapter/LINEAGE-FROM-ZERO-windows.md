@@ -302,18 +302,25 @@ and the pod cycling to Running. Then **[HUMAN]**: open the platform UI in the br
 ```bash
 cd ~/kagenti-extensions/authbridge/demos/lineage-adapter
 NAMESPACE=team1 SELF_ID=weather-service TARGET=weather-service.team1.svc.cluster.local:8080 \
-  ./concurrency-test-interactions.sh
+  N=3 SETTLE=60 ./concurrency-test-interactions.sh
 ```
-It fires 6 concurrent questions from inside the cluster, each with its own conversation
+It fires N concurrent questions from inside the cluster, each with its own conversation
 ID, and checks each derived tree in the DG database.
+
+**Be patient — turns are LLM-bound.** On a CPU-only machine one weather turn takes
+2–5 minutes, and N concurrent turns contend for the same CPU. The harness prints each
+turn's wall time (`in NNNs`) and waits up to 10 minutes per turn — a long wait is normal,
+not a hang. Start with `N=3` as above; only after it passes, optionally re-run with `N=6`.
+
 You should see, as the last line:
 ```
-CLEAN FORESTS: 6/6   DISTINCT TRACES: 6/6
+CLEAN FORESTS: 3/3   DISTINCT TRACES: 3/3
 ```
-(each per-trace line above it ends `[OK]`). Anything less than 6/6 — report the full
-output. Never drive this through `kubectl port-forward` — that path bypasses the sidecar.
+(each per-trace line above it ends `[OK]`). Anything less than N/N — report the full
+output including the per-turn times. Never drive this through `kubectl port-forward` —
+that path bypasses the sidecar.
 
-**Finish line reached** when 6a shows the tree and 6b prints 6/6.
+**Finish line reached** when 6a shows the tree and 6b prints N/N.
 
 ---
 

@@ -54,6 +54,11 @@
 #   SETTLE    seconds to wait for spans to derive (default 25)
 #   DRIVER_POD in-cluster curl pod name (default lineage-driver2)
 #   DG_NS     data-governance namespace (default data-governance)
+#   TURN_TIMEOUT per-request curl timeout in seconds (default 600). A turn is
+#             LLM-bound: on CPU-only hosts a single weather turn can take
+#             2-5 minutes, longer under N-way concurrency — a short client
+#             timeout reads as HTTP 000 and looks like a network failure.
+#             The -w output prints each turn's wall time; believe it.
 #   EXPECT_KINDS optional "kind=count,kind=count" (e.g.
 #             "tool_call_arguments=1,mcp_lifecycle_request=2"). Per trace, read
 #             the derived kinds from the interactions API and count one entry
@@ -78,6 +83,24 @@ DRIVER_POD="${DRIVER_POD:-lineage-driver2}"
 DG_NS="${DG_NS:-data-governance}"
 EXPECT_KINDS="${EXPECT_KINDS:-}"
 EXPECT_ROOTS="${EXPECT_ROOTS:-}"
+TURN_TIMEOUT="${TURN_TIMEOUT:-600}"
+
+# Resolve an in-cluster service FQDN to its ClusterIP on the HOST side. The
+# curlimages driver's musl resolver fails on *.svc.cluster.local FQDNs under
+# some kernels (seen on WSL2: curl exit 6 while nslookup in the same pod
+# succeeds) — kubectl already knows the answer, so don't make the driver ask.
+case "$TARGET" in
+  *.svc.cluster.local:*)
+    _svc="${TARGET%%.*}"
+    _rest="${TARGET#*.}"; _ns="${_rest%%.*}"
+    _port="${TARGET##*:}"
+    _ip="$(kubectl get svc -n "$_ns" "$_svc" -o jsonpath='{.spec.clusterIP}' 2>/dev/null || true)"
+    if [ -n "$_ip" ]; then
+      echo ">> resolved $TARGET -> $_ip:$_port (host-side, driver-DNS-independent)"
+      TARGET="$_ip:$_port"
+    fi
+    ;;
+esac
 
 # ---- ensure an in-cluster driver pod exists (IfNotPresent: works offline) ----
 # A pod that exists but isn't Running (e.g. left in Unknown/Failed by a node
@@ -105,7 +128,7 @@ for i in $(seq 0 $((N-1))); do
   TIDS[$i]="$tid"; TOKS[$i]="$tok"
   text="${PROMPT//\{TOKEN\}/$tok}"
   body="{\"jsonrpc\":\"2.0\",\"id\":\"$i\",\"method\":\"message/send\",\"params\":{\"message\":{\"role\":\"user\",\"messageId\":\"m$i\",\"parts\":[{\"kind\":\"text\",\"text\":\"$text\"}]}}}"
-  line="curl -s -o /dev/null -w 'req $tok -> HTTP %{http_code}\\n' -X POST http://$TARGET/ "
+  line="curl -s -o /dev/null --max-time $TURN_TIMEOUT -w 'req $tok -> HTTP %{http_code} in %{time_total}s\\n' -X POST http://$TARGET/ "
   line+="-H 'Content-Type: application/json' -H 'traceparent: 00-$tid-$sid-01' -d '$body' &"
   script+="$line"$'\n'
 done
