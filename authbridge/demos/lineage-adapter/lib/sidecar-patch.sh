@@ -53,6 +53,22 @@ kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
   exit 1
 }
 
+# Adopt targets are natively-instrumented apps (no shim) — they only propagate
+# trace context when their own OTel SDK is configured. A Deployment without
+# OTEL_EXPORTER_OTLP_ENDPOINT (seen with UI-"Deploy From Image" imports, which
+# drop the example manifests' env) records exchanges that scatter into orphan
+# traces: sidecar attaches fine, forests never link. Warn at attach time.
+if ! kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
+    -o jsonpath='{.spec.template.spec.containers[*].env[*].name}' \
+    | grep -q OTEL_EXPORTER_OTLP_ENDPOINT; then
+  echo "WARNING: deploy/$DEPLOY has no OTEL_EXPORTER_OTLP_ENDPOINT env." >&2
+  echo "  Its app will not propagate trace context; its exchanges will land in" >&2
+  echo "  orphan traces instead of the caller's tree. If the app is OTel-capable:" >&2
+  echo "    kubectl set env -n $NAMESPACE deploy/$DEPLOY \\" >&2
+  echo "      OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector.<platform-ns>.svc.cluster.local:8335" >&2
+  echo "  (If it is NOT OTel-instrumented, use the fleet path — it adds the shim.)" >&2
+fi
+
 gen() {  # $1 = EMIT mode; forwards the shared knobs to the one generator
   EMIT="$1" NAME="$DEPLOY" SELF_ID="$SELF_ID" NAMESPACE="$NAMESPACE" \
     "${SCRIPT_DIR}/attach-lineage.sh"
