@@ -100,6 +100,7 @@ func (p *TokenBudget) Configure(raw json.RawMessage) error {
 }
 
 func (p *TokenBudget) Init(_ context.Context) error {
+	// "redis" driver handles both Redis and Valkey (wire-compatible); URL must use redis:// scheme.
 	store, err := storage.Open("redis", p.cfg.RedisURL)
 	if err != nil {
 		return fmt.Errorf("token-budget: redis connect: %w", err)
@@ -137,6 +138,9 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 	p.mu.RUnlock()
 
 	if !ok {
+		// Cold cache: session not yet seen by this pod. First request passes; refresh loop
+		// picks up Redis counters within one interval. Intentional one-request overshoot
+		// tradeoff for zero-I/O enforcement on the hot path.
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
@@ -225,14 +229,11 @@ func (p *TokenBudget) accumulate(sessionID string, tokens int64) {
 	if tokens > 0 {
 		if _, err := p.store.HashIncr(ctx, key, "tokens", tokens); err != nil {
 			p.log.Warn("redis HashIncr tokens failed", "session", sessionID, "err", err)
-			return
 		}
 	}
 
-	_, err := p.store.HashIncr(ctx, key, "calls", 1)
-	if err != nil {
+	if _, err := p.store.HashIncr(ctx, key, "calls", 1); err != nil {
 		p.log.Warn("redis HashIncr calls failed", "session", sessionID, "err", err)
-		return
 	}
 
 	set, _ := p.store.HashSetNX(ctx, key, "started_at", strconv.FormatInt(time.Now().Unix(), 10))
