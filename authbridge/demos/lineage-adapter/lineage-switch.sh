@@ -4,9 +4,9 @@
 #
 #   ./lineage-switch.sh off     # 1. fleet apps redeployed BARE: no OTel shim
 #                               #    wrapper AND no lineage-telemetry plugin in
-#                               #    the sidecar (NO_OTEL=1 NO_LINEAGE=1 through
-#                               #    deploy-fleet.sh, manifests only — no image
-#                               #    builds)
+#                               #    the sidecar (NO_PROPAGATE=1 NO_EMIT=1
+#                               #    through deploy-fleet.sh, manifests only —
+#                               #    no image builds)
 #                               # 2. data-governance stack scaled to 0: no
 #                               #    receiver, no UI, no interactions processor,
 #                               #    no postgres POD (the PVC — the data —
@@ -38,7 +38,7 @@ fleet_names() {  # app names from the validated catalog
 case "$1" in
   off)
     echo ">> [1/2] redeploying fleet bare (no shim, no lineage plugin)"
-    NO_OTEL=1 NO_LINEAGE=1 SKIP_BUILD=1 "${SCRIPT_DIR}/deploy-fleet.sh"
+    NO_PROPAGATE=1 NO_EMIT=1 SKIP_BUILD=1 "${SCRIPT_DIR}/deploy-fleet.sh"
     echo ">> [2/2] scaling data-governance stack to 0 (PVC/data preserved)"
     kubectl scale -n "$DG_NS" deploy --all --replicas=0
     kubectl scale -n "$DG_NS" statefulset data-governance-postgres --replicas=0
