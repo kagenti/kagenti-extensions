@@ -76,11 +76,12 @@ else
 fi
 
 # ---- build env block ----
-# propagate-only OTEL env is always present (harmless when NO_OTEL, ignored).
+# Exporter suppression lives ONLY in the command wrapper's --*_exporter none
+# flags (the launcher writes its flags over the environment, so an env copy is
+# dead weight — and under NO_OTEL=1 it could clobber an instrumented app's own
+# exporter config). Env carries only what the wrapper actually reads and the
+# flags don't cover: propagators + service name.
 env_block=$(cat <<EOF
-            - { name: OTEL_TRACES_EXPORTER,  value: "none" }
-            - { name: OTEL_METRICS_EXPORTER, value: "none" }
-            - { name: OTEL_LOGS_EXPORTER,    value: "none" }
             - { name: OTEL_PROPAGATORS,      value: "tracecontext,baggage" }
             - { name: PORT, value: "${APP_PORT}" }
             - { name: HOST, value: "0.0.0.0" }
