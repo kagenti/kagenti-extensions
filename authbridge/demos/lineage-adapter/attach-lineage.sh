@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # GENERALIZED lineage-sidecar attachment. Emits (to stdout) a complete manifest —
 # lineage ConfigMap + Service + Deployment — that runs ANY app image with:
-#   (a) arielf's lineage sidecar (proxy-init initContainer + envoy-proxy sidecar,
+#   (a) the AuthBridge lineage sidecar (proxy-init initContainer + envoy-proxy sidecar,
 #       AuthBridge envoy-sidecar mode, capture_io:true, no auth/SPIRE), and
 #   (b) the propagate-only OTEL shim launcher wrapping the app command
 #       (--traces_exporter none: export nothing, only propagate traceparent).
 #
-# Supersedes the trivia-specific trivia-experiment.yaml. Per app, only a handful
-# of variables change (image + self_id + the app's own entrypoint + LLM env).
+# Per app, only a handful of variables change (image + self_id + the app's own
+# entrypoint + LLM env).
 #
 # Usage (pipe to kubectl apply):
 #   NAME=a2a-currency-converter \
@@ -23,8 +23,8 @@
 #   SELF_ID            lineage self_id (default: NAME). Only this varies in the config.
 #   APP_PORT           app container port (default 8000).
 #   SVC_PORT           service port (default 8080).
-#   APP_ENTRYPOINT     the app's OWN command tokens that replace trivia's `server`
-#                      (default 'server'). Check the app image's Dockerfile CMD,
+#   APP_ENTRYPOINT     the app's OWN command tokens (default 'server').
+#                      Check the app image's Dockerfile CMD,
 #                      dropping any leading `uv run --no-sync`.
 #   ENV_VARS           space-separated KEY=VALUE app env (LLM_* etc). Values must
 #                      not contain spaces (fine for our URLs/models). May include

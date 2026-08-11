@@ -1,5 +1,4 @@
 # GENERALIZED deploy-time propagation shim for ANY uninstrumented Kagenti app.
-# (STUDY §10.5 / §10.10. Supersedes the app-specific Dockerfile.trivia-otel.)
 #
 # We DO NOT touch the app's source. We layer OpenTelemetry auto-instrumentation
 # ON TOP of the user's image so it PROPAGATES traceparent (extract on the inbound
@@ -14,10 +13,10 @@
 # client is httpx / requests / aiohttp — the mainstream Python A2A/MCP stack.
 #
 # Build (parameterized — only BASE_IMAGE changes per app):
-#   podman build -f lineage-sidecar/Dockerfile.otel-shim \
+#   podman build -f demos/lineage-adapter/Dockerfile.otel-shim \
 #     --build-arg BASE_IMAGE=docker.io/library/<app>:latest \
-#     -t <app>-otel:latest lineage-sidecar
-# or use lineage-sidecar/build-otel-shim.sh which also kind-loads it.
+#     -t <app>-otel:latest demos/lineage-adapter
+# or use demos/lineage-adapter/build-otel-shim.sh which also kind-loads it.
 #
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}

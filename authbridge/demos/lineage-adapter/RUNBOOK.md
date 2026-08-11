@@ -1,7 +1,7 @@
 # Runbook — adapt an arbitrary Kagenti app for correct lineage in N steps
 
 *How to take any uninstrumented (or already-instrumented) Kagenti Python app and,
-with minimum friction, get arielf's lineage sidecar to reconstruct a **correct
+with minimum friction, get the AuthBridge lineage sidecar to reconstruct a **correct
 per-request execution forest** for it under concurrency — target 6/6 pairing.*
 
 Proven across 7 apps (trivia, currency_converter, contact_extractor, git_issue,
