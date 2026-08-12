@@ -94,10 +94,14 @@ LiteLLM, OpenAI) and buffered JSON responses alike.
     "spent_tokens": 50200,
     "spent_calls": 42,
     "token_limit": 50000,
-    "call_limit": 100
+    "call_limit": 100,
+    "duration_seconds": 1205,
+    "duration_limit": 1800
   }
 }
 ```
+
+`duration_seconds` and `duration_limit` are included only when `max_duration_seconds` is configured.
 
 ## Redis Key Schema
 
@@ -116,6 +120,8 @@ token-budget:<session-id>  (Hash, TTL = session_ttl_seconds)
 | Redis fails mid-session | Local cache continues enforcing; writes dropped silently |
 | Pod restarts | First request passes (cold cache); refresh picks up Redis counters within one interval |
 | Provider returns no usage data | `max_tokens` not enforced; `max_calls` and `max_duration_seconds` still work |
+
+**Fail-open guarantee:** The plugin never blocks requests due to its own infrastructure failures. Redis unavailability degrades enforcement (local cache only, no cross-pod consistency) but never causes false denials.
 
 **Note on token counting:** Token accumulation requires the LLM provider to
 return `usage` (prompt/completion token counts) in responses. Providers that

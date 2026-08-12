@@ -122,30 +122,29 @@ func (p *TokenBudget) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// OnRequest evaluates cached counters against limits. No I/O.
+// OnRequest evaluates cached counters against limits and optimistically reserves
+// a call slot so concurrent requests on the same session see each other. No I/O.
 func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	sessionID := p.sessionID(pctx)
 	if sessionID == "" {
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	p.mu.RLock()
+	p.mu.Lock()
 	c, ok := p.cache[sessionID]
-	var snap counters
-	if ok {
-		snap = *c
-	}
-	p.mu.RUnlock()
-
 	if !ok {
+		p.mu.Unlock()
 		// Cold cache: session not yet seen by this pod. First request passes; refresh loop
 		// picks up Redis counters within one interval. Intentional one-request overshoot
 		// tradeoff for zero-I/O enforcement on the hot path.
 		return pipeline.Action{Type: pipeline.Continue}
 	}
-
+	snap := *c
 	if reason := p.evaluate(&snap); reason != "" {
 		if p.cfg.OnExceed == "observe" {
+			// Still reserve a call — the request will proceed in shadow mode.
+			c.calls++
+			p.mu.Unlock()
 			pctx.Observe("shadow_budget_exceeded")
 			p.log.Warn("budget exceeded (shadow mode)",
 				"session", sessionID,
@@ -154,13 +153,23 @@ func (p *TokenBudget) OnRequest(_ context.Context, pctx *pipeline.Context) pipel
 				"calls", snap.calls)
 			return pipeline.Action{Type: pipeline.Continue}
 		}
-		return pipeline.DenyWithDetails("budget.exceeded", reason, map[string]any{
+		p.mu.Unlock()
+		details := map[string]any{
 			"spent_tokens": snap.tokens,
 			"spent_calls":  snap.calls,
 			"token_limit":  p.cfg.MaxTokens,
 			"call_limit":   p.cfg.MaxCalls,
-		})
+		}
+		if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
+			details["duration_seconds"] = int64(time.Since(snap.startedAt).Seconds())
+			details["duration_limit"] = p.cfg.MaxDurationSeconds
+		}
+		return pipeline.DenyWithDetails("budget.exceeded", reason, details)
 	}
+	// Optimistically reserve a call slot so concurrent requests see it.
+	c.calls++
+	p.mu.Unlock()
+
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -192,11 +201,12 @@ func (p *TokenBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Context,
 	p.mu.Lock()
 	c, ok := p.cache[sessionID]
 	if !ok {
-		c = &counters{startedAt: time.Now()}
+		// First response without a prior OnRequest (e.g. cold cache path).
+		c = &counters{startedAt: time.Now(), calls: 1}
 		p.cache[sessionID] = c
 	}
 	c.tokens += tokens
-	c.calls++
+	// calls already incremented by OnRequest's optimistic reserve.
 	p.mu.Unlock()
 
 	return pipeline.Action{Type: pipeline.Continue}
