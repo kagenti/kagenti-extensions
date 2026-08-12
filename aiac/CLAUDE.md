@@ -204,7 +204,7 @@ demo workloads, which don't) and CPU/memory requests + limits.
 
 ## External references
 
-- [Kagenti Developer Guide](https://github.com/kagenti/kagenti/blob/main/docs/dev-guide.md) — upstream Kagenti dev guide: per-persona workflows (agent, tool, extensions developers, MCP gateway operators), Git/PR process, pre-commit hooks, feature flags, local Kagenti UI v2 development (React frontend + FastAPI backend, building/deploying images to Kubernetes), and HyperShift-based testing on ephemeral OpenShift clusters (cluster lifecycle, cost management, troubleshooting).
+- [Rosso Developer Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/dev-guide.md) — upstream Rosso dev guide (formerly the Kagenti Developer Guide; Kagenti was renamed to Rosso): per-persona workflows (agent, tool, extensions developers, MCP gateway operators), Git/PR process, pre-commit hooks, feature flags (all new features must be gated behind a disabled-by-default `ROSSOCTL_FEATURE_FLAG_<NAME>` flag), local Rosso UI v2 development (React frontend + FastAPI backend, building/deploying images to Kubernetes), and HyperShift-based testing on ephemeral OpenShift clusters (cluster lifecycle, cost management, troubleshooting).
 
 ## Agent skills
 
