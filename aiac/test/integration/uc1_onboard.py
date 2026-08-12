@@ -593,13 +593,29 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
             )
 
         if not poll_until(_ready, timeout=BUNDLE_TIMEOUT, interval=BUNDLE_POLL_INTERVAL):
+            # Surface the RAW outbound (code, body) — not just the classified outcome — so a stalled
+            # run is self-diagnosing (issue #139). The classifier collapses two very different
+            # failures into ``"error"``: a 503 (or an ``AB_ERR`` transport exception, code=None) means
+            # the ``token-exchange`` leg never came up and OPA was *never consulted*, whereas a
+            # genuine OPA policy stall would surface as ``"deny"`` (HTTP 200 + an OPA error frame) —
+            # never ``"error"``, because the generated Rego always carries ``default allow := false``.
+            # Printing the transport status here says which of the two it is without a second run.
+            ob_token = mint_token(
+                "dev-user", scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"]
+            )
+            ob_code, ob_body = outbound_probe(
+                ob_token, "source-read", namespace=ctx["namespace"], agent_pod=ctx["agent_pod"]
+            )
             raise RuntimeError(
                 f"live pipeline did not converge within {BUNDLE_TIMEOUT:.0f}s after onboarding "
                 f"{workloads} + Part B: inbound(dev-user)={inbound_decision(ctx, 'dev-user')!r} "
                 f"inbound(devops-user)={inbound_decision(ctx, 'devops-user')!r} "
-                f"outbound(dev-user,source-read)={outbound_decision(ctx, 'dev-user', 'source-read')!r} "
-                f"(expected allow / deny / {expected_source_read}). bundle-service or OPA may still be "
-                "polling, or token-exchange never came up — see docs/opa-kind-runbook.md."
+                f"outbound(dev-user,source-read)={outbound_outcome(ob_code, ob_body)!r} "
+                f"[raw: HTTP {ob_code}, body={ob_body[:300]!r}] "
+                f"(expected allow / deny / {expected_source_read}). A 503 (or code=None) here means "
+                "the token-exchange leg never came up so OPA was never reached; a 200 with an OPA "
+                "error frame would instead be a genuine policy stall — see docs/opa-kind-runbook.md "
+                "and issue #139."
             )
         yield ctx
     finally:
