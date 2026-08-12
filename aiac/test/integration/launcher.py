@@ -1,23 +1,35 @@
 """Shared machinery for the integration-test launchers.
 
-The subprocess half — spawn aiac services as ``uvicorn`` subprocesses, poll each ``GET /health``
-until ready, run some work, tear them down — is used by ``test/pdp/policy/generate_rego.py`` (5.2)
-and ``test/integration/test_policy_pipeline.py`` (5.3).
+Two halves, both live here so a single module import serves every launcher:
 
-The cluster half — ``kubectl`` cp, ``kubectl port-forward``, ``resolve_pod``, and the ``opa``
-oracle — is used by the UC-1 onboarding ladder (``test/integration/test_uc1_onboard_agent_only.py``
-and its rung-2/3 siblings, 5.4), which drives a real rossoctl/Kind cluster rather than in-process
-subprocesses.
+* **Subprocess half** — spawn aiac services as ``uvicorn`` subprocesses, poll each ``GET /health``
+  until ready, run some work, tear them down. Used by ``test/pdp/policy/generate_rego.py`` (the
+  standalone Rego-dump launcher, which is *not* under ``test/integration/`` and is out of scope for
+  the live-cluster rework). ``Service`` / ``start_service`` / ``wait_until_ready`` /
+  ``running_services`` / ``terminate`` / ``print_rego_dir`` / ``resolve_output_dir`` exist for it.
+
+* **Live-cluster half** — drive a real rossoctl/Kind cluster with the AuthBridge OPA pipeline wired
+  in (see ``docs/opa-kind-runbook.md``). ``kubectl`` wrappers + ``port_forward`` + ``resolve_pod``
+  onboard through the in-cluster Controller; ``mint_token`` / ``jwt_claim`` / ``inbound_probe`` /
+  ``outbound_probe`` send **real HTTP requests through AuthBridge** and classify the **real OPA
+  plugin's** allow/deny; ``poll_until`` waits for ``bundle-service`` to reflect a CR change; and the
+  skip gates (``require_env_or_skip`` / ``require_pipeline`` / ``verify_subject_mapper``) make the
+  suite skip cleanly — never false-pass — when the cluster is not wired.
+
+The evaluator is now the deployed plugin, not a standalone OPA-CLI run over dumped ``.rego``: there is
+deliberately no ``opa`` binary dependency and no ``.rego``-dump oracle here anymore (handoff 08).
 
 It imports only the standard library and ``requests`` — never ``aiac`` — so a launcher may import
 it *before* setting the environment variables the aiac libraries read at import time. ``pytest`` is
-imported lazily inside ``opa_bin`` (only 5.4 uses it, and only under pytest) so the module stays
-importable in the standalone launchers.
+imported lazily inside the skip gates (only the live suite uses them, and only under pytest) so the
+module stays importable in the standalone launchers.
 """
 
 from __future__ import annotations
 
+import base64
 import json
+import logging
 import os
 import shutil
 import signal
@@ -25,12 +37,15 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 import requests
+
+log = logging.getLogger(__name__)
 
 
 def ensure_on_path(*paths: Path) -> None:
@@ -203,14 +218,6 @@ def kubectl_get_json(resource: str, *, namespace: str | None = None) -> dict:
     return json.loads(kubectl(*args))
 
 
-def kubectl_cp(pod: str, remote_path: str, local_path: Path, *, namespace: str, container: str | None = None) -> None:
-    """``kubectl cp <ns>/<pod>:<remote_path> <local_path>`` — copy a file/dir out of a pod."""
-    args = ["cp", f"{namespace}/{pod}:{remote_path}", str(local_path)]
-    if container:
-        args += ["-c", container]
-    kubectl(*args, timeout=120.0)
-
-
 def resolve_pod(selector: str, *, namespace: str) -> str:
     """Return the name of the first pod matching a label ``selector`` (e.g. ``app=aiac-opa``)."""
     out = kubectl(
@@ -285,34 +292,354 @@ def port_forward(target: str, *, namespace: str, local_port: int, remote_port: i
 
 
 # ======================================================================================
-# OPA oracle (5.4) — standalone ``opa eval`` as the verification binary
+# Live AuthBridge probes — the real OPA plugin is the evaluator (handoff 08)
+# ======================================================================================
+#
+# The integration suite no longer evaluates ``.rego`` with a standalone ``opa`` binary. It onboards
+# (which upserts the ``AuthorizationPolicy`` CR on the live API), waits for ``bundle-service`` to
+# recompose the per-pod bundle, then sends **real HTTP requests through AuthBridge** and reads the
+# **real OPA plugin's** decision off the response. AuthBridge's own ``jwt-validation`` + ``mcp-parser``
+# build ``input.identity.*`` + ``input.mcp.params.name`` — the test never hand-builds an input doc.
+#
+# Request shaping + outcome classification follow ``docs/opa-kind-runbook.md`` exactly (Parts A/B).
+
+KEYCLOAK_CLIENT_ID = "rossoctl"  # the platform client the runbook mints user tokens through
+_CURL_IMAGE = "curlimages/curl:8.10.1"  # same throwaway image the runbook probes with
+
+
+def mint_token(
+    username: str,
+    password: str,
+    *,
+    keycloak_url: str,
+    realm: str,
+    client_id: str = KEYCLOAK_CLIENT_ID,
+    scope: str = "openid",
+    timeout: float = 30.0,
+) -> str:
+    """Mint a user access token via the OIDC password grant (runbook A.1 / B.4).
+
+    Requires Direct Access Grants enabled on ``client_id`` and the user's password set; a token whose
+    ``sub`` is the username further needs the realm's ``username -> sub`` mapper (see
+    ``verify_subject_mapper``). Raises ``requests.HTTPError`` on a non-2xx token response so the caller
+    can turn a mint failure into a skip."""
+    resp = requests.post(
+        f"{keycloak_url.rstrip('/')}/realms/{realm}/protocol/openid-connect/token",
+        data={
+            "client_id": client_id,
+            "username": username,
+            "password": password,
+            "grant_type": "password",
+            "scope": scope,
+        },
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()["access_token"]
+
+
+def jwt_claim(token: str, claim: str) -> object:
+    """Best-effort decode of a JWT payload claim (no signature check — for the ``sub`` sanity gate).
+
+    Splits off the payload segment, pads it to a base64url boundary, and returns ``claim`` (``None``
+    if absent). Raises on a structurally invalid token."""
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return json.loads(base64.urlsafe_b64decode(payload)).get(claim)
+
+
+def _parse_curl_output(stdout: str) -> tuple[int | None, str]:
+    """Split a probe pod's stdout into ``(http_code, body)``.
+
+    The probe scripts append a ``HTTP_CODE:<n>`` sentinel after the response body (inbound curl ``-w``)
+    or emit an ``AB_HTTP:<n>`` / ``AB_ERR:<msg>`` marker (outbound python). Returns ``(None, stdout)``
+    when no code marker is present (a failed probe — classified as ``"error"`` upstream)."""
+    code: int | None = None
+    body_lines: list[str] = []
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("HTTP_CODE:") or stripped.startswith("AB_HTTP:"):
+            try:
+                code = int(stripped.split(":", 1)[1])
+            except ValueError:
+                code = None
+            continue
+        if stripped.startswith("AB_ERR:"):
+            return None, stripped[len("AB_ERR:") :].strip()
+        body_lines.append(line)
+    return code, "\n".join(body_lines).strip()
+
+
+def inbound_probe(
+    token: str,
+    *,
+    namespace: str,
+    agent_service: str,
+    port: int = 8080,
+    timeout: float = 120.0,
+) -> tuple[int | None, str]:
+    """Send an inbound request through AuthBridge as ``token`` and return ``(http_code, body)``.
+
+    Mirrors the runbook's ``probe_as`` (A.2): a throwaway ``curlimages/curl`` pod in ``namespace``
+    POSTs a ``ping/nonexistent`` JSON-RPC method to the agent Service — enough to clear
+    ``jwt-validation`` + OPA and reach (or be blocked before) the app, without triggering the CrewAI
+    flow. ``curl -w`` appends the sentinel ``HTTP_CODE:<n>`` line the caller parses. ``--command`` is
+    used to override the image entrypoint robustly (a deliberate deviation from the runbook's bare
+    ``-- sh -c``). Any kubectl/scheduling failure returns ``(None, <message>)`` -> classified
+    ``"error"`` so a poll keeps waiting rather than crashing."""
+    url = f"http://{agent_service}.{namespace}.svc.cluster.local:{port}/"
+    script = (
+        "curl -s -m 15 -w '\\nHTTP_CODE:%{http_code}\\n' "
+        f"-X POST {url} "
+        "-H 'Content-Type: application/json' -H \"Authorization: Bearer $TOK\" "
+        "-d '{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"ping/nonexistent\",\"params\":{}}'"
+    )
+    pod_name = f"probe-inbound-{uuid.uuid4().hex[:8]}"
+    try:
+        out = kubectl(
+            "run", pod_name,
+            "-n", namespace,
+            "--image", _CURL_IMAGE,
+            "--restart=Never", "--rm", "--attach", "--quiet",
+            f"--env=TOK={token}",
+            "--command", "--", "sh", "-c", script,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        stderr = getattr(exc, "stderr", "") or getattr(exc, "output", "") or str(exc)
+        return None, f"inbound probe pod failed: {stderr}".strip()
+    return _parse_curl_output(out)
+
+
+def outbound_probe(
+    token: str,
+    tool_name: str,
+    *,
+    namespace: str,
+    agent_pod: str,
+    tool_url: str = "http://github-tool:9090/",
+    container: str = "agent",
+    timeout: float = 120.0,
+) -> tuple[int | None, str]:
+    """Drive an outbound MCP ``tools/call`` through AuthBridge's forward proxy and return
+    ``(http_code, body)``.
+
+    Mirrors the runbook's outbound probe (B.4) but invokes a **bare** tool (``params.name = tool_name``,
+    e.g. ``source-read``) instead of ``tools/list``, so AuthBridge's ``mcp-parser`` surfaces
+    ``input.mcp.params.name`` and OPA's per-tool outbound gate is actually exercised. The agent app
+    container has ``HTTP_PROXY=127.0.0.1:8081`` (the forward proxy) and ``python3``; ``token-exchange``
+    uses the carried ``dev-user`` bearer as the RFC 8693 subject token. The python emits an
+    ``AB_HTTP:<n>`` marker + body (or ``AB_ERR:<msg>``) the caller parses. Any exec failure returns
+    ``(None, <message>)`` -> ``"error"``."""
+    script = (
+        "import urllib.request, urllib.error, json\n"
+        f"tok = {json.dumps(token)}\n"
+        f"name = {json.dumps(tool_name)}\n"
+        f"url = {json.dumps(tool_url)}\n"
+        'op = urllib.request.build_opener('
+        'urllib.request.ProxyHandler({"http": "http://127.0.0.1:8081"}))\n'
+        'body = json.dumps({"jsonrpc": "2.0", "id": "1", "method": "tools/call",'
+        ' "params": {"name": name, "arguments": {}}}).encode()\n'
+        'req = urllib.request.Request(url, data=body, headers={'
+        '"Content-Type": "application/json", "Authorization": "Bearer " + tok})\n'
+        "try:\n"
+        "    r = op.open(req, timeout=15)\n"
+        '    print("AB_HTTP:%d" % r.status)\n'
+        '    print(r.read().decode("utf-8", "replace"))\n'
+        "except urllib.error.HTTPError as e:\n"
+        '    print("AB_HTTP:%d" % e.code)\n'
+        '    print(e.read().decode("utf-8", "replace"))\n'
+        "except Exception as e:\n"
+        '    print("AB_ERR:%s" % e)\n'
+    )
+    try:
+        out = kubectl(
+            "exec", "-i", "-n", namespace, agent_pod, "-c", container,
+            "--", "python3", "-",
+            input_text=script,
+            timeout=timeout,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+        stderr = getattr(exc, "stderr", "") or getattr(exc, "output", "") or str(exc)
+        return None, f"outbound probe exec failed: {stderr}".strip()
+    return _parse_curl_output(out)
+
+
+def inbound_outcome(code: int | None) -> str:
+    """Classify an inbound probe: HTTP 200 -> ``"allow"`` (reached the app), 403 -> ``"deny"`` (OPA
+    blocked it), anything else -> ``"error"`` (runbook A.4)."""
+    if code == 200:
+        return "allow"
+    if code == 403:
+        return "deny"
+    return "error"
+
+
+def outbound_outcome(code: int | None, body: str) -> str:
+    """Classify an outbound probe by **body**, per runbook B.4.
+
+    On an MCP-shaped request AuthBridge renders an OPA denial as a JSON-RPC error frame **at HTTP 200**
+    (``error.data.plugin == "opa"`` / ``error.data.error == "policy.forbidden"``) — not an HTTP error.
+    So: ``503`` (token-exchange failed before OPA) or any other non-200/403 -> ``"error"``; a plain
+    ``403`` (non-MCP-shaped rejection fallback) -> ``"deny"``; HTTP 200 with an OPA error frame ->
+    ``"deny"``; HTTP 200 with any other body (a ``result`` frame, or a tool-level error that means OPA
+    *allowed* the call) -> ``"allow"``. Classify by the frame, never the transport status."""
+    if code is None:
+        return "error"
+    if code == 403:
+        return "deny"
+    if code != 200:
+        return "error"
+    try:
+        doc = json.loads(body)
+    except (ValueError, TypeError):
+        return "error"
+    err = doc.get("error") if isinstance(doc, dict) else None
+    if isinstance(err, dict):
+        data = err.get("data")
+        if isinstance(data, dict) and (
+            data.get("plugin") == "opa" or data.get("error") == "policy.forbidden"
+        ):
+            return "deny"
+    return "allow"
+
+
+def poll_until(
+    predicate: Callable[[], bool], *, timeout: float, interval: float = 5.0
+) -> bool:
+    """Poll ``predicate`` until it returns truthy or ``timeout`` seconds elapse; return whether it did.
+
+    Exceptions from ``predicate`` (a probe against an ephemeral pod / a bundle still rebuilding) are
+    swallowed and retried — the point is to wait out ``bundle-service``'s rebuild + OPA poll latency
+    without ``sleep``-and-hope (handoff 08 §2.2)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if predicate():
+                return True
+        except Exception as exc:  # noqa: BLE001 — a transient probe failure is expected while waiting
+            log.debug("poll_until: predicate raised (retrying): %s", exc)
+        time.sleep(interval)
+    return False
+
+
+# ======================================================================================
+# Skip gates — the suite skips (never false-passes) when the live pipeline is not wired
 # ======================================================================================
 
 
-def opa_bin() -> str:
-    """Path to the ``opa`` binary (``$OPA_BIN`` -> ``PATH``), or ``pytest.skip`` the calling test.
-    Absence SKIPS, never fails (spec/issue acceptance)."""
-    found = os.environ.get("OPA_BIN") or shutil.which("opa")
-    if not found:
+def require_env_or_skip(*names: str) -> dict[str, str]:
+    """Like ``require_env`` but ``pytest.skip`` (not exit) when a variable is unset — so a developer
+    running the integration marker without ``test/integration/.env`` sourced gets a clean skip, not a
+    crash. ``pytest`` is imported lazily so the module stays importable outside pytest."""
+    missing = [name for name in names if not os.environ.get(name)]
+    if missing:
         import pytest
 
-        pytest.skip("opa binary not found (set OPA_BIN or add opa to PATH)")
-    return found
+        pytest.skip(
+            "integration env not set: "
+            + ", ".join(missing)
+            + " — source test/integration/.env (see aiac/CLAUDE.md)."
+        )
+    return {name: os.environ[name] for name in names}
 
 
-def opa_eval(rego_paths: list[Path], query: str, input_doc: dict) -> object:
-    """Evaluate ``query`` against the given Rego file(s) with ``input_doc`` on stdin, returning the
-    result value. Raises (via ``check=True``) if OPA rejects the Rego or the query errors."""
-    cmd = [
-        opa_bin(),
-        "eval",
-        "-f",
-        "json",
-        *sum((["-d", str(p)] for p in rego_paths), []),
-        "--stdin-input",
-        query,
-    ]
-    out = subprocess.run(
-        cmd, input=json.dumps(input_doc), capture_output=True, text=True, check=True
-    ).stdout
-    return json.loads(out)["result"][0]["expressions"][0]["value"]
+def _kubectl_try(*args: str, timeout: float = 30.0) -> tuple[bool, str, str]:
+    """Run ``kubectl`` returning ``(ok, stdout, error)`` instead of raising — for the readiness probe,
+    where any failure (unreachable API, absent resource) is a *skip reason*, not a test error."""
+    try:
+        return True, kubectl(*args, timeout=timeout), ""
+    except FileNotFoundError:
+        return False, "", "kubectl not found on PATH"
+    except subprocess.CalledProcessError as exc:
+        return False, exc.output or "", (exc.stderr or "").strip()
+    except subprocess.TimeoutExpired:
+        return False, "", "kubectl timed out"
+
+
+def pipeline_unwired_reason(*, namespace: str, workloads: list[str]) -> str | None:
+    """Return ``None`` when the live AuthBridge OPA pipeline is fully wired for ``namespace``, else a
+    human-readable reason the suite should skip. Checks (cheap -> specific): ``kubectl`` present, the
+    ``AuthorizationPolicy`` CRD served, ``bundle-service`` Running, the ``opa`` plugin on **both** legs
+    of ``namespace``'s AuthBridge runtime config, and each ``workloads`` pod Running."""
+    if shutil.which("kubectl") is None:
+        return "kubectl not on PATH"
+
+    ok, _, err = _kubectl_try("get", "crd", "authorizationpolicies.agent.rossoctl.dev", "-o", "name")
+    if not ok:
+        return f"AuthorizationPolicy CRD not served / cluster unreachable ({err or 'no output'})"
+
+    ok, out, err = _kubectl_try(
+        "get", "pods", "-n", "rossoctl-system", "-l", "app=bundle-service",
+        "-o", "jsonpath={.items[*].status.phase}",
+    )
+    if not ok:
+        return f"cannot query bundle-service in rossoctl-system ({err})"
+    if "Running" not in out:
+        return "bundle-service is not Running in rossoctl-system"
+
+    ok, out, err = _kubectl_try(
+        "get", "configmap", "authbridge-runtime-config", "-n", namespace,
+        "-o", r"jsonpath={.data.config\.yaml}",
+    )
+    if not ok:
+        return f"authbridge-runtime-config not found in {namespace} ({err})"
+    wired = out.count("name: opa")
+    if wired < 2:
+        return (
+            f"OPA plugin not wired into both legs in {namespace} (found {wired} of 2) — "
+            "run ../scripts/opa-kind-enable.sh"
+        )
+
+    for workload in workloads:
+        ok, out, err = _kubectl_try(
+            "get", "pods", "-n", namespace, "-l", f"app.kubernetes.io/name={workload}",
+            "-o", "jsonpath={.items[*].status.phase}",
+        )
+        if not ok:
+            return f"cannot query workload {workload!r} in {namespace} ({err})"
+        if "Running" not in out:
+            return f"workload {workload!r} is not Running in {namespace}"
+
+    return None
+
+
+def require_pipeline(*, namespace: str, workloads: list[str]) -> None:
+    """``pytest.skip`` with a clear message when the live pipeline is not wired (acceptance #4)."""
+    reason = pipeline_unwired_reason(namespace=namespace, workloads=workloads)
+    if reason:
+        import pytest
+
+        pytest.skip(
+            f"live AuthBridge OPA pipeline not wired: {reason}. Stand it up with "
+            "../scripts/opa-kind-enable.sh (see docs/opa-kind-runbook.md)."
+        )
+
+
+def verify_subject_mapper(
+    *, keycloak_url: str, realm: str, user: str, password: str, client_id: str = KEYCLOAK_CLIENT_ID
+) -> str:
+    """Mint a token for ``user`` and ``pytest.skip`` unless its ``sub`` equals ``user``.
+
+    The live loop keys OPA decisions on ``input.identity.subject`` (the token ``sub``), which equals
+    the username only when the realm carries the ``username -> sub`` mapper and Direct Access Grants
+    are enabled on ``client_id`` — a one-time Keycloak prerequisite the fixture does **not** provision
+    (runbook Prerequisites). Skipping here (rather than failing every decision) keeps a mis-provisioned
+    realm from masquerading as a policy bug. Returns the minted token on success."""
+    import pytest
+
+    try:
+        token = mint_token(user, password, keycloak_url=keycloak_url, realm=realm, client_id=client_id)
+    except Exception as exc:  # noqa: BLE001 — any mint failure is a skippable prerequisite gap
+        pytest.skip(
+            f"cannot mint a {user!r} token in realm {realm!r} via client {client_id!r}: {exc}. "
+            "Enable Direct Access Grants on the client and set the user's password "
+            "(see docs/opa-kind-runbook.md Prerequisites)."
+        )
+    sub = jwt_claim(token, "sub")
+    if sub != user:
+        pytest.skip(
+            f"token 'sub' is {sub!r}, not {user!r} — the realm's username->sub protocol mapper is "
+            "missing (see docs/opa-kind-runbook.md Prerequisites)."
+        )
+    return token

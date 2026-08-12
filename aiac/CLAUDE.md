@@ -80,15 +80,24 @@ failures.)
 
 Use `ls test/` / `find test -type d` to discover current test directories.
 
-**Integration tests** (`-m integration`) need live config — Keycloak + admin creds + an LLM
-endpoint (`opa` on PATH for the policy-pipeline suite). Those variables live in
+**Integration tests** (`-m integration`) now close the **real OPA evaluation loop** — they onboard
+through the in-cluster Controller, then drive real HTTP requests **through AuthBridge** and assert the
+**deployed OPA plugin's** allow/deny (no `opa eval`, no `.rego` dump, so `opa` on PATH is no longer
+needed). They therefore need a live **rossoctl/Kind cluster with the AuthBridge OPA pipeline wired
+into both legs** (the demo `github-agent`/`github-tool` deployed + registered), plus Keycloak admin
+creds and an LLM endpoint for onboarding. Stand the pipeline up with `../scripts/opa-kind-enable.sh`;
+the full prerequisites, wiring, and manual probe commands are in `docs/opa-kind-runbook.md`, and the
+per-loop shape is documented in `test/integration/uc1_onboard.py`. Config lives in
 `test/integration/.env` (gitignored): `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `KEYCLOAK_URL`,
 `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD`. Source it before running:
 
 ```bash
+../scripts/opa-kind-enable.sh          # one-time: wire the OPA plugin into the Kind cluster
 set -a; . test/integration/.env; set +a
 .venv/bin/pytest test/integration/ -m integration
 ```
+
+When the cluster is not wired or the env is unset, the suite **skips cleanly** (it never false-passes).
 
 **Smoke test** (requires live service at `AIAC_PDP_CONFIG_URL`, default `http://127.0.0.1:7071`):
 

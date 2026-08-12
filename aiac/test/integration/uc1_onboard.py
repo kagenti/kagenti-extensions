@@ -1,23 +1,38 @@
 """Shared harness for the UC-1 onboarding integration-test ladder (rungs 1–3).
 
-Spec: ``docs/specs/integration-test/uc1-onboarding-pipeline.md``. Every rung follows the same
-**Keycloak cleanup → onboard (in the rung's order) → validate end state → Keycloak cleanup** shape
-against **one** in-cluster AIAC stack (Controller + Policy Store + OPA filesystem-stub writer). The
-only thing that differs between rungs is *which workloads are onboarded and in what order* — so all
-the machinery to do it lives here, and each ``test_uc1_onboard_*.py`` module supplies just its own
-oracle (the expected verdicts, computed from ``scenario_uc1.py``) and live assertions.
+Spec: ``docs/specs/integration-test/uc1-onboarding-pipeline.md``; live loop shape (handoff 08):
+``docs/opa-kind-runbook.md``. The evaluator is now the **deployed AuthBridge OPA plugin**, not a
+standalone OPA-CLI run over dumped ``.rego`` — there is no ``.rego`` dump and no ``opa`` binary here.
+
+Every rung follows the same shape against **one** live rossoctl/Kind cluster with the AuthBridge OPA
+pipeline wired into both legs:
+
+    Keycloak cleanup + policy-store clear
+      → onboard the rung's workloads in order (POST /apply/service/{id} on the in-cluster Controller,
+        which upserts the AuthorizationPolicy CR on the live API)
+      → enable the outbound token-exchange leg (Part B: route + optional client scope + agent restart)
+      → poll bundle-service + OPA until this run's CR is reflected in real decisions
+      → drive REAL HTTP requests through AuthBridge and assert the real plugin's allow/deny
+      → Keycloak cleanup + CR delete
+
+The only thing that differs between rungs is *which workloads are onboarded and in what order*, so
+all the machinery lives here and each ``test_uc1_onboard_*.py`` supplies just its own oracle
+(verdicts computed from ``scenario_uc1.py``) and live assertions.
 
 This module owns:
 
 * **Config** (env, spec § Configuration) — single stack, no variants.
 * **Keycloak** — ``connect_admin`` / ``provision_realm_and_users`` (the fixture UC-1 does *not* do) /
   ``resolve_service_id`` (route-safe trigger id = internal client UUID) / ``cleanup_provisioned``.
-* **Onboarding + Rego capture** — ``ensure_agent_policy`` (mount the PRB's ``policy.md``), ``onboard``
-  (``POST /apply/service/{id}``), and the writer-pod ``/rego`` capture helpers.
-* **Grant-set extraction** — re-derive the inbound / outbound-subject grant sets from the generated
-  Rego via ``opa eval`` (the semantic-equivalence oracle).
-* **``onboarded_stack``** — the whole per-rung fixture flow, parameterised by the ordered list of
-  workloads to onboard; each rung wraps it in a one-line session fixture.
+* **Onboarding** — ``ensure_agent_policy`` (mount the PRB's ``policy.md``) + ``onboard``.
+* **Outbound-leg prep (Part B)** — ``ensure_github_tool_route`` / ``grant_exchange_scope`` /
+  ``restart_agent`` so ``token-exchange`` runs and OPA is actually consulted on the outbound leg.
+* **Live decision oracle + probes** — ``expected_inbound`` / ``expected_outbound_bare`` (verdicts from
+  ``scenario_uc1``, keyed on the **bare** runtime tool names AuthBridge sends) and ``inbound_decision``
+  / ``outbound_decision`` (mint a user token, send a real request through AuthBridge, classify the
+  real plugin's response).
+* **``onboarded_stack``** — the whole per-rung fixture flow, parameterised by the ordered workload
+  list; each rung wraps it in a one-line session fixture and yields a probe context.
 
 It imports only stdlib + ``requests`` + ``launcher`` + the pure-data ``scenario_uc1`` (never
 ``aiac``), so it is importable before the env-before-import dance, exactly like ``scenario_uc1`` and
@@ -29,6 +44,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 import sys
 from contextlib import contextmanager
 from pathlib import Path
@@ -43,14 +59,20 @@ if str(REPO_ROOT) not in sys.path:  # so ``import test.integration.*`` resolves
 
 from test.integration import scenario_uc1 as scn  # noqa: E402
 from test.integration.launcher import (  # noqa: E402
+    inbound_probe,
+    inbound_outcome,
     kubectl,
-    kubectl_cp,
     kubectl_rollout_status,
-    opa_bin,
-    opa_eval,
+    mint_token,
+    outbound_probe,
+    outbound_outcome,
+    poll_until,
     port_forward,
     require_env,
+    require_env_or_skip,
+    require_pipeline,
     resolve_pod,
+    verify_subject_mapper,
 )
 
 log = logging.getLogger(__name__)
@@ -88,74 +110,69 @@ POLICY_MOUNT_PATH = os.environ.get("AIAC_POLICY_MOUNT_PATH", "/etc/aiac")
 # fail the run (``AIAC_ONBOARD_TIMEOUT``, seconds).
 ONBOARD_TIMEOUT = float(os.environ.get("AIAC_ONBOARD_TIMEOUT", "900"))
 
-# OPA-writer pod to ``kubectl cp`` the generated .rego from (name explicit or via label selector).
-# The OPA filesystem-stub writer runs as a container INSIDE the interface pod (not its own pod),
-# so the .rego is captured from that container. Defaults match the deployed stack.
-OPA_NAMESPACE = os.environ.get("AIAC_OPA_NAMESPACE", "aiac-system")
-OPA_SELECTOR = os.environ.get("AIAC_OPA_SELECTOR", "app=aiac-interface")
-OPA_CONTAINER = os.environ.get("AIAC_OPA_CONTAINER", "aiac-pdp-policy-opa")
-OPA_POD = os.environ.get("AIAC_OPA_POD")
-OPA_REGO_PATH = os.environ.get("AIAC_OPA_REGO_PATH", "/rego")
+# --- Live-cluster loop knobs (handoff 08) ---------------------------------------------------
 
-# Base dir the captured ``.rego`` is copied to, one subfolder per rung (see ``fresh_rego_dir``).
-# Defaults to the (gitignored) ``test/integration/rego_out/uc1/`` tree so artifacts stay in the
-# project for eyeballing but never get committed; ``$REGO_OUTPUT_DIR`` overrides the base.
-REGO_OUTPUT_BASE = Path(os.environ.get("REGO_OUTPUT_DIR") or (HERE / "rego_out" / "uc1"))
+# The workload Deployment to restart after Part B so it reloads the new outbound route (and, on its
+# OPA sidecar's next poll, the recomposed bundle). Defaults to the agent workload name.
+AGENT_DEPLOYMENT = os.environ.get("AIAC_AGENT_DEPLOYMENT", scn.AGENT_WORKLOAD)
 
-AGENT_SLUG = f"{NAMESPACE}_{scn.AGENT_WORKLOAD}".replace("-", "_")  # team1/github-agent -> team1_github_agent
-INBOUND_REGO = f"{AGENT_SLUG}.inbound.rego"
-OUTBOUND_REGO = f"{AGENT_SLUG}.outbound.rego"
-AGENT_REGO_FILES = (INBOUND_REGO, OUTBOUND_REGO)
+# SPIFFE trust domain the operator registers the demo workloads under (the ``spiffe://<td>/ns/...``
+# authority). Matches the rossoctl Kind cluster's default; override for a differently-named cluster.
+TRUST_DOMAIN = os.environ.get("AIAC_TRUST_DOMAIN", "localtest.me")
 
-# The outbound user-gate probe (``data.probe.outbound.allow``), shared by every rung.
-PROBE_UC1 = HERE / "probe_uc1.rego"
+# After a CR is upserted, ``bundle-service`` recomposes the namespace bundle and each pod's OPA polls
+# it on its own (~20–30 s) interval, and ``token-exchange`` needs a moment to settle after the agent
+# restart. ``onboarded_stack`` polls real decisions until they converge, up to this budget (seconds).
+BUNDLE_TIMEOUT = float(os.environ.get("AIAC_BUNDLE_TIMEOUT", "300"))
+BUNDLE_POLL_INTERVAL = float(os.environ.get("AIAC_BUNDLE_POLL_INTERVAL", "10"))
 
 
 # ======================================================================================
-# Shared inbound oracle (identical for every rung — inbound is unaffected by tool onboarding)
+# Expected-verdict oracle (pure functions over the scenario_uc1 truth table)
 # ======================================================================================
 #
-# A user may call the agent iff their realm role sources some agent scope (``INBOUND_PAIRS``). This
-# holds for all rungs; only the *outbound* gate differs (empty for rung 1, the full
-# ``OUTBOUND_SUBJECT_PAIRS`` once a tool is onboarded), so ``expected_outbound`` stays rung-local.
+# Two naming registers meet here (see ``scenario_uc1`` docstring): the *provisioned* grant sets stay
+# PREFIXED (``github-tool.source-read`` — what UC-1 writes into Keycloak + the CR data maps), while
+# the *request the test sends and the outcome it expects* are keyed on the BARE runtime names
+# AuthBridge's mcp-parser puts in ``input.mcp.params.name`` (``source-read``). The grant-set constants
+# below are the prefixed provisioned truth (for the fixture-independent oracle-contract tests); the
+# ``expected_*`` helpers decide live outcomes over the bare names.
+
+# Prefixed provisioned truth — the exact strings UC-1 provisions and the PCE writes into the CR maps.
+INBOUND_GRANT_SET: set[tuple[str, str]] = set(scn.INBOUND_PAIRS)
+OUTBOUND_SUBJECT_GRANT_SET: set[tuple[str, str]] = set(scn.OUTBOUND_SUBJECT_PAIRS)
+OUTBOUND_TARGET_GRANT_SET: set[tuple[str, str]] = set(scn.OUTBOUND_TARGET_PAIRS)
 
 _INBOUND_SOURCES = {role for role, _ in scn.INBOUND_PAIRS}  # user-roles reaching some agent scope
-INBOUND_GRANT_SET: set[tuple[str, str]] = set(scn.INBOUND_PAIRS)
 
 
 def expected_inbound(subject: str) -> bool:
-    """A user may call the agent iff their realm role sources some agent scope (``INBOUND_PAIRS``)."""
+    """A user may call the agent iff their realm role sources some agent scope (``INBOUND_PAIRS``).
+    Unaffected by tool onboarding — the same for every rung."""
     return scn.USERS[subject] in _INBOUND_SOURCES
 
 
-# ======================================================================================
-# Shared outbound oracle for the tool-onboarded rungs (rungs 2 & 3)
-# ======================================================================================
-#
-# Once **any** tool is onboarded, the agent's outbound user gate is the full user→tool grant set
-# (``OUTBOUND_SUBJECT_PAIRS``) — and it is the same set **regardless of onboarding order** (spec:
-# *Onboarding order is irrelevant*). Rung 2 (agent→tool) fills it in when the tool is onboarded after
-# the agent; rung 3 (tool→agent) produces it in one pass. Both converge here, so both share this
-# oracle; only rung 1 (no tool) is the exception and keeps its own empty-gate oracle. Verdicts are
-# computed from this, never read from the Rego under test.
-
-OUTBOUND_SUBJECT_GRANT_SET: set[tuple[str, str]] = set(scn.OUTBOUND_SUBJECT_PAIRS)
-
-# The agent-capability gate: the tool scopes the agent's per-skill operator roles reach (the
-# right-hand column of ``OUTBOUND_TARGET_PAIRS``). In UC-1 the agent reaches all four tool scopes,
-# so the per-scope AND reduces to the subject gate for the verdicts — but the oracle expresses the
-# AND explicitly so the two-gate decision is documented, not assumed.
-OUTBOUND_TARGET_GRANT_SET: set[str] = {fn for _, fn in scn.OUTBOUND_TARGET_PAIRS}
-
-
-def expected_outbound_with_tool(subject: str, function_name: str) -> bool:
-    """A user may reach a tool scope iff **both** gates pass (per-scope AND): their realm role is
-    granted it in the user→tool subject gate (``OUTBOUND_SUBJECT_PAIRS``) **and** the agent's own
-    operator roles reach it in the capability gate (``OUTBOUND_TARGET_PAIRS``). Any tool onboarding
-    fills both gates on the agent's model, order-independently (rungs 2 & 3)."""
-    user_ok = (scn.USERS[subject], function_name) in OUTBOUND_SUBJECT_GRANT_SET
-    agent_ok = function_name in OUTBOUND_TARGET_GRANT_SET
+def expected_outbound_bare(subject: str, tool_bare: str) -> bool:
+    """A user's outbound call to a **bare** tool name (``source-read``) is allowed iff **both** gates
+    pass (per-scope AND): their realm role reaches it in the user→tool subject gate
+    (``OUTBOUND_SUBJECT_BARE``) **and** the agent's own operator roles reach it in the capability gate
+    (``OUTBOUND_TARGET_BARE``). This is the tool-onboarded oracle (rungs 2 & 3); rung 1's gate is
+    empty (no tool onboarded), so rung 1 supplies its own all-deny oracle."""
+    user_ok = (scn.USERS[subject], tool_bare) in scn.OUTBOUND_SUBJECT_BARE
+    agent_ok = tool_bare in scn.OUTBOUND_TARGET_BARE
     return user_ok and agent_ok
+
+
+def expected_inbound_decision(subject: str) -> str:
+    """The inbound oracle as a decision string (``"allow"`` / ``"deny"``) — comparable to the live
+    ``inbound_decision`` outcome."""
+    return "allow" if expected_inbound(subject) else "deny"
+
+
+def expected_outbound_decision(subject: str, tool_bare: str) -> str:
+    """The tool-onboarded outbound oracle as a decision string — comparable to the live
+    ``outbound_decision`` outcome (rungs 2 & 3)."""
+    return "allow" if expected_outbound_bare(subject, tool_bare) else "deny"
 
 
 # ======================================================================================
@@ -252,14 +269,14 @@ def clear_policy_store() -> None:
     The store's SQLite lives on a StatefulSet PV that outlives image redeploys, and onboarding
     appends to each SPM with ``override=False``; without this the store accumulates pre-fix cruft
     (stale role-id generations, retired ``*-aud`` edges, cross-run pollution) that the PCE replays
-    into every regenerated Rego — so a fixed pipeline still emits defective policy. Clearing here
-    guarantees each run derives its Rego from only the edges this run onboarded.
+    into every regenerated policy — so a fixed pipeline still emits defective policy. Clearing here
+    guarantees each run derives its policy from only the edges this run onboarded.
 
     Hits ``DELETE /policy/services`` directly through a port-forward (the harness never imports
     ``aiac``). Best-effort about *reachability* — a store that is unreachable (or a port-forward that
     won't come up) is tolerated and only warned about. But a store that answers with a **non-2xx**
     means the clear actually failed: proceeding would run the rung on dirty state (stale SPMs
-    replayed into every regenerated Rego), so that case fails loudly rather than silently."""
+    replayed into every regenerated policy), so that case fails loudly rather than silently."""
     try:
         with port_forward(
             STORE_TARGET,
@@ -283,7 +300,7 @@ def clear_policy_store() -> None:
 
 
 # ======================================================================================
-# Onboarding trigger + Rego capture
+# Onboarding trigger + policy (the one mutable stack precondition the ladder owns)
 # ======================================================================================
 
 
@@ -342,141 +359,191 @@ def ensure_agent_policy(namespace: str) -> None:
 
 
 def onboard(base_url: str, service_id: str) -> None:
-    """``POST /apply/service/{service_id}`` against the Controller; assert 200."""
+    """``POST /apply/service/{service_id}`` against the Controller; assert 200. This upserts the
+    ``AuthorizationPolicy`` CR on the live Kubernetes API (bundle-service picks it up)."""
     resp = requests.post(f"{base_url}/apply/service/{service_id}", timeout=ONBOARD_TIMEOUT)
     assert resp.status_code == 200, (
         f"onboard {service_id!r} at {base_url}: HTTP {resp.status_code} — {resp.text[:500]}"
     )
 
 
-def fresh_rego_dir(subdir: str) -> Path:
-    """Host dir the captured ``.rego`` is copied to: a per-rung ``subdir`` under ``REGO_OUTPUT_BASE``
-    (``test/integration/rego_out/uc1/`` by default — gitignored, or ``$REGO_OUTPUT_DIR`` if set).
-
-    The artifacts live in the project tree so they can be eyeballed after a run, one folder per test
-    case. Every ``.rego`` in the dir is cleared at the start of each rung so a broken pipeline can't
-    pass green on leftovers, and each run verifies only freshly generated policy."""
-    path = REGO_OUTPUT_BASE / subdir
-    path.mkdir(parents=True, exist_ok=True)
-    for stale in path.glob("*.rego"):
-        stale.unlink()
-    return path
-
-
-def writer_pod() -> str:
-    """Resolve the pod hosting the OPA filesystem-stub writer (the ``aiac-pdp-policy-opa`` container
-    lives inside the interface pod)."""
-    return OPA_POD or resolve_pod(OPA_SELECTOR, namespace=OPA_NAMESPACE)
+def delete_agent_cr() -> None:
+    """Best-effort delete of the agent's ``AuthorizationPolicy`` CR so each run starts and ends from a
+    clean policy slate (the CR is named for the agent workload, matched by bundle-service against the
+    SPIFFE SA segment). Ignored if absent; a delete failure is logged, not raised."""
+    try:
+        kubectl(
+            "delete", "authorizationpolicy", scn.AGENT_WORKLOAD, "-n", NAMESPACE,
+            "--ignore-not-found", timeout=60,
+        )
+    except subprocess.CalledProcessError as exc:
+        log.warning("delete_agent_cr: %s", (exc.stderr or exc.output or exc))
 
 
-def clear_writer_rego(pod: str) -> None:
-    """Delete any stale ``.rego`` in the writer's output dir **before** onboarding, so the run
-    captures only freshly-generated policy — a leftover from a previous run must never let a broken
-    pipeline pass green. (The host capture dir is cleared too, in ``fresh_rego_dir``.)"""
-    kubectl(
-        "exec", "-n", OPA_NAMESPACE, pod, "-c", OPA_CONTAINER, "--",
-        "sh", "-c", f"rm -f {OPA_REGO_PATH.rstrip('/')}/*.rego",
+# ======================================================================================
+# Outbound token-exchange leg prep (runbook Part B) — so OPA is actually consulted outbound
+# ======================================================================================
+#
+# The outbound OPA gate is only reached if ``token-exchange`` first intercepts + exchanges the agent's
+# call to github-tool. That needs: (B.1) an outbound route for the github-tool host, (B.2) the agent's
+# Keycloak client granted the github-tool audience scope as optional, and (B.3) the agent restarted so
+# it reloads the route. Without this the call would pass through unexchanged and never reach OPA.
+
+
+def _tool_audience() -> str:
+    """The RFC 8693 ``audience`` for the github-tool exchange — its SPIFFE ID."""
+    return f"spiffe://{TRUST_DOMAIN}/ns/{NAMESPACE}/sa/{scn.TOOL_WORKLOAD}"
+
+
+def _tool_aud_scope() -> str:
+    """The realm client-scope whose audience mapper stamps the github-tool audience (runbook B.2)."""
+    return f"agent-{NAMESPACE}-{scn.TOOL_WORKLOAD}-aud"
+
+
+def ensure_github_tool_route(namespace: str) -> None:
+    """Ensure ``authproxy-routes`` carries an outbound route for the github-tool host (runbook B.1).
+
+    Reads the current ``routes.yaml``, appends the github-tool route if it is not already present
+    (preserving any existing routes, e.g. the weather route), and patches it back. Creates the
+    ConfigMap if it does not exist. Idempotent: a second call is a no-op when the route is present."""
+    tool = scn.TOOL_WORKLOAD
+    route_block = (
+        f'- host: "{tool}"\n'
+        f'  target_audience: "{_tool_audience()}"\n'
+        f'  token_scopes: "openid {_tool_aud_scope()}"\n'
     )
+    try:
+        current = kubectl(
+            "get", "configmap", "authproxy-routes", "-n", namespace,
+            "-o", r"jsonpath={.data.routes\.yaml}", timeout=30,
+        )
+    except subprocess.CalledProcessError:
+        current = ""  # ConfigMap (or key) absent — treat as empty, create below
+
+    if f'host: "{tool}"' in current or f"host: {tool}" in current:
+        return  # already routed
+    new_routes = (current + ("\n" if current.strip() else "") + route_block) if current.strip() else route_block
+
+    patch = {"data": {"routes.yaml": new_routes}}
+    try:
+        kubectl(
+            "patch", "configmap", "authproxy-routes", "-n", namespace,
+            "--type", "merge", "-p", json.dumps(patch), timeout=30,
+        )
+    except subprocess.CalledProcessError:
+        # ConfigMap does not exist yet — create it with just the github-tool route.
+        cm = {
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {"name": "authproxy-routes", "namespace": namespace},
+            "data": {"routes.yaml": new_routes},
+        }
+        kubectl("apply", "-f", "-", input_text=json.dumps(cm), timeout=30)
 
 
-def writer_rego_files(pod: str) -> list[str]:
-    """List the ``.rego`` basenames present in the writer's output dir (the ground truth for the
-    file-set assertions). Lets a rung assert *what the pipeline actually wrote* — e.g. that no
-    ``github_tool.*.rego`` exists even after the tool is onboarded — rather than only what was
-    copied to the host."""
-    out = kubectl(
-        "exec", "-n", OPA_NAMESPACE, pod, "-c", OPA_CONTAINER, "--",
-        "sh", "-c", f"ls -1 {OPA_REGO_PATH.rstrip('/')}/*.rego 2>/dev/null || true",
-    )
-    return [Path(line.strip()).name for line in out.splitlines() if line.strip()]
+def grant_exchange_scope(admin) -> None:
+    """Grant the agent's Keycloak client the github-tool audience scope as **optional** (runbook B.2),
+    so the ``client_credentials`` token exchange to the github-tool audience succeeds.
 
+    Resolves the agent client by its SPIFFE ``clientId`` (``.../sa/github-agent``) or its
+    ``name`` (``{ns}/github-agent``), and the client scope by name (``agent-{ns}-github-tool-aud``).
+    Idempotent — Keycloak's assign-optional-scope is a PUT."""
+    from keycloak.exceptions import KeycloakError
 
-def capture_rego(pod: str, rego_dir: Path) -> None:
-    """``kubectl cp`` the agent's inbound + outbound Rego from the writer container into ``rego_dir``.
+    admin.change_current_realm(TEST_REALM)
+    aud_scope = _tool_aud_scope()
 
-    Only the two agent files are copied: under UC-1 the tool is a pure target and the pipeline emits
-    no ``github_tool.*.rego`` for any rung. (Use ``writer_rego_files`` to assert that on the pod.)"""
-    for filename in AGENT_REGO_FILES:
-        kubectl_cp(
-            pod, f"{OPA_REGO_PATH.rstrip('/')}/{filename}", rego_dir / filename,
-            namespace=OPA_NAMESPACE, container=OPA_CONTAINER,
+    client_uuid = None
+    for client in admin.get_clients():
+        cid = client.get("clientId", "")
+        if cid.endswith(f"/sa/{scn.AGENT_WORKLOAD}") or client.get("name") == f"{NAMESPACE}/{scn.AGENT_WORKLOAD}":
+            client_uuid = client["id"]
+            break
+    if client_uuid is None:
+        raise AssertionError(
+            f"no Keycloak client for {NAMESPACE}/{scn.AGENT_WORKLOAD} in realm {TEST_REALM!r} — is "
+            "the agent registered by the operator?"
         )
 
-
-# ======================================================================================
-# Grant-set extraction (semantic-equivalence oracle, re-derived from the generated Rego)
-# ======================================================================================
-
-
-def opa_dump(rego: Path, ref: str) -> object:
-    """Return the value of a Rego data ref (a map/list, not a boolean) via ``opa eval``.
-
-    ``opa eval`` omits ``result`` entirely (or yields an empty expression list) when the ref is
-    undefined — e.g. the writer emitted a Rego with no such rule — which would otherwise surface as
-    a raw ``KeyError``/``IndexError`` from the result-unwrapping in ``opa_eval``. Turn that into a
-    clear assertion so a missing dump reads as an oracle failure, not an opaque crash."""
-    try:
-        return opa_eval([rego], ref, {})
-    except (KeyError, IndexError) as exc:
+    scope = next((s for s in admin.get_client_scopes() if s.get("name") == aud_scope), None)
+    if scope is None:
         raise AssertionError(
-            f"opa eval produced no value for {ref!r} against {rego} — the ref is undefined "
-            f"(the pipeline may have emitted no such rule): {exc}"
-        ) from exc
+            f"client scope {aud_scope!r} not found in realm {TEST_REALM!r} — is {scn.TOOL_WORKLOAD} "
+            "deployed + registered by the operator?"
+        )
+    try:
+        admin.add_client_optional_client_scope(client_uuid, scope["id"], {})
+    except KeycloakError as exc:
+        log.info("grant_exchange_scope: assign %r returned (benign if already assigned): %s", aud_scope, exc)
 
 
-def outbound_subject_grants(rego_dir: Path) -> set[tuple[str, str]]:
-    """User->tool grant set from the outbound Rego's ``subject_role_scopes`` map (``∅`` when
-    no tool has been onboarded, the full ``OUTBOUND_SUBJECT_PAIRS`` once one has)."""
-    m = opa_dump(
-        rego_dir / OUTBOUND_REGO,
-        f"data.authz.{AGENT_SLUG}.outbound.subject_role_scopes",
-    )
-    return {(role, scope) for role, scopes in (m or {}).items() for scope in scopes}
-
-
-def inbound_grants(rego_dir: Path) -> set[tuple[str, str]]:
-    """User-role->agent-scope grant set from the inbound Rego's ``role_scopes`` restricted to the
-    published ``agent_scopes`` (a role may list scopes the agent does not expose; those don't grant)."""
-    rego = rego_dir / INBOUND_REGO
-    role_scopes = opa_dump(rego, f"data.authz.{AGENT_SLUG}.inbound.role_scopes") or {}
-    agent_scopes = set(opa_dump(rego, f"data.authz.{AGENT_SLUG}.inbound.agent_scopes") or [])
-    return {
-        (role, scope)
-        for role, scopes in role_scopes.items()
-        for scope in scopes
-        if scope in agent_scopes
-    }
+def restart_agent(namespace: str) -> None:
+    """Restart the agent Deployment so it reloads the outbound route (routes are read once at
+    startup — runbook B.3) and its OPA sidecar re-fetches the recomposed bundle on its next poll."""
+    kubectl("rollout", "restart", f"deployment/{AGENT_DEPLOYMENT}", "-n", namespace, timeout=60)
+    kubectl_rollout_status(f"deployment/{AGENT_DEPLOYMENT}", namespace=namespace, timeout=180)
 
 
 # ======================================================================================
-# Per-rung fixture flow — cleanup → onboard (in order) → capture rego → yield → cleanup
+# Live decisions — mint a user token, send a real request through AuthBridge, classify the plugin
+# ======================================================================================
+
+
+def inbound_decision(ctx: dict, user: str) -> str:
+    """Mint a fresh ``user`` token and send a real inbound request through AuthBridge; return the real
+    OPA plugin's classified decision (``"allow"`` 200 / ``"deny"`` 403 / ``"error"`` otherwise)."""
+    token = mint_token(user, scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"])
+    code, _ = inbound_probe(token, namespace=ctx["namespace"], agent_service=scn.AGENT_WORKLOAD)
+    return inbound_outcome(code)
+
+
+def outbound_decision(ctx: dict, user: str, tool_bare: str) -> str:
+    """Mint a fresh ``user`` token, drive an outbound MCP ``tools/call`` for the **bare** ``tool_bare``
+    through AuthBridge's forward proxy (token-exchange → OPA), and return the real plugin's classified
+    decision (``"deny"`` for an OPA error frame or 403; ``"allow"`` for a non-OPA 200; ``"error"`` for
+    a 503/transport failure)."""
+    token = mint_token(user, scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"])
+    code, body = outbound_probe(token, tool_bare, namespace=ctx["namespace"], agent_pod=ctx["agent_pod"])
+    return outbound_outcome(code, body)
+
+
+# ======================================================================================
+# Per-rung fixture flow — cleanup → onboard (in order) → Part B → poll bundle → yield → cleanup
 # ======================================================================================
 
 
 @contextmanager
-def onboarded_stack(workloads: list[str], *, rego_subdir: str) -> Iterator[dict]:
-    """Run one rung's whole flow and yield ``{"admin", "rego_dir", "writer_pod"}``.
+def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
+    """Run one rung's whole live flow and yield a probe ``ctx`` for its assertions.
 
-    Provision users/roles, onboard the given ``workloads`` **in order** through the real in-cluster
-    UC-1 Controller (``POST /apply/service/{id}``, one call each within a single port-forward),
-    capture the agent's Rego, and yield the live handles for the rung's assertions. Keycloak cleanup
-    runs before and after; the clients are left registered as before (spec § Per-rung flow).
+    ``ctx`` = ``{"admin", "namespace", "agent_pod", "keycloak_url", "realm", "tool_onboarded"}``.
 
-    ``opa`` absence **skips** the whole suite up front (before any cluster work), so a missing oracle
-    binary never masquerades as a failure. The workload order is the rung's identity — e.g. rung 2
-    passes ``[agent, tool]`` so tool onboarding retroactively completes the agent's outbound gate."""
-    opa_bin()  # skip early if opa is absent — cheaper than skipping after the onboard
-    require_env("KEYCLOAK_URL", "KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD")
+    Flow: skip cleanly (never false-pass) if the pipeline is not wired or the integration env is
+    unset; provision users/roles + clear the store; onboard the given ``workloads`` **in order**
+    through the real in-cluster UC-1 Controller (``POST /apply/service/{id}``, upserting the CR);
+    enable the outbound leg (Part B: route + optional client scope + agent restart); then **poll real
+    decisions** until ``bundle-service`` + OPA reflect this run's CR (and token-exchange has settled)
+    before yielding. Keycloak cleanup + CR delete run before and after; the clients are left
+    registered as before (spec § Per-rung flow). The workload order is the rung's identity — e.g.
+    rung 2 passes ``[agent, tool]`` so tool onboarding retroactively completes the agent's outbound
+    gate; rung 3 passes ``[tool, agent]`` and must converge to the same live decisions."""
+    # Skip gates first — before any cluster mutation (acceptance #4: skip, never false-pass).
+    require_pipeline(namespace=NAMESPACE, workloads=[scn.AGENT_WORKLOAD, scn.TOOL_WORKLOAD])
+    creds = require_env_or_skip("KEYCLOAK_URL", "KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD")
+    keycloak_url = creds["KEYCLOAK_URL"]
 
     admin = connect_admin()
+    delete_agent_cr()  # before — clean policy slate (drop any prior run's CR)
     cleanup_provisioned(admin, TEST_REALM)  # before — clean slate (Keycloak)
     clear_policy_store()  # before — clean slate (Policy Store SPMs; PV survives redeploys)
     provision_realm_and_users(admin, TEST_REALM)  # BEFORE onboarding (PRB reads the role universe)
+    # username->sub mapper + Direct Access Grants are a one-time realm prereq the fixture does NOT
+    # provision; skip (don't fail) if a token can't be minted or its ``sub`` isn't the username.
+    verify_subject_mapper(
+        keycloak_url=keycloak_url, realm=TEST_REALM, user="dev-user", password=scn.USER_PASSWORD
+    )
     ensure_agent_policy(CONTROLLER_NAMESPACE)  # mount the PRB's policy.md if the stack lacks it
 
-    rego_dir = fresh_rego_dir(rego_subdir)  # fresh per-rung host dir; stale .rego cleared
-    pod = writer_pod()
-    clear_writer_rego(pod)  # clear stale .rego in the writer BEFORE onboarding
+    tool_onboarded = scn.TOOL_WORKLOAD in workloads
     try:
         service_ids = [
             resolve_service_id(admin, TEST_REALM, f"{NAMESPACE}/{workload}") for workload in workloads
@@ -491,13 +558,50 @@ def onboarded_stack(workloads: list[str], *, rego_subdir: str) -> Iterator[dict]
             for service_id in service_ids:  # onboard in the rung's order
                 onboard(base_url, service_id)
 
-        capture_rego(pod, rego_dir)
-        missing = [f for f in AGENT_REGO_FILES if not (rego_dir / f).is_file()]
-        if missing:
-            raise RuntimeError(
-                f"onboarding {workloads} produced no {missing} in {rego_dir} — the pipeline failed "
-                "or the OPA filesystem-stub writer is not deployed (spec § Blocked by)."
+        # Part B — enable the outbound token-exchange leg so OPA is actually consulted outbound. Done
+        # after onboarding so the restarted agent (and its OPA sidecar) picks up both the new route
+        # and, on its next poll, the recomposed bundle.
+        ensure_github_tool_route(NAMESPACE)
+        grant_exchange_scope(admin)
+        restart_agent(NAMESPACE)
+        agent_pod = resolve_pod(f"app.kubernetes.io/name={scn.AGENT_WORKLOAD}", namespace=NAMESPACE)
+
+        ctx = {
+            "admin": admin,
+            "namespace": NAMESPACE,
+            "agent_pod": agent_pod,
+            "keycloak_url": keycloak_url,
+            "realm": TEST_REALM,
+            "tool_onboarded": tool_onboarded,
+        }
+
+        # Wait for bundle-service + OPA to reflect THIS run's CR (and token-exchange to settle) before
+        # any assertion. Readiness signals, all deterministic for this scenario regardless of a stale
+        # CR (which the run replaced): dev-user reaches the agent (inbound allow), devops-user is
+        # blocked (inbound deny — proves the restrictive client-scoped gate is live, not the allow-all
+        # baseline), and dev-user's outbound source-read has reached its terminal verdict —
+        # ``allow`` once a tool is onboarded, ``deny`` for the empty-gate agent-only rung. Polling the
+        # outbound signal to a *definitive* allow/deny (not ``error``) also waits out the post-restart
+        # token-exchange 503 window.
+        expected_source_read = "allow" if tool_onboarded else "deny"
+
+        def _ready() -> bool:
+            return (
+                inbound_decision(ctx, "dev-user") == "allow"
+                and inbound_decision(ctx, "devops-user") == "deny"
+                and outbound_decision(ctx, "dev-user", "source-read") == expected_source_read
             )
-        yield {"admin": admin, "rego_dir": rego_dir, "writer_pod": pod}
+
+        if not poll_until(_ready, timeout=BUNDLE_TIMEOUT, interval=BUNDLE_POLL_INTERVAL):
+            raise RuntimeError(
+                f"live pipeline did not converge within {BUNDLE_TIMEOUT:.0f}s after onboarding "
+                f"{workloads} + Part B: inbound(dev-user)={inbound_decision(ctx, 'dev-user')!r} "
+                f"inbound(devops-user)={inbound_decision(ctx, 'devops-user')!r} "
+                f"outbound(dev-user,source-read)={outbound_decision(ctx, 'dev-user', 'source-read')!r} "
+                f"(expected allow / deny / {expected_source_read}). bundle-service or OPA may still be "
+                "polling, or token-exchange never came up — see docs/opa-kind-runbook.md."
+            )
+        yield ctx
     finally:
-        cleanup_provisioned(admin, TEST_REALM)  # after — restore the pre-run state
+        delete_agent_cr()  # after — drop this run's CR
+        cleanup_provisioned(admin, TEST_REALM)  # after — restore the pre-run Keycloak state
