@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
-ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.5.2
+# Keep this tag in sync with keycloak.version in pom.xml (>= 26.6.4; see the
+# security note there). The provider is compiled against and baked into the
+# same Keycloak line it runs on.
+ARG KEYCLOAK_IMAGE=quay.io/keycloak/keycloak:26.6.4
 
 # Stage 1: build the SPI JAR (shaded — bundles jnats, since it isn't on Keycloak's classpath).
 FROM maven:3.9-eclipse-temurin-17 AS jar-builder

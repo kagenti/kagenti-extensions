@@ -44,7 +44,21 @@ jobs:
           # version exists (affected <= 1.5.9, crewai pins chromadb < 1.2). The vulnerability
           # requires running a chromadb HTTP server with trust_remote_code=true, which the
           # github_agent demo does not do. See demo/agents/github_agent/pyproject.toml.
-          allow-ghsas: GHSA-f4j7-r4q5-qw2c
+          #
+          # keycloak-services (aiac/keycloak-spi, provided-scope): these are Keycloak *server*
+          # advisories, not code shipped in our provider jar (only jnats is shaded). They are
+          # remediated operationally by patching the Keycloak deployment; our pom + Dockerfile
+          # already track a patched line (26.6.4, see keycloak-spi/pom.xml). The three below have
+          # NO released fix (affected <= 26.6.4, patched version "None"), so they cannot be
+          # resolved by a version bump:
+          #   GHSA-wcvj-vpvw-9rr5  Improper Validation of Consistency within Input
+          #   GHSA-p3v8-fm5p-v84h  Improper Verification of Cryptographic Signature
+          #   GHSA-q6h7-xxp7-7429  Authentication Bypass by Primary Weakness
+          allow-ghsas: >-
+            GHSA-f4j7-r4q5-qw2c,
+            GHSA-wcvj-vpvw-9rr5,
+            GHSA-p3v8-fm5p-v84h,
+            GHSA-q6h7-xxp7-7429
 
   shellcheck:
     name: Shell Script Lint
