@@ -119,6 +119,9 @@ require_cmd() {
 # is usually missing.
 mint_token() {
   local user="$1" resp tok err
+  # DEV ONLY: password == username, valid only for this Kind dev cluster's seeded
+  # users (see opa-kind-runbook.md prerequisites). Never cargo-copy this grant into
+  # a staging/production script — real users do not have password == username.
   resp=$(curl -s -X POST "${KC}/realms/${REALM}/protocol/openid-connect/token" \
           -d client_id=rossoctl -d "username=${user}" -d "password=${user}" \
           -d grant_type=password -d scope=openid || true)

@@ -266,7 +266,11 @@ def generate_outbound_rego(model: AgentPolicyModel) -> str:
                 "subject_role_scopes",
                 _group_rules_deprefixed(model.outbound_subject_rules),
             ),
-            _render_map(
+            # agent_role_scopes is emitted for debugging/observability only; the
+            # allow decision never references it (target_scopes is the capability
+            # gate). The leading Rego comment says so in the rendered bundle.
+            "# informational/debugging only — not referenced by allow\n"
+            + _render_map(
                 "agent_role_scopes", _group_rules_deprefixed(model.outbound_rules)
             ),
             _render_map("target_scopes", _name_map_deprefixed(model.target_scopes)),
