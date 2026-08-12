@@ -17,8 +17,12 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <!-- Match this to your Keycloak / Red Hat Build of Keycloak version. -->
-        <keycloak.version>26.5.2</keycloak.version>
+        <!-- Match this to your Keycloak / Red Hat Build of Keycloak version.
+             Minimum 26.6.3: earlier 26.x are affected by GHSA-x4p7-7chp-64hq,
+             GHSA-q35r-vvhv-vx5h, GHSA-rr5q-3xwr-f323, GHSA-4q93-v92x-p89f
+             (all fixed in 26.6.3). These are provided-scope, so this also
+             pins the compile-time API to a patched line. -->
+        <keycloak.version>26.6.3</keycloak.version>
         <!-- Verify against Maven Central at implementation/upgrade time. -->
         <jnats.version>2.20.6</jnats.version>
     </properties>
