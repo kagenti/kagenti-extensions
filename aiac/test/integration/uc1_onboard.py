@@ -496,13 +496,23 @@ def inbound_decision(ctx: dict, user: str) -> str:
     return inbound_outcome(code)
 
 
+def resolve_agent_pod() -> str:
+    """Resolve the **current** live agent pod (newest Running+Ready, non-terminating — see
+    ``resolve_pod``). Re-resolved per outbound probe rather than pinned once at fixture setup: the
+    outbound leg ``kubectl exec``s into a specific pod (unlike inbound, which reaches the agent through
+    its pod-agnostic Service), so a pod name captured before/during ``restart_agent``'s rolling
+    replacement can go stale and every later exec then fails ``NotFound`` -> ``"error"`` forever (issue
+    #139). Resolving fresh self-heals across any pod churn."""
+    return resolve_pod(f"app.kubernetes.io/name={scn.AGENT_WORKLOAD}", namespace=NAMESPACE)
+
+
 def outbound_decision(ctx: dict, user: str, tool_bare: str) -> str:
     """Mint a fresh ``user`` token, drive an outbound MCP ``tools/call`` for the **bare** ``tool_bare``
     through AuthBridge's forward proxy (token-exchange → OPA), and return the real plugin's classified
     decision (``"deny"`` for an OPA error frame or 403; ``"allow"`` for a non-OPA 200; ``"error"`` for
     a 503/transport failure)."""
     token = mint_token(user, scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"])
-    code, body = outbound_probe(token, tool_bare, namespace=ctx["namespace"], agent_pod=ctx["agent_pod"])
+    code, body = outbound_probe(token, tool_bare, namespace=ctx["namespace"], agent_pod=resolve_agent_pod())
     return outbound_outcome(code, body)
 
 
@@ -564,7 +574,9 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
         ensure_github_tool_route(NAMESPACE)
         grant_exchange_scope(admin)
         restart_agent(NAMESPACE)
-        agent_pod = resolve_pod(f"app.kubernetes.io/name={scn.AGENT_WORKLOAD}", namespace=NAMESPACE)
+        # Resolved once for the ctx contract, but the live outbound path re-resolves per probe
+        # (``resolve_agent_pod``) so a pod replaced after this point can't poison the whole run (#139).
+        agent_pod = resolve_agent_pod()
 
         ctx = {
             "admin": admin,
@@ -594,17 +606,23 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
 
         if not poll_until(_ready, timeout=BUNDLE_TIMEOUT, interval=BUNDLE_POLL_INTERVAL):
             # Surface the RAW outbound (code, body) — not just the classified outcome — so a stalled
-            # run is self-diagnosing (issue #139). The classifier collapses two very different
-            # failures into ``"error"``: a 503 (or an ``AB_ERR`` transport exception, code=None) means
-            # the ``token-exchange`` leg never came up and OPA was *never consulted*, whereas a
-            # genuine OPA policy stall would surface as ``"deny"`` (HTTP 200 + an OPA error frame) —
-            # never ``"error"``, because the generated Rego always carries ``default allow := false``.
-            # Printing the transport status here says which of the two it is without a second run.
+            # run is self-diagnosing (issue #139). The classifier collapses three very different
+            # failures into ``"error"``; the raw ``(code, body)`` tells them apart in one shot:
+            #   * ``code=None`` + body ``"outbound probe exec failed: ..."`` — the *probe's* ``kubectl
+            #     exec`` failed (e.g. the agent pod was replaced by a restart and its name went stale,
+            #     ``NotFound``). A harness/pod issue, not the pipeline — OPA was never reached.
+            #   * ``code=503`` — the ``token-exchange`` leg failed upstream (audience refused, IdP
+            #     unreachable), so OPA was never consulted.
+            #   * a genuine OPA policy stall can't show as ``"error"`` at all: it surfaces as ``"deny"``
+            #     (HTTP 200 + an OPA error frame), because the generated Rego always carries
+            #     ``default allow := false``.
+            # Re-resolve the pod fresh here (not the possibly-stale ``ctx["agent_pod"]``) so the raw
+            # line reflects the *current* live pod.
             ob_token = mint_token(
                 "dev-user", scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"]
             )
             ob_code, ob_body = outbound_probe(
-                ob_token, "source-read", namespace=ctx["namespace"], agent_pod=ctx["agent_pod"]
+                ob_token, "source-read", namespace=ctx["namespace"], agent_pod=resolve_agent_pod()
             )
             raise RuntimeError(
                 f"live pipeline did not converge within {BUNDLE_TIMEOUT:.0f}s after onboarding "
@@ -612,9 +630,9 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
                 f"inbound(devops-user)={inbound_decision(ctx, 'devops-user')!r} "
                 f"outbound(dev-user,source-read)={outbound_outcome(ob_code, ob_body)!r} "
                 f"[raw: HTTP {ob_code}, body={ob_body[:300]!r}] "
-                f"(expected allow / deny / {expected_source_read}). A 503 (or code=None) here means "
-                "the token-exchange leg never came up so OPA was never reached; a 200 with an OPA "
-                "error frame would instead be a genuine policy stall — see docs/opa-kind-runbook.md "
+                f"(expected allow / deny / {expected_source_read}). code=None + 'exec failed' body = a "
+                "stale/gone agent pod (harness); 503 = token-exchange never came up (OPA not reached); "
+                "a real policy stall would read 'deny', never 'error' — see docs/opa-kind-runbook.md "
                 "and issue #139."
             )
         yield ctx

@@ -218,15 +218,49 @@ def kubectl_get_json(resource: str, *, namespace: str | None = None) -> dict:
     return json.loads(kubectl(*args))
 
 
-def resolve_pod(selector: str, *, namespace: str) -> str:
-    """Return the name of the first pod matching a label ``selector`` (e.g. ``app=aiac-opa``)."""
-    out = kubectl(
-        "get", "pods", "-n", namespace, "-l", selector,
-        "-o", "jsonpath={.items[0].metadata.name}",
+def _pod_is_ready(pod: dict) -> bool:
+    """True iff ``pod`` is ``Running`` with its ``Ready`` condition ``True``."""
+    status = pod.get("status", {})
+    if status.get("phase") != "Running":
+        return False
+    return any(
+        c.get("type") == "Ready" and c.get("status") == "True" for c in status.get("conditions", [])
     )
-    if not out.strip():
-        raise RuntimeError(f"no pod matches selector {selector!r} in namespace {namespace!r}")
-    return out.strip()
+
+
+def select_live_pod(items: list[dict]) -> str | None:
+    """Pick the **newest live** pod name from a ``kubectl get pods`` ``items`` list, or ``None``.
+
+    "Live" = **not terminating** (no ``metadata.deletionTimestamp``); among those, prefer the newest
+    ``Ready`` pod (by ``creationTimestamp``), else the newest non-terminating one. Pure — no I/O — so
+    the selection race behind issue #139 is unit-testable without a cluster."""
+    live = [p for p in items if not p.get("metadata", {}).get("deletionTimestamp")]
+    if not live:
+        return None
+    ready = [p for p in live if _pod_is_ready(p)]
+    chosen = max(ready or live, key=lambda p: p.get("metadata", {}).get("creationTimestamp", ""))
+    return chosen.get("metadata", {}).get("name")
+
+
+def resolve_pod(selector: str, *, namespace: str) -> str:
+    """Return the name of the **newest live** pod matching a label ``selector`` (e.g. ``app=aiac-opa``).
+
+    "Live" = ``status.phase == Running``, the ``Ready`` condition true, and **not terminating** (no
+    ``metadata.deletionTimestamp``). This matters during a rolling restart: with ``replicas=1`` and
+    ``maxUnavailable=0`` the new pod is created and made Ready *before* the old one is deleted, so the
+    old pod lingers ``Terminating`` (up to its grace period) alongside the new one. The old
+    ``jsonpath={.items[0]}`` had no ordering or phase filter and could hand back that doomed pod; the
+    caller would then pin it (e.g. ``kubectl exec``), the pod would finish terminating, and every
+    later exec would fail ``NotFound`` — the intermittent stall behind issue #139. Selecting the
+    newest Ready, non-terminating pod (see ``select_live_pod``) avoids that race.
+
+    Falls back to the newest non-terminating pod when none report Ready yet (e.g. resolved mid-startup),
+    and raises only when no non-terminating pod matches at all."""
+    doc = json.loads(kubectl("get", "pods", "-n", namespace, "-l", selector, "-o", "json"))
+    name = select_live_pod(doc.get("items", []))
+    if name is None:
+        raise RuntimeError(f"no (non-terminating) pod matches selector {selector!r} in namespace {namespace!r}")
+    return name
 
 
 @contextmanager
