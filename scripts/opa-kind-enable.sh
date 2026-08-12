@@ -168,6 +168,7 @@ helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   --set openshift=false \
   --set featureFlags.agentSandbox=true \
   --set operator-chart.defaults.images.authbridge="$IMAGE_TAG" \
+  --set operator-chart.featureGates.injectTools=true \
   --wait --timeout 5m
 
 echo "==> Step 5/5: restarting authbridge pods in ${AGENT_NAMESPACE}"
