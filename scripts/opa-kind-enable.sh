@@ -142,7 +142,7 @@ authBridge:
             keycloak_realm: "rossoctl"
         - name: opa
           config:
-            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+            bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
     outbound:
       plugins:
         - name: a2a-parser
@@ -157,7 +157,7 @@ authBridge:
               type: "client-secret"
         - name: opa
           config:
-            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+            bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
 YAML
 
 echo "==> Step 4/5: helm upgrade (base values.yaml + overlay — base file not modified)"

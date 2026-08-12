@@ -816,6 +816,7 @@ func subjectFromToken(authHeader string) string {
 	if raw == "" {
 		return ""
 	}
+	// safe: subject used for delegation provenance only, not for auth.
 	tok, err := jwt.ParseInsecure([]byte(raw))
 	if err != nil {
 		return ""
