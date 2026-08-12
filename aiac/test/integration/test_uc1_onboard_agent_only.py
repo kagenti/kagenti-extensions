@@ -5,7 +5,7 @@ The simplest rung (issue ``testing/5.4.1-uc1-onboard-agent-only.md``; spec
 Service Onboarding agent (``POST /apply/service/{id}``) for **only** the ``github-agent`` — the
 ``github-tool`` is deployed + registered but **not** onboarded — then assert the agent-side outcome
 by driving **real HTTP requests through AuthBridge** and reading the **real OPA plugin's** allow/deny
-(handoff 08; live loop shape in ``docs/opa-kind-runbook.md``). Proves agent discovery + inbound
+(handoff 08; live loop shape in ``k8s/opa-kind-runbook.md``). Proves agent discovery + inbound
 policy generation stand alone, and that the outbound user gate is correctly **empty** (all deny) when
 no tool has been onboarded.
 
@@ -24,7 +24,7 @@ drive real requests + assert → Keycloak cleanup**. Deployment + client registr
 ``ping/nonexistent`` inbound and a bare ``tools/call`` outbound).
 
 Run (needs a live rossoctl/Kind cluster with the AIAC stack + AuthBridge OPA pipeline wired in — see
-``docs/opa-kind-runbook.md`` / ``../scripts/opa-kind-enable.sh`` — the demo workloads deployed +
+``k8s/opa-kind-runbook.md`` / ``k8s/opa-kind-enable.sh`` — the demo workloads deployed +
 registered into ``AIAC_TEST_REALM``, a real LLM in-pod, and ``test/integration/.env`` sourced):
 
     .venv/bin/pytest test/integration/test_uc1_onboard_agent_only.py -m integration -v

@@ -1,7 +1,7 @@
 """End-to-end policy-pipeline integration test — the **enforced** decision is the artifact under test.
 
 Umbrella full-matrix e2e for the fixed ``github-agent`` scenario (spec:
-``docs/specs/integration-test/policy-pipeline.md``; live loop shape: ``docs/opa-kind-runbook.md``). A
+``docs/specs/integration-test/policy-pipeline.md``; live loop shape: ``k8s/opa-kind-runbook.md``). A
 single session fixture drives the whole identity→policy→**enforcement** pipeline with nothing mocked
 or dumped: it onboards **both** the ``github-agent`` and the ``github-tool`` through the real
 in-cluster UC-1 Controller (``POST /apply/service/{id}``, upserting the ``AuthorizationPolicy`` CR),
@@ -24,7 +24,7 @@ former two-policy-variant equivalence check (explicit vs. abstract) is deferred 
 ``testing/5.4.4`` (only one ``policy.md`` is mounted on the live stack; see ``scenario_uc1`` docstring).
 
 Run (needs a live rossoctl/Kind cluster with the AuthBridge OPA pipeline wired in — see
-``docs/opa-kind-runbook.md`` / ``../scripts/opa-kind-enable.sh`` — the demo workloads deployed +
+``k8s/opa-kind-runbook.md`` / ``k8s/opa-kind-enable.sh`` — the demo workloads deployed +
 registered into ``AIAC_TEST_REALM``, a real LLM in-pod, and ``test/integration/.env`` sourced):
 
     .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v

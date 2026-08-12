@@ -85,14 +85,14 @@ through the in-cluster Controller, then drive real HTTP requests **through AuthB
 **deployed OPA plugin's** allow/deny (no `opa eval`, no `.rego` dump, so `opa` on PATH is no longer
 needed). They therefore need a live **rossoctl/Kind cluster with the AuthBridge OPA pipeline wired
 into both legs** (the demo `github-agent`/`github-tool` deployed + registered), plus Keycloak admin
-creds and an LLM endpoint for onboarding. Stand the pipeline up with `../scripts/opa-kind-enable.sh`;
-the full prerequisites, wiring, and manual probe commands are in `docs/opa-kind-runbook.md`, and the
+creds and an LLM endpoint for onboarding. Stand the pipeline up with `k8s/opa-kind-enable.sh`;
+the full prerequisites, wiring, and manual probe commands are in `k8s/opa-kind-runbook.md`, and the
 per-loop shape is documented in `test/integration/uc1_onboard.py`. Config lives in
 `test/integration/.env` (gitignored): `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `KEYCLOAK_URL`,
 `KEYCLOAK_ADMIN_USERNAME`, `KEYCLOAK_ADMIN_PASSWORD`. Source it before running:
 
 ```bash
-../scripts/opa-kind-enable.sh          # one-time: wire the OPA plugin into the Kind cluster
+k8s/opa-kind-enable.sh          # one-time: wire the OPA plugin into the Kind cluster
 set -a; . test/integration/.env; set +a
 .venv/bin/pytest test/integration/ -m integration
 ```

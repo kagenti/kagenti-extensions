@@ -29,7 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORTEX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CORTEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OPERATOR_DIR="${OPERATOR_DIR:-$(cd "$CORTEX_DIR/../operator" 2>/dev/null && pwd || echo "")}"
 ROSSOCTL_DIR="${ROSSOCTL_DIR:-$(cd "$CORTEX_DIR/../rossoctl" 2>/dev/null && pwd || echo "")}"
@@ -183,5 +183,5 @@ Verify OPA + parsers are wired into both legs (expect 2 'name: opa' matches):
     -o jsonpath='{.data.config\.yaml}' | grep -c 'name: opa'
 
 Restore the original pipeline with:
-  ./scripts/opa-kind-restore.sh
+  ./opa-kind-restore.sh
 EOF

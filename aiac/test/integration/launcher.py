@@ -9,7 +9,7 @@ Two halves, both live here so a single module import serves every launcher:
   ``running_services`` / ``terminate`` / ``print_rego_dir`` / ``resolve_output_dir`` exist for it.
 
 * **Live-cluster half** — drive a real rossoctl/Kind cluster with the AuthBridge OPA pipeline wired
-  in (see ``docs/opa-kind-runbook.md``). ``kubectl`` wrappers + ``port_forward`` + ``resolve_pod``
+  in (see ``k8s/opa-kind-runbook.md``). ``kubectl`` wrappers + ``port_forward`` + ``resolve_pod``
   onboard through the in-cluster Controller; ``mint_token`` / ``jwt_claim`` / ``inbound_probe`` /
   ``outbound_probe`` send **real HTTP requests through AuthBridge** and classify the **real OPA
   plugin's** allow/deny; ``poll_until`` waits for ``bundle-service`` to reflect a CR change; and the
@@ -335,7 +335,7 @@ def port_forward(target: str, *, namespace: str, local_port: int, remote_port: i
 # **real OPA plugin's** decision off the response. AuthBridge's own ``jwt-validation`` + ``mcp-parser``
 # build ``input.identity.*`` + ``input.mcp.params.name`` — the test never hand-builds an input doc.
 #
-# Request shaping + outcome classification follow ``docs/opa-kind-runbook.md`` exactly (Parts A/B).
+# Request shaping + outcome classification follow ``k8s/opa-kind-runbook.md`` exactly (Parts A/B).
 
 KEYCLOAK_CLIENT_ID = "rossoctl"  # the platform client the runbook mints user tokens through
 _CURL_IMAGE = "curlimages/curl:8.10.1"  # same throwaway image the runbook probes with
@@ -624,7 +624,7 @@ def pipeline_unwired_reason(*, namespace: str, workloads: list[str]) -> str | No
     if wired < 2:
         return (
             f"OPA plugin not wired into both legs in {namespace} (found {wired} of 2) — "
-            "run ../scripts/opa-kind-enable.sh"
+            "run k8s/opa-kind-enable.sh"
         )
 
     for workload in workloads:
@@ -648,7 +648,7 @@ def require_pipeline(*, namespace: str, workloads: list[str]) -> None:
 
         pytest.skip(
             f"live AuthBridge OPA pipeline not wired: {reason}. Stand it up with "
-            "../scripts/opa-kind-enable.sh (see docs/opa-kind-runbook.md)."
+            "k8s/opa-kind-enable.sh (see k8s/opa-kind-runbook.md)."
         )
 
 
@@ -670,12 +670,12 @@ def verify_subject_mapper(
         pytest.skip(
             f"cannot mint a {user!r} token in realm {realm!r} via client {client_id!r}: {exc}. "
             "Enable Direct Access Grants on the client and set the user's password "
-            "(see docs/opa-kind-runbook.md Prerequisites)."
+            "(see k8s/opa-kind-runbook.md Prerequisites)."
         )
     sub = jwt_claim(token, "sub")
     if sub != user:
         pytest.skip(
             f"token 'sub' is {sub!r}, not {user!r} — the realm's username->sub protocol mapper is "
-            "missing (see docs/opa-kind-runbook.md Prerequisites)."
+            "missing (see k8s/opa-kind-runbook.md Prerequisites)."
         )
     return token

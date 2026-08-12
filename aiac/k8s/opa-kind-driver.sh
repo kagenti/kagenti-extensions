@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# opa-kind-driver.sh — execute aiac/docs/opa-kind-runbook.md end-to-end.
+# opa-kind-driver.sh — execute aiac/k8s/opa-kind-runbook.md end-to-end.
 #
 # This is an automated driver for the AIAC "OPA Kind Cluster Runbook"
-# (aiac/docs/opa-kind-runbook.md). It runs every step of that runbook in
+# (aiac/k8s/opa-kind-runbook.md). It runs every step of that runbook in
 # order, prints each step and the result it obtained, prints the OPA `input`
 # documents for BOTH the inbound and the outbound legs, and FAILS with a clear
 # message the moment an observed result does not match the runbook's stated
 # expectation (instead of silently continuing).
 #
 # What it does, mirroring the runbook 1:1:
-#   Step 1   enable OPA in both legs               (scripts/opa-kind-enable.sh)
+#   Step 1   enable OPA in both legs               (opa-kind-enable.sh)
 #   Step 2   verify the starting point             (pods, bundle-service, client-id)
 #   Part A   inbound authorization
 #     A.1    dev-user token carries sub=dev-user
@@ -46,13 +46,13 @@
 #                  on restart, which leaves the exported kubeconfig stale.
 #
 # Run from the repo root (cortex/):
-#   OPERATOR_DIR=../operator ROSSOCTL_DIR=../rossoctl ./scripts/opa-kind-driver.sh
-#   SKIP_ENABLE=1 ./scripts/opa-kind-driver.sh   # skip the rebuild, just re-test
+#   OPERATOR_DIR=../operator ROSSOCTL_DIR=../rossoctl ./aiac/k8s/opa-kind-driver.sh
+#   SKIP_ENABLE=1 ./aiac/k8s/opa-kind-driver.sh   # skip the rebuild, just re-test
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORTEX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CORTEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ── Configuration (runbook defaults) ────────────────────────────────────────
 # Sibling repo clones the enable step needs; default to ../operator and
@@ -136,7 +136,7 @@ try:
 except Exception:
     print("no/invalid JSON from the token endpoint (is Keycloak reachable at the URL above?)")' 2>/dev/null || true)
     die "could not mint a token for user '${user}' at ${KC} — Keycloak said: ${err}
-     Keycloak Prerequisites (aiac/docs/opa-kind-runbook.md): in realm '${REALM}' the
+     Keycloak Prerequisites (aiac/k8s/opa-kind-runbook.md): in realm '${REALM}' the
      'rossoctl' client needs Direct Access Grants enabled + a username->sub protocol
      mapper, and users must exist with password == username."
   fi
@@ -162,6 +162,8 @@ except Exception:
 # admin_token  — realm master admin token for Keycloak admin API (B.2)
 admin_token() {
   local tok
+  # DEV ONLY: admin/admin is the seeded Kind cluster default — never copy into
+  # staging/production scripts; real deployments do not have password == username.
   tok=$(curl -s -X POST "${KC}/realms/master/protocol/openid-connect/token" \
           -d client_id=admin-cli -d username=admin -d password=admin -d grant_type=password \
         | python3 -c 'import sys,json;print(json.load(sys.stdin).get("access_token",""))' 2>/dev/null || true)
@@ -239,7 +241,7 @@ dump_opa_input() {
 
 # ── Preflight ────────────────────────────────────────────────────────────────
 printf '%s%sAIAC OPA Kind runbook driver%s\n' "$C_BLD" "$C_CYN" "$C_RST"
-info "runbook: aiac/docs/opa-kind-runbook.md   namespace: ${NS}   keycloak: ${KC}"
+info "runbook: aiac/k8s/opa-kind-runbook.md   namespace: ${NS}   keycloak: ${KC}"
 
 step "Preflight — required tooling and files"
 require_cmd
@@ -266,7 +268,7 @@ if [ "${SKIP_ENABLE:-}" = "1" ]; then
   step "Step 1 — Enable OPA in both legs  [SKIPPED: SKIP_ENABLE=1]"
   info "skipping the image rebuild + opa-kind-enable.sh; verifying OPA is already wired"
 else
-  step "Step 1 — Enable OPA in both legs (scripts/opa-kind-enable.sh)"
+  step "Step 1 — Enable OPA in both legs (opa-kind-enable.sh)"
   [ -n "${OPERATOR_DIR:-}" ] && [ -d "${OPERATOR_DIR:-}" ] \
     || die "OPERATOR_DIR must point to a rossoctl/operator clone (got: '${OPERATOR_DIR:-<unset>}')"
   [ -n "${ROSSOCTL_DIR:-}" ] && [ -d "${ROSSOCTL_DIR:-}" ] \

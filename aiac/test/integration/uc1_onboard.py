@@ -1,7 +1,7 @@
 """Shared harness for the UC-1 onboarding integration-test ladder (rungs 1–3).
 
 Spec: ``docs/specs/integration-test/uc1-onboarding-pipeline.md``; live loop shape (handoff 08):
-``docs/opa-kind-runbook.md``. The evaluator is now the **deployed AuthBridge OPA plugin**, not a
+``k8s/opa-kind-runbook.md``. The evaluator is now the **deployed AuthBridge OPA plugin**, not a
 standalone OPA-CLI run over dumped ``.rego`` — there is no ``.rego`` dump and no ``opa`` binary here.
 
 Every rung follows the same shape against **one** live rossoctl/Kind cluster with the AuthBridge OPA
@@ -632,7 +632,7 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
                 f"[raw: HTTP {ob_code}, body={ob_body[:300]!r}] "
                 f"(expected allow / deny / {expected_source_read}). code=None + 'exec failed' body = a "
                 "stale/gone agent pod (harness); 503 = token-exchange never came up (OPA not reached); "
-                "a real policy stall would read 'deny', never 'error' — see docs/opa-kind-runbook.md "
+                "a real policy stall would read 'deny', never 'error' — see k8s/opa-kind-runbook.md "
                 "and issue #139."
             )
         yield ctx

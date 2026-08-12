@@ -5,7 +5,7 @@ Issue ``testing/5.4.2-uc1-onboard-agent-then-tool.md``; spec
 Service Onboarding agent (``POST /apply/service/{id}``) for the ``github-agent`` **first** and the
 ``github-tool`` **second**, then assert the **full** truth table at the end by driving **real HTTP
 requests through AuthBridge** and reading the **real OPA plugin's** allow/deny (handoff 08; live loop
-shape in ``docs/opa-kind-runbook.md``).
+shape in ``k8s/opa-kind-runbook.md``).
 
 This rung proves the key reconciliation property: onboarding the tool **after** the agent
 retroactively completes the agent's outbound policy. When the agent is onboarded alone its outbound
@@ -33,7 +33,7 @@ poll bundle → drive real requests + assert → Keycloak cleanup**. Deployment 
 **preconditions**, not test steps.
 
 Run (needs a live rossoctl/Kind cluster with the AIAC stack + AuthBridge OPA pipeline wired in — see
-``docs/opa-kind-runbook.md`` / ``../scripts/opa-kind-enable.sh`` — the demo workloads deployed +
+``k8s/opa-kind-runbook.md`` / ``k8s/opa-kind-enable.sh`` — the demo workloads deployed +
 registered into ``AIAC_TEST_REALM``, a real LLM in-pod, and ``test/integration/.env`` sourced):
 
     .venv/bin/pytest test/integration/test_uc1_onboard_agent_then_tool.py -m integration -v
