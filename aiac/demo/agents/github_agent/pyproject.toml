@@ -21,6 +21,7 @@ dependencies = [
     "lxml>=6.1.1",              # Indirect; prevents CVE-2026-41066
     "orjson>=3.11.6",           # Indirect; prevents CVE-2025-67221
     "json-repair>=0.60.1",      # Indirect (via crewai); prevents GHSA-xf7x-x43h-rpqh (DoS)
+    "aiohttp>=3.14.3",          # Indirect; prevents GHSA-cq5v-8q36-5273 (OOB heap read)
     # CVE-2026-45829 (chromadb): no fixed version published; crewai pins chromadb<1.2.
     # Vulnerability requires running a chromadb HTTP server with trust_remote_code=true,
     # which this agent does not do.
