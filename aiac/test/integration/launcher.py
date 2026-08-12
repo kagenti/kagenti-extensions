@@ -417,7 +417,7 @@ def outbound_probe(
     *,
     namespace: str,
     agent_pod: str,
-    tool_url: str = "http://github-tool:9090/",
+    tool_url: str = "http://github-tool:9090/mcp",
     container: str = "agent",
     timeout: float = 120.0,
 ) -> tuple[int | None, str]:
@@ -441,7 +441,9 @@ def outbound_probe(
         'body = json.dumps({"jsonrpc": "2.0", "id": "1", "method": "tools/call",'
         ' "params": {"name": name, "arguments": {}}}).encode()\n'
         'req = urllib.request.Request(url, data=body, headers={'
-        '"Content-Type": "application/json", "Authorization": "Bearer " + tok})\n'
+        '"Content-Type": "application/json",'
+        ' "Accept": "application/json, text/event-stream",'
+        ' "Authorization": "Bearer " + tok})\n'
         "try:\n"
         "    r = op.open(req, timeout=15)\n"
         '    print("AB_HTTP:%d" % r.status)\n'
