@@ -39,6 +39,7 @@ spec:
     metadata:
       labels:
         app: github-tool
+        app.kubernetes.io/name: github-tool
     spec:
       containers:
         - name: github-tool
