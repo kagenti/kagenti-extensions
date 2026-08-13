@@ -258,6 +258,12 @@ def upsert_policy(policy: PolicyModel):
 
 @app.post("/policy/agents/{agent_id}", status_code=204)
 def upsert_agent(agent_id: str, model: AgentPolicyModel):
+    # The ``{agent_id}`` path segment is intentionally ignored: the request
+    # body is authoritative. ``_upsert_agent`` derives namespace/name from
+    # ``model.agent_id`` (via ``identity_ref``), the single source of truth, so
+    # a mismatched or placeholder URL segment (e.g. ``/policy/agents/ignored``)
+    # never affects which CR is written. The segment is kept only to give the
+    # route a RESTful shape.
     return _run_write(lambda: _upsert_agent(model))
 
 
