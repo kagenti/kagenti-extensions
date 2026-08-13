@@ -249,7 +249,11 @@ app = FastAPI()
 def upsert_policy(policy: PolicyModel):
     def _op():
         # A malformed agent_id aborts the batch with a 400 naming it; agents
-        # already applied before that point stay written (no rollback).
+        # already applied before that point stay written (no rollback). The
+        # batch is also unbounded in size. This partial-write semantic is
+        # acceptable for the current caller (store-derived, pre-validated ids;
+        # SSA is idempotent so a retry re-applies the whole set) and is tracked
+        # for hardening in s-and-p-team/cortex#143.
         for agent in policy.agents:
             _upsert_agent(agent)
 
