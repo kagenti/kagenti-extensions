@@ -26,14 +26,14 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 | [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Experimental (opt-in build tag) | Outbound | No |
 | [`cpex`](#cpex) | APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step. | Separate build (`authbridge-cpex`, cgo) | Outbound | No |
 | [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Yes | Outbound | No |
-| [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Yes | Outbound | No |
+| [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Unknown | Outbound | No |
 | [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Yes | Inbound | YES |
-| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Yes | Inbound | No |
+| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Unknown | Inbound | No |
 | [`mcp-parser`](#mcp-parser) | Parses MCP tool calls/results into `pctx.Extensions.MCP`. | Yes | Outbound | No |
-| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Yes | Both | No |
-| [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Yes | Outbound | No |
-| [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Yes | Outbound | No |
-| [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Yes | Outbound | No |
+| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Unknown | Both | No |
+| [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Unknown | Outbound | No |
+| [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Unknown | Outbound | No |
+| [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Unknown | Outbound | No |
 | [`token-budget`](#token-budget) | Enforces per-session token, call, and duration budgets via Redis. | Experimental (opt-in build tag) | Outbound | No |
 | [`token-exchange`](#token-exchange) | RFC 8693 outbound token exchange per route. | Yes | Outbound | YES |
 
@@ -196,6 +196,8 @@ Opt-in at build time (`-tags include_plugin_tokenbudget`).
 - `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
 - `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
 
+Note that enforcement uses a zero-I/O local cache. After a pod restart, the first request can pass while the cache is cold, before Redis refresh restores the counters.
+
 ## `token-exchange`
 
 RFC 8693 outbound token exchange per route. Supports Keycloak, Entra
@@ -205,7 +207,7 @@ ID, Okta, and any RFC 8693-compliant IdP.
 - `provider` (string) — IdP selector for endpoint derivation and client auth: `keycloak`, `generic`.
 - `provider_url` / `provider_realm` (string) — IdP base URL and realm/tenant, meaning varies by provider.
 - `keycloak_url` / `keycloak_realm` (string) — deprecated aliases for `provider_url`/`provider_realm` with `provider=keycloak`.
-- `default_policy` (string) — behavior when no route matches: `passthrough` (default) or `exchange` (empty-audience client-credentials).
+- `default_policy` (string) — behavior when no route matches: `passthrough` (default) or `exchange` (empty-audience client-credentials) for hosts explicitly configured in `authproxy-routes`.
 - `no_token_policy` (string) — behavior for outbound requests with no bearer token: `client-credentials`, `allow`, or `deny` (default).
 - `identity.type` (string) — `spiffe` (JWT-SVID assertion) or `client-secret`; required.
 - `identity.client_id` / `identity.client_id_file` — OAuth client ID, inline or from file (default `/shared/client-id.txt`).
