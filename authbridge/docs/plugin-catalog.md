@@ -22,20 +22,20 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 
 | Name | Description | Production ready? | Direction | Default config? |
 |------|-------------|--------------------|-----------|------------------|
-| [`a2a-parser`](#a2a-parser) | Parses A2A messages into `pctx.Extensions.A2A` for downstream plugins. | Yes | Inbound | No |
-| [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Experimental (opt-in build tag) | Outbound | No |
-| [`cpex`](#cpex) | APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step. | Separate build (`authbridge-cpex`, cgo) | Outbound | No |
-| [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Yes | Outbound | No |
-| [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Unknown | Outbound | No |
-| [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Yes | Inbound | YES |
-| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Unknown | Inbound | No |
-| [`mcp-parser`](#mcp-parser) | Parses MCP tool calls/results into `pctx.Extensions.MCP`. | Yes | Outbound | No |
-| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Unknown | Both | No |
-| [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Unknown | Outbound | No |
-| [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Unknown | Outbound | No |
-| [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Unknown | Outbound | No |
-| [`token-budget`](#token-budget) | Enforces per-session token, call, and duration budgets via Redis. | Experimental (opt-in build tag) | Outbound | No |
-| [`token-exchange`](#token-exchange) | RFC 8693 outbound token exchange per route. | Yes | Outbound | YES |
+| [`a2a-parser`](#a2a-parser) | Parses A2A messages into `pctx.Extensions.A2A` for downstream plugins. | Beta | Inbound | No |
+| [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Coming Soon | Outbound | No |
+| [`cpex`](#cpex) | APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step. | Coming Soon | Outbound | No |
+| [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Alpha | Outbound | No |
+| [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Alpha | Outbound | No |
+| [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Ready | Inbound | YES |
+| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Alpha | Inbound | No |
+| [`mcp-parser`](#mcp-parser) | Parses MCP tool calls/results into `pctx.Extensions.MCP`. | Beta | Outbound | No |
+| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Alpha | Both | No |
+| [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Alpha | Outbound | No |
+| [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Alpha | Outbound | No |
+| [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Alpha | Outbound | No |
+| [`token-budget`](#token-budget) | Enforces per-session token, call, and duration budgets via Redis. | Coming Soon | Outbound | No |
+| [`token-exchange`](#token-exchange) | RFC 8693 outbound token exchange per route. | Ready | Outbound | YES |
 
 ## `a2a-parser`
 
