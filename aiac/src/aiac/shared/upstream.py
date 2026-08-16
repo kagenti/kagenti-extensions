@@ -57,7 +57,17 @@ def is_transient(exc: BaseException) -> bool:
     # requests.exceptions.ConnectionError / Timeout are NOT subclasses of the builtins above;
     # match them structurally by class name so this module stays transport-agnostic.
     name = type(exc).__name__
-    if name in ("ConnectionError", "Timeout", "ConnectTimeout", "ReadTimeout", "ConnectionResetError"):
+    if name in (
+        "ConnectionError",
+        "Timeout",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "ConnectionResetError",
+        # openai / langchain_openai raise these on request timeout / dropped connection;
+        # matched by name so this module keeps no openai import (transport-agnostic).
+        "APITimeoutError",
+        "APIConnectionError",
+    ):
         return True
     status = _status_code(exc)
     return status is not None and status >= 500

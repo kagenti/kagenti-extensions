@@ -37,13 +37,13 @@ def main() -> None:
     for f in (cfg.inbound_rego, cfg.outbound_rego):
         ok(f"{rego_dir / f}")
 
-    # The tool's ``*-aud`` audience client scope only exists once the tool is onboarded, so 02-setup.py
+    # The tool's ``*-aud`` audience client scope only exists once the tool is onboarded, so 03-setup.py
     # could not yet assign it as a default scope on the agent client. Do it now, so an exchanged token's
     # ``aud`` reaches the tool without the caller requesting the scope explicitly. Idempotent.
     say("4", "4", "Assign the tool-audience default scope to the agent client")
     agent_uuid = resolve_service_id(admin, cfg, f"{cfg.namespace}/{scn.AGENT_WORKLOAD}")
     tool_aud_scope = f"agent-{cfg.namespace}-{scn.TOOL_WORKLOAD}-aud"
-    # Unlike 02-setup.py (which runs before the tool exists, so a missing scope is expected), here the
+    # Unlike 03-setup.py (which runs before the tool exists, so a missing scope is expected), here the
     # tool has just been onboarded — the ``*-aud`` scope must exist now. If it doesn't, the exchanged
     # token would lack the tool audience and downstream calls would silently fail, so abort rather
     # than report a success the token exchange can't back up.
