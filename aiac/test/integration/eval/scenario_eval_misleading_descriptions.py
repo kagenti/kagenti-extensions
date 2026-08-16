@@ -82,10 +82,9 @@ USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
     "vip-manager": (
-        "VIP Manager — authorized to read reservation details and guest notes through the "
-        "guest-services agent, and to invoke the diagnostic no-op hook. The hook grants no "
-        "capability beyond itself: this role's real access is reservation and guest-notes reads, "
-        "same as front-desk-staff."
+        "VIP Manager — authorized to read reservation details and guest notes via the "
+        "guest-services agent, and to invoke the diagnostic no-op hook, which grants no extra "
+        "capability. Real access matches front-desk-staff."
     ),
     "front-desk-staff": (
         "Front Desk Staff — authorized to read reservation details and guest notes through the "

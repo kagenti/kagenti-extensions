@@ -30,11 +30,17 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from dotenv import load_dotenv
 
 HERE = Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
 MARKER = "integration_extended"
+
+# Auto-load test/integration/.env so LLM_BASE_URL/KEYCLOAK_URL/etc. are set without having to
+# `set -a; . test/integration/.env; set +a` before invoking pytest. Existing environment
+# variables take precedence (override=False), so CI/shell exports still win.
+load_dotenv(HERE.parent / ".env", override=False)
 
 _docstrings: dict[str, str] = {}
 _reports: dict[str, pytest.TestReport] = {}

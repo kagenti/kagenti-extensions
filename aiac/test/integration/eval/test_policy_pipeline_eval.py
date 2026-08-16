@@ -557,7 +557,7 @@ def pipeline() -> dict[str, dict]:
 
         idp = Service("aiac.idp.service.configuration.keycloak.main:app", port=idp_port, host=idp_host)
         store = Service(
-            "aiac.policy.store.service.main:app",
+            "aiac.policy.model_store.service.main:app",
             port=store_port,
             host=store_host,
             env={"SERVICEPOLICY_DB_PATH": str(db_path)},
@@ -770,16 +770,18 @@ def test_grant_set_matches_truth_table(pipeline: dict[str, dict], scenario_name:
     assert got == want, f"{scenario_name} {gate}: missing={want - got} extra={got - want}"
 
 
-@pytest.mark.parametrize("scenario_name", _scenario_ids())
+def _identity_confusion_scenario_ids() -> list[str]:
+    return [name for name, scenario in SCENARIOS.items() if getattr(scenario, "IDENTITY_CONFUSION_PROBES", [])]
+
+
+@pytest.mark.parametrize("scenario_name", _identity_confusion_scenario_ids())
 def test_identity_confusion_probes(pipeline: dict[str, dict], scenario_name: str) -> None:
     """Optional per-scenario hook (Scenario 9): ``scenario.IDENTITY_CONFUSION_PROBES`` is a list of
     ``(subject, agent_id, expected)`` triples where ``subject`` is another agent's own
     service-account identity, asserting the inbound gate doesn't accidentally admit an agent
-    identity that looks like a subject. Scenarios that define no probes are skipped."""
+    identity that looks like a subject. Only scenarios that define probes are collected."""
     scenario = SCENARIOS[scenario_name]
-    probes = getattr(scenario, "IDENTITY_CONFUSION_PROBES", [])
-    if not probes:
-        pytest.skip(f"scenario {scenario_name} defines no identity-confusion probes")
+    probes = scenario.IDENTITY_CONFUSION_PROBES
     for subject, agent_id, expected in probes:
         slug = agent_id.replace("-", "_")
         rego = pipeline[scenario_name]["rego_dir"] / f"{slug}.inbound.rego"
