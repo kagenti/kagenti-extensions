@@ -5,6 +5,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    groups:
+      codeql-action:
+        patterns:
+          - "github/codeql-action/*"
 
   # Go - authlib (the shared library — pulled in by every cmd/* binary
   # via replace directives, so updates here flow into everything).
