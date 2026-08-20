@@ -44,6 +44,7 @@ spec:
     metadata:
       labels:
         app: github-tool
+        app.kubernetes.io/name: github-tool
     spec:
       serviceAccountName: github-tool
       # The image runs as non-root UID 10001 (see the github_tool Dockerfile).

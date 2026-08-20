@@ -5,6 +5,7 @@ contract — field names, invariants, error behaviour, the rules that the
 framework enforces at startup.
 
 **See also:**
+- [`plugin-catalog.md`](./plugin-catalog.md) — catalog of implemented plugins.
 - [`plugin-tutorial.md`](./plugin-tutorial.md) — step-by-step tutorial for writing a new plugin.
 - [`framework-architecture.md`](./framework-architecture.md) — how the pipeline
   composes plugins, the lifecycle, the Context / Extensions wire shape.

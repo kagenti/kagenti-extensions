@@ -69,7 +69,7 @@ No authentication credentials are required. The NATS server runs with no-auth co
 
 ## Runtime
 
-- Image: `nats:latest` with JetStream enabled (`-js` flag)
+- Image: `nats:2.14-alpine` with JetStream enabled (`-js` flag)
 - Bind: `0.0.0.0:4222` (NATS client port)
 - Kubernetes ClusterIP service: `aiac-event-broker-service:4222`
 - Base image: official `nats` Docker image

@@ -140,7 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
 
@@ -215,7 +215,7 @@ jobs:
 
       - name: Run Hadolint
         if: steps.find-dockerfiles.outputs.has_dockerfiles == 'true'
-        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # v3.3.0
+        uses: hadolint/hadolint-action@2a66e89f53d0771bb131a7fa31f3136336094aa6  # v3.4.0
         with:
           dockerfile: "**/Dockerfile*"
           recursive: true
@@ -271,16 +271,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3  # v4
         with:
           languages: ${{ matrix.language }}
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Autobuild
-        uses: github/codeql-action/autobuild@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        uses: github/codeql-action/autobuild@5595ccaf912efad79be6eef63a5619ff05969be3  # v4
 
       - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9  # v4
+        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3  # v4
         with:
           category: "/language:${{ matrix.language }}"
 

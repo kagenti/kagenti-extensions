@@ -1,3 +1,8 @@
 fastapi
 uvicorn[standard]
+# Pinned to a known-good major: this service now mutates cluster state
+# (create/update/patch/delete on AuthorizationPolicy CRs), so the client's
+# blast radius is higher than the old filesystem stub — cap the major to keep
+# a surprise 37.x from silently changing SSA/CR behavior. Bump deliberately.
+kubernetes>=36.0.3,<37
 pydantic

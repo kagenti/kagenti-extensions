@@ -5,6 +5,13 @@
 #   make demo   # init (00-03) -> onboard (04-05) -> run (dev/test/devops)
 #   make dev    # drive dev-user's intents through the after-tool snapshot
 #
+# How the demo sources generated Rego (see demo.md "How the demo sources the generated Rego"):
+# the reworked PDP Policy Writer is CR-backed — production writes AuthorizationPolicy CRs only, no
+# /rego file dump. So `make agent`/`tool` read the agent's Rego straight from its
+# `authorizationpolicies.agent.rossoctl.dev/github-agent` CR (spec.policies[].content) into
+# generated/<snapshot>/team1/github-agent/{inbound,outbound}/request.rego, and `make clear` deletes
+# that CR. No demo-only deployment overlay is needed (we do NOT enable POLICY_WRITER_DUMP_REGO).
+#
 # Prereqs: a rossoctl/kind cluster with SPIRE + Keycloak + the rossoctl operator (see
 # ../../assets/INSTALL.md and ../../../k8s/aiac-deployment-guide.md). KEYCLOAK_URL /
 # KEYCLOAK_ADMIN_USERNAME / KEYCLOAK_ADMIN_PASSWORD are discovered automatically by the
@@ -45,7 +52,7 @@ keycloak:  ## Port-forward the in-cluster Keycloak and discover admin creds (run
 prereqs: keycloak  ## Verify (and install if absent) everything the demo needs before touching Keycloak
 	$(KC_ENV) $(PYTHON) init/01-prereqs.py
 
-clear:  ## Reset to a clean slate: Keycloak roles/scopes, Policy Store, writer's /rego, generated/
+clear:  ## Reset to a clean slate: Keycloak roles/scopes, Policy Store, the agent's AuthorizationPolicy CR, generated/
 	$(KC_ENV) $(PYTHON) init/02-clear.py
 
 setup:  ## Provision users/roles, mount policy.md, configure token exchange; prints both UUIDs

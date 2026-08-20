@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0
+                             http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <groupId>io.aiac.keycloak</groupId>
+    <artifactId>aiac-event-listener</artifactId>
+    <version>0.1.0</version>
+    <packaging>jar</packaging>
+
+    <name>AIAC Keycloak Event Listener</name>
+    <description>Keycloak admin-event listener that publishes CLIENT_CREATED and role create/update events to the AIAC NATS JetStream Event Broker.</description>
+
+    <properties>
+        <maven.compiler.source>17</maven.compiler.source>
+        <maven.compiler.target>17</maven.compiler.target>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <!-- Match this to your Keycloak / Red Hat Build of Keycloak version.
+             Kept at >= 26.6.3 to clear the dependency-review advisories against
+             26.5.2 (GHSA-x4p7-7chp-64hq high; GHSA-q35r-vvhv-vx5h,
+             GHSA-rr5q-3xwr-f323, GHSA-4q93-v92x-p89f moderate). All of these,
+             and the later keycloak-services advisories, are provided-scope
+             (Keycloak supplies these jars at runtime) — they don't ship in the
+             shaded provider jar. keycloak-services is deliberately NOT a
+             dependency here: this SPI imports only org.keycloak.Config (core),
+             org.keycloak.models.* (server-spi), and org.keycloak.events.*
+             (server-spi-private). -->
+        <keycloak.version>26.6.3</keycloak.version>
+        <!-- Verify against Maven Central at implementation/upgrade time. -->
+        <jnats.version>2.20.6</jnats.version>
+        <!-- jboss-logging is Keycloak's logging facade, on its runtime classpath;
+             provided-scope so it isn't shaded. Was previously pulled transitively
+             via keycloak-services (dropped). -->
+        <jboss.logging.version>3.6.1.Final</jboss.logging.version>
+    </properties>
+
+    <dependencies>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-core</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.keycloak</groupId>
+            <artifactId>keycloak-server-spi-private</artifactId>
+            <version>${keycloak.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.jboss.logging</groupId>
+            <artifactId>jboss-logging</artifactId>
+            <version>${jboss.logging.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <!-- NOT provided by Keycloak's own classpath: must be shaded into the final jar. -->
+        <dependency>
+            <groupId>io.nats</groupId>
+            <artifactId>jnats</artifactId>
+            <version>${jnats.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>5.11.3</version>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <finalName>${project.artifactId}-${project.version}</finalName>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.13.0</version>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+            </plugin>
+            <!-- jnats is compile-scope (not provided by Keycloak), so it must be
+                 bundled into the provider jar via shading — ServiceLoader-based
+                 provider loading gives no other way onto the runtime classpath. -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>3.6.0</version>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>

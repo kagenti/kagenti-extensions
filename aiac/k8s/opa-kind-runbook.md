@@ -12,11 +12,11 @@ CRD — is identical. This document gives the **exact, copy-paste** steps to run
 the AIAC scenario end-to-end on a local Kind cluster, using the two helper
 scripts that wire OPA in and out:
 
-- [`scripts/opa-kind-enable.sh`](../../scripts/opa-kind-enable.sh) — rebuilds
+- [`opa-kind-enable.sh`](opa-kind-enable.sh) — rebuilds
   the `authbridge-proxy` image from the current tree, loads it into Kind, and
   wires the `opa` plugin (plus the parser set) into **both** the inbound and
   outbound pipeline of every `team1` agent.
-- [`scripts/opa-kind-restore.sh`](../../scripts/opa-kind-restore.sh) — reverts
+- [`opa-kind-restore.sh`](opa-kind-restore.sh) — reverts
   the pipeline to its shipped state (no OPA overlay) and restarts the agents.
 
 The scenario itself uses one agent (`github-agent` in namespace `team1`) and
@@ -24,7 +24,7 @@ its downstream tool (`github-tool`):
 
 - **`dev-user` is the allowed user, `alice` is the blocked user.** `dev-user`
   is the canonical scenario username from
-  [`docs/specs/integration-test/policy-pipeline.md`](specs/integration-test/policy-pipeline.md).
+  [`docs/specs/integration-test/policy-pipeline.md`](../docs/specs/integration-test/policy-pipeline.md).
 - **Inbound** authorization is enforced by a **client-scoped**
   `AuthorizationPolicy` targeting `github-agent` alone.
 - **Outbound** shows the token-exchange → OPA leg: the agent's call to
@@ -58,7 +58,7 @@ read the delegation chain (see [Part B](#part-b--outbound-token-exchange--opa)).
     node was likely restarted and reassigned its API-server host port, leaving
     the exported kubeconfig stale. Re-export it:
     `kind export kubeconfig --name rossoctl`. (The
-    [`scripts/opa-kind-driver.sh`](../../scripts/opa-kind-driver.sh) driver does
+    [`opa-kind-driver.sh`](opa-kind-driver.sh) driver does
     this automatically in preflight.)
 - The `rossoctl` Keycloak realm has `dev-user` and `alice` users with
   **password == username**, and the `rossoctl` client has Direct Access Grants
@@ -109,7 +109,7 @@ All commands below are run from the repo root (`cortex/`).
 ## Step 1 — Enable OPA in both legs
 
 ```bash
-OPERATOR_DIR=../operator ROSSOCTL_DIR=../rossoctl ./scripts/opa-kind-enable.sh
+OPERATOR_DIR=../operator ROSSOCTL_DIR=../rossoctl ./aiac/k8s/opa-kind-enable.sh
 ```
 
 This rebuilds `localhost/authbridge:local` from the current tree, loads it into
@@ -289,7 +289,7 @@ JSON; the log prints it in Go `map[...]` form):
 - Credential headers (`authorization`, `cookie`, …) are **redacted** from
   `headers` — use `identity` for auth decisions.
 
-The policy ([`opa-team1-policy.yaml`](examples/opa-team1-policy.yaml)) keys on
+The policy ([`opa-team1-policy.yaml`](../docs/examples/opa-team1-policy.yaml)) keys on
 `input.identity.subject`: `dev-user` maps to a role whose scopes are allowed →
 `allow: true`; `alice` has no role → `allow: false`. The decision appears in
 the same log line as `result`:
@@ -489,7 +489,7 @@ built:
   Parser sections (`mcp` / `a2a` / `inference`) appear **only** when the body
   matches that parser's protocol — a non-MCP body carries no `input.mcp`.
 
-The example CR ([`opa-team1-policy.yaml`](examples/opa-team1-policy.yaml))
+The example CR ([`opa-team1-policy.yaml`](../docs/examples/opa-team1-policy.yaml))
 carries an `outbound/request.rego` that keys entirely on fields the live plugin
 emits on this leg: the synthesized `input.identity.subject`,
 `input.identity.service_id` (the exchange target, added to the outbound identity
@@ -536,7 +536,7 @@ curl -s -o /dev/null -w "remove scope HTTP %{http_code}\n" -X DELETE -H "Authori
   "$KC/admin/realms/rossoctl/clients/$CID/optional-client-scopes/$SID"
 
 # 4. revert the pipeline (removes the OPA overlay, restarts the agents)
-ROSSOCTL_DIR=../rossoctl ./scripts/opa-kind-restore.sh
+ROSSOCTL_DIR=../rossoctl ./aiac/k8s/opa-kind-restore.sh
 ```
 
 Confirm OPA is gone from the pipeline (expect **0**):

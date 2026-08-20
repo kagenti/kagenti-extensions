@@ -52,6 +52,10 @@ The operator resolves the mode per workload from `AgentRuntime.Spec.AuthBridgeMo
 
 The shared auth library at [`authlib/`](./authlib/) contains the building blocks (JWT validation, token exchange, caching, routing) with no protocol dependencies. See [`authlib/README.md`](./authlib/README.md) for package reference.
 
+## Plugin Catalog
+
+See [`docs/plugin-catalog.md`](./docs/plugin-catalog.md) for the full list of implemented pipeline plugins, what each does, and its configuration options.
+
 ## Architecture (Operator-Injected)
 
 The following describes the operator-injected sidecar deployment. After cortex#411 each mode is served by its own combined image (one container per pod, with `spiffe-helper` bundled inside and gated by `SPIRE_ENABLED`). The legacy `authbridge-unified`, `authbridge-light`, `envoy-with-processor`, and standalone `client-registration` / `spiffe-helper` sidecars are gone.

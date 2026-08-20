@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Reset the demo to a clean slate: delete UC-1's provisioned Keycloak roles/scopes, clear the
 Policy Store (non-optional — its SQLite survives on a PV and onboarding appends with
-``override=False``), and clear both the writer pod's ``/rego`` and the local ``generated/`` copy.
+``override=False``), delete the agent's ``AuthorizationPolicy`` CR (the reworked writer is
+CR-backed — there is no ``/rego`` file to wipe), and clear the local ``generated/`` copy.
 
 Kept separate from ``03-setup.py`` so a presenter can re-run just the reset between takes.
 """
@@ -14,7 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
 
-from _lib import GENERATED, cleanup_provisioned, clear_policy_store, clear_writer_rego, connect_admin, load_config, ok, say, writer_pod
+from _lib import GENERATED, cleanup_provisioned, clear_policy_store, clear_writer_rego, connect_admin, load_config, ok, say
 
 
 def main() -> None:
@@ -29,10 +30,9 @@ def main() -> None:
     clear_policy_store(cfg)
     ok("Policy Store cleared")
 
-    say("3", "4", "Clear writer pod's /rego")
-    pod = writer_pod(cfg)
-    clear_writer_rego(cfg, pod)
-    ok(f"cleared /rego on pod {pod!r}")
+    say("3", "4", "Delete the agent's AuthorizationPolicy CR")
+    clear_writer_rego(cfg)
+    ok(f"deleted AuthorizationPolicy {cfg.cr_name!r} in {cfg.namespace!r} (if present)")
 
     say("4", "4", "Clear local generated/ snapshots")
     if GENERATED.exists():

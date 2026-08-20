@@ -19,8 +19,50 @@ data:
   AIAC_PDP_CONFIG_URL: "http://aiac-pdp-config-service:7071"
   AIAC_PDP_POLICY_URL: "http://aiac-pdp-policy-service:7072"
   AIAC_POLICY_MODEL_STORE_URL: "http://aiac-policy-model-store-service:7074"
-  # NATS_URL is added to this ConfigMap in Phase 2 (Event Broker, issue 4.19).
+  # PLATFORM_SOURCE_CLIENTS is the comma-separated list of platform bypass
+  # clients the inbound Rego admits without a user role.
+  PLATFORM_SOURCE_CLIENTS: "rossoctl"
+  # NATS_URL points the PDP services at the Event Broker (Phase 2, issue 4.19).
+  NATS_URL: "nats://aiac-event-broker-service:4222"
   # AIAC_RAG_INGEST_URL and AIAC_CHROMADB_URL are added in Phase 3 (RAG Pod, issue 4.20).
+
+---
+# RBAC for the PDP Policy Writer (aiac-pdp-policy-opa container). The writer
+# server-side-applies per-agent AuthorizationPolicy CRs, so its pod needs a
+# dedicated ServiceAccount bound to a ClusterRole granting CR write access.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aiac-pdp-policy-writer
+  namespace: aiac-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: aiac-pdp-policy-writer
+rules:
+  # No "watch": the writer only creates/patches CRs; bundle-service polls.
+  - apiGroups: ["agent.rossoctl.dev"]
+    resources: ["authorizationpolicies"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+---
+# Cluster-scoped binding (not a namespaced RoleBinding): the writer creates CRs
+# in arbitrary workload namespaces (team1, etc.), derived from each agent's
+# identity_ref namespace — not just aiac-system.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: aiac-pdp-policy-writer
+subjects:
+  - kind: ServiceAccount
+    name: aiac-pdp-policy-writer
+    namespace: aiac-system
+roleRef:
+  kind: ClusterRole
+  name: aiac-pdp-policy-writer
+  apiGroup: rbac.authorization.k8s.io
 
 ---
 # Preconditions (NOT created by this manifest):
@@ -50,10 +92,12 @@ spec:
       labels:
         app: aiac-interface
     spec:
-      # Both images run as non-root UID 10001. fsGroup makes the /rego emptyDir
-      # (written by the aiac-pdp-policy-opa container) group-writable by that
-      # user; without it the kubelet leaves the emptyDir root-owned and the
-      # writer's /health check fails on the non-writable mount.
+      # Dedicated SA so the aiac-pdp-policy-opa container can server-side-apply
+      # AuthorizationPolicy CRs (RBAC above); the default namespace SA cannot.
+      serviceAccountName: aiac-pdp-policy-writer
+      # Both images run as non-root UID 10001. fsGroup makes the /tmp emptyDirs
+      # group-writable by that user; without it the kubelet leaves an emptyDir
+      # root-owned and temp writes on the read-only root filesystem fail.
       securityContext:
         runAsNonRoot: true
         runAsUser: 10001
@@ -103,18 +147,18 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
-        # Phase 1 PDP Policy Writer: OPA rego-file mock. Generates Rego
-        # packages and writes them as .rego files to REGO_OUTPUT_DIR. It is a
-        # pure filesystem stub — no Keycloak, no k8s API — so it mounts neither
-        # keycloak-admin-secret nor any Keycloak credentials. The AuthorizationPolicy
-        # CR-backed variant (RBAC + env vars) is layered on later per issue 4.18.
+        # PDP Policy Writer (OPA): CR-backed writer. It server-side-applies
+        # per-agent AuthorizationPolicy CRs (agent.rossoctl.dev) to the
+        # Kubernetes API, authorized via the aiac-pdp-policy-writer
+        # ServiceAccount/RBAC (above). The .rego file dump is an optional debug
+        # aid (POLICY_WRITER_DUMP_REGO) and is off here in production.
         - name: aiac-pdp-policy-opa
           image: localhost/aiac-pdp-policy-opa:local
           imagePullPolicy: Never
           ports:
             - containerPort: 7072
-          # Writes Rego to the /rego mount (writable); the rest of the root
-          # filesystem is read-only, so temp writes go to the /tmp emptyDir.
+          # The root filesystem is read-only; the Kubernetes client and FastAPI
+          # still need somewhere to write, so temp writes go to the /tmp emptyDir.
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -143,17 +187,10 @@ spec:
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config
-          env:
-            - name: REGO_OUTPUT_DIR
-              value: /rego
           volumeMounts:
-            - name: rego-output
-              mountPath: /rego
             - name: tmp-opa
               mountPath: /tmp
       volumes:
-        - name: rego-output
-          emptyDir: {}
         - name: tmp
           emptyDir: {}
         - name: tmp-opa

@@ -8,9 +8,11 @@ rebuilding the common case, and lets unit tests inject a fake component factory
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from dataclasses import replace
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .models import ReflectionIssue, ReflectRequest, ReflectResponse
@@ -118,14 +120,59 @@ class ReflectionEngine:
         decision = _decision_str(reflection.decision)
         score = _extract_overall_score(raw_pipeline)
         execution_ms = getattr(output, "execution_time_ms", None)
+
+        # Extract tool name + args from the first tool call for correlation.
+        first_tc = request.tool_calls[0] if request.tool_calls else {}
+        fn = first_tc.get("function", {})
+        if not fn:
+            log.warning("reflect: tool_calls[0] has no 'function' key; tool correlation unavailable. call=%s", first_tc)
+        tool_name = fn.get("name", "-")
+        raw_args = fn.get("arguments", "{}")
+        try:
+            tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        except (json.JSONDecodeError, TypeError):
+            tool_args = raw_args
+        try:
+            args_str = json.dumps(tool_args, separators=(",", ":"))
+        except (TypeError, ValueError):
+            args_str = repr(tool_args)
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        score_str = f"{score:.2f}" if score is not None else "-"
+        ms_str = f"{execution_ms:.1f}" if isinstance(execution_ms, (int, float)) else "-"
+
+        def _tok(*keys: str) -> str:
+            for k in keys:
+                v = raw_pipeline.get(k)
+                if v is not None:
+                    return str(v)
+            return "-"
+
+        # INFO: safe correlation fields only. Tool arguments are caller-controlled
+        # (log-injection risk via embedded newlines — CodeQL alert #179) and can
+        # contain payload data (PII, payment ids, etc.), so they never appear at
+        # INFO. The session_id / track are correlation identifiers, not payload,
+        # and are logged as-is.
         log.info(
-            "reflect session=%s track=%s decision=%s score=%s ms=%s",
-            request.session_id or "-",
-            track,
-            decision,
-            f"{score:.2f}" if score is not None else "-",
-            f"{execution_ms:.1f}" if isinstance(execution_ms, (int, float)) else "-",
+            "reflect ts=%s tool=%s decision=%s score=%s ms=%s track=%s session=%s",
+            ts, tool_name, decision, score_str, ms_str,
+            track, request.session_id or "-",
         )
+        log.debug(
+            "reflect ts=%s tool=%s decision=%s score=%s ms=%s"
+            " track=%s session=%s tokens_in=%s tokens_out=%s messages=%s",
+            ts, tool_name, decision, score_str, ms_str,
+            track,
+            request.session_id or "-",
+            _tok("tokens_in", "input_tokens"),
+            _tok("tokens_out", "output_tokens"),
+            len(request.messages),
+        )
+        # Raw arguments are only logged when the operator explicitly opts in via
+        # SPARC_LOG_REQUESTS=true, and only at DEBUG. Args are still
+        # attacker-influenced text so DEBUG output should be treated as sensitive.
+        if self._settings.log_requests:
+            log.debug("reflect ts=%s tool=%s args=%s", ts, tool_name, args_str)
 
         return ReflectResponse(
             decision=decision,

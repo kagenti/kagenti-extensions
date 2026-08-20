@@ -538,6 +538,43 @@ func TestBuildInput_OutboundIdentityFromDelegation(t *testing.T) {
 	}
 }
 
+// TestBuildInput_OutboundIdentityEmptyClientIDWhenAgentIDUnset pins the
+// contract when delegation is present but no agent_id is configured: the
+// synthesized input.identity carries client_id == "" (the empty string, not
+// absent). Outbound policy keys its allow decision on service_id/scopes, not
+// client_id, so "" is a benign but observable value worth asserting explicitly.
+func TestBuildInput_OutboundIdentityEmptyClientIDWhenAgentIDUnset(t *testing.T) {
+	inc := newIncludeSet(nil)
+	del := &pipeline.DelegationExtension{}
+	del.AppendHop(pipeline.DelegationHop{
+		SubjectID: "dev-user",
+		Scopes:    []string{"openid"},
+		Audience:  "github-tool",
+		Strategy:  "token-exchange",
+	})
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Method:    "POST",
+		Path:      "/mcp",
+		Host:      "github-tool-mcp",
+		Headers:   http.Header{},
+	}
+	pctx.Extensions.Delegation = del
+
+	input := buildInput(pctx, inc, "") // no agent_id configured
+	id, ok := input["identity"].(map[string]any)
+	if !ok {
+		t.Fatal("expected synthesized identity map on outbound")
+	}
+	cid, present := id["client_id"]
+	if !present {
+		t.Error("client_id should be present (as empty string), not omitted")
+	}
+	if cid != "" {
+		t.Errorf("client_id = %v, want \"\" when agent_id is unset", cid)
+	}
+}
+
 // TestBuildInput_OutboundIdentityOmitsServiceIDWhenAbsent verifies that a hop
 // with no recorded target audience (e.g. a non-exchange hop) does not assert an
 // empty input.identity.service_id, matching the scopes-omitted behavior.

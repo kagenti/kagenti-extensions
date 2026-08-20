@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 # For full control you can also set SPARC_LLM_REGISTRY_ID to any ALTK registry id.
 PROVIDER_REGISTRY_IDS: dict[str, str] = {
     "watsonx": "litellm.watsonx.output_val",
+    "litellm.watsonx": "litellm.watsonx.output_val",
     "ollama": "litellm.ollama.output_val",
     "openai": "litellm.output_val",
     "azure": "litellm.output_val",
@@ -35,6 +36,7 @@ PROVIDER_REGISTRY_IDS: dict[str, str] = {
 # Per-provider default model id (empty → SPARC_MODEL is required).
 PROVIDER_DEFAULT_MODELS: dict[str, str] = {
     "watsonx": "mistral-large-2512",
+    "litellm.watsonx": "mistral-large-2512",
     "ollama": "llama3.2:3b",
     "openai": "gpt-4o-mini",
     "azure": "",
@@ -98,6 +100,17 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 8090
 
+    # Request logging / arg-stripping (see api.py).
+    log_requests: bool = False
+    strip_tool_arg_keys: frozenset = field(default_factory=frozenset)
+
+    # When true, inject the response schema via the system prompt instead of
+    # relying on the provider's native ``response_format`` parameter. Required
+    # for models that return output only in ``reasoning_content`` (WatsonX
+    # reasoning models, Haiku via IBM LiteLLM proxy). Leave false for models
+    # that support ``response_format`` natively (e.g. mistral-large-2512).
+    schema_in_prompt: bool = False
+
     # Validation errors collected at load time (provider creds missing, etc.).
     errors: tuple[str, ...] = field(default_factory=tuple)
 
@@ -143,14 +156,20 @@ class Settings:
                 errors.append(f"SPARC_LLM_KWARGS_JSON is not valid JSON: {exc}")
 
         # Provider-specific credential / config validation.
-        if provider == "watsonx" and (not wx_api_key or not wx_project_id):
-            errors.append("provider=watsonx requires WX_API_KEY and WX_PROJECT_ID")
+        if provider in ("watsonx", "litellm.watsonx") and (not wx_api_key or not wx_project_id):
+            errors.append(f"provider={provider} requires WX_API_KEY and WX_PROJECT_ID")
         if provider == "openai" and not (os.getenv("OPENAI_API_KEY") or "api_key" in llm_kwargs):
             errors.append("provider=openai requires OPENAI_API_KEY (or api_key in SPARC_LLM_KWARGS_JSON)")
         if provider in ("azure", "litellm") and not model:
             errors.append(
                 f"provider={provider} requires SPARC_MODEL (e.g. azure/<deployment> or anthropic/claude-3-5-sonnet)"
             )
+
+        strip_tool_arg_keys: frozenset[str] = frozenset(
+            k.strip()
+            for k in os.getenv("SPARC_STRIP_TOOL_ARG_KEYS", "").split(",")
+            if k.strip()
+        )
 
         return cls(
             provider=provider,
@@ -171,5 +190,8 @@ class Settings:
             llm_registry_id=os.getenv("SPARC_LLM_REGISTRY_ID", "").strip(),
             host=os.getenv("HOST", "0.0.0.0"),
             port=_int_env("PORT", 8090),
+            log_requests=_truthy(os.getenv("SPARC_LOG_REQUESTS", "")),
+            strip_tool_arg_keys=strip_tool_arg_keys,
+            schema_in_prompt=_truthy(os.getenv("SPARC_SCHEMA_IN_PROMPT", "")),
             errors=tuple(errors),
         )

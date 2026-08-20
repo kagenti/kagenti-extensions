@@ -29,7 +29,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CORTEX_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+CORTEX_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 OPERATOR_DIR="${OPERATOR_DIR:-$(cd "$CORTEX_DIR/../operator" 2>/dev/null && pwd || echo "")}"
 ROSSOCTL_DIR="${ROSSOCTL_DIR:-$(cd "$CORTEX_DIR/../rossoctl" 2>/dev/null && pwd || echo "")}"
@@ -142,7 +142,7 @@ authBridge:
             keycloak_realm: "rossoctl"
         - name: opa
           config:
-            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+            bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
     outbound:
       plugins:
         - name: a2a-parser
@@ -157,7 +157,7 @@ authBridge:
               type: "client-secret"
         - name: opa
           config:
-            bundle_url: "http://bundle-service.rossoctl-system.svc.cluster.local:8080"
+            bundle_url: "http://bundle-service.${RELEASE_NAMESPACE}.svc.cluster.local:8080"
 YAML
 
 echo "==> Step 4/5: helm upgrade (base values.yaml + overlay — base file not modified)"
@@ -168,6 +168,7 @@ helm upgrade "$RELEASE_NAME" "$CHART_DIR" -n "$RELEASE_NAMESPACE" \
   --set openshift=false \
   --set featureFlags.agentSandbox=true \
   --set operator-chart.defaults.images.authbridge="$IMAGE_TAG" \
+  --set operator-chart.featureGates.injectTools=true \
   --wait --timeout 5m
 
 echo "==> Step 5/5: restarting authbridge pods in ${AGENT_NAMESPACE}"
@@ -182,5 +183,5 @@ Verify OPA + parsers are wired into both legs (expect 2 'name: opa' matches):
     -o jsonpath='{.data.config\.yaml}' | grep -c 'name: opa'
 
 Restore the original pipeline with:
-  ./scripts/opa-kind-restore.sh
+  ./opa-kind-restore.sh
 EOF

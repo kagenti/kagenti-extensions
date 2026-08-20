@@ -1,8 +1,6 @@
 # ~~Component PRD: Keycloak Configuration Service~~
 
-> **Superseded.** This component has been replaced by two separate services:
-> - **IdP Configuration Service** (read endpoints) — see [idp-configuration-service.md](idp-configuration-service.md)
-> - **PDP Policy Writer — Keycloak Implementation** (write endpoints) — see [pdp-policy-keycloak-service.md](pdp-policy-keycloak-service.md)
+> **Superseded.** This component's read endpoints have been replaced by the **IdP Configuration Service** — see [idp-configuration-service.md](idp-configuration-service.md).
 >
 > The content below is retained for reference only.
 >

@@ -90,9 +90,34 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      # aiac-init init container is deferred to Phase 2 (issue 4.21).
-      # It will gate startup on NATS + IdP Config + PDP Policy + RAG Ingest health
-      # and provision the aiac-events JetStream stream.
+      initContainers:
+        # Gates Agent startup on NATS + IdP Config + PDP Policy (+ optional RAG
+        # Ingest) health, then provisions the aiac-events JetStream stream.
+        # Reuses the aiac-agent image (see src/aiac/agent/init/wait_and_provision.py).
+        - name: aiac-init
+          image: localhost/aiac-agent:local
+          imagePullPolicy: Never
+          command: ["python", "-m", "aiac.agent.init.wait_and_provision"]
+          envFrom:
+            - configMapRef:
+                name: aiac-pdp-config
+          # Same hardening baseline as the app container; temp writes go to /tmp.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
       containers:
         - name: aiac-agent
           image: localhost/aiac-agent:local

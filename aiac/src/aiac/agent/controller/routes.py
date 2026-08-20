@@ -15,6 +15,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import Response
 
+from aiac.agent.eventbus.consumer import lifespan
 from aiac.agent.uc.offboarding.offboard import offboard_service
 from aiac.agent.uc.onboarding.orchestrator import onboard_service
 from aiac.agent.uc.policy_update.build import build_policy
@@ -22,7 +23,7 @@ from aiac.agent.uc.policy_update.rebuild import rebuild_policy
 from aiac.agent.uc.role_update.role import update_role
 from aiac.policy.computation import compute_and_apply, decommission
 
-app = FastAPI()
+app = FastAPI(lifespan=lifespan)
 
 
 @app.get("/health")
@@ -65,12 +66,8 @@ def apply_role(role_id: str) -> Response:
 # Offboard is keyed by the clientId (the SPM key), NOT the Keycloak internal UUID that
 # /apply/service/{service_id} carries: an offboarded client is gone from get_services(), so
 # UUID→clientId resolution is impossible. The {service_id:path} converter carries slash-bearing
-# SPIFFE-URI clientIds. Decommission is a whole-service teardown, so — BY DESIGN — it does NOT
-# go through the (rules, override) → compute_and_apply path the other /apply/* routes share.
-# compute_and_apply folds *incremental* rule updates into the SPM store; decommission is an
-# authoritative offboard that must tear down a service's entire policy footprint (its SPM, its
-# outbound edges on other SPMs, and its APM), which is not expressible as a rule delta. So this
-# route intentionally calls the PCE's decommission() directly. See the implementation plan.
+# SPIFFE-URI clientIds. Decommission is a whole-service teardown, so it bypasses the
+# (rules, override) → compute_and_apply path and calls the PCE's decommission directly.
 @app.post("/apply/offboard/{service_id:path}")
 def apply_offboard(service_id: str) -> Response:
     decommission(offboard_service(service_id))

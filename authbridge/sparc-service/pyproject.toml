@@ -11,7 +11,7 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = [
     # The SPARC engine itself, consumed directly from PyPI (no vendoring).
-    "agent-lifecycle-toolkit==0.10.1",
+    "agent-lifecycle-toolkit==0.11.0",
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",
     "pydantic>=2",
