@@ -5,6 +5,7 @@ use (
 	./cmd/abctl
 	./cmd/authbridge-cpex
 	./cmd/authbridge-envoy
+	./cmd/authbridge-praxis
 	./cmd/authbridge-proxy
 	./storage/redis
 )
