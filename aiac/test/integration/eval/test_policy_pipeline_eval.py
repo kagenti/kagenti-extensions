@@ -71,17 +71,17 @@ sys.path.insert(0, str(REPO_ROOT))  # so ``import test.integration.*`` resolves
 sys.path.insert(0, str(SRC))  # so ``import aiac.*`` resolves
 
 from test.integration import scenario_eval_agent_delegation as scn_agent_delegation  # noqa: E402
-from test.integration.eval import scenario_eval_ambiguous_clause as scn_ambiguous_clause  # noqa: E402
-from test.integration.eval import scenario_eval_baseline as scn_baseline  # noqa: E402
-from test.integration.eval import scenario_eval_confusable_agents as scn_confusable_agents  # noqa: E402
-from test.integration.eval import scenario_eval_empty_descriptions as scn_empty_descriptions  # noqa: E402
-from test.integration.eval import (  # noqa: E402
+from test.integration.eval.scenarios import scenario_eval_ambiguous_clause as scn_ambiguous_clause  # noqa: E402
+from test.integration.eval.scenarios import scenario_eval_baseline as scn_baseline  # noqa: E402
+from test.integration.eval.scenarios import scenario_eval_confusable_agents as scn_confusable_agents  # noqa: E402
+from test.integration.eval.scenarios import scenario_eval_empty_descriptions as scn_empty_descriptions  # noqa: E402
+from test.integration.eval.scenarios import (  # noqa: E402
     scenario_eval_misleading_descriptions as scn_misleading_descriptions,
 )
-from test.integration.eval import (  # noqa: E402
+from test.integration.eval.scenarios import (  # noqa: E402
     scenario_eval_unreachable_resources as scn_unreachable_resources,
 )
-from test.integration.eval import scenario_eval_wildcard_grant as scn_wildcard_grant  # noqa: E402
+from test.integration.eval.scenarios import scenario_eval_wildcard_grant as scn_wildcard_grant  # noqa: E402
 from test.integration.launcher import (  # noqa: E402
     Service,
     require_env,

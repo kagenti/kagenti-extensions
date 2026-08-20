@@ -70,12 +70,15 @@ ls src/aiac/<subsystem>/               # drill into any layer
 **Unit test command:**
 
 ```bash
-.venv/bin/pytest test/ -m "not integration"
+.venv/bin/pytest test/
 ```
 
-The whole `test/` tree collects and runs green — no `--ignore` flags are needed.
-(This wasn't always true: the Policy Computation Engine was migrated to the SPM
-store surface in Wave 3, which resolved the earlier PCE-chain collection
+`pyproject.toml`'s `addopts` defaults `-m` to excluding every live-infra marker
+(`integration`, `integration_extended`, `integration_consistency`,
+`integration_robustness`), so a bare invocation never makes a real LLM/Keycloak
+call. The whole `test/` tree collects and runs green — no `--ignore` flags are
+needed. (This wasn't always true: the Policy Computation Engine was migrated to
+the SPM store surface in Wave 3, which resolved the earlier PCE-chain collection
 failures.)
 
 Use `ls test/` / `find test -type d` to discover current test directories.
@@ -89,6 +92,16 @@ endpoint (`opa` on PATH for the policy-pipeline suite). Those variables live in
 set -a; . test/integration/.env; set +a
 .venv/bin/pytest test/integration/ -m integration
 ```
+
+A passed `-m` always overrides the default, so this opts back into exactly
+`integration` (not the heavier markers below). Three heavier, narrower-infra
+markers exist alongside it — `integration_extended` (same live infra as
+`integration`, many more PRB/LLM calls), `integration_consistency` and
+`integration_robustness` (LLM only, no Keycloak/`opa`) — each invoked the same
+way, e.g. `pytest test/integration/eval/ -m integration_extended`. See
+`docs/specs/integration-test/policy-eval-scenarios.md` and
+`docs/specs/integration-test/policy-eval-robustness-consistency.md` for their
+runbooks.
 
 **Smoke test** (requires live service at `AIAC_PDP_CONFIG_URL`, default `http://127.0.0.1:7071`):
 

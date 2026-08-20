@@ -1,16 +1,19 @@
-"""Per-run pass/fail/skip report for the policy-eval-scenarios suite (spec: ``docs/specs/
-integration-test/policy-eval-scenarios.md``).
+"""Per-run pass/fail/skip report for the policy-eval-scenarios, policy-eval-robustness, and
+policy-eval-consistency suites (spec: ``docs/specs/integration-test/policy-eval-scenarios.md`` and
+``docs/specs/integration-test/policy-eval-robustness-consistency.md``).
 
-Every run of ``test_policy_pipeline_eval.py`` (``@pytest.mark.integration_extended``) writes a
-Markdown report to ``reports/`` listing every collected test's outcome — passed, failed, skipped,
-xfailed, xpassed, or a setup/collection error. All six sections are always present (even empty)
-so a reader can see at a glance that nothing was silently omitted. Failed/error entries carry the
-assertion's crash message (pytest's own computed diff, e.g. "assert True == False" or a custom
-mismatch message with expected/actual sets); skipped/xfailed entries carry the skip reason; every
-entry carries the test function's docstring so a reader doesn't have to open the source file to
-know what was actually being checked. The report is scoped to the ``integration_extended`` marker
-(not just "any test collected while this conftest happens to be loaded"), so running the whole
-repo's test suite from a parent directory does not pull unrelated tests into this suite's report.
+Every run of ``test_policy_pipeline_eval.py`` (``@pytest.mark.integration_extended``),
+``test_policy_pipeline_consistency.py`` (``@pytest.mark.integration_consistency``), or
+``test_policy_pipeline_robustness.py`` (``@pytest.mark.integration_robustness``) writes a Markdown
+report to ``reports/`` listing every collected test's outcome — passed, failed, skipped, xfailed,
+xpassed, or a setup/collection error. All six sections are always present (even empty) so a reader
+can see at a glance that nothing was silently omitted. Failed/error entries carry the assertion's
+crash message (pytest's own computed diff, e.g. "assert True == False" or a custom mismatch
+message with expected/actual sets); skipped/xfailed entries carry the skip reason; every entry
+carries the test function's docstring so a reader doesn't have to open the source file to know
+what was actually being checked. The report is scoped to these three markers (not just "any test
+collected while this conftest happens to be loaded"), so running the whole repo's test suite from
+a parent directory does not pull unrelated tests into this suite's report.
 
 Filename: ``reports/report_<DD_MM_HH_MM>.md``, timestamped in Asia/Jerusalem local time, e.g.
 ``report_04_08_16_37.md`` for 04 Aug at 16:37 local time. Regenerated (not appended) per run — old
@@ -35,7 +38,7 @@ from dotenv import load_dotenv
 HERE = Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
 JERUSALEM = ZoneInfo("Asia/Jerusalem")
-MARKER = "integration_extended"
+MARKERS = {"integration_extended", "integration_consistency", "integration_robustness"}
 
 # Auto-load test/integration/.env so LLM_BASE_URL/KEYCLOAK_URL/etc. are set without having to
 # `set -a; . test/integration/.env; set +a` before invoking pytest. Existing environment
@@ -48,7 +51,7 @@ _reports: dict[str, pytest.TestReport] = {}
 
 def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config, items: list) -> None:
     for item in items:
-        if MARKER not in item.keywords:
+        if not (MARKERS & set(item.keywords)):
             continue
         func = getattr(item, "obj", None)
         doc = (getattr(func, "__doc__", None) or "").strip()
@@ -60,7 +63,7 @@ def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     if report.when == "teardown":
         return
-    if MARKER not in report.keywords:
+    if not (MARKERS & set(report.keywords)):
         return
     # A later phase (call) supersedes an earlier one (setup) for the same nodeid; a setup
     # failure/skip has no call phase to supersede it.

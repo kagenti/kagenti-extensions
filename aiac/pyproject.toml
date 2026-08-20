@@ -10,7 +10,13 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 testpaths = ["test"]
 pythonpath = ["src"]
+# Bare `pytest test/` runs unit tests only — every live-infra marker is excluded by
+# default. `-m` on the command line overrides this (last `-m` wins), so
+# `pytest test/ -m integration_extended` etc. still works to opt back in.
+addopts = ["-m", "not integration and not integration_extended and not integration_consistency and not integration_robustness"]
 markers = [
     "integration: tests that need live infra — a running Keycloak, Keycloak admin credentials, a real LLM endpoint, and the `opa` binary on PATH (see test/integration/.env)",
     "integration_extended: heavier multi-scenario policy-pipeline evaluation tests — same live infra as `integration`, but several full pipeline runs and many more PRB/LLM calls per session (see test/integration/test_policy_pipeline_eval.py)",
+    "integration_consistency: PRB run-to-run consistency (same scenario, N repeats, exact grant-set equality) — needs LLM_BASE_URL/LLM_MODEL/LLM_API_KEY only, no Keycloak/opa (see test/integration/eval/test_policy_pipeline_consistency.py)",
+    "integration_robustness: PRB robustness to mechanical + semantic input perturbation against the truth-table oracle — needs LLM_BASE_URL/LLM_MODEL/LLM_API_KEY only, no Keycloak/opa (see test/integration/eval/test_policy_pipeline_robustness.py)",
 ]
