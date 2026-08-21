@@ -78,3 +78,15 @@ authbridge/cmd/authbridge-proxy/authbridge-proxy
 authbridge/cmd/authbridge-envoy/authbridge-envoy
 authbridge/cmd/authbridge-lite/authbridge-lite
 authbridge/cmd/authbridge-cpex/authbridge-cpex
+authbridge/cmd/authbridge-praxis/authbridge-praxis
+# `go build ./cmd/...` from authbridge/ drops binaries in that dir rather than
+# in the package dir, so ignore those spellings too.
+authbridge/authbridge-proxy
+authbridge/authbridge-envoy
+authbridge/authbridge-cpex
+authbridge/authbridge-praxis
+
+# MLflow local tracking store — created by `mlflow` runs in the working tree.
+# Local experiment state, not project source.
+mlflow.db
+mlruns/
