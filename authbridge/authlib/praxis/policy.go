@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
 // This file generates the Praxis *policy document* — the second file the
@@ -29,11 +30,30 @@ import (
 // engine's public API: `identity/jwt` selects the JWT identity resolver, and
 // `identity.resolve` is the hook it runs on.
 const (
-	policyPluginKindJWT    = "identity/jwt"
-	policyHookIdentity     = "identity.resolve"
-	policyModeSequential   = "sequential"
-	policyOnErrorFail      = "fail"
-	policyClaimMapperStd   = "standard"
+	policyPluginKindJWT  = "identity/jwt"
+	policyHookIdentity   = "identity.resolve"
+	policyModeSequential = "sequential"
+	policyOnErrorFail    = "fail"
+	policyClaimMapperStd = "standard"
+
+	// policyDefaultLeewaySec is the clock-skew tolerance, in seconds, written
+	// into each trusted issuer.
+	//
+	// Upstream treats leeway_seconds: 0 as "use the resolver default", and that
+	// default is currently 60s (see the identity-jwt resolver: `if
+	// issuer.leeway_seconds == 0 { 60 } else { ... }`). So 60 is not a departure
+	// from upstream — it is upstream's effective value, stated explicitly rather
+	// than left implicit. Emitting it makes the generated policy self-describing
+	// and pins the behavior if that internal default ever changes; writing 0
+	// would silently inherit whatever a future version picks.
+	//
+	// It IS slightly more permissive than AuthBridge, which sets no skew
+	// tolerance and so takes jwx's strict default: a token up to 60s past `exp`
+	// is accepted by the generated policy but rejected by AuthBridge. That is
+	// the standard allowance for clock drift between the proxy and the IdP, and
+	// tightening it to 0 would make the generated proxy reject tokens for
+	// ordinary NTP jitter. Set trusted_issuers[].leeway_seconds in the generated
+	// policy to override.
 	policyDefaultLeewaySec = 60
 
 	// policyJWTPluginPriority orders the identity plugin within its mode
@@ -334,8 +354,41 @@ func BuildPolicy(cfg *config.Config, opts *PolicyOptions) (*PolicyResult, error)
 	}
 
 	for _, p := range cfg.Pipeline.Inbound.Plugins {
-		if p.Name != "jwt-validation" || p.OnError == "off" {
+		if p.Name != "jwt-validation" {
 			continue
+		}
+		// off is a kill-switch: AuthBridge does not dispatch the plugin at all,
+		// so there is nothing to translate and no gap to report.
+		if p.OnError.Resolved() == pipeline.ErrorPolicyOff {
+			continue
+		}
+		// observe is shadow mode: the plugin still evaluates and may still
+		// return Reject, but the framework converts that Reject into a
+		// pass-through and records it as Shadow=true. So an operator canarying
+		// jwt-validation in observe is DELIBERATELY letting unauthenticated
+		// traffic reach the app while they watch the shadow-deny counter.
+		//
+		// The policy engine has no equivalent — its OnError covers plugin
+		// errors, not deny decisions, and there is no dry-run mode — so the
+		// generated plugin necessarily gets on_error: fail and enforces for
+		// real. That inverts the operator's intent: traffic they were
+		// intentionally admitting starts getting 401s.
+		//
+		// This is a warning rather than an error because the flip is toward
+		// MORE enforcement, not less: the generated proxy is stricter than the
+		// AuthBridge config, so no request that AuthBridge would have blocked
+		// gets through. Failing the conversion would block a legitimate,
+		// documented rollout shape over a difference that cannot cause a
+		// bypass. But it can cause an outage, so it must be stated loudly.
+		if p.OnError.Resolved() == pipeline.ErrorPolicyObserve {
+			res.Warnings = append(res.Warnings, fmt.Sprintf(
+				"jwt-validation is configured with on_error: %s (shadow mode), which in AuthBridge "+
+					"evaluates the plugin but converts a rejection into a pass-through — "+
+					"unauthenticated requests reach the application and are only counted. The policy "+
+					"engine has no shadow equivalent, so the generated policy ENFORCES: requests that "+
+					"AuthBridge currently admits will get 401. If this is a canary rollout, expect "+
+					"the generated proxy to be stricter than what you are canarying.",
+				pipeline.ErrorPolicyObserve))
 		}
 		plugin, warnings, err := jwtPolicyPlugin(p, fileAudience, opts)
 		if err != nil {

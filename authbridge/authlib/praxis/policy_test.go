@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"gopkg.in/yaml.v3"
 )
 
@@ -599,12 +600,62 @@ func TestBuildPolicy_MissingIssuer_IsError(t *testing.T) {
 	}
 }
 
+// on_error: observe is shadow mode — AuthBridge evaluates jwt-validation but
+// converts its rejection into a pass-through, so unauthenticated requests reach
+// the app on purpose. The policy engine has no shadow equivalent, so the
+// generated policy enforces for real and 401s that traffic. The flip is toward
+// MORE enforcement (so not a bypass, hence a warning not an error), but it can
+// cause an outage for an operator mid-canary and must be stated.
+func TestBuildPolicy_ObservePlugin_WarnsAboutEnforcementFlip(t *testing.T) {
+	e := keycloakJWT(t)
+	e.OnError = pipeline.ErrorPolicyObserve
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{e}
+	}), nil)
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	// Still translated: observe means "evaluate but don't block", so the plugin
+	// is active and belongs in the policy — just with different consequences.
+	if res.Document == nil {
+		t.Fatal("expected a policy document: observe still evaluates the plugin")
+	}
+	if !containsSubstring(res.Warnings, "shadow mode") {
+		t.Errorf("expected a warning naming shadow mode, got %v", res.Warnings)
+	}
+	if !containsSubstring(res.Warnings, "401") {
+		t.Errorf("the warning should say what changes for live traffic, got %v", res.Warnings)
+	}
+	// The emitted plugin is fail-closed regardless, which is the whole point of
+	// the warning.
+	if res.Document.Plugins[0].OnError != policyOnErrorFail {
+		t.Errorf("on_error = %q, want %q", res.Document.Plugins[0].OnError, policyOnErrorFail)
+	}
+}
+
+// enforce (and the empty default) is the ordinary case and must not warn.
+func TestBuildPolicy_EnforcePlugin_NoObserveWarning(t *testing.T) {
+	for _, policy := range []pipeline.ErrorPolicy{"", pipeline.ErrorPolicyEnforce} {
+		e := keycloakJWT(t)
+		e.OnError = policy
+		res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+			c.Pipeline.Inbound.Plugins = []config.PluginEntry{e}
+		}), nil)
+		if err != nil {
+			t.Fatalf("BuildPolicy(on_error=%q): %v", policy, err)
+		}
+		if containsSubstring(res.Warnings, "shadow mode") {
+			t.Errorf("on_error=%q must not warn about shadow mode: %v", policy, res.Warnings)
+		}
+	}
+}
+
 // on_error: off means AuthBridge drops the plugin, so no policy is generated
 // for it — otherwise the Praxis proxy would enforce what AuthBridge did not.
 func TestBuildPolicy_DisabledPlugin_NoDocument(t *testing.T) {
 	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		e := keycloakJWT(t)
-		e.OnError = "off"
+		e.OnError = pipeline.ErrorPolicyOff
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{e}
 	}), nil)
 	if err != nil {

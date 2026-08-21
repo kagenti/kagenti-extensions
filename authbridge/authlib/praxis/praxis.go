@@ -66,6 +66,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"gopkg.in/yaml.v3"
 )
 
@@ -867,7 +868,9 @@ func pluginFilters(plugins []config.PluginEntry, dir direction, opts *Options) (
 	)
 
 	for _, p := range plugins {
-		if p.OnError == "off" {
+		// off is a kill-switch: AuthBridge does not dispatch the plugin, so it is
+		// not a translation gap.
+		if p.OnError.Resolved() == pipeline.ErrorPolicyOff {
 			continue
 		}
 		name := p.Name

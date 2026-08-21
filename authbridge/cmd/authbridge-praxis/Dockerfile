@@ -21,8 +21,9 @@
 #
 # Praxis source is not vendored in this repo, so the Rust stage fetches it from
 # git. PRAXIS_REPO / PRAXIS_REF pin what gets built; PRAXIS_REF defaults to a
-# commit rather than a branch so an image rebuild is reproducible. Point
-# PRAXIS_REPO at a fork to build that instead.
+# commit SHA rather than a tag or branch, so an image rebuild is reproducible
+# even if the tag is moved or deleted upstream. Point PRAXIS_REPO at a fork to
+# build that instead.
 
 # ── Stage 1: Build the Praxis proxy binary (with the policy engine) ─────────
 #
@@ -49,28 +50,38 @@ ENV OPENSSL_STATIC=1
 RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf cmake make g++ git
 
 ARG PRAXIS_REPO=https://github.com/praxis-proxy/praxis.git
-# A release tag, not a branch: pinning to `main` would make image rebuilds
+# An immutable commit SHA, not a tag or branch. A branch would make rebuilds
 # non-reproducible and could silently pick up a schema change the generator in
-# stage 2 does not emit for. v0.5.3 carries the policy-engine feature and the
-# `policy` filter fields this image's generated configs use.
-ARG PRAXIS_REF=v0.5.3
+# stage 2 does not emit for; a tag is better but still mutable — it can be
+# force-moved or deleted upstream, and a build that silently follows it is the
+# same hazard one step removed. The SHA below is release v0.5.3, which carries
+# the policy-engine feature and the `policy` filter fields this image's
+# generated configs use.
+#
+# To bump: resolve the new tag to its commit and update both the SHA and the
+# comment together, so the human-readable version never drifts from what builds.
+#   git ls-remote --tags https://github.com/praxis-proxy/praxis.git v0.5.4
+#
+# PRAXIS_REF = v0.5.3
+ARG PRAXIS_REF=7c6cef76a9b8449c3617dacfa597ee6d7ac9d82e
 
 WORKDIR /praxis
 
 # Fetch exactly PRAXIS_REF, or fail.
 #
-# Two shapes are accepted — a tag (the default) or a bare SHA / branch — and each
-# is checked out from the ref it just fetched. That coupling is the point: an
-# earlier version fell back to fetching ALL branch tips and checking out
-# FETCH_HEAD, so a transient failure fetching the pinned tag would silently build
-# main instead — defeating the reproducibility the PRAXIS_REF comment above
-# promises, on exactly the condition it was meant to guarantee. Failing the build
-# is the only safe outcome; a stage that quietly compiles different source than
-# it was told to is worse than one that stops.
+# Two shapes are accepted — a tag or a bare SHA / branch — and each is checked
+# out from the ref it just fetched. That coupling is the point: an earlier
+# version fell back to fetching ALL branch tips and checking out FETCH_HEAD, so
+# a transient failure fetching the pinned ref would silently build main instead
+# — defeating the reproducibility the PRAXIS_REF comment above promises, on
+# exactly the condition it was meant to guarantee. Failing the build is the only
+# safe outcome; a stage that quietly compiles different source than it was told
+# to is worse than one that stops.
 #
-# Both shapes are attempted because fetching an arbitrary commit by SHA requires
-# the server to permit it, which GitHub does not always do: a SHA-pinned build
-# needs the second form, a tag-pinned build the first.
+# The default PRAXIS_REF is a SHA, which takes the second form: fetching an
+# arbitrary commit by SHA needs the server to permit it (GitHub allows this for
+# public repos, but not universally), and the tag form is kept first so a
+# tag-valued override still works.
 RUN git init -q . \
     && git remote add origin "${PRAXIS_REPO}" \
     && ( ( git fetch -q --depth 1 origin "refs/tags/${PRAXIS_REF}:refs/tags/${PRAXIS_REF}" \
@@ -83,7 +94,15 @@ RUN git init -q . \
 # `policy-engine` pulls in the praxis-policy crates (identity/jwt, Cedar PDP,
 # OAuth delegator). Build only the server crate; the workspace's test and
 # benchmark members are not needed for the binary.
-RUN cargo build --release -p praxis-proxy --features policy-engine \
+#
+# --locked builds against upstream's committed Cargo.lock and fails if that file
+# would need to change. Without it cargo is free to resolve newer semver-
+# compatible dependency versions than the ones upstream tested and released,
+# so two builds of the same PRAXIS_REF could ship different dependency trees —
+# and a compromised or simply broken point release of any transitive crate would
+# be pulled in silently. Pinning the source commit without pinning the lockfile
+# leaves most of the dependency surface unpinned.
+RUN cargo build --release --locked -p praxis-proxy --features policy-engine \
     && cp target/release/praxis /praxis-bin \
     && strip /praxis-bin
 
