@@ -90,12 +90,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
+	slog.Debug("config loaded", "configPath", *configPath)
+
 	var provider *spiffe.Provider
 	if bootCfg.SPIFFE != nil {
 		mirrorFiles := true
 		if bootCfg.SPIFFE.MirrorFiles != nil {
 			mirrorFiles = *bootCfg.SPIFFE.MirrorFiles
 		}
+		slog.Debug("About to create SPIFFE Provider", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
 		provider, err = spiffe.NewProvider(context.Background(), spiffe.ProviderConfig{
 			SocketPath:  bootCfg.SPIFFE.Socket,
 			MirrorFiles: mirrorFiles,
@@ -105,6 +108,9 @@ func main() {
 			log.Fatalf("spiffe provider: %v", err)
 		}
 		defer provider.Close()
+		slog.Debug("SPIFFE provider created", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
+	} else {
+		slog.Debug("Config does not use SPIFFE")
 	}
 
 	buildPipelines := func() (*pipeline.Pipeline, *pipeline.Pipeline, *config.Config, error) {

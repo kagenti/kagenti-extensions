@@ -180,6 +180,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
+	slog.Debug("config loaded", "configPath", *configPath)
+
 	// Build the SPIFFE Provider only when something actually consumes it —
 	// top-level mTLS (X509Source for the listeners) or a plugin whose identity
 	// is spiffe-based (JWT-SVID for token-exchange). The platform's base config
@@ -195,6 +197,7 @@ func main() {
 		if bootCfg.SPIFFE.MirrorFiles != nil {
 			mirrorFiles = *bootCfg.SPIFFE.MirrorFiles
 		}
+		slog.Debug("About to create SPIFFE Provider", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
 		provider, err = spiffe.NewProvider(context.Background(), spiffe.ProviderConfig{
 			SocketPath:  bootCfg.SPIFFE.Socket,
 			MirrorFiles: mirrorFiles,
@@ -204,9 +207,12 @@ func main() {
 			log.Fatalf("spiffe provider: %v", err)
 		}
 		defer provider.Close()
+		slog.Debug("SPIFFE provider created", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
 	} else if bootCfg.SPIFFE != nil {
 		slog.Info("spiffe block present but unused (no mTLS, no spiffe-identity plugin) — " +
 			"skipping SPIRE provider; no Workload API connection will be attempted")
+	} else {
+		slog.Debug("Config does not use SPIFFE")
 	}
 
 	// This binary is hardcoded to proxy-sidecar. Rejecting other modes
