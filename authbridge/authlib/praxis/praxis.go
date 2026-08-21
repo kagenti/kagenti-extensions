@@ -956,8 +956,10 @@ func policyFilter(path string, enforces []string) Filter {
 //
 // The returned Result carries the policy's fidelity warnings alongside its own,
 // so a single caller-side loop surfaces every caveat about the generated pair.
-func ConvertWithPolicy(cfg *config.Config, policyPath string) (*Result, *PolicyResult, error) {
-	pol, err := BuildPolicy(cfg)
+// polOpts may be nil; see [PolicyOptions] for what it tunes (notably resolving
+// the inbound audience from a mounted file).
+func ConvertWithPolicy(cfg *config.Config, policyPath string, polOpts *PolicyOptions) (*Result, *PolicyResult, error) {
+	pol, err := BuildPolicy(cfg, polOpts)
 	if err != nil {
 		return nil, nil, err
 	}

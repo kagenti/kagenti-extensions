@@ -35,7 +35,7 @@ func keycloakJWT(t *testing.T) config.PluginEntry {
 }
 
 func TestBuildPolicy_NilConfig(t *testing.T) {
-	if _, err := BuildPolicy(nil); err == nil {
+	if _, err := BuildPolicy(nil, nil); err == nil {
 		t.Fatal("expected an error for a nil config")
 	}
 }
@@ -44,7 +44,7 @@ func TestBuildPolicy_NilConfig(t *testing.T) {
 // enforce, so no document should be produced — writing one, and pointing a
 // policy filter at it, would add a filter that enforces nothing.
 func TestBuildPolicy_NoJWTPlugin_NoDocument(t *testing.T) {
-	res, err := BuildPolicy(proxySidecar(t, nil))
+	res, err := BuildPolicy(proxySidecar(t, nil), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestBuildPolicy_NoJWTPlugin_NoDocument(t *testing.T) {
 func TestBuildPolicy_JWTValidation(t *testing.T) {
 	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestBuildPolicy_JWTValidation(t *testing.T) {
 func TestBuildPolicy_PlaintextJWKS_SetsInsecureAndWarns(t *testing.T) {
 	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -137,7 +137,7 @@ func TestBuildPolicy_HTTPSJWKS_NoInsecureFlag(t *testing.T) {
 			"jwks_url": "https://idp.example.com/realms/r/protocol/openid-connect/certs",
 			"audience": "svc",
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestBuildPolicy_ExplicitJWKSWins(t *testing.T) {
 			"keycloak_realm": "r",
 			"audience":       "svc",
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -178,7 +178,7 @@ func TestBuildPolicy_JWKSFromIssuer(t *testing.T) {
 			"issuer":   "https://idp.example.com/realms/r",
 			"audience": "svc",
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestBuildPolicy_AudienceUnion(t *testing.T) {
 			"audience":          "primary",
 			"allowed_audiences": []string{"extra-1", "extra-2", "primary"},
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestBuildPolicy_AudienceFile_IsError(t *testing.T) {
 			"issuer":        "https://idp.example.com/realms/r",
 			"audience_file": "/shared/client-id.txt",
 		})}
-	}))
+	}), nil)
 	if err == nil {
 		t.Fatal("expected an error: audience_file cannot be resolved, so aud would go unvalidated")
 	}
@@ -242,7 +242,7 @@ func TestBuildPolicy_PerHostAudience_IsError(t *testing.T) {
 			"issuer":        "https://idp.example.com/realms/r",
 			"audience_mode": "per-host",
 		})}
-	}))
+	}), nil)
 	if err == nil {
 		t.Fatal("expected an error: per-host audience cannot be expressed statically")
 	}
@@ -257,11 +257,195 @@ func TestBuildPolicy_NoAudience_IsError(t *testing.T) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
 			"issuer": "https://idp.example.com/realms/r",
 		})}
-	}))
+	}), nil)
 	if err == nil {
 		t.Fatal("expected an error when no audience is declared")
 	}
 }
+
+// writeAudienceFile creates a file holding aud and returns its path.
+func writeAudienceFile(t *testing.T, contents string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "client-id.txt")
+	if err := os.WriteFile(p, []byte(contents), 0o600); err != nil {
+		t.Fatalf("write audience file: %v", err)
+	}
+	return p
+}
+
+// The in-cluster shape: jwt-validation names no literal audience because the
+// operator mounts the client ID at /shared/client-id.txt. Pointing the
+// converter at that file must produce a policy, not an error.
+func TestBuildPolicy_AudienceFromFile(t *testing.T) {
+	path := writeAudienceFile(t, "agent-team1-weather-service\n")
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":        "https://idp.example.com/realms/r",
+			"audience_file": "/shared/client-id.txt",
+		})}
+	}), &PolicyOptions{AudienceFile: path})
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if res.Document == nil {
+		t.Fatal("expected a policy document when the audience file supplies the audience")
+	}
+	jc := res.Document.Plugins[0].Config.(JWTIdentityConfig)
+	auds := jc.TrustedIssuers[0].Audiences
+	// Trailing newline must be trimmed, or the aud claim never matches.
+	if len(auds) != 1 || auds[0] != "agent-team1-weather-service" {
+		t.Errorf("audiences = %v, want [agent-team1-weather-service]", auds)
+	}
+	// Baking a runtime-read value into a static file is worth stating: rotating
+	// the client ID silently invalidates the generated policy.
+	if !containsSubstring(res.Warnings, "regenerate") {
+		t.Errorf("expected a warning that the value is baked in, got %v", res.Warnings)
+	}
+}
+
+// A file audience unions with an explicit one under the same OR semantics
+// jwt-validation uses, rather than either replacing the other.
+func TestBuildPolicy_AudienceFileUnionsWithLiteral(t *testing.T) {
+	path := writeAudienceFile(t, "from-file")
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":   "https://idp.example.com/realms/r",
+			"audience": "from-config",
+		})}
+	}), &PolicyOptions{AudienceFile: path})
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	jc := res.Document.Plugins[0].Config.(JWTIdentityConfig)
+	auds := jc.TrustedIssuers[0].Audiences
+	if len(auds) != 2 {
+		t.Fatalf("audiences = %v, want both the config and file values", auds)
+	}
+	found := map[string]bool{}
+	for _, a := range auds {
+		found[a] = true
+	}
+	if !found["from-config"] || !found["from-file"] {
+		t.Errorf("audiences = %v, want both from-config and from-file", auds)
+	}
+}
+
+// A duplicate between file and config must dedupe, not emit the value twice.
+func TestBuildPolicy_AudienceFileDedupes(t *testing.T) {
+	path := writeAudienceFile(t, "same")
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":   "https://idp.example.com/realms/r",
+			"audience": "same",
+		})}
+	}), &PolicyOptions{AudienceFile: path})
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	jc := res.Document.Plugins[0].Config.(JWTIdentityConfig)
+	if auds := jc.TrustedIssuers[0].Audiences; len(auds) != 1 {
+		t.Errorf("audiences = %v, want one deduplicated entry", auds)
+	}
+}
+
+// An explicitly named audience file that cannot be read is an error, not a
+// silent fallback: falling through would emit a policy with no audience, which
+// accepts any token from the issuer.
+func TestBuildPolicy_AudienceFileUnreadable_IsError(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		contents *string
+	}{
+		{name: "missing file"},
+		{name: "empty file", contents: strPtr("")},
+		{name: "whitespace only", contents: strPtr("   \n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "absent.txt")
+			if tc.contents != nil {
+				path = writeAudienceFile(t, *tc.contents)
+			}
+			_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+				c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+					"issuer":        "https://idp.example.com/realms/r",
+					"audience_file": "/shared/client-id.txt",
+				})}
+			}), &PolicyOptions{AudienceFile: path})
+			if err == nil {
+				t.Error("expected an error: an unreadable audience file must not fall through " +
+					"to an audience-less policy")
+			}
+		})
+	}
+}
+
+// A whitespace-only file trims to empty and must never become an audience
+// entry. ReadCredentialFile rejects a zero-byte file outright, but a file of
+// only whitespace is non-zero on disk and trims away — so this guards the trim
+// path rather than the size check. Uses a plugin with a literal audience so the
+// conversion still succeeds: the assertion is that the blank value is not
+// silently added alongside it.
+func TestBuildPolicy_AudienceFileWhitespaceNotAnAudience(t *testing.T) {
+	path := writeAudienceFile(t, "\n\t \n")
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":   "https://idp.example.com/realms/r",
+			"audience": "real-aud",
+		})}
+	}), &PolicyOptions{AudienceFile: path})
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	auds := res.Document.Plugins[0].Config.(JWTIdentityConfig).TrustedIssuers[0].Audiences
+	if len(auds) != 1 || auds[0] != "real-aud" {
+		t.Errorf("audiences = %v, want only [real-aud]: a whitespace-only file must contribute "+
+			"nothing, and an empty entry would disable aud matching for that value", auds)
+	}
+	for _, a := range auds {
+		if strings.TrimSpace(a) == "" {
+			t.Errorf("audiences contains a blank entry: %q", a)
+		}
+	}
+}
+
+// No audience file configured keeps the previous behavior: the literal audience
+// alone is enough.
+func TestBuildPolicy_NoAudienceFile_LiteralStillWorks(t *testing.T) {
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+	}), &PolicyOptions{})
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	if res.Document == nil {
+		t.Fatal("expected a policy document")
+	}
+	if containsSubstring(res.Warnings, "regenerate") {
+		t.Errorf("no audience file was read, so no baked-in warning belongs: %v", res.Warnings)
+	}
+}
+
+// The error for an unresolvable audience should point at the flag that fixes
+// it, naming the plugin's own audience_file path.
+func TestBuildPolicy_AudienceError_SuggestsAudienceFile(t *testing.T) {
+	_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":        "https://idp.example.com/realms/r",
+			"audience_file": "/shared/client-id.txt",
+		})}
+	}), nil)
+	if err == nil {
+		t.Fatal("expected an error when no audience can be resolved")
+	}
+	if !strings.Contains(err.Error(), "--audience-file") {
+		t.Errorf("error should point at the flag that fixes it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "/shared/client-id.txt") {
+		t.Errorf("error should name the plugin's audience_file: %v", err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
 
 // Guard the fail-open mechanism directly: if Audiences is ever populated empty,
 // omitempty drops the key and the engine stops validating aud. Any policy this
@@ -269,7 +453,7 @@ func TestBuildPolicy_NoAudience_IsError(t *testing.T) {
 func TestBuildPolicy_EmittedPolicyAlwaysHasAudiences(t *testing.T) {
 	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -304,7 +488,7 @@ func TestBuildPolicy_EmittedPolicyAlwaysHasAudiences(t *testing.T) {
 func TestBuildPolicy_DefaultAlgorithms(t *testing.T) {
 	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -342,7 +526,7 @@ func TestBuildPolicy_ExplicitAlgorithmsWin(t *testing.T) {
 			"audience":   "svc",
 			"algorithms": []string{"ES384"},
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -373,7 +557,7 @@ func TestBuildPolicy_MalformedJWKS_IsError(t *testing.T) {
 					"keycloak_url":   tc.keycloakURL,
 					"keycloak_realm": "r",
 				})}
-			}))
+			}), nil)
 			if err == nil {
 				t.Errorf("expected an error for keycloak_url %q", tc.keycloakURL)
 			}
@@ -390,7 +574,7 @@ func TestBuildPolicy_BypassPaths_Warns(t *testing.T) {
 			"audience":     "svc",
 			"bypass_paths": []string{"/healthz", "/metrics"},
 		})}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -406,7 +590,7 @@ func TestBuildPolicy_MissingIssuer_IsError(t *testing.T) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
 			"audience": "svc",
 		})}
-	}))
+	}), nil)
 	if err == nil {
 		t.Fatal("expected an error when jwt-validation has no issuer")
 	}
@@ -422,7 +606,7 @@ func TestBuildPolicy_DisabledPlugin_NoDocument(t *testing.T) {
 		e := keycloakJWT(t)
 		e.OnError = "off"
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{e}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -438,7 +622,7 @@ func TestConvertWithPolicy_EmitsPolicyFilter(t *testing.T) {
 	cfg := proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
 	})
-	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml")
+	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml", nil)
 	if err != nil {
 		t.Fatalf("ConvertWithPolicy: %v", err)
 	}
@@ -500,7 +684,7 @@ func TestConvertWithoutPolicy_NoPolicyFilter(t *testing.T) {
 // A pipeline with no enforceable plugin must not get a policy filter, since it
 // would point at a file the caller never writes and Praxis would fail to start.
 func TestConvertWithPolicy_NoEnforceable_NoFilter(t *testing.T) {
-	res, pol, err := ConvertWithPolicy(proxySidecar(t, nil), "/tmp/praxis-policy.yaml")
+	res, pol, err := ConvertWithPolicy(proxySidecar(t, nil), "/tmp/praxis-policy.yaml", nil)
 	if err != nil {
 		t.Fatalf("ConvertWithPolicy: %v", err)
 	}
@@ -521,7 +705,7 @@ func TestConvertWithPolicy_NoEnforceable_NoFilter(t *testing.T) {
 func TestConvertWithPolicy_SinglePolicyFilterPerChain(t *testing.T) {
 	res, _, err := ConvertWithPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t), keycloakJWT(t)}
-	}), "/tmp/praxis-policy.yaml")
+	}), "/tmp/praxis-policy.yaml", nil)
 	if err != nil {
 		t.Fatalf("ConvertWithPolicy: %v", err)
 	}
@@ -546,7 +730,7 @@ func TestConvertWithPolicy_OutboundJWTDoesNotEmitPolicyFilter(t *testing.T) {
 		// Same plugin name, wrong direction.
 		c.Pipeline.Outbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
 	})
-	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml")
+	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml", nil)
 	if err != nil {
 		t.Fatalf("ConvertWithPolicy: %v", err)
 	}
@@ -591,7 +775,7 @@ func TestConvertWithPolicy_NoBackend_WarnsPolicyNotEnforced(t *testing.T) {
 	cfg.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
 	config.ApplyPreset(cfg)
 
-	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml")
+	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml", nil)
 	if err != nil {
 		t.Fatalf("ConvertWithPolicy: %v", err)
 	}
@@ -614,7 +798,7 @@ func TestConvertWithPolicy_NoBackend_WarnsPolicyNotEnforced(t *testing.T) {
 func TestRenderPolicyResult_ParsesAsYAML(t *testing.T) {
 	pol, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
-	}))
+	}), nil)
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
@@ -738,7 +922,7 @@ func TestGeneratedPolicy_ValidatesWithPraxis(t *testing.T) {
 			policyPath := filepath.Join(dir, "praxis-policy.yaml")
 			cfgPath := filepath.Join(dir, "praxis-config.yaml")
 
-			res, pol, err := ConvertWithPolicy(cfg, policyPath)
+			res, pol, err := ConvertWithPolicy(cfg, policyPath, nil)
 			if err != nil {
 				t.Fatalf("ConvertWithPolicy: %v", err)
 			}

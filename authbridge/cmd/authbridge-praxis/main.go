@@ -99,6 +99,11 @@ func main() {
 	praxisPolicyOut := flag.String("praxis-policy-out", defaultPraxisPolicyPath,
 		"path to write the generated Praxis policy document to (referenced by the "+
 			"generated config's policy filter; requires Praxis built with --features policy-engine)")
+	audienceFile := flag.String("audience-file", "",
+		"read the expected inbound JWT audience from this file when the jwt-validation "+
+			"plugin config names none literally (the in-cluster default is the operator-mounted "+
+			"/shared/client-id.txt). The value is baked into the generated policy, so regenerate "+
+			"it if the workload's client ID is rotated")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -186,7 +191,7 @@ func main() {
 	// dropping them silently, and they are logged at WARN below — a generated
 	// proxy that no longer enforces inbound auth is precisely the kind of thing
 	// that must not be discoverable only by reading the output file.
-	if err := writePraxisConfig(bootCfg, *praxisOut, *praxisPolicyOut); err != nil {
+	if err := writePraxisConfig(bootCfg, *praxisOut, *praxisPolicyOut, *audienceFile); err != nil {
 		log.Fatalf("failed to write Praxis config: %v", err)
 	}
 
@@ -219,8 +224,9 @@ func main() {
 // Note the generated `policy` filter requires Praxis to be built with the
 // policy-engine cargo feature; a default-feature build rejects it as an unknown
 // filter type.
-func writePraxisConfig(cfg *config.Config, outPath, policyPath string) error {
-	res, pol, err := praxis.ConvertWithPolicy(cfg, policyPath)
+func writePraxisConfig(cfg *config.Config, outPath, policyPath, audienceFile string) error {
+	res, pol, err := praxis.ConvertWithPolicy(cfg, policyPath,
+		&praxis.PolicyOptions{AudienceFile: audienceFile})
 	if err != nil {
 		return fmt.Errorf("converting config: %w", err)
 	}

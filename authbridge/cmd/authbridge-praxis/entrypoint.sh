@@ -38,12 +38,32 @@ PRAXIS_POLICY="${PRAXIS_POLICY:-/tmp/praxis-policy.yaml}"
 # AuthBridge images mount their runtime config at.
 AUTHBRIDGE_CONFIG="${AUTHBRIDGE_CONFIG:-/etc/authbridge/config.yaml}"
 
+# Where the inbound audience is read from when the jwt-validation plugin config
+# names none literally. /shared/client-id.txt is the Rossoctl convention — the
+# operator mounts the workload's Keycloak client ID there, and jwt-validation
+# defaults to reading it — so this is the in-cluster shape.
+#
+# Passed only when the file actually exists. The generator treats an explicitly
+# named but unreadable audience file as an error (a policy with no audience
+# accepts any token from the issuer), which is right for a deliberate flag but
+# wrong as an unconditional default: a config that states its audience inline
+# needs no file, and standalone runs have no /shared mount at all.
+AUDIENCE_FILE="${AUDIENCE_FILE:-/shared/client-id.txt}"
+
+AUDIENCE_ARGS=""
+if [ -s "${AUDIENCE_FILE}" ]; then
+  echo "[entrypoint] Using ${AUDIENCE_FILE} as the inbound audience source"
+  AUDIENCE_ARGS="--audience-file ${AUDIENCE_FILE}"
+fi
+
 # --- Phase 1: generate the Praxis config from the AuthBridge config ---
 echo "[entrypoint] Generating Praxis config from ${AUTHBRIDGE_CONFIG}..."
+# shellcheck disable=SC2086  # AUDIENCE_ARGS is intentionally word-split (empty = omitted)
 /usr/local/bin/authbridge-praxis \
   --config "${AUTHBRIDGE_CONFIG}" \
   --praxis-config-out "${PRAXIS_CONFIG}" \
   --praxis-policy-out "${PRAXIS_POLICY}" \
+  ${AUDIENCE_ARGS} \
   "$@"
 
 # Fail loudly rather than handing Praxis a path that does not exist: the

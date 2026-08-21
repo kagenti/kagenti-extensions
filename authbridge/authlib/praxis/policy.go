@@ -202,14 +202,13 @@ func (c jwtValidationConfig) resolveJWKSURL() string {
 
 // audiences returns the accepted audience values, mirroring jwt-validation's
 // OR semantics: allowed_audiences entries in config order, then the literal
-// audience. Deduplicated, first occurrence winning.
+// audience, then fileAudience (the resolved contents of an audience file).
+// Deduplicated, first occurrence winning.
 //
-// audience_file is NOT resolved here: it names a file read at runtime (the
-// Rossoctl client-id convention), and this converter does not read the
-// filesystem — a generated policy that silently baked in whatever happened to
-// be on the generating machine's disk would be worse than one that reports the
-// gap. Callers see it via [PolicyResult.Warnings].
-func (c jwtValidationConfig) audiences() []string {
+// fileAudience is passed in rather than read here so that reading the
+// filesystem stays an explicit, caller-controlled step — see
+// [PolicyOptions.AudienceFile]. Empty means no file audience was resolved.
+func (c jwtValidationConfig) audiences(fileAudience string) []string {
 	var (
 		out  []string
 		seen = map[string]bool{}
@@ -225,7 +224,55 @@ func (c jwtValidationConfig) audiences() []string {
 		add(a)
 	}
 	add(c.Audience)
+	add(fileAudience)
 	return out
+}
+
+// PolicyOptions tunes policy generation.
+type PolicyOptions struct {
+	// AudienceFile is a file to read the expected inbound audience from when
+	// the plugin config does not state one literally.
+	//
+	// jwt-validation's own default is to read the audience from
+	// /shared/client-id.txt — the Rossoctl convention, where the operator
+	// mounts the workload's client ID as a Secret. That is a real audience, it
+	// just is not in the YAML, so refusing to convert such a config would
+	// reject the most common in-cluster shape. Naming the file here lets the
+	// audience be resolved into the generated policy.
+	//
+	// Reading the filesystem is opt-in and explicit rather than automatic on
+	// jwt-validation's `audience_file`: the generator may run somewhere other
+	// than the pod that will serve traffic, and silently baking in whatever
+	// happened to be on the generating machine's disk — under a path the
+	// operator never named — would produce a policy whose audience nobody
+	// chose. Passing the path is the operator saying "this file is the
+	// authority."
+	//
+	// When empty, no file is read. When set but unreadable, missing, or empty,
+	// [BuildPolicy] returns an error rather than falling through to an
+	// audience-less policy, since that would be fail-open.
+	//
+	// Precedence matches jwt-validation: an explicit `audience` /
+	// `allowed_audiences` in the plugin config is used as well, unioned with
+	// the file's value under the same OR semantics.
+	AudienceFile string
+}
+
+// resolveAudienceFile returns the audience read from opts.AudienceFile, or ""
+// when no file was configured. The plugin's own `audience_file` value is used
+// only for diagnostics — it names the runtime path, which may not exist here.
+func resolveAudienceFile(opts *PolicyOptions) (string, error) {
+	if opts == nil || opts.AudienceFile == "" {
+		return "", nil
+	}
+	aud, err := config.ReadCredentialFile(opts.AudienceFile)
+	if err != nil {
+		return "", fmt.Errorf(
+			"praxis: reading audience file %q: %w (it was named explicitly, so an unreadable "+
+				"or empty file is an error rather than a fallback — a policy without an audience "+
+				"accepts any token from the trusted issuer)", opts.AudienceFile, err)
+	}
+	return aud, nil
 }
 
 // PolicyResult is the outcome of building a policy document.
@@ -256,20 +303,41 @@ type PolicyResult struct {
 // skipped, matching AuthBridge dropping it from the pipeline.
 //
 // An error is returned only when a jwt-validation plugin is present but cannot
-// be translated into something that would actually verify tokens (no issuer,
-// or no derivable JWKS URL) — emitting a policy that accepts everything, or
-// one the engine rejects at startup, would both be worse than failing here.
-func BuildPolicy(cfg *config.Config) (*PolicyResult, error) {
+// be translated into something that would actually verify tokens (no issuer, no
+// derivable JWKS URL, or no resolvable audience) — emitting a policy that
+// accepts everything, or one the engine rejects at startup, would both be worse
+// than failing here.
+//
+// opts may be nil. Set [PolicyOptions.AudienceFile] to convert a config whose
+// audience lives in a mounted file rather than in the YAML — the common
+// in-cluster shape, since jwt-validation defaults to reading
+// /shared/client-id.txt.
+func BuildPolicy(cfg *config.Config, opts *PolicyOptions) (*PolicyResult, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("praxis: nil AuthBridge config")
 	}
 	res := &PolicyResult{}
 
+	// Read the audience file once, before the loop: every jwt-validation entry
+	// in a stage resolves against the same file, and a read error should fail
+	// the conversion regardless of how many plugins would have used it.
+	fileAudience, err := resolveAudienceFile(opts)
+	if err != nil {
+		return nil, err
+	}
+	if fileAudience != "" {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"the inbound audience %q was read from %q at generation time and baked into the "+
+				"policy. AuthBridge re-reads that file at runtime and picks up changes on restart; "+
+				"the generated policy does not. If the workload's client ID is rotated, regenerate "+
+				"the policy.", fileAudience, opts.AudienceFile))
+	}
+
 	for _, p := range cfg.Pipeline.Inbound.Plugins {
 		if p.Name != "jwt-validation" || p.OnError == "off" {
 			continue
 		}
-		plugin, warnings, err := jwtPolicyPlugin(p)
+		plugin, warnings, err := jwtPolicyPlugin(p, fileAudience, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -285,8 +353,9 @@ func BuildPolicy(cfg *config.Config) (*PolicyResult, error) {
 }
 
 // jwtPolicyPlugin translates one jwt-validation entry into an identity/jwt
-// policy plugin.
-func jwtPolicyPlugin(entry config.PluginEntry) (PolicyPlugin, []string, error) {
+// policy plugin. fileAudience is the value resolved from
+// [PolicyOptions.AudienceFile], or "" when no file was configured.
+func jwtPolicyPlugin(entry config.PluginEntry, fileAudience string, opts *PolicyOptions) (PolicyPlugin, []string, error) {
 	var jc jwtValidationConfig
 	if len(entry.Config) > 0 {
 		if err := json.Unmarshal(entry.Config, &jc); err != nil {
@@ -366,44 +435,51 @@ func jwtPolicyPlugin(entry config.PluginEntry) (PolicyPlugin, []string, error) {
 			algs, jc.Issuer))
 	}
 
-	// Audience resolution FAILS the conversion when it yields nothing.
+	// The audience may come from the plugin config or from a file the caller
+	// named (see [PolicyOptions.AudienceFile]) — either is enough to produce a
+	// policy. Conversion fails only when NEITHER yields one.
 	//
-	// This is deliberately an error rather than a warning. Upstream treats an
-	// empty `audiences` list as "disable aud validation", and TrustedIssuer's
-	// Audiences field is `omitempty` — so an empty slice does not emit an empty
-	// list, it omits the key entirely and the engine accepts ANY token from the
-	// trusted issuer. That is a fail-open weakening of the exact check
-	// jwt-validation exists to perform, and a warning is the wrong instrument
-	// for it: warnings are advisory, and the generated policy would still be
-	// deployed, silently authenticating tokens minted for a different audience.
-	//
-	// Both reachable paths here are standard AuthBridge shapes, not edge cases:
-	// `audience_file` is the Rossoctl client-id convention and the plugin's own
-	// default, and `audience_mode: per-host` is the waypoint shape. Missing
-	// issuer and undecidable JWKS are already hard errors above; audience
-	// belongs with them.
-	auds := jc.audiences()
+	// That last case is an error rather than a warning because it is fail-open.
+	// Upstream treats an empty `audiences` list as "disable aud validation", and
+	// TrustedIssuer's Audiences field is `omitempty` — so an empty slice does
+	// not emit an empty list, it omits the key entirely and the engine accepts
+	// ANY token from the trusted issuer. That silently defeats the exact check
+	// jwt-validation exists to perform, and a warning is the wrong instrument:
+	// warnings are advisory, and the policy would still be deployed. Missing
+	// issuer and undecidable JWKS are already hard errors above; an
+	// unresolvable audience belongs with them.
+	auds := jc.audiences(fileAudience)
 	if len(auds) == 0 {
+		// Name the audience_file the plugin itself points at, since that is
+		// most likely what the operator should pass as AudienceFile. Fall back
+		// to the plugin's documented default when the field is empty, because
+		// applyDefaults fills it in at runtime even when the YAML omits it.
+		suggest := jc.AudienceFile
+		if suggest == "" {
+			suggest = "/shared/client-id.txt"
+		}
 		switch {
 		case jc.AudienceMode == "per-host":
 			return PolicyPlugin{}, nil, fmt.Errorf(
 				"praxis: jwt-validation uses audience_mode: per-host, which derives the expected " +
 					"audience from each request's Host; the policy engine's trusted_issuers take a " +
-					"static audience list and cannot express that. Generating a policy anyway " +
-					"would omit the audiences key entirely and accept ANY token from the issuer. " +
-					"Set an explicit `audience` (or `allowed_audiences`) on the plugin to convert")
+					"static audience list and cannot express that. Generating a policy anyway would " +
+					"omit the audiences key entirely and accept ANY token from the issuer. Set an " +
+					"explicit `audience` / `allowed_audiences` on the plugin to convert")
 		case jc.AudienceFile != "":
 			return PolicyPlugin{}, nil, fmt.Errorf(
-				"praxis: jwt-validation reads its expected audience from the file %q at runtime, "+
-					"which this converter does not read; generating a policy anyway would omit the "+
-					"audiences key entirely and accept ANY token from issuer %q. Set an explicit "+
-					"`audience` (or `allowed_audiences`) on the plugin to convert",
-				jc.AudienceFile, jc.Issuer)
+				"praxis: jwt-validation reads its expected audience from %q at runtime and the "+
+					"plugin config names no literal audience, so none could be resolved; a policy "+
+					"without one accepts ANY token from issuer %q. Either point the converter at "+
+					"that file (--audience-file %s) so its value is baked into the policy, or set "+
+					"an explicit `audience` on the plugin",
+				jc.AudienceFile, jc.Issuer, suggest)
 		default:
 			return PolicyPlugin{}, nil, fmt.Errorf(
-				"praxis: jwt-validation declares no audience, so no policy could be generated "+
-					"that validates the aud claim; without it any token from issuer %q would be "+
-					"accepted. Set `audience` or `allowed_audiences` on the plugin", jc.Issuer)
+				"praxis: jwt-validation declares no audience, so no policy could be generated that "+
+					"validates the aud claim; without it any token from issuer %q would be accepted. "+
+					"Set `audience` / `allowed_audiences` on the plugin, or point the converter at "+
+					"the file the audience is mounted from (--audience-file %s)", jc.Issuer, suggest)
 		}
 	}
 
