@@ -10,6 +10,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/praxis"
@@ -233,15 +234,24 @@ func writePraxisConfig(cfg *config.Config, outPath, policyPath string) error {
 		if err != nil {
 			return fmt.Errorf("rendering policy: %w", err)
 		}
-		// 0o644: the policy references a JWKS URL and issuer/audience values,
-		// never key material or secrets, and Praxis may run as another user.
-		if err := os.WriteFile(policyPath, policyData, 0o644); err != nil {
+		if err := writeFileAtomic(policyPath, policyData); err != nil {
 			return fmt.Errorf("writing policy %q: %w", policyPath, err)
 		}
 		slog.Info("wrote Praxis policy",
 			"path", policyPath,
 			"enforces", pol.Enforced)
 	} else {
+		// Remove any policy from a previous run. Leaving it would strand a file
+		// that nothing loads — the generated config carries no `policy` filter
+		// in this branch — while the entrypoint's `[ -s "$PRAXIS_POLICY" ]`
+		// check would find it and announce "policy engine will enforce it".
+		// That is a false claim of enforcement, which is worse than no file.
+		if err := os.Remove(policyPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing stale policy %q: %w", policyPath, err)
+		} else if err == nil {
+			slog.Warn("removed a stale Praxis policy from a previous run "+
+				"(nothing in this config maps to a policy plugin)", "path", policyPath)
+		}
 		slog.Info("no Praxis policy written (nothing in the inbound pipeline maps to a policy plugin)",
 			"path", policyPath)
 	}
@@ -250,9 +260,7 @@ func writePraxisConfig(cfg *config.Config, outPath, policyPath string) error {
 	if err != nil {
 		return fmt.Errorf("rendering config: %w", err)
 	}
-	// 0o644: the generated config carries no secrets (it references credential
-	// and SVID paths, never their contents) and Praxis may run as another user.
-	if err := os.WriteFile(outPath, data, 0o644); err != nil {
+	if err := writeFileAtomic(outPath, data); err != nil {
 		return fmt.Errorf("writing %q: %w", outPath, err)
 	}
 
@@ -266,6 +274,56 @@ func writePraxisConfig(cfg *config.Config, outPath, policyPath string) error {
 	}
 	for _, w := range res.Warnings {
 		slog.Warn("Praxis config translation note", "detail", w)
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to path via a temporary file in the same
+// directory, then renames it into place.
+//
+// A plain WriteFile truncates first, so an interrupted or partial write leaves a
+// truncated document behind — and both of these files are consumed by another
+// process. Praxis watches its config for changes and reloads on them, so it can
+// observe a half-written file; on the policy side a truncated document is worse
+// than a missing one, because it can parse into a policy that enforces less
+// than intended. rename(2) within a directory is atomic, so a reader sees either
+// the old file or the complete new one.
+//
+// 0o644: neither file carries secrets — they reference JWKS URLs, issuer and
+// audience values, and credential/SVID paths, never the material itself — and
+// Praxis may run as a different user than the generator.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp*")
+	if err != nil {
+		return fmt.Errorf("creating temp file in %q: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup on every failure path below; a successful rename
+	// makes this a no-op.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("writing temp file %q: %w", tmpName, err)
+	}
+	// fsync before rename: without it the rename can be durable while the
+	// contents are not, which after a crash yields an empty file at the final
+	// path — precisely the state the rename was meant to rule out.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("syncing temp file %q: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing temp file %q: %w", tmpName, err)
+	}
+	// CreateTemp makes the file 0o600; widen it before the rename so the final
+	// file has its intended mode from the instant it becomes visible.
+	if err := os.Chmod(tmpName, 0o644); err != nil {
+		return fmt.Errorf("chmod temp file %q: %w", tmpName, err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("renaming %q to %q: %w", tmpName, path, err)
 	}
 	return nil
 }

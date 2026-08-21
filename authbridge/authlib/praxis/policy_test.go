@@ -216,42 +216,168 @@ func TestBuildPolicy_AudienceUnion(t *testing.T) {
 }
 
 // An audience_file is read at runtime by AuthBridge and cannot be resolved
-// here. The resulting policy does NOT validate aud, which is a real weakening
-// and must be reported rather than passing silently.
-func TestBuildPolicy_AudienceFile_WarnsAboutNoAudValidation(t *testing.T) {
-	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+// here. Emitting the plugin anyway is FAIL-OPEN: Audiences is omitempty, so an
+// empty slice omits the key and the engine accepts any token from the issuer.
+// That must be an error, not a warning — a warning still ships the policy.
+func TestBuildPolicy_AudienceFile_IsError(t *testing.T) {
+	_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
 			"issuer":        "https://idp.example.com/realms/r",
 			"audience_file": "/shared/client-id.txt",
+		})}
+	}))
+	if err == nil {
+		t.Fatal("expected an error: audience_file cannot be resolved, so aud would go unvalidated")
+	}
+	if !strings.Contains(err.Error(), "/shared/client-id.txt") {
+		t.Errorf("error should name the file: %v", err)
+	}
+}
+
+// audience_mode: per-host is the waypoint shape and equally unrepresentable in
+// a static trusted_issuers list, so it fails for the same fail-open reason.
+func TestBuildPolicy_PerHostAudience_IsError(t *testing.T) {
+	_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":        "https://idp.example.com/realms/r",
+			"audience_mode": "per-host",
+		})}
+	}))
+	if err == nil {
+		t.Fatal("expected an error: per-host audience cannot be expressed statically")
+	}
+	if !strings.Contains(err.Error(), "per-host") {
+		t.Errorf("error should mention per-host: %v", err)
+	}
+}
+
+// No audience of any kind is the third fail-open path.
+func TestBuildPolicy_NoAudience_IsError(t *testing.T) {
+	_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer": "https://idp.example.com/realms/r",
+		})}
+	}))
+	if err == nil {
+		t.Fatal("expected an error when no audience is declared")
+	}
+}
+
+// Guard the fail-open mechanism directly: if Audiences is ever populated empty,
+// omitempty drops the key and the engine stops validating aud. Any policy this
+// converter emits must carry at least one audience.
+func TestBuildPolicy_EmittedPolicyAlwaysHasAudiences(t *testing.T) {
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+	}))
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	for _, p := range res.Document.Plugins {
+		jc, ok := p.Config.(JWTIdentityConfig)
+		if !ok {
+			continue
+		}
+		for i, ti := range jc.TrustedIssuers {
+			if len(ti.Audiences) == 0 {
+				t.Errorf("plugin %q trusted_issuers[%d] has no audiences; omitempty would drop "+
+					"the key and the engine would accept any token from the issuer", p.Name, i)
+			}
+		}
+	}
+
+	// And confirm the rendered YAML actually carries the key.
+	out, err := RenderPolicyResult(res, "/tmp/c.yaml")
+	if err != nil {
+		t.Fatalf("RenderPolicyResult: %v", err)
+	}
+	if !strings.Contains(string(out), "audiences:") {
+		t.Errorf("rendered policy must carry an audiences key:\n%s", out)
+	}
+}
+
+// AuthBridge's verifier does not restrict algorithms (jwt.WithKeySet accepts
+// whatever the JWKS key advertises), but the policy engine requires an explicit
+// list. Defaulting to RS256 alone would reject every token from an ES256 or
+// RS512 realm — a total inbound outage. The default must cover the asymmetric
+// families and be reported.
+func TestBuildPolicy_DefaultAlgorithms(t *testing.T) {
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+	}))
+	if err != nil {
+		t.Fatalf("BuildPolicy: %v", err)
+	}
+	jc := res.Document.Plugins[0].Config.(JWTIdentityConfig)
+	algs := jc.TrustedIssuers[0].Algorithms
+	for _, want := range []string{"RS256", "RS512", "ES256", "PS256", "EdDSA"} {
+		found := false
+		for _, a := range algs {
+			if a == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("default algorithms %v missing %q", algs, want)
+		}
+	}
+	// HS* is symmetric and cannot be a JWKS verification key here; including it
+	// alongside an asymmetric issuer invites algorithm confusion.
+	for _, a := range algs {
+		if strings.HasPrefix(a, "HS") {
+			t.Errorf("default algorithms must not include symmetric %q: %v", a, algs)
+		}
+	}
+	if !containsSubstring(res.Warnings, "algorithms") {
+		t.Errorf("defaulting the algorithm list must be reported, got %v", res.Warnings)
+	}
+}
+
+// An explicit algorithms list on the plugin must win over the default, so the
+// generated policy tracks the realm rather than this converter's guess.
+func TestBuildPolicy_ExplicitAlgorithmsWin(t *testing.T) {
+	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+			"issuer":     "https://idp.example.com/realms/r",
+			"audience":   "svc",
+			"algorithms": []string{"ES384"},
 		})}
 	}))
 	if err != nil {
 		t.Fatalf("BuildPolicy: %v", err)
 	}
 	jc := res.Document.Plugins[0].Config.(JWTIdentityConfig)
-	if len(jc.TrustedIssuers[0].Audiences) != 0 {
-		t.Errorf("expected no audiences, got %v", jc.TrustedIssuers[0].Audiences)
+	algs := jc.TrustedIssuers[0].Algorithms
+	if len(algs) != 1 || algs[0] != "ES384" {
+		t.Errorf("algorithms = %v, want [ES384]", algs)
 	}
-	if !containsSubstring(res.Warnings, "does NOT validate") {
-		t.Errorf("expected a warning that aud is unvalidated, got %v", res.Warnings)
-	}
-	if !containsSubstring(res.Warnings, "/shared/client-id.txt") {
-		t.Errorf("expected the warning to name the file, got %v", res.Warnings)
+	if containsSubstring(res.Warnings, "names no signing algorithms") {
+		t.Errorf("an explicit list must not warn about defaulting: %v", res.Warnings)
 	}
 }
 
-func TestBuildPolicy_PerHostAudience_Warns(t *testing.T) {
-	res, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
-		c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
-			"issuer":        "https://idp.example.com/realms/r",
-			"audience_mode": "per-host",
-		})}
-	}))
-	if err != nil {
-		t.Fatalf("BuildPolicy: %v", err)
-	}
-	if !containsSubstring(res.Warnings, "per-host") {
-		t.Errorf("expected a per-host warning, got %v", res.Warnings)
+// A malformed JWKS URL must fail rather than being written into the policy: it
+// would be an undefined key source that reads as secure, since insecure_http
+// stays false and no warning fires.
+func TestBuildPolicy_MalformedJWKS_IsError(t *testing.T) {
+	for _, tc := range []struct{ name, keycloakURL string }{
+		{"no scheme", "keycloak.example.com:8080"},
+		{"unsupported scheme", "ftp://keycloak.example.com"},
+		{"scheme only", "https://"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
+				c.Pipeline.Inbound.Plugins = []config.PluginEntry{jwtPlugin(t, map[string]any{
+					"issuer":         "https://idp.example.com/realms/r",
+					"audience":       "svc",
+					"keycloak_url":   tc.keycloakURL,
+					"keycloak_realm": "r",
+				})}
+			}))
+			if err == nil {
+				t.Errorf("expected an error for keycloak_url %q", tc.keycloakURL)
+			}
+		})
 	}
 }
 
@@ -410,6 +536,81 @@ func TestConvertWithPolicy_SinglePolicyFilterPerChain(t *testing.T) {
 	}
 }
 
+// BuildPolicy reads only the INBOUND pipeline, so an outbound jwt-validation
+// entry must NOT produce a `policy` filter on the outbound chain: that filter
+// would point at a document describing inbound identity, enforcing the wrong
+// stage's rules on egress while reporting the plugin as translated.
+func TestConvertWithPolicy_OutboundJWTDoesNotEmitPolicyFilter(t *testing.T) {
+	cfg := proxySidecar(t, func(c *config.Config) {
+		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+		// Same plugin name, wrong direction.
+		c.Pipeline.Outbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+	})
+	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml")
+	if err != nil {
+		t.Fatalf("ConvertWithPolicy: %v", err)
+	}
+	if pol.Document == nil {
+		t.Fatal("expected a policy document from the inbound plugin")
+	}
+
+	byChain := map[string]int{}
+	for _, ch := range res.Config.FilterChains {
+		for _, f := range ch.Filters {
+			if f.Type == "policy" {
+				byChain[ch.Name]++
+			}
+		}
+	}
+	if byChain[ChainInbound] != 1 {
+		t.Errorf("inbound chain policy filters = %d, want 1", byChain[ChainInbound])
+	}
+	if byChain[ChainOutbound] != 0 {
+		t.Errorf("outbound chain must carry no policy filter (the document is inbound-only), got %d",
+			byChain[ChainOutbound])
+	}
+	// The outbound entry is not enforced by anything, so it must be reported.
+	if !containsSubstring(res.Unmapped, "jwt-validation") {
+		t.Errorf("an outbound jwt-validation is unenforced and must be reported unmapped: %v",
+			res.Unmapped)
+	}
+}
+
+// A policy document is written but no inbound listener can be generated, so
+// nothing loads it. That must be surfaced, or the caller logs
+// "wrote Praxis policy, enforces=[jwt-validation]" for enforcement that does
+// not exist.
+func TestConvertWithPolicy_NoBackend_WarnsPolicyNotEnforced(t *testing.T) {
+	cfg := &config.Config{
+		Mode: config.ModeProxySidecar,
+		Listener: config.ListenerConfig{
+			Roles: []string{config.RoleReverse, config.RoleForward},
+			// No reverse_proxy_backend.
+		},
+	}
+	cfg.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
+	config.ApplyPreset(cfg)
+
+	res, pol, err := ConvertWithPolicy(cfg, "/tmp/praxis-policy.yaml")
+	if err != nil {
+		t.Fatalf("ConvertWithPolicy: %v", err)
+	}
+	if pol.Document == nil {
+		t.Fatal("expected a policy document (the inbound plugin is present)")
+	}
+	for _, l := range res.Config.Listeners {
+		if l.Name == ListenerInbound {
+			t.Fatal("expected no inbound listener without a backend")
+		}
+	}
+	if !containsSubstring(res.Warnings, "reverse_proxy_backend") {
+		t.Errorf("expected a warning naming the missing field, got %v", res.Warnings)
+	}
+	if !containsSubstring(res.Warnings, "not enforced") {
+		t.Errorf("expected the warning to say inbound plugins are unenforced, got %v", res.Warnings)
+	}
+}
+
 func TestRenderPolicyResult_ParsesAsYAML(t *testing.T) {
 	pol, err := BuildPolicy(proxySidecar(t, func(c *config.Config) {
 		c.Pipeline.Inbound.Plugins = []config.PluginEntry{keycloakJWT(t)}
@@ -498,10 +699,15 @@ func TestGeneratedPolicy_ValidatesWithPraxis(t *testing.T) {
 			})},
 		},
 		{
-			name: "no audience (aud validation disabled)",
+			// Pins that every entry of defaultJWTAlgorithms is a variant the
+			// engine's Algorithm enum accepts. An invalid one (ES512, which
+			// upstream does NOT accept despite RS512/PS512 being valid) makes
+			// the engine reject the whole document at startup.
+			name: "default algorithm set is accepted by the engine",
 			plugins: []config.PluginEntry{jwtPlugin(t, map[string]any{
-				"issuer":        "https://idp.example.com/realms/r",
-				"audience_file": "/shared/client-id.txt",
+				"issuer":   "https://idp.example.com/realms/r",
+				"jwks_url": "https://idp.example.com/realms/r/protocol/openid-connect/certs",
+				"audience": "svc",
 			})},
 		},
 		{

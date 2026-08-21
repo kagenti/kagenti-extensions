@@ -137,6 +137,43 @@ type jwtValidationConfig struct {
 	AudienceMode     string   `json:"audience_mode"`
 	AllowedAudiences []string `json:"allowed_audiences"`
 	BypassPaths      []string `json:"bypass_paths"`
+	// Algorithms is not a field jwt-validation defines today; it is read here
+	// so that if the plugin gains one, the generated policy honors it instead
+	// of silently keeping this converter's default. See [defaultJWTAlgorithms]
+	// for why a default is needed at all.
+	Algorithms []string `json:"algorithms"`
+}
+
+// defaultJWTAlgorithms is the algorithm set the generated policy accepts when
+// the AuthBridge config names none.
+//
+// AuthBridge's verifier does not restrict algorithms: it calls
+// jwt.Parse(..., jwt.WithKeySet(keySet)) and accepts whatever the JWKS key
+// advertises (see authlib/plugins/jwtvalidation/validation/jwks.go). The policy
+// engine, by contrast, REQUIRES a non-empty algorithms list per trusted issuer
+// and verifies only those.
+//
+// So there is no way to express "whatever the JWKS says" in the policy, and any
+// list this converter picks is narrower than AuthBridge. Picking RS256 alone —
+// the previous behavior — means an ES256 or RS512 realm gets a policy that
+// rejects every token AuthBridge accepted: a total inbound outage, with nothing
+// in the config to hint at why. Enumerating the asymmetric families Keycloak
+// and other OIDC providers actually sign with keeps the common cases working.
+//
+// HMAC (HS*) is deliberately excluded: those are symmetric, cannot be served
+// over JWKS as a verification key in this shape, and accepting them alongside
+// an asymmetric issuer invites algorithm-confusion attacks.
+//
+// Every entry must be a variant the policy engine's Algorithm enum accepts, or
+// it rejects the whole document at startup ("unknown variant `X`, expected one
+// of ..."). Upstream's asymmetric set is exactly these nine — note ES512 is NOT
+// among them, though RS512 and PS512 are. TestBuildPolicy_DefaultAlgorithms_*
+// and the binary-backed policy test pin this against the real engine.
+var defaultJWTAlgorithms = []string{
+	"RS256", "RS384", "RS512",
+	"PS256", "PS384", "PS512",
+	"ES256", "ES384",
+	"EdDSA",
 }
 
 // resolveJWKSURL reproduces jwt-validation's derivation priority so the
@@ -272,14 +309,40 @@ func jwtPolicyPlugin(entry config.PluginEntry) (PolicyPlugin, []string, error) {
 
 	var warnings []string
 
+	// The JWKS URL must be a well-formed http:// or https:// URL, and nothing
+	// else, before it is written into the policy.
+	//
+	// resolveJWKSURL builds this by string concatenation from issuer /
+	// keycloak_url, so a malformed keycloak_url produces a malformed result. If
+	// that were merely parsed-and-ignored, insecure_http would stay false and no
+	// warning would fire, while the garbage URL was still written to
+	// DecodingKey.URL — a key source that is undefined at runtime but reads as
+	// secure in the file. Requiring a recognized scheme up front turns that into
+	// a startup-time conversion error instead.
+	u, parseErr := url.Parse(jwks)
+	switch {
+	case parseErr != nil:
+		return PolicyPlugin{}, nil, fmt.Errorf(
+			"praxis: jwt-validation JWKS endpoint %q is not a valid URL: %w (derived from "+
+				"jwks_url, or keycloak_url + keycloak_realm — check those for typos)",
+			jwks, parseErr)
+	case u.Scheme != "http" && u.Scheme != "https":
+		return PolicyPlugin{}, nil, fmt.Errorf(
+			"praxis: jwt-validation JWKS endpoint %q has scheme %q; the policy engine fetches "+
+				"JWKS over http or https only. A missing scheme usually means keycloak_url was "+
+				"set without one", jwks, u.Scheme)
+	case u.Host == "":
+		return PolicyPlugin{}, nil, fmt.Errorf(
+			"praxis: jwt-validation JWKS endpoint %q has no host", jwks)
+	}
+
 	// The policy engine rejects a plaintext http:// JWKS URL unless
 	// insecure_http is set. AuthBridge does not have this guard, so a local /
 	// demo config that works under AuthBridge would fail Praxis startup
 	// outright. Set the flag to preserve behavior, and say so — over plaintext
 	// anyone on the path can swap the key material and forge accepted JWTs.
-	insecureHTTP := false
-	if u, err := url.Parse(jwks); err == nil && u.Scheme == "http" {
-		insecureHTTP = true
+	insecureHTTP := u.Scheme == "http"
+	if insecureHTTP {
 		warnings = append(warnings, fmt.Sprintf(
 			"jwt-validation JWKS endpoint %q is plaintext http://, so the generated policy sets "+
 				"decoding_key.insecure_http: true (the policy engine rejects http:// JWKS URLs "+
@@ -288,29 +351,59 @@ func jwtPolicyPlugin(entry config.PluginEntry) (PolicyPlugin, []string, error) {
 				"development; use https for anything else.", jwks))
 	}
 
+	// Algorithms: honor the plugin's list if it ever grows one, else default to
+	// the asymmetric families. See [defaultJWTAlgorithms] for why the default
+	// cannot be a single algorithm.
+	algs := jc.Algorithms
+	if len(algs) == 0 {
+		algs = defaultJWTAlgorithms
+		warnings = append(warnings, fmt.Sprintf(
+			"jwt-validation names no signing algorithms (it does not restrict them: its verifier "+
+				"accepts whatever the JWKS key advertises), but the policy engine requires an "+
+				"explicit list per issuer. The generated policy accepts %v. If issuer %q signs "+
+				"with something outside that set, every token will be rejected — set "+
+				"trusted_issuers[0].algorithms in the generated policy to match the realm's keys.",
+			algs, jc.Issuer))
+	}
+
+	// Audience resolution FAILS the conversion when it yields nothing.
+	//
+	// This is deliberately an error rather than a warning. Upstream treats an
+	// empty `audiences` list as "disable aud validation", and TrustedIssuer's
+	// Audiences field is `omitempty` — so an empty slice does not emit an empty
+	// list, it omits the key entirely and the engine accepts ANY token from the
+	// trusted issuer. That is a fail-open weakening of the exact check
+	// jwt-validation exists to perform, and a warning is the wrong instrument
+	// for it: warnings are advisory, and the generated policy would still be
+	// deployed, silently authenticating tokens minted for a different audience.
+	//
+	// Both reachable paths here are standard AuthBridge shapes, not edge cases:
+	// `audience_file` is the Rossoctl client-id convention and the plugin's own
+	// default, and `audience_mode: per-host` is the waypoint shape. Missing
+	// issuer and undecidable JWKS are already hard errors above; audience
+	// belongs with them.
 	auds := jc.audiences()
 	if len(auds) == 0 {
-		// Upstream treats an empty audiences list as "disable aud validation".
-		// AuthBridge always validates audience, so an empty list here is a
-		// real weakening and must be reported rather than quietly emitted.
 		switch {
 		case jc.AudienceMode == "per-host":
-			warnings = append(warnings,
-				"jwt-validation uses audience_mode: per-host, which derives the expected "+
-					"audience from each request's Host. The policy engine's trusted_issuers take "+
-					"a static audience list, so the generated policy does NOT validate the aud "+
-					"claim. Add the concrete audiences to trusted_issuers[0].audiences.")
+			return PolicyPlugin{}, nil, fmt.Errorf(
+				"praxis: jwt-validation uses audience_mode: per-host, which derives the expected " +
+					"audience from each request's Host; the policy engine's trusted_issuers take a " +
+					"static audience list and cannot express that. Generating a policy anyway " +
+					"would omit the audiences key entirely and accept ANY token from the issuer. " +
+					"Set an explicit `audience` (or `allowed_audiences`) on the plugin to convert")
 		case jc.AudienceFile != "":
-			warnings = append(warnings, fmt.Sprintf(
-				"jwt-validation reads its expected audience from the file %q at runtime, which "+
-					"this converter does not read. The generated policy does NOT validate the "+
-					"aud claim — any token from the trusted issuer is accepted regardless of "+
-					"audience. Set `audience` explicitly in the plugin config, or add the value "+
-					"to trusted_issuers[0].audiences in the generated policy.", jc.AudienceFile))
+			return PolicyPlugin{}, nil, fmt.Errorf(
+				"praxis: jwt-validation reads its expected audience from the file %q at runtime, "+
+					"which this converter does not read; generating a policy anyway would omit the "+
+					"audiences key entirely and accept ANY token from issuer %q. Set an explicit "+
+					"`audience` (or `allowed_audiences`) on the plugin to convert",
+				jc.AudienceFile, jc.Issuer)
 		default:
-			warnings = append(warnings,
-				"jwt-validation declares no audience, so the generated policy does NOT validate "+
-					"the aud claim: any token from the trusted issuer is accepted.")
+			return PolicyPlugin{}, nil, fmt.Errorf(
+				"praxis: jwt-validation declares no audience, so no policy could be generated "+
+					"that validates the aud claim; without it any token from issuer %q would be "+
+					"accepted. Set `audience` or `allowed_audiences` on the plugin", jc.Issuer)
 		}
 	}
 
@@ -341,7 +434,7 @@ func jwtPolicyPlugin(entry config.PluginEntry) (PolicyPlugin, []string, error) {
 			TrustedIssuers: []TrustedIssuer{{
 				Issuer:     jc.Issuer,
 				Audiences:  auds,
-				Algorithms: []string{"RS256"},
+				Algorithms: algs,
 				DecodingKey: DecodingKey{
 					Kind:         "jwks_url",
 					URL:          jwks,

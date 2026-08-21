@@ -373,6 +373,54 @@ func TestConvert_NoMTLS_NoSVIDWarning(t *testing.T) {
 	}
 }
 
+// The outbound transparent listener is AuthBridge's hard egress guard —
+// deliberately not self-exemptable — and the proxy-sidecar preset defaults it
+// on. Dropping it silently would remove an enforcement boundary the operator
+// never explicitly enabled.
+func TestConvert_TransparentProxyAddr_Reported(t *testing.T) {
+	res, err := Convert(proxySidecar(t, nil), nil)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	// The preset fills this for proxy-sidecar, so it should be reported without
+	// the test setting it explicitly.
+	if got := res.Config.Listeners; len(got) == 0 {
+		t.Fatal("expected listeners")
+	}
+	if !containsSubstring(res.Warnings, "transparent_proxy_addr") {
+		t.Errorf("expected transparent_proxy_addr reported, got %v", res.Warnings)
+	}
+	if !containsSubstring(res.Warnings, "egress guard") {
+		t.Errorf("the warning should say what is lost, got %v", res.Warnings)
+	}
+}
+
+func TestConvert_SkipHosts_Reported(t *testing.T) {
+	res, err := Convert(proxySidecar(t, func(c *config.Config) {
+		c.Listener.SkipHosts = []string{"otel-collector*", "*.metrics.local"}
+	}), nil)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if !containsSubstring(res.Warnings, "skip_hosts") {
+		t.Errorf("expected skip_hosts reported, got %v", res.Warnings)
+	}
+	if !containsSubstring(res.Warnings, "otel-collector*") {
+		t.Errorf("the warning should name the patterns, got %v", res.Warnings)
+	}
+}
+
+// No skip_hosts configured means nothing to report about them.
+func TestConvert_NoSkipHosts_NotReported(t *testing.T) {
+	res, err := Convert(proxySidecar(t, nil), nil)
+	if err != nil {
+		t.Fatalf("Convert: %v", err)
+	}
+	if containsSubstring(res.Warnings, "skip_hosts") {
+		t.Errorf("skip_hosts is unset and must not be reported: %v", res.Warnings)
+	}
+}
+
 // Transparent inbound interception has no Praxis counterpart: Praxis cannot
 // recover the original destination per connection. It must be reported rather
 // than silently producing a listener pointed somewhere invented.

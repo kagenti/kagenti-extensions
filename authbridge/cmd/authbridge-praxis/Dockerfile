@@ -30,6 +30,18 @@
 # its rust-toolchain.toml) plus the musl / OpenSSL / cmake toolchain its
 # dependency tree needs. OPENSSL_STATIC links OpenSSL into the binary so the
 # runtime stage needs no OpenSSL package.
+#
+# Deliberately NOT digest-pinned, unlike the golang and alpine images below. A
+# digest names one architecture's manifest, so pinning here would break
+# multi-arch builds of this image — and this is the one stage that must build on
+# both arm64 and amd64 from source. The tag is a minor-version tag
+# (rust:1.96-alpine, not :latest or :1), so the toolchain version is still
+# fixed; what floats is only the patch/base-image refresh, which is what keeps
+# the multi-arch manifest usable. The build's reproducibility guarantee comes
+# from PRAXIS_REF below, which pins the source actually being compiled.
+#
+# The runtime stages ARE digest-pinned: they ship the final artifacts, so
+# supply-chain pinning matters more there than cross-arch flexibility.
 FROM rust:1.96-alpine AS praxis-builder
 
 ENV OPENSSL_STATIC=1
@@ -45,18 +57,27 @@ ARG PRAXIS_REF=v0.5.3
 
 WORKDIR /praxis
 
-# Fetch the pinned ref without cloning full history. Three shapes of
-# PRAXIS_REF are accepted, tried cheapest-first: a tag (the default), then a
-# bare SHA or branch via a direct refspec fetch, then all branch tips as a last
-# resort. The tag path is listed first because fetching an arbitrary commit by
-# SHA requires the server to allow it, which GitHub does not always do — so a
-# SHA-pinned build can fall through to the later forms.
+# Fetch exactly PRAXIS_REF, or fail.
+#
+# Two shapes are accepted — a tag (the default) or a bare SHA / branch — and each
+# is checked out from the ref it just fetched. That coupling is the point: an
+# earlier version fell back to fetching ALL branch tips and checking out
+# FETCH_HEAD, so a transient failure fetching the pinned tag would silently build
+# main instead — defeating the reproducibility the PRAXIS_REF comment above
+# promises, on exactly the condition it was meant to guarantee. Failing the build
+# is the only safe outcome; a stage that quietly compiles different source than
+# it was told to is worse than one that stops.
+#
+# Both shapes are attempted because fetching an arbitrary commit by SHA requires
+# the server to permit it, which GitHub does not always do: a SHA-pinned build
+# needs the second form, a tag-pinned build the first.
 RUN git init -q . \
     && git remote add origin "${PRAXIS_REPO}" \
-    && ( git fetch -q --depth 1 origin "refs/tags/${PRAXIS_REF}:refs/tags/${PRAXIS_REF}" \
-         || git fetch -q --depth 1 origin "${PRAXIS_REF}" \
-         || git fetch -q --depth 1 origin '+refs/heads/*:refs/remotes/origin/*' ) \
-    && ( git checkout -q "${PRAXIS_REF}" || git checkout -q FETCH_HEAD ) \
+    && ( ( git fetch -q --depth 1 origin "refs/tags/${PRAXIS_REF}:refs/tags/${PRAXIS_REF}" \
+           && git checkout -q "refs/tags/${PRAXIS_REF}" ) \
+         || ( git fetch -q --depth 1 origin "${PRAXIS_REF}" \
+              && git checkout -q FETCH_HEAD ) \
+         || { echo "FATAL: could not fetch PRAXIS_REF=${PRAXIS_REF} from ${PRAXIS_REPO}" >&2; exit 1; } ) \
     && git --no-pager log --oneline -1
 
 # `policy-engine` pulls in the praxis-policy crates (identity/jwt, Cedar PDP,
@@ -66,16 +87,43 @@ RUN cargo build --release -p praxis-proxy --features policy-engine \
     && cp target/release/praxis /praxis-bin \
     && strip /praxis-bin
 
-# Fail the build here rather than at container start if the feature flag did
-# not take effect: a Praxis without the `policy` filter cannot run the configs
-# this image generates. A missing config_path proves the filter is registered
-# (an unregistered filter reports "unknown filter type" instead).
+# Fail the build here rather than at container start if the policy-engine
+# feature did not take effect: a Praxis without the `policy` filter cannot run
+# the configs this image generates, and that failure would otherwise surface as
+# a crashlooping pod.
 #
-# The probe is EXPECTED to exit non-zero (its config_path is deliberately
-# absent), so its output is redirected to a file and inspected rather than
-# piped — a pipeline would either mask the status or, under pipefail, abort
-# before the grep that actually decides the outcome.
-RUN printf 'listeners:\n\
+# The assertion is POSITIVE — a complete, valid policy document plus a config
+# that references it must make `--validate` exit 0. An earlier version instead
+# probed with a deliberately-missing config_path and passed when the output did
+# NOT contain "unknown filter type". That inverted form fails open on precisely
+# the condition it guards: the string is an upstream `format!` with no stability
+# guarantee, and PRAXIS_REF is overridable, so any rewording of that message
+# would make the gate pass unconditionally — silently shipping a Praxis that
+# rejects every generated config. Exit status cannot drift the same way.
+#
+# The probe policy mirrors what BuildPolicy emits (an identity/jwt plugin over
+# trusted_issuers), so this also catches an upstream change to the policy schema
+# that the generator has not been updated for. HS256 with an inline secret keeps
+# it self-contained: no JWKS fetch, so no network dependency at build time.
+RUN printf 'plugins:\n\
+  - name: probe-jwt\n\
+    kind: identity/jwt\n\
+    hooks: [identity.resolve]\n\
+    mode: sequential\n\
+    priority: 10\n\
+    on_error: fail\n\
+    config:\n\
+      header: Authorization\n\
+      claim_mapper: standard\n\
+      trusted_issuers:\n\
+        - issuer: "https://probe.invalid/realms/probe"\n\
+          audiences: ["probe-aud"]\n\
+          algorithms: ["HS256"]\n\
+          decoding_key:\n\
+            kind: secret\n\
+            secret: "build-time-probe-secret-not-used-at-runtime"\n\
+          leeway_seconds: 60\n' > /probe-policy.yaml \
+    && printf 'listeners:\n\
   - name: probe\n\
     address: "127.0.0.1:18099"\n\
     filter_chains: [c]\n\
@@ -83,15 +131,17 @@ filter_chains:\n\
   - name: c\n\
     filters:\n\
       - filter: policy\n\
-        config_path: /nonexistent/policy.yaml\n\
+        config_path: /probe-policy.yaml\n\
+        require_protocol_metadata: false\n\
       - filter: static_response\n\
         status: 200\n' > /probe.yaml \
-    && { /praxis-bin --validate --config /probe.yaml > /probe.out 2>&1 || true; } \
-    && cat /probe.out \
-    && if grep -q "unknown filter type" /probe.out; then \
-         echo "FATAL: praxis was built WITHOUT the policy-engine feature" >&2; exit 1; \
+    && if ! /praxis-bin --validate --config /probe.yaml; then \
+         echo "FATAL: praxis rejected a policy-filter config — it was probably built WITHOUT" >&2; \
+         echo "       --features policy-engine, or the policy schema has changed upstream." >&2; \
+         exit 1; \
        fi \
-    && rm -f /probe.yaml /probe.out
+    && echo "policy-engine verified: policy filter accepted a valid policy document" \
+    && rm -f /probe.yaml /probe-policy.yaml
 
 # ── Stage 2: Build the authbridge-praxis config generator ───────────────────
 #

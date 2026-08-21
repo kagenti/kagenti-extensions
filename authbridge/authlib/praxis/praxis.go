@@ -457,6 +457,41 @@ func Convert(cfg *config.Config, opts *Options) (*Result, error) {
 				"Praxis requires at least one listener", cfg.Mode, cfg.Listener.Roles)
 	}
 
+	// ── Outbound listener fields with no Praxis counterpart ──────────────
+	// Reported outside the forward-role branch above because both fields are
+	// set independently of it, and because silence here is the failure mode
+	// that matters: each one removes an enforcement boundary.
+	if cfg.Listener.TransparentProxyAddr != "" {
+		// The outbound transparent listener is AuthBridge's HARD egress guard:
+		// iptables REDIRECTs the agent's bypass egress to it, and unlike
+		// skip_hosts it is deliberately not self-exemptable by the agent's
+		// chosen destination. The proxy-sidecar and lite presets default it to
+		// :8082, so it is effectively always on for those shapes — which means
+		// converting such a config silently removes a guard the operator never
+		// explicitly enabled and so may not think to check for.
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"listener.transparent_proxy_addr (%s) has no Praxis counterpart and is NOT translated: "+
+				"it is AuthBridge's hard egress guard, receiving iptables-REDIRECTed traffic and "+
+				"recovering the original destination via SO_ORIGINAL_DST — a mechanism Praxis, which "+
+				"routes to preconfigured clusters, cannot express. Egress that AuthBridge forced "+
+				"through the outbound pipeline is unconstrained by the generated config. Note the "+
+				"proxy-sidecar and lite presets set this by default, so it may be active without "+
+				"appearing in the source config.", cfg.Listener.TransparentProxyAddr))
+	}
+	if len(cfg.Listener.SkipHosts) > 0 {
+		// Direction of risk is the opposite of the guard above: skip_hosts
+		// makes AuthBridge MORE permissive, so not translating it is not a
+		// security regression. It still changes behavior — those hosts now run
+		// the generated chain — and it silently drops the operator's intent.
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"listener.skip_hosts %v is NOT translated: AuthBridge bypasses the plugin pipeline and "+
+				"session recording entirely for these destinations. The generated config has no "+
+				"equivalent bypass, so traffic to them runs the outbound chain like any other. This "+
+				"is more restrictive, not less — but if these are infrastructure destinations that "+
+				"must not be subject to egress policy, express that with router routes instead.",
+			cfg.Listener.SkipHosts))
+	}
+
 	// ── Top-level blocks ─────────────────────────────────────────────────
 	res.Config.Admin, res.Config.InsecureOptions = convertAdmin(cfg)
 	if cfg.TLSBridge != nil && cfg.TLSBridge.Mode == "enabled" {
@@ -493,7 +528,26 @@ func inboundAddrAndBackend(cfg *config.Config, res *Result) (addr, backend strin
 				"address to emit one.")
 		return "", "", nil
 	}
+	// Without both an address to bind and a backend to forward to there is no
+	// inbound listener to generate. Warn rather than returning silently: the
+	// inbound chain is where the `policy` filter lives, so dropping it drops
+	// JWT enforcement — and BuildPolicy still produced a document, so the
+	// caller would otherwise log "wrote Praxis policy, enforces=[jwt-validation]"
+	// for a policy no generated listener loads. The transparent branch above
+	// warns for the same reason; this keeps the two symmetric.
 	if cfg.Listener.ReverseProxyAddr == "" || cfg.Listener.ReverseProxyBackend == "" {
+		missing := "listener.reverse_proxy_backend"
+		if cfg.Listener.ReverseProxyAddr == "" {
+			missing = "listener.reverse_proxy_addr"
+			if cfg.Listener.ReverseProxyBackend == "" {
+				missing = "listener.reverse_proxy_addr and listener.reverse_proxy_backend"
+			}
+		}
+		res.Warnings = append(res.Warnings, fmt.Sprintf(
+			"the reverse role is active but %s is empty, so NO inbound listener was generated. "+
+				"Any inbound plugins — including jwt-validation — are therefore not enforced by "+
+				"the generated config, even if a policy document was written for them. Set the "+
+				"missing field to emit the inbound listener.", missing))
 		return "", "", nil
 	}
 	endpoint, err := endpointFromBackendURL(cfg.Listener.ReverseProxyBackend)
@@ -788,8 +842,17 @@ func pluginFilters(plugins []config.PluginEntry, dir direction, opts *Options) (
 	// Plugins the generated policy document enforces. Those become a single
 	// `policy` filter at the position of the first one, rather than an inert
 	// marker — the policy engine runs them all from one document.
+	//
+	// Gated on the INBOUND direction: BuildPolicy reads only
+	// cfg.Pipeline.Inbound.Plugins, so the document it produces describes
+	// inbound identity alone. Matching on name irrespective of direction would
+	// let an outbound jwt-validation entry emit a `policy` filter on the
+	// outbound chain pointing at a document built from inbound plugins —
+	// enforcing the wrong stage's rules on egress, and reporting the plugin as
+	// translated when nothing in the document corresponds to it. If the policy
+	// ever grows outbound plugins, this gate is what must change with it.
 	enforced := map[string]bool{}
-	if opts != nil && opts.PolicyPath != "" {
+	if opts != nil && opts.PolicyPath != "" && dir == directionInbound {
 		for _, n := range opts.PolicyEnforces {
 			enforced[n] = true
 		}
