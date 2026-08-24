@@ -32,6 +32,12 @@ updates:
     schedule:
       interval: weekly
 
+  # Go - storage backends (direct deps: go-redis, miniredis)
+  - package-ecosystem: gomod
+    directory: /authbridge/storage/redis
+    schedule:
+      interval: weekly
+
   # Python - root (tests)
   - package-ecosystem: pip
     directory: /
