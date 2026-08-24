@@ -121,13 +121,13 @@ cat > "$OVERLAY_FILE" <<YAML
 #     from /shared, passthrough default policy). Per-destination routes
 #     come from the authproxy-routes ConfigMap; hosts with no route fall
 #     through unchanged and simply carry no delegation hop.
-# NOTE: the rossoctl chart reads the pipeline from `.Values.authBridge.pipeline`
+# NOTE: the rossoctl chart reads the pipeline from \`.Values.authBridge.pipeline\`
 # (a multiline string rendered via tpl() into the namespace
 # authbridge-runtime-config ConfigMap — see charts/rossoctl/templates/
 # _helpers.tpl "rossoctl.authbridge-runtime-config-yaml"). The operator webhook
-# then uses that ConfigMap's `pipeline:` verbatim as the base for each per-agent
+# then uses that ConfigMap's \`pipeline:\` verbatim as the base for each per-agent
 # authbridge-config-<agent> ConfigMap. So the override MUST be nested under
-# `authBridge.pipeline` — a top-level `pipeline:` key is silently ignored.
+# \`authBridge.pipeline\` — a top-level \`pipeline:\` key is silently ignored.
 authBridge:
   pipeline: |
     inbound:
