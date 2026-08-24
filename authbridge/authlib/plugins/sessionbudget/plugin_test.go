@@ -972,8 +972,10 @@ func TestShutdown_TimeoutDoesNotCloseStore(t *testing.T) {
 }
 
 // TestShutdown_DoubleCloseSafe verifies that Shutdown can be called more than
-// once without panicking. The channel-close is guarded by sync.Once; regression
-// against a plain close(p.stopCh) that panics on the second call.
+// once without panicking and that store.Close is invoked exactly once across
+// repeat calls. Regression guards: stopCh close (sync.Once) and store.Close
+// (sync.Once + cached err) — the underlying go-redis Close is not idempotent
+// and would return "redis: client is closed" on the second call.
 func TestShutdown_DoubleCloseSafe(t *testing.T) {
 	p := New()
 	cfg, _ := json.Marshal(config{
@@ -986,14 +988,19 @@ func TestShutdown_DoubleCloseSafe(t *testing.T) {
 	if err := p.Configure(cfg); err != nil {
 		t.Fatalf("Configure: %v", err)
 	}
-	p.store = newMemStore()
+	rec := &closeRecordingStore{Store: newMemStore()}
+	p.store = rec
+	go p.refreshLoop(30 * time.Millisecond)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	// The second call must not panic on close of closed channel — the
-	// sync.Once guard makes the close idempotent.
-	_ = p.Shutdown(ctx)
-	_ = p.Shutdown(ctx)
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("first Shutdown: %v", err)
+	}
+	if err := p.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown: %v", err)
+	}
+	if n := rec.closes.Load(); n != 1 {
+		t.Errorf("store.Close called %d times, want 1", n)
+	}
 }
 
 // closeRecordingStore wraps a Store and counts Close() calls.

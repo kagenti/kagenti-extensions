@@ -82,6 +82,8 @@ type SessionBudget struct {
 	stopCh       chan struct{}
 	stopped      chan struct{}
 	shutdownOnce sync.Once
+	closeOnce    sync.Once
+	closeErr     error
 }
 
 func New() *SessionBudget {
@@ -198,7 +200,7 @@ func (p *SessionBudget) Init(_ context.Context) error {
 }
 
 // In-flight accumulate goroutines get ErrClosed after store.Close — bounded by their 2s ctx.
-// Safe to call multiple times: the stopCh close is guarded by sync.Once.
+// Safe to call multiple times: both the stopCh close and store.Close are guarded by sync.Once.
 func (p *SessionBudget) Shutdown(ctx context.Context) error {
 	p.shutdownOnce.Do(func() { close(p.stopCh) })
 	select {
@@ -212,7 +214,8 @@ func (p *SessionBudget) Shutdown(ctx context.Context) error {
 		return ctx.Err()
 	}
 	if p.store != nil {
-		return p.store.Close()
+		p.closeOnce.Do(func() { p.closeErr = p.store.Close() })
+		return p.closeErr
 	}
 	return nil
 }
