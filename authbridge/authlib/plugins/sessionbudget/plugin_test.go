@@ -299,6 +299,93 @@ func TestAccumulate_ZeroTokens(t *testing.T) {
 	}
 }
 
+// TestAccumulate_ExpireSelfHealsAfterFailure verifies that Expire runs on
+// every accumulate — not just the one where HashSetNX succeeds. This
+// self-heals keys where a prior Expire failed after HashSetNX already
+// recorded started_at. Before the fix, only call #1 attempted Expire (gated
+// on HashSetNX returning true), so a transient Expire error left the key
+// TTL-less forever. Observable outcome (TTL restored on call #2) proves the
+// mechanism (Expire ran on a call whose HashSetNX returned false).
+func TestAccumulate_ExpireSelfHealsAfterFailure(t *testing.T) {
+	inner := newMemStore()
+	spy := &oneShotExpireFailStore{inner: inner, failNext: true}
+	p := New()
+	cfg, _ := json.Marshal(config{
+		RedisURL:          "mem://test",
+		MaxTokens:         1000,
+		OnExceed:          "deny",
+		RefreshInterval:   "30ms",
+		SessionTTLSeconds: 60,
+		RedisUnavailable:  "fail_open",
+	})
+	if err := p.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = spy
+
+	// Call #1: HashSetNX succeeds (started_at recorded), Expire fails.
+	p.accumulate("sess", 10)
+	inner.mu.Lock()
+	_, hasTTL := inner.ttls["session-budget:sess"]
+	inner.mu.Unlock()
+	if hasTTL {
+		t.Fatalf("expected no TTL after call #1 (Expire was configured to fail)")
+	}
+
+	// Call #2: HashSetNX returns false (started_at already set), but Expire
+	// must still run and restore the TTL. Pre-fix code gated Expire on
+	// HashSetNX-returned-true and would leave the key TTL-less forever.
+	p.accumulate("sess", 10)
+	inner.mu.Lock()
+	ttl, hasTTL := inner.ttls["session-budget:sess"]
+	inner.mu.Unlock()
+	if !hasTTL {
+		t.Fatalf("call #2 did not restore TTL — self-heal broken (fix regressed)")
+	}
+	if ttl != 60*time.Second {
+		t.Fatalf("restored TTL = %v, want 60s", ttl)
+	}
+}
+
+// oneShotExpireFailStore wraps memStore and fails the next Expire call once.
+// The controllableStore in e2e_test.go can't be used here: it fails every op
+// together, but this test needs HashSetNX to succeed while Expire fails.
+type oneShotExpireFailStore struct {
+	inner    *memStore
+	mu       sync.Mutex
+	failNext bool
+}
+
+func (s *oneShotExpireFailStore) Get(ctx context.Context, key string) (string, error) {
+	return s.inner.Get(ctx, key)
+}
+func (s *oneShotExpireFailStore) Set(ctx context.Context, key, value string, ttl time.Duration) error {
+	return s.inner.Set(ctx, key, value, ttl)
+}
+func (s *oneShotExpireFailStore) Incr(ctx context.Context, key string, delta int64) (int64, error) {
+	return s.inner.Incr(ctx, key, delta)
+}
+func (s *oneShotExpireFailStore) HashIncr(ctx context.Context, key, field string, delta int64) (int64, error) {
+	return s.inner.HashIncr(ctx, key, field, delta)
+}
+func (s *oneShotExpireFailStore) HashGet(ctx context.Context, key string) (map[string]string, error) {
+	return s.inner.HashGet(ctx, key)
+}
+func (s *oneShotExpireFailStore) HashSetNX(ctx context.Context, key, field, value string) (bool, error) {
+	return s.inner.HashSetNX(ctx, key, field, value)
+}
+func (s *oneShotExpireFailStore) Expire(ctx context.Context, key string, ttl time.Duration) error {
+	s.mu.Lock()
+	shouldFail := s.failNext
+	s.failNext = false
+	s.mu.Unlock()
+	if shouldFail {
+		return context.DeadlineExceeded
+	}
+	return s.inner.Expire(ctx, key, ttl)
+}
+func (s *oneShotExpireFailStore) Close() error { return nil }
+
 func TestOnResponseFrame_ZeroTokensCountsCalls(t *testing.T) {
 	p := newTestPlugin(1000, 5, 0)
 	pctx := makePctx("sess-1", 0)
@@ -882,6 +969,31 @@ func TestShutdown_TimeoutDoesNotCloseStore(t *testing.T) {
 	if n := rec.closes.Load(); n != 0 {
 		t.Errorf("store.Close() called %d times on timeout path, want 0", n)
 	}
+}
+
+// TestShutdown_DoubleCloseSafe verifies that Shutdown can be called more than
+// once without panicking. The channel-close is guarded by sync.Once; regression
+// against a plain close(p.stopCh) that panics on the second call.
+func TestShutdown_DoubleCloseSafe(t *testing.T) {
+	p := New()
+	cfg, _ := json.Marshal(config{
+		RedisURL:         "mem://test",
+		MaxTokens:        100,
+		OnExceed:         "deny",
+		RefreshInterval:  "30ms",
+		RedisUnavailable: "fail_open",
+	})
+	if err := p.Configure(cfg); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	p.store = newMemStore()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// The second call must not panic on close of closed channel — the
+	// sync.Once guard makes the close idempotent.
+	_ = p.Shutdown(ctx)
+	_ = p.Shutdown(ctx)
 }
 
 // closeRecordingStore wraps a Store and counts Close() calls.
