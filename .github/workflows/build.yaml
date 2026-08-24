@@ -13,11 +13,13 @@ on:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # push images to ghcr.io
 
     strategy:
       matrix:
