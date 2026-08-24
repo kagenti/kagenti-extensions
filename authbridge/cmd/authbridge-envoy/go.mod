@@ -11,7 +11,7 @@ require (
 	github.com/envoyproxy/go-control-plane/envoy v1.37.0
 	github.com/rossoctl/cortex/authbridge/authlib v0.0.0
 	github.com/rossoctl/cortex/authbridge/storage/redis v0.0.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.83.1
 )
 
 require (
