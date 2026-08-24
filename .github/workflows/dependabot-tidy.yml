@@ -42,12 +42,21 @@ jobs:
           go-version-file: authbridge/authlib/go.mod
 
       - name: Run go mod tidy in every module
+        # authbridge-cpex's main.go is gated `//go:build cpex`, so a plain
+        # `go mod tidy` skips it (custom tags are off by default) and prunes
+        # its cpex-only deps — the tagged build in build.yaml then fails with
+        # "updates to go.mod needed". `go mod tidy` has no -tags flag, but it
+        # honors GOFLAGS=-tags=..., so scope that env to the cpex module.
         run: |
           set -euo pipefail
           while IFS= read -r -d '' go_mod; do
             mod=$(dirname "$go_mod")
-            echo "::group::go mod tidy in $mod"
-            (cd "$mod" && go mod tidy)
+            tidy_env=()
+            case "$mod" in
+              authbridge/cmd/authbridge-cpex) tidy_env=(GOFLAGS=-tags=cpex) ;;
+            esac
+            echo "::group::go mod tidy ${tidy_env[*]} in $mod"
+            (cd "$mod" && env "${tidy_env[@]}" go mod tidy)
             echo "::endgroup::"
           done < <(find authbridge -name go.mod -not -path '*/demos/*' -print0 | sort -z)
 
