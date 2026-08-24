@@ -76,11 +76,12 @@ type SessionBudget struct {
 	gracePeriod  time.Duration
 	pauseTimeout time.Duration
 
-	mu       sync.RWMutex
-	cache    map[string]*counters
-	hydrateG singleflight.Group
-	stopCh   chan struct{}
-	stopped  chan struct{}
+	mu           sync.RWMutex
+	cache        map[string]*counters
+	hydrateG     singleflight.Group
+	stopCh       chan struct{}
+	stopped      chan struct{}
+	shutdownOnce sync.Once
 }
 
 func New() *SessionBudget {
@@ -197,8 +198,9 @@ func (p *SessionBudget) Init(_ context.Context) error {
 }
 
 // In-flight accumulate goroutines get ErrClosed after store.Close — bounded by their 2s ctx.
+// Safe to call multiple times: the stopCh close is guarded by sync.Once.
 func (p *SessionBudget) Shutdown(ctx context.Context) error {
-	close(p.stopCh)
+	p.shutdownOnce.Do(func() { close(p.stopCh) })
 	select {
 	case <-p.stopped:
 	case <-ctx.Done():
@@ -519,9 +521,15 @@ func (p *SessionBudget) accumulate(sessionID string, tokens int64) {
 		p.log.Warn("redis HashIncr calls failed", "session", sessionID, "err", err)
 	}
 
-	set, _ := p.store.HashSetNX(ctx, key, "started_at", strconv.FormatInt(time.Now().Unix(), 10))
-	if set {
-		_ = p.store.Expire(ctx, key, ttl)
+	if _, err := p.store.HashSetNX(ctx, key, "started_at", strconv.FormatInt(time.Now().Unix(), 10)); err != nil {
+		p.log.Warn("redis HashSetNX started_at failed", "session", sessionID, "err", err)
+	}
+	// Refresh TTL on every accumulate. Redis EXPIRE is idempotent and this
+	// self-heals keys where a prior Expire failed after HashSetNX succeeded —
+	// without it, one Expire failure would leave the key TTL-less forever
+	// (HashSetNX only fires TTL on its first success per key).
+	if err := p.store.Expire(ctx, key, ttl); err != nil {
+		p.log.Warn("redis Expire failed", "session", sessionID, "err", err)
 	}
 }
 
