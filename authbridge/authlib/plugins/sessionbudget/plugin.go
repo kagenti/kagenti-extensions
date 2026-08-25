@@ -18,6 +18,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/storage"
 	"golang.org/x/sync/singleflight"
 )
@@ -665,7 +666,11 @@ func (p *SessionBudget) sessionID(pctx *pipeline.Context) string {
 	if pctx.Session != nil && pctx.Session.ID != "" {
 		return pctx.Session.ID
 	}
-	return ""
+	// Forward-proxy egress with no prior inbound A2A leaves pctx.Session
+	// nil. Fall back to the well-known default bucket so single-workload
+	// demos and any traffic ahead of the first inbound request still get
+	// budgeted, matching the listener's own DefaultSessionID fallback.
+	return session.DefaultSessionID
 }
 
 func (p *SessionBudget) redisKey(sessionID string) string {
