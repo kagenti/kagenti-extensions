@@ -198,6 +198,32 @@ model silently changed underneath it. A deliberate model upgrade is its own
 reviewed event: re-run the full suite against the new pinned version,
 diff old-vs-new, then move the pin forward.
 
+### 7.1 Initial model selection run
+
+Before settling on the pinned model for routine use, run the **complete
+suite once under two contrasting model tiers** — one strong (e.g. a
+frontier model with the largest available context and highest reasoning
+capability) and one weak (e.g. a smaller, cheaper model in the same
+provider's line-up) — and compare their results head-to-head across every
+quality attribute (Correctness, Robustness, Scale, Consistency). The
+goal is twofold:
+
+1. **Capability floor check** — establish how much model capability the
+   pipeline actually needs. If the weak model already meets all gates, the
+   strong model brings no measurable benefit; pinning the cheaper tier is
+   the right call. If the weak model fails gates the strong model passes,
+   the gap is evidence for the minimum capability required.
+2. **Cost/quality trade-off data** — the comparison run produces concrete
+   numbers (over-grant rate, under-grant rate, consistency disagreement
+   rate, latency, estimated cost per run) for both tiers, making the
+   model-selection decision reviewable and documented rather than intuitive.
+
+This is a **manual, one-off run** (not recurring), performed before the
+first pin is committed and whenever a candidate replacement model is being
+evaluated. Its output is recorded in the structured trend log (§9) using a
+`run_type = "model_selection"` tag so it is clearly distinguished from
+routine regression runs.
+
 ## 8. Cadence
 
 **Current state: everything is manual-only.** No suite is wired into CI to
@@ -229,6 +255,29 @@ Two artifacts, at different durability levels:
   text. Small enough to not bloat the repo; durable enough to actually plot
   drift over time across machines and contributors.
 
+### 9.1 Actionable improvement feedback
+
+The detailed per-cell report includes an **"Improvement recommendations"
+section** generated after every run. The section surfaces findings as
+concrete, targeted actions the team can act on — not just a statement of
+which metrics failed. The following categories of recommendation are
+produced whenever the supporting evidence is present:
+
+| Finding type | Recommendation form |
+|---|---|
+| Scenario theme with elevated over-grant rate | Identify the specific policy clause or semantic pattern the PRB is over-interpreting; recommend a prompt constraint, a PRB graph edge, or a targeted scenario addition to the training/prompt corpus. |
+| Scenario theme with elevated under-grant rate | Identify whether the miss is a parsing gap (policy text not recognized) or a reasoning gap (text parsed but grant not inferred); recommend either input normalization upstream of the PRB or an explicit reasoning step in the graph. |
+| Sensitivity family failures (output did not change when it should have) | Flag which policy-text edit types the PRB is insensitive to (e.g. negation words, exception clauses); recommend adding those edit patterns to the Robustness corpus and reviewing PRB prompts for those constructs. |
+| Invariance family failures (output changed when it shouldn't have) | Flag which surface-form changes destabilize the PRB; recommend prompt hardening or normalization pre-processing. |
+| Consistency disagreements | Note whether disagreements cluster on specific scenarios (structural prompt sensitivity) or appear random (temperature/batching noise); recommend `temperature=0` enforcement or a retry-with-majority-vote strategy accordingly. |
+| Scale correctness degradation above a threshold | Identify whether degradation is in per-decision scale (large candidate lists) or total-corpus scale; recommend context-window management changes (chunking, summarization) or candidate-list pruning strategies respectively. |
+
+Recommendations that have no supporting evidence in the current run are
+omitted (not printed as vacuous "no issues found" items). Each
+recommendation references the specific failing scenario(s) or metric
+cell(s) that produced it, so the reader can verify the evidence directly
+in the same report.
+
 ## 10. Framework trust
 
 No mutation-testing validation of the harness itself (e.g. deliberately
@@ -241,8 +290,9 @@ shouldn't have.
 ## 11. Repository structure and migration
 
 - The existing suite at `test/integration/eval/` is **moved** (not left in
-  place, not rebuilt from scratch alongside it) to **`test/eval/`** — a
-  sibling of `test/integration/`, not nested inside it.
+  place, not rebuilt from scratch alongside it) to **`aiac/eval/`** — a
+  top-level directory inside the `aiac/` package root, separate from
+  `test/`.
 - Everything already implemented there that covers something this spec
   calls for is **reused, adapted in place, rather than reimplemented**:
   - `conftest.py` — extended (not replaced) to natively support asymmetric
