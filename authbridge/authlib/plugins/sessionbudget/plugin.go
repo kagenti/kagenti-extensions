@@ -36,6 +36,7 @@ type config struct {
 	SessionTTLSeconds  int    `json:"session_ttl_seconds" description:"Redis key TTL; should be >= max_duration_seconds." default:"7200"`
 	RefreshInterval    string `json:"refresh_interval" description:"How often to sync local cache from Redis." default:"5s"`
 	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
+	DefaultSessionFallback bool `json:"default_session_fallback" description:"Pool sessionless traffic into a shared 'default' bucket. Off by default. Single-workload only." default:"false"`
 }
 
 // approvalFlight carries the outcome of one webhook call. The leader writes
@@ -666,11 +667,13 @@ func (p *SessionBudget) sessionID(pctx *pipeline.Context) string {
 	if pctx.Session != nil && pctx.Session.ID != "" {
 		return pctx.Session.ID
 	}
-	// Forward-proxy egress with no prior inbound A2A leaves pctx.Session
-	// nil. Fall back to the well-known default bucket so single-workload
-	// demos and any traffic ahead of the first inbound request still get
-	// budgeted, matching the listener's own DefaultSessionID fallback.
-	return session.DefaultSessionID
+	// Opt-in fallback for single-workload deployments where all sessionless
+	// egress should share one bucket. Off by default; callers with no
+	// session then skip enforcement (existing no_session_id path).
+	if p.cfg.DefaultSessionFallback {
+		return session.DefaultSessionID
+	}
+	return ""
 }
 
 func (p *SessionBudget) redisKey(sessionID string) string {
