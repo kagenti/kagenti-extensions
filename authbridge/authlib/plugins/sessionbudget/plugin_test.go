@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/storage"
 )
 
@@ -258,6 +259,36 @@ func TestOnRequest_NoSession(t *testing.T) {
 	action := p.OnRequest(context.Background(), pctx)
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue for nil session, got %v", action.Type)
+	}
+}
+
+// Pins the default-session fallback on the response path: forward-proxy egress
+// with no inbound A2A leaves pctx.Session nil, and the plugin must still
+// accumulate under session.DefaultSessionID so budgets are enforced instead of
+// silently skipped.
+func TestOnResponseFrame_NoSession_UsesDefaultBucket(t *testing.T) {
+	p := newTestPlugin(1000, 0, 0)
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Headers:   http.Header{},
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{TotalTokens: 42},
+		},
+	}
+
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	p.mu.RLock()
+	c := p.cache[session.DefaultSessionID]
+	p.mu.RUnlock()
+	if c == nil {
+		t.Fatalf("expected cache entry under %q, got none", session.DefaultSessionID)
+	}
+	if c.tokens != 42 {
+		t.Errorf("tokens = %d, want 42", c.tokens)
+	}
+	if c.calls != 1 {
+		t.Errorf("calls = %d, want 1", c.calls)
 	}
 }
 
