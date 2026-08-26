@@ -34,7 +34,7 @@ resumes (or rejects with 403) once the operator decides.
 The outbound pipeline is an in-process function chain with no network hop between
 the proxy and its plugins:
 
-```
+```text
                                  ┌───────────────────────────────────┐
                                  │  authbridge-proxy   (:47601)      │
                                  │                                   │
@@ -192,8 +192,8 @@ go run ./approver.go
 
 Expected:
 
-```
-approver listening on :9099 (auto-approve=false, auto-deny=false)
+```text
+approver listening on 127.0.0.1:9099 (auto-approve=false, auto-deny=false)
 ```
 
 ### Terminal 2 — the proxy
@@ -207,7 +207,7 @@ From the repo root:
 
 Expected (relevant lines):
 
-```
+```text
 level=INFO msg="HTTP server listening" name=forward-proxy addr=127.0.0.1:47601
 level=INFO msg="authbridge-proxy starting" mode=proxy-sidecar
 ```
@@ -237,7 +237,7 @@ What happens:
 - **Call #3** — hangs. Terminal 2 logs `budget exceeded, requesting
   approval reason="call limit reached: 2/2"`. Terminal 1 prints:
 
-  ```
+  ```text
   ─── pause request ───
     session: default
     reason:  call limit reached: 2/2

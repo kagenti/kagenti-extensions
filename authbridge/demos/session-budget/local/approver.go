@@ -7,7 +7,7 @@
 //
 //	go run demos/session-budget/local/approver.go
 //	go run demos/session-budget/local/approver.go --auto-approve
-//	go run demos/session-budget/local/approver.go --addr :7000
+//	go run demos/session-budget/local/approver.go --addr 127.0.0.1:7000
 package main
 
 import (
@@ -37,7 +37,7 @@ type pauseRequest struct {
 }
 
 func main() {
-	addr := flag.String("addr", ":9099", "listen address")
+	addr := flag.String("addr", "127.0.0.1:9099", "listen address")
 	autoApprove := flag.Bool("auto-approve", false, "skip the prompt and always approve")
 	autoDeny := flag.Bool("auto-deny", false, "skip the prompt and always deny")
 	flag.Parse()
@@ -79,6 +79,7 @@ func main() {
 	srv := &http.Server{
 		Addr:              *addr,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
 	}
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "approver:", err)
@@ -112,8 +113,8 @@ func decide(pr *pauseRequest, mu *sync.Mutex, stdin *bufio.Reader, autoApprove, 
 	fmt.Print("  [a]pprove / [d]eny (default: approve): ")
 	line, err := stdin.ReadString('\n')
 	if err != nil {
-		fmt.Printf("  (stdin closed: %v — defaulting to approve)\n", err)
-		return "approve"
+		fmt.Printf("  (stdin closed: %v — failing closed to deny; use --auto-approve for unattended approvals)\n", err)
+		return "deny"
 	}
 	line = strings.TrimSpace(strings.ToLower(line))
 	if strings.HasPrefix(line, "d") {

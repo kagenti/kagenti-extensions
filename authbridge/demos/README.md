@@ -128,7 +128,8 @@ more AuthBridge capabilities.
 
 ## Prerequisites
 
-All demos require:
+Cluster-backed demos (everything above except the session-budget local
+walkthrough) require:
 - A Kubernetes cluster with the Rossoctl platform installed
   ([Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md))
 - Keycloak deployed in the `keycloak` namespace
@@ -136,6 +137,10 @@ All demos require:
 
 UI-based demos additionally require:
 - The Rossoctl UI running at `http://rossoctl-ui.localtest.me:8080`
+
+The session-budget [`hitl-local.md`](session-budget/hitl-local.md)
+walkthrough is Kubernetes-free — see its own Prerequisites section
+(Docker, Ollama, Go).
 
 ## Common Setup: Keycloak Port-Forward
 
