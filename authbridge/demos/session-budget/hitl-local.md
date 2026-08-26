@@ -35,31 +35,33 @@ The outbound pipeline is an in-process function chain with no network hop betwee
 the proxy and its plugins:
 
 ```text
-                                 ┌───────────────────────────────────┐
-                                 │  authbridge-proxy   (:47601)      │
-                                 │                                   │
-   curl ──HTTP_PROXY──▶ forward ─┼─▶ outbound pipeline               │
-                       proxy     │     ├─ session-budget    (plugin) │
-                                 │     └─ inference-parser  (plugin) │
-                                 │            │        ▲             │
-                                 │            │        │ HGETALL /   │
-                                 │            │        │ HINCRBY     │
-                                 │            ▼        │             │
-                                 │     ┌────────────────────┐        │
-                                 │     │  Redis :6379       │        │
-                                 │     │  session-budget:*  │        │
-                                 │     └────────────────────┘        │
-                                 │            │                      │
-                                 │  on breach │ HTTP POST            │
-                                 │            ▼                      │
-                                 └────────────┼──────────────────────┘
-                                              ▼
-                                      approver.go (:9099)
-                                              │
+                                 ┌────────────────────────────────────┐
+                                 │  authbridge-proxy   (:47601)       │
+                                 │                                    │
+   curl ──HTTP_PROXY──▶ forward ─┼─▶ outbound pipeline                │
+                       proxy     │     ├─ session-budget    (plugin)  │
+                                 │     └─ inference-parser  (plugin)  │
+                                 │            │        ▲              │
+                                 │            │        │ HGETALL /    │
+                                 │            │        │ HINCRBY      │
+                                 │            ▼        │              │
+                                 │     ┌────────────────────┐         │
+                                 │     │  Redis :6379       │         │
+                                 │     │  session-budget:*  │         │
+                                 │     └────────────────────┘         │
+                                 │  on breach │      ▲                │
+                                 │  HTTP POST │      │ {"action":...} │
+                                 │            ▼      │                │
+                                 │        ┌────────────────┐          │
+                                 │        │ approver.go    │          │
+                                 │        │    (:9099)     │          │
+                                 │        └────────────────┘          │
+                                 │  under budget, OR approver said    │
+                                 │  approve: proxy forwards           │
+                                 │            │                       │
+                                 └────────────┼───────────────────────┘
                                               ▼
                                           Ollama :11434
-                                    (only reached if approved
-                                     or under budget)
 ```
 
 ## Prerequisites
@@ -72,7 +74,8 @@ the proxy and its plugins:
   curl -s http://localhost:11434/v1/models | jq -r '.data[].id'
   ```
 
-- Go 1.25+ for building the proxy binary.
+- Go toolchain matching `authbridge/cmd/authbridge-proxy/go.mod` for
+  building the proxy binary.
 
 ## Setup
 
