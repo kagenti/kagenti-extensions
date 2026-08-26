@@ -12,6 +12,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -50,7 +51,22 @@ func main() {
 	// Serialize prompts so concurrent pause requests queue rather than
 	// interleave keystrokes on stdin.
 	var promptMu sync.Mutex
-	stdin := bufio.NewReader(os.Stdin)
+
+	// One long-running reader owns os.Stdin; decide reads answers off
+	// this channel. That way a pause whose request context cancels can
+	// abandon its prompt without racing another decide on stdin.
+	lines := make(chan string)
+	go func() {
+		r := bufio.NewReader(os.Stdin)
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				close(lines)
+				return
+			}
+			lines <- line
+		}
+	}()
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -68,7 +84,7 @@ func main() {
 			return
 		}
 
-		action := decide(&pr, &promptMu, stdin, *autoApprove, *autoDeny)
+		action := decide(r.Context(), &pr, &promptMu, lines, *autoApprove, *autoDeny)
 
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]string{"action": action})
@@ -87,14 +103,16 @@ func main() {
 	}
 }
 
-func decide(pr *pauseRequest, mu *sync.Mutex, stdin *bufio.Reader, autoApprove, autoDeny bool) string {
+func decide(ctx context.Context, pr *pauseRequest, mu *sync.Mutex, lines <-chan string, autoApprove, autoDeny bool) string {
 	mu.Lock()
 	defer mu.Unlock()
 
 	fmt.Println()
 	fmt.Println("─── pause request ───")
-	fmt.Printf("  session: %s\n", pr.SessionID)
-	fmt.Printf("  reason:  %s\n", pr.Reason)
+	// %q on caller-supplied fields so an embedded escape sequence
+	// cannot rewrite the calls/tokens lines the operator decides on.
+	fmt.Printf("  session: %q\n", pr.SessionID)
+	fmt.Printf("  reason:  %q\n", pr.Reason)
 	fmt.Printf("  calls:   %d / %d\n", pr.SpentCalls, pr.CallLimit)
 	fmt.Printf("  tokens:  %d / %d\n", pr.SpentTokens, pr.TokenLimit)
 	if pr.DurationLimit > 0 {
@@ -110,17 +128,43 @@ func decide(pr *pauseRequest, mu *sync.Mutex, stdin *bufio.Reader, autoApprove, 
 		return "deny"
 	}
 
-	fmt.Print("  [a]pprove / [d]eny (default: approve): ")
-	line, err := stdin.ReadString('\n')
-	if err != nil {
-		fmt.Printf("  (stdin closed: %v — failing closed to deny; use --auto-approve for unattended approvals)\n", err)
-		return "deny"
+	// Drain any answer typed for a prior request whose context already
+	// canceled — a stale keystroke should not decide the current one.
+	for {
+		select {
+		case _, ok := <-lines:
+			if !ok {
+				fmt.Println("  (stdin closed — failing closed to deny; use --auto-approve for unattended approvals)")
+				return "deny"
+			}
+			continue
+		default:
+		}
+		break
 	}
-	line = strings.TrimSpace(strings.ToLower(line))
-	if strings.HasPrefix(line, "d") {
-		fmt.Println("  → deny")
-		return "deny"
+
+	for {
+		fmt.Print("  [a]pprove / [d]eny (Enter = approve): ")
+		select {
+		case <-ctx.Done():
+			fmt.Println()
+			fmt.Println("  (request canceled by caller — failing closed to deny)")
+			return "deny"
+		case line, ok := <-lines:
+			if !ok {
+				fmt.Println("  (stdin closed — failing closed to deny; use --auto-approve for unattended approvals)")
+				return "deny"
+			}
+			switch strings.TrimSpace(strings.ToLower(line)) {
+			case "", "a", "approve":
+				fmt.Println("  → approve")
+				return "approve"
+			case "d", "deny":
+				fmt.Println("  → deny")
+				return "deny"
+			default:
+				fmt.Println("  (unrecognized — type 'a' to approve or 'd' to deny)")
+			}
+		}
 	}
-	fmt.Println("  → approve")
-	return "approve"
 }

@@ -242,14 +242,14 @@ What happens:
 
   ```text
   ─── pause request ───
-    session: default
-    reason:  call limit reached: 2/2
+    session: "default"
+    reason:  "call limit reached: 2/2"
     calls:   2 / 2
     tokens:  87 / 1000000        # tokens value will vary with the model
-    [a]pprove / [d]eny (default: approve):
+    [a]pprove / [d]eny (Enter = approve):
   ```
 
-  Type `a` and hit Enter → curl in Terminal 3 completes with `200`.
+  Type `a` (or just Enter) → curl in Terminal 3 completes with `200`.
   Type `d` → curl gets `403` with body:
 
   ```json
