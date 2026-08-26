@@ -31,11 +31,8 @@ resumes (or rejects with 403) once the operator decides.
 
 ## How it fits together
 
-`authbridge-proxy` is the process. `inference-parser` and
-`session-budget` are **plugins** the proxy loads and runs in-process on
-every outbound request. There's no network hop between the proxy and
-its plugins — the outbound pipeline is a function call chain inside
-the same binary:
+The outbound pipeline is an in-process function chain with no network hop between
+the proxy and its plugins:
 
 ```
                                  ┌───────────────────────────────────┐
@@ -63,30 +60,6 @@ the same binary:
                                           Ollama :11434
                                     (only reached if approved
                                      or under budget)
-```
-
-**Call flow for call #3 (the over-budget one):**
-
-```
-curl ─▶ authbridge-proxy ─▶ session-budget   (reads Redis: calls=2, limit=2)
-                          └▶ inference-parser  (marks as inference call)
-                                    │
-                                    │ over budget + on_exceed=pause
-                                    ▼
-                              POST http://localhost:9099
-                                    │
-                                    ▼
-                              approver.go prints prompt,
-                              waits for a / d on stdin
-                                    │
-                          ┌─────────┴─────────┐
-                          ▼                   ▼
-                   {"action":"approve"}  {"action":"deny"}
-                          │                   │
-                          ▼                   ▼
-              call forwarded to        403 budget.exceeded
-              Ollama, response          returned to curl
-              flows back to curl        (Ollama never called)
 ```
 
 ## Prerequisites
@@ -187,7 +160,7 @@ that `go run` execs; if the new approver reports `address already in
 use`, free the port directly:
 
 ```bash
-lsof -i :9099 -sTCP:LISTEN | awk 'NR>1 {print $2}' | xargs -r kill -9
+pids=$(lsof -ti :9099 -sTCP:LISTEN); [ -n "$pids" ] && kill $pids
 ```
 
 Optional — confirm the counter is actually zero before you start:
@@ -283,6 +256,8 @@ What happens:
    "details":{"call_limit":2,"spent_calls":2,"spent_tokens":87,"token_limit":1000000}}
   ```
 
+  (`spent_tokens` will vary with the model, same as the prompt above.)
+
   Every subsequent over-budget call re-prompts (the 1ms grace window
   is effectively off), so you can approve one, deny the next, and see
   both outcomes in a single run.
@@ -290,7 +265,10 @@ What happens:
 ## Auto modes for CI
 
 The approver has `--auto-approve` and `--auto-deny` flags. They let you
-smoke-test the wire without a human present:
+smoke-test the wire without a human present. Stop any prior approver
+first (see "Reset between runs" for the `lsof` one-liner) — a
+backgrounded auto-mode approver will exit silently if `:9099` is
+already bound.
 
 ```bash
 # Auto-deny: every over-budget call returns 403.
@@ -300,12 +278,18 @@ go run ./approver.go --auto-deny &
 # Auto-approve: every over-budget call is waved through.
 go run ./approver.go --auto-approve &
 # then run the curl loop — all calls return 200.
+
+# Stop the approver when done — kill $! only reaps the `go run` parent
+# and leaves the compiled server bound to :9099, so free the port directly:
+pids=$(lsof -ti :9099 -sTCP:LISTEN); [ -n "$pids" ] && kill $pids
 ```
 
 ## Cleanup
 
 ```bash
-pkill -f approver
+# pkill -f approver may miss the go-run child (see "Reset between runs");
+# freeing :9099 directly is more reliable.
+pids=$(lsof -ti :9099 -sTCP:LISTEN); [ -n "$pids" ] && kill $pids
 pkill -f authbridge-proxy
 docker rm -f sb-demo-redis
 ```
