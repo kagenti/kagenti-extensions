@@ -56,6 +56,7 @@ pipeline:
 | `session_ttl_seconds` | 7200 | Redis key TTL. Must be ≥ `max_duration_seconds` when the latter is set (rejected at Configure time otherwise). |
 | `refresh_interval` | `5s` | Local-cache sync interval |
 | `redis_unavailable` | `fail_open` | Only `fail_open` supported today |
+| `default_session_fallback` | `false` | Pool sessionless traffic into a shared `"default"` bucket. Single-workload only — one caller exhausting the budget denies the rest. Under `max_duration_seconds`, continuous traffic refreshes the TTL, so once elapsed exceeds the limit requests stay denied until the key expires or is deleted. |
 
 At least one of `max_tokens`, `max_calls`, `max_duration_seconds` must be > 0.
 
