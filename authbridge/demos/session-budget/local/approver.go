@@ -3,21 +3,11 @@
 // each incoming pause request, prompts the operator for [a]pprove or
 // [d]eny, and returns the matching JSON response.
 //
-// This is a demo script, not a product surface — it lives under
-// demos/session-budget/local/ and is not built into any release. Point
-// session-budget's `pause_webhook` at this endpoint to demo the pause
-// loop end-to-end:
-//
-//	pause_webhook: "http://localhost:9099"
-//
 // Run:
 //
 //	go run demos/session-budget/local/approver.go
 //	go run demos/session-budget/local/approver.go --auto-approve
 //	go run demos/session-budget/local/approver.go --addr :7000
-//
-// Stdlib only — no go.mod, not part of the workspace, safe to run from
-// any checkout.
 package main
 
 import (
