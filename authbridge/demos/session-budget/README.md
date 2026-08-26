@@ -4,6 +4,10 @@ Deployable helpers for exercising the `session-budget` plugin. For plugin
 configuration and mode semantics, see
 [`../../docs/session-budget-plugin.md`](../../docs/session-budget-plugin.md).
 
+> **No cluster handy?** See [`hitl-local.md`](hitl-local.md) for a
+> laptop-only walkthrough of `on_exceed: pause` (Docker + Go + curl,
+> no Kubernetes).
+
 ## `k8s/pause-webhook-stub.yaml`
 
 Minimal HITL webhook that returns `{"action":"approve"}` for every POST —
