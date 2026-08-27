@@ -80,8 +80,7 @@ def test_auditor_admits_single_subject_grant_despite_competing_relation(_bad_nam
     from aiac.agent.policy_rules_builder.graph import build_scope_rules
 
     user_roles = [
-        Role(id=f"role-{name}", name=name, description=desc, composite=False)
-        for name, desc in _USER_ROLES.items()
+        Role(id=f"role-{name}", name=name, description=desc, composite=False) for name, desc in _USER_ROLES.items()
     ]
     issues_write = Scope(id="scope-issues-write", name="issues-write", description=_ISSUES_WRITE_DESC)
 

@@ -18,7 +18,7 @@ from pydantic import BaseModel, SecretStr
 from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_exponential
 
 from aiac.idp.configuration.models import Role, Scope
-from aiac.policy.model.models import PolicyRule
+from aiac.policy.model.models import PolicyRule, RuleEffect
 from aiac.shared.upstream import is_transient, max_retries
 
 from .policy_source import get_policy_source
@@ -48,25 +48,56 @@ class _Selection(BaseModel):
     reasoning: str
 
 
+# The deny name lists + exclusivity flags default to the allow-only-equivalent values
+# (no prohibition, not exclusive) so allow-only producers and the pre-#123 mocks keep
+# working byte-identically -- the same reason PolicyRule.effect defaults to ALLOW.
 class RoleSelection(_Selection):
     granted_scope_names: list[str]
+    denied_scope_names: list[str] = []  # explicit prohibitions about the focal role
+    grant_is_exclusive: bool = False  # focal role's access is closed to exactly the granted set
 
 
 class ScopeSelection(_Selection):
     roles_with_access_names: list[str]
+    roles_denied_access_names: list[str] = []  # explicit prohibitions about the focal scope
+    access_is_exclusive: bool = False  # access to the focal scope is closed to exactly the granted set
+
+
+class Contradiction(BaseModel):
+    candidate_name: str
+    description: str  # which policy statements collide; names the kind (direct conflict vs coarse-scope)
 
 
 class AuditVerdict(BaseModel):
     approved: bool
     reason: str | None = None
+    contradictions: list[Contradiction] = []
 
 
 class PolicyRulesBuilderError(RuntimeError): ...
 
 
+class PolicyContradictionError(Exception):
+    """Raised when the policy GENUINELY both grants and prohibits the same (focal, candidate) pair
+    (a direct conflict or a coarse-scope granularity mismatch). Carries the focal entity and ALL
+    genuine contradictions in a single raise; the PRB fails closed (withholds the focal entity's
+    whole rule set). This is a policy finding, not a builder failure -- deliberately NOT a
+    ``PolicyRulesBuilderError`` -- and it short-circuits past retry (retrying can't fix a real
+    conflict). The *treatment* of a report is a separate, deferred concern."""
+
+    def __init__(self, focal: str, contradictions: list[Contradiction]):
+        self.focal = focal
+        self.contradictions = contradictions
+        detail = "; ".join(f"{c.candidate_name}: {c.description}" for c in contradictions)
+        super().__init__(f"Policy contradiction for {focal}: {detail}")
+
+
 class _PRBWorking(TypedDict):
     policy_text: str
     selected_names: list[str]
+    denied_names: list[str]
+    conflict_names: list[str]
+    exclusive: bool
     reasoning: str
     approved: bool
     audit_feedback: str | None
@@ -127,29 +158,62 @@ def _propose(
     focal: str,
     candidates: str,
     contract: str,
+    direction: str,
     schema: type[_Selection],
     names_field: str,
+    denied_names_field: str,
+    exclusive_field: str,
 ) -> dict[str, Any]:
-    msgs = build_proposer_messages(state["policy_text"], focal, candidates, contract, state["audit_feedback"])
+    msgs = build_proposer_messages(
+        state["policy_text"], focal, candidates, contract, state["audit_feedback"], direction=direction
+    )
     sel = _structured_call(schema, msgs)
-    return {"selected_names": list(getattr(sel, names_field)), "reasoning": sel.reasoning}
+    return {
+        "selected_names": list(getattr(sel, names_field)),
+        "denied_names": list(getattr(sel, denied_names_field)),
+        "exclusive": bool(getattr(sel, exclusive_field)),
+        "reasoning": sel.reasoning,
+    }
 
 
 def _precheck(state: _PRBWorking, *, candidate_names: set[str]) -> dict[str, Any]:
+    """Filter both name lists to the candidate set (symmetric hallucination-drop for grants
+    and denies)."""
     keep = [n for n in state["selected_names"] if n in candidate_names]
     dropped = [n for n in state["selected_names"] if n not in candidate_names]
-    if dropped:
-        logger.warning("PRB precheck dropped hallucinated names: %s", dropped)
-    return {"selected_names": keep}
+    keep_denied = [n for n in state["denied_names"] if n in candidate_names]
+    dropped_denied = [n for n in state["denied_names"] if n not in candidate_names]
+    if dropped or dropped_denied:
+        logger.warning("PRB precheck dropped hallucinated names: granted=%s denied=%s", dropped, dropped_denied)
+    # Deterministic overlap signal: a candidate in BOTH lists. The derived exclusivity complement
+    # is disjoint from grants by construction, so overlap can only come from an explicit denied-name
+    # that is also granted -- a direct conflict or coarse-scope mismatch. precheck resolves nothing;
+    # the auditor adjudicates each conflict name as genuine (raise) vs generation error (retry).
+    conflict = [n for n in keep if n in set(keep_denied)]
+    return {"selected_names": keep, "denied_names": keep_denied, "conflict_names": conflict}
 
 
-def _audit(state: _PRBWorking, *, focal: str, candidates: str) -> dict[str, Any]:
+def _audit(state: _PRBWorking, *, focal: str, candidates: str, direction: str) -> dict[str, Any]:
     verdict = _structured_call(
         AuditVerdict,
-        build_auditor_messages(state["policy_text"], focal, candidates, state["selected_names"]),
+        build_auditor_messages(
+            state["policy_text"],
+            focal,
+            candidates,
+            state["selected_names"],
+            state["denied_names"],
+            state["conflict_names"],
+            direction=direction,
+        ),
     )
+    # Three-way routing. A genuine contradiction short-circuits past retry (retrying can't fix a
+    # real conflict) and fails closed regardless of the audit budget; the raise IS the report.
+    if verdict.contradictions:
+        raise PolicyContradictionError(focal, verdict.contradictions)
     if verdict.approved:
         return {"approved": True}
+    # Ordinary rejection (includes a generation-error overlap the auditor did NOT deem genuine):
+    # feed the reason back and re-propose on the shared budget.
     if state["retry_count"] >= MAX_AUDIT_RETRIES:
         raise PolicyRulesBuilderError(f"Auditor rejected after {MAX_AUDIT_RETRIES} retries: {verdict.reason}")
     return {"approved": False, "audit_feedback": verdict.reason, "retry_count": state["retry_count"] + 1}
@@ -175,8 +239,49 @@ def _role_cands(rs: list[Role]) -> str:
     return "\n".join(_role_focal(r) for r in rs)
 
 
-_ROLE_CONTRACT = "Return granted_scope_names (subset of candidate scope names) + reasoning."
-_SCOPE_CONTRACT = "Return roles_with_access_names (subset of candidate role names) + reasoning."
+_ROLE_CONTRACT = (
+    "Return granted_scope_names (subset of candidate scope names), denied_scope_names (explicit "
+    "prohibitions, subset of candidates), grant_is_exclusive + reasoning."
+)
+_SCOPE_CONTRACT = (
+    "Return roles_with_access_names (subset of candidate role names), roles_denied_access_names "
+    "(explicit prohibitions, subset of candidates), access_is_exclusive + reasoning."
+)
+
+# Explicit gate-direction framing, passed to BOTH the proposer and the auditor (the auditor
+# previously got NO axis hint, so a focal whose name echoes a policy domain -- e.g. an agent
+# ``*.source_operations`` role -- dragged it onto the SUBJECT axis and it adjudicated the
+# proposal against user roles that are not candidates at all). Each string names what the focal
+# is, what the candidates are, and that entities named only in the policy prose are NOT candidates.
+_ROLE_DIRECTION = (
+    "GATE DIRECTION -- capability gate. The FOCAL ENTITY is a ROLE; every CANDIDATE is a SCOPE. "
+    "Decide which candidate SCOPES the focal role is granted (and, only if the SCENARIO policy "
+    "prohibits or restricts this role, which it is denied). A grant rests on the focal role's OWN "
+    "capability description matched to a candidate scope's description (rule 3) plus any scenario-"
+    "policy statement about THIS role. Every name you output MUST be one of the candidate SCOPES "
+    "listed below: any other entity -- a user role, a subject, anything named only in the policy "
+    "prose -- is NOT a candidate in this gate, must never appear in your grant or prohibition lists, "
+    "and is not by itself a basis to grant or deny the focal role."
+)
+_SCOPE_DIRECTION = (
+    "GATE DIRECTION -- subject gate. The FOCAL ENTITY is a SCOPE; every CANDIDATE is a ROLE. "
+    "Decide which candidate ROLES are granted access to the focal scope (and, only if the SCENARIO "
+    "policy prohibits or restricts, which are denied). Every name you output MUST be one of the "
+    "candidate ROLES listed below: any other entity -- a scope, a capability, anything named only in "
+    "the policy prose -- is NOT a candidate in this gate and must never appear in your grant or "
+    "prohibition lists."
+)
+
+
+def _denied_names(explicit: list[str], exclusive: bool, candidate_order: list[str], granted: set[str]) -> set[str]:
+    """The set of candidate names to DENY: the explicit prohibitions, plus -- when the grant is
+    exclusive -- the derived complement (every candidate not granted). The complement is DERIVED
+    from the typed candidate set (complete by construction), never LLM-enumerated, and is disjoint
+    from grants by construction."""
+    denied = set(explicit)
+    if exclusive:
+        denied |= {c for c in candidate_order if c not in granted}
+    return denied
 
 
 def _assemble(state_type: type, propose, precheck, audit, build):
@@ -204,19 +309,35 @@ def build_role_graph():
             focal=_role_focal(s["role"]),
             candidates=_scope_cands(s["scopes"]),
             contract=_ROLE_CONTRACT,
+            direction=_ROLE_DIRECTION,
             schema=RoleSelection,
             names_field="granted_scope_names",
+            denied_names_field="denied_scope_names",
+            exclusive_field="grant_is_exclusive",
         )
 
     def precheck(s: RoleRulesState) -> dict[str, Any]:
         return _precheck(s, candidate_names={sc.name for sc in s["scopes"]})
 
     def audit(s: RoleRulesState) -> dict[str, Any]:
-        return _audit(s, focal=_role_focal(s["role"]), candidates=_scope_cands(s["scopes"]))
+        return _audit(
+            s, focal=_role_focal(s["role"]), candidates=_scope_cands(s["scopes"]), direction=_ROLE_DIRECTION
+        )
 
     def build(s: RoleRulesState) -> dict[str, Any]:
+        # ALLOW from granted names, DENY from explicit prohibitions -- every rule rebuilt from the
+        # typed scopes (never LLM string fields). Allows first, then denies, each in candidate order.
+        denied = _denied_names(
+            s["denied_names"], s["exclusive"], [sc.name for sc in s["scopes"]], set(s["selected_names"])
+        )
         granted = set(s["selected_names"])
-        return {"rules": [PolicyRule(role=s["role"], scope=sc) for sc in s["scopes"] if sc.name in granted]}
+        allows = [
+            PolicyRule(role=s["role"], scope=sc, effect=RuleEffect.ALLOW) for sc in s["scopes"] if sc.name in granted
+        ]
+        denies = [
+            PolicyRule(role=s["role"], scope=sc, effect=RuleEffect.DENY) for sc in s["scopes"] if sc.name in denied
+        ]
+        return {"rules": allows + denies}
 
     return _assemble(RoleRulesState, propose, precheck, audit, build)
 
@@ -228,19 +349,33 @@ def build_scope_graph():
             focal=_scope_focal(s["scope"]),
             candidates=_role_cands(s["roles"]),
             contract=_SCOPE_CONTRACT,
+            direction=_SCOPE_DIRECTION,
             schema=ScopeSelection,
             names_field="roles_with_access_names",
+            denied_names_field="roles_denied_access_names",
+            exclusive_field="access_is_exclusive",
         )
 
     def precheck(s: ScopeRulesState) -> dict[str, Any]:
         return _precheck(s, candidate_names={r.name for r in s["roles"]})
 
     def audit(s: ScopeRulesState) -> dict[str, Any]:
-        return _audit(s, focal=_scope_focal(s["scope"]), candidates=_role_cands(s["roles"]))
+        return _audit(
+            s, focal=_scope_focal(s["scope"]), candidates=_role_cands(s["roles"]), direction=_SCOPE_DIRECTION
+        )
 
     def build(s: ScopeRulesState) -> dict[str, Any]:
+        # ALLOW from granted names, DENY from explicit prohibitions -- every rule rebuilt from the
+        # typed roles (never LLM string fields). Allows first, then denies, each in candidate order.
+        denied = _denied_names(
+            s["denied_names"], s["exclusive"], [r.name for r in s["roles"]], set(s["selected_names"])
+        )
         granted = set(s["selected_names"])
-        return {"rules": [PolicyRule(role=r, scope=s["scope"]) for r in s["roles"] if r.name in granted]}
+        allows = [
+            PolicyRule(role=r, scope=s["scope"], effect=RuleEffect.ALLOW) for r in s["roles"] if r.name in granted
+        ]
+        denies = [PolicyRule(role=r, scope=s["scope"], effect=RuleEffect.DENY) for r in s["roles"] if r.name in denied]
+        return {"rules": allows + denies}
 
     return _assemble(ScopeRulesState, propose, precheck, audit, build)
 
@@ -255,6 +390,9 @@ def build_role_rules(role: Role, scopes: list[Scope]) -> list[PolicyRule]:
         "scopes": scopes,
         "policy_text": "",
         "selected_names": [],
+        "denied_names": [],
+        "conflict_names": [],
+        "exclusive": False,
         "reasoning": "",
         "approved": False,
         "audit_feedback": None,
@@ -270,6 +408,9 @@ def build_scope_rules(roles: list[Role], scope: Scope) -> list[PolicyRule]:
         "scope": scope,
         "policy_text": "",
         "selected_names": [],
+        "denied_names": [],
+        "conflict_names": [],
+        "exclusive": False,
         "reasoning": "",
         "approved": False,
         "audit_feedback": None,

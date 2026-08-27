@@ -13,10 +13,12 @@ on:
 
 permissions:
   contents: read
-  issues: write
 
 jobs:
   self-assign:
+    permissions:
+      contents: read
+      issues: write  # assign the commenter to the issue
     uses: rossoctl/.github/.github/workflows/self-assign-reusable.yml@main
     secrets:
       ISSUE_ASSIGN_TOKEN: ${{ secrets.ISSUE_ASSIGN_TOKEN }}

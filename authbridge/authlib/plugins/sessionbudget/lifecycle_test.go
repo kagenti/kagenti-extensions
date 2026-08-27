@@ -1,4 +1,4 @@
-package tokenbudget
+package sessionbudget
 
 import (
 	"context"
@@ -20,9 +20,9 @@ func TestFullLifecycle_RefreshFromRedis(t *testing.T) {
 	p.store = store
 
 	ctx := context.Background()
-	store.HashIncr(ctx, "token-budget:remote-sess", "tokens", 450)
-	store.HashIncr(ctx, "token-budget:remote-sess", "calls", 10)
-	store.HashSetNX(ctx, "token-budget:remote-sess", "started_at", "1700000000")
+	store.HashIncr(ctx, "session-budget:remote-sess", "tokens", 450)
+	store.HashIncr(ctx, "session-budget:remote-sess", "calls", 10)
+	store.HashSetNX(ctx, "session-budget:remote-sess", "started_at", "1700000000")
 
 	// Seed cache so refreshCache picks it up.
 	p.mu.Lock()

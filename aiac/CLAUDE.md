@@ -81,7 +81,28 @@ needed. (This wasn't always true: the Policy Computation Engine was migrated to
 the SPM store surface in Wave 3, which resolved the earlier PCE-chain collection
 failures.)
 
+The `-m "not integration"` expression needs no external services. The live-LLM
+PRB suite (below) is marked **both** `integration` and `llm` — `integration`
+because it calls a real LLM endpoint, so `-m "not integration"` already deselects
+it (the routine collected count is unchanged by it); `llm` so it can be selected
+on its own, cluster-free, via `-m llm`.
+
 Use `ls test/` / `find test -type d` to discover current test directories.
+
+**Live-LLM PRB tests** (`-m llm`) run the **real** LLM end-to-end through the
+Policy Rules Builder (`test/agent/policy_rules_builder/test_graph_live_llm.py`)
+and assert the emitted `(name, effect)` rule set matches the policy text — for
+allow-only policies and for policies with explicit / description-driven /
+exclusivity denies. Only the role/scope **descriptions** and the **policy
+source** are mocked in-process (the `_structured_call` LLM seam is left live), so
+the suite needs **no Kubernetes and no Keycloak** — only an LLM endpoint. It
+reuses the same `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` env as the
+integration suite and **skips cleanly** when they are unset. Run it opt-in:
+
+```bash
+set -a; . test/integration/.env; set +a   # or export LLM_BASE_URL / LLM_MODEL / LLM_API_KEY
+.venv/bin/pytest test/ -m llm
+```
 
 **Integration tests** (`-m integration`) now close the **real OPA evaluation loop** — they onboard
 through the in-cluster Controller, then drive real HTTP requests **through AuthBridge** and assert the

@@ -66,11 +66,16 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/policy/services", response_model=None)
 def list_service_policies_by_role(role: str) -> list[ServicePolicyModel]:
-    # Return every cached SPM whose inbound_rules reference the given role id. This must
+    # Return every cached SPM referencing the given role id across BOTH inbound rule lists
+    # (allow and deny) — a role that appears only in a deny edge must still surface. This must
     # be answered from the store (not the IdP): the SPM is the source of truth, so stale
     # role->service mappings the live IdP no longer reflects still show up here — which is
     # exactly what override-purge needs. Never 404s; empty list on no match.
-    return [spm for spm in _cache.values() if any(rule.role.id == role for rule in spm.inbound_rules)]
+    return [
+        spm
+        for spm in _cache.values()
+        if any(rule.role.id == role for rule in (*spm.inbound_allow_rules, *spm.inbound_deny_rules))
+    ]
 
 
 @app.delete("/policy/services", response_model=None)

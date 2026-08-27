@@ -20,12 +20,26 @@ The Rego ``input`` follows the live plugin shape:
 - ``input.mcp.params.name`` — the **bare** invoked MCP tool name (e.g.
   ``source-read``); outbound only. A missing ``params.name`` (e.g. ``tools/list``)
   or an absent ``service_id`` matches nothing and is therefore denied.
+
+**ALLOW/DENY (deny-overrides).** Each gate is emitted twice — an ``*_allow_ok``
+gate driven by the ALLOW scope maps and a symmetric ``*_deny_ok`` gate driven by
+the DENY scope maps. A request is permitted iff every ALLOW gate passes and no
+DENY gate matches::
+
+    # inbound
+    allow if { subject_allow_ok; source_allow_ok; not subject_deny_ok; not source_deny_ok }
+    # outbound
+    allow if { subject_allow_ok; target_allow_ok; not subject_deny_ok; not target_deny_ok }
+
+The identity maps (``subject_roles`` / ``source_roles``) are **effect-agnostic**,
+so a principal that appears only in a DENY rule still resolves and its
+prohibition fires.
 """
 
 import json
 import re
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyRule
+from aiac.policy.model.models import AgentPolicyModel, PolicyRule, RuleEffect
 
 __all__ = ["identity_ref", "generate_inbound_rego", "generate_outbound_rego"]
 
@@ -131,9 +145,10 @@ def _group_rules(rules: list[PolicyRule]) -> dict[str, list[str]]:
 def _group_rules_deprefixed(rules: list[PolicyRule]) -> dict[str, list[str]]:
     """Like ``_group_rules`` but de-prefixes each scope value (outbound only).
 
-    Groups ``{role.name: [_deprefix(scope), ...]}`` — used for
-    ``subject_role_scopes`` / ``agent_role_scopes``, whose values must match the
-    bare ``input.mcp.params.name``."""
+    Groups ``{role.name: [_deprefix(scope), ...]}`` — used for the outbound
+    ``subject_role_allow_scopes`` / ``subject_role_deny_scopes`` /
+    ``agent_role_scopes`` maps, whose values must match the bare
+    ``input.mcp.params.name``."""
     grouped: dict[str, list[str]] = {}
     for rule in rules:
         scopes = grouped.setdefault(rule.role.name, [])
@@ -154,7 +169,7 @@ def _name_map(mapping) -> dict[str, list[str]]:
 
 
 def _name_map_deprefixed(mapping) -> dict[str, list[str]]:
-    """Like ``_name_map`` but de-prefixes each value (outbound ``target_scopes``).
+    """Like ``_name_map`` but de-prefixes each value (outbound ``target_*_scopes``).
 
     Keys stay the **full** target service id (they match
     ``input.identity.service_id``, a full SPIFFE ID); only the scope *values*
@@ -165,33 +180,125 @@ def _name_map_deprefixed(mapping) -> dict[str, list[str]]:
     }
 
 
-# The inbound subject gate: the subject holds a role that grants at least one of
-# the agent's own scopes (compared internally against agent_scopes, using FULL
-# scope names — never against input.mcp.params.name).
-_INBOUND_SUBJECT_OK = (
-    "subject_ok if {\n"
-    "    some role in subject_roles[input.identity.subject]\n"
-    "    some scope in role_scopes[role]\n"
-    "    scope in agent_scopes\n"
-    "}"
-)
+# --- inbound gate templates -------------------------------------------------
+#
+# The inbound subject gate is emitted twice against the SAME shape: an
+# ``*_allow_ok`` gate reads the ALLOW scope map, a symmetric ``*_deny_ok`` gate
+# reads the DENY scope map. Both require the matched scope to be one of the
+# agent's own ``agent_scopes`` (the inbound audience), compared internally with
+# FULL scope names — never against ``input.mcp.params.name``. A subject/source
+# that only appears in a DENY rule still resolves because the identity maps
+# (``subject_roles`` / ``source_roles``) are effect-agnostic.
 
-# The outbound subject gate: the delegated user's role admits the invoked tool
-# (bare input.mcp.params.name is in that role's de-prefixed subject_role_scopes).
-_OUTBOUND_SUBJECT_OK = (
-    "subject_ok if {\n"
-    "    some role in subject_roles[input.identity.subject]\n"
-    "    input.mcp.params.name in subject_role_scopes[role]\n"
-    "}"
-)
 
-# The outbound capability gate: the target service (keyed by its full SPIFFE id)
-# admits the invoked tool. This — not agent_role_scopes — is the capability gate.
-_OUTBOUND_TARGET_OK = (
-    "target_ok if {\n"
-    "    input.mcp.params.name in target_scopes[input.identity.service_id]\n"
-    "}"
-)
+def _inbound_subject_gate(gate: str, scope_map: str) -> str:
+    return (
+        f"{gate} if {{\n"
+        "    some role in subject_roles[input.identity.subject]\n"
+        f"    some scope in {scope_map}[role]\n"
+        "    scope in agent_scopes\n"
+        "}"
+    )
+
+
+def _inbound_source_allow_gate(platform_clients: tuple[str, ...]) -> str:
+    """The inbound source ALLOW gate.
+
+    Passes when there is no calling ``client_id`` (end-user traffic), when the
+    ``client_id`` is one of ``platform_clients`` (the mandatory bypass — one rule
+    per client; without it end-user traffic, which carries the platform client,
+    would be denied), or when that client holds a role granting an agent scope.
+    """
+    rules = ["source_allow_ok if { not input.identity.client_id }"]
+    for client in platform_clients:
+        rules.append(
+            f"source_allow_ok if {{ input.identity.client_id == {json.dumps(client)} }}"
+        )
+    rules.append(
+        "source_allow_ok if {\n"
+        "    some role in source_roles[input.identity.client_id]\n"
+        "    some scope in source_role_allow_scopes[role]\n"
+        "    scope in agent_scopes\n"
+        "}"
+    )
+    return "\n".join(rules)
+
+
+def _inbound_source_deny_gate() -> str:
+    """The inbound source DENY gate.
+
+    An absent client_id (or a platform client) has no roles here, so this gate
+    simply never fires for it — the ALLOW-side bypass is not undone by a deny.
+    """
+    return (
+        "source_deny_ok if {\n"
+        "    some role in source_roles[input.identity.client_id]\n"
+        "    some scope in source_role_deny_scopes[role]\n"
+        "    scope in agent_scopes\n"
+        "}"
+    )
+
+
+# --- outbound gate templates ------------------------------------------------
+#
+# The outbound decision is a per-tool two-gate AND, both keyed on the invoked
+# tool ``input.mcp.params.name`` (the delegated user reaching a downstream
+# target):
+#   subject gate    — the delegated user's role admits the invoked tool
+#   capability gate — the target service admits the invoked tool
+# Each gate is emitted twice (allow/deny). ``allow`` is deny-overrides: both
+# ALLOW gates pass on the invoked tool and neither DENY gate matches it.
+
+
+def _outbound_subject_gate(gate: str, scope_map: str) -> str:
+    return (
+        f"{gate} if {{\n"
+        "    some role in subject_roles[input.identity.subject]\n"
+        f"    input.mcp.params.name in {scope_map}[role]\n"
+        "}"
+    )
+
+
+def _outbound_target_gate(gate: str, scope_map: str) -> str:
+    return (
+        f"{gate} if {{\n"
+        f"    input.mcp.params.name in {scope_map}[input.identity.service_id]\n"
+        "}"
+    )
+
+
+# --- trailing decision block (the only thing default_effect changes) --------
+#
+# CRITICAL: the generator assumes disjoint ALLOW/DENY per (role, scope). A
+# genuine grant/deny overlap on the same pair is an upstream policy conflict
+# surfaced as HTTP 422 (PRB ``PolicyContradictionError``) and is NEVER
+# reconciled here. The ``allow := false if { <deny> }`` rules below are not
+# conflict reconciliation: they give an explicit deny precedence over a
+# permissive default, and resolve co-occurring-but-disjoint denies at request
+# time (a subject holding multiple roles; the outbound two-gate decision) —
+# each individual (role, scope) stays allow-XOR-deny.
+
+
+def _decision_block(
+    default_effect: RuleEffect, allow_body: str, deny_gates: tuple[str, ...]
+) -> str:
+    """Render the trailing ``allow`` decision — the *only* part that varies by mode.
+
+    ``DENY`` (least-privilege) reproduces today's output byte-for-byte:
+    ``default allow := false`` plus the single ``allow if { <allow_body> }`` rule
+    (an allow-conjunction with inline ``not …_deny_ok`` guards).
+
+    ``ALLOW`` opens the default and lets explicit denies override: ``default
+    allow := true`` plus one ``allow := false if { <gate> }`` rule per deny gate.
+    A literal flip of the constant alone is insufficient — an incremental
+    ``allow if { … }`` body can only push ``allow`` toward ``true``, so the deny
+    guards must become separate ``allow := false if`` rules to pull it back down
+    (deny-overrides over a permissive default)."""
+    if default_effect == RuleEffect.ALLOW:
+        lines = ["default allow := true"]
+        lines += [f"allow := false if {{ {gate} }}" for gate in deny_gates]
+        return "\n".join(lines)
+    return "default allow := false\n" + f"allow if {{ {allow_body} }}"
 
 
 def generate_inbound_rego(
@@ -199,44 +306,56 @@ def generate_inbound_rego(
 ) -> str:
     """Render the fixed ``authbridge.client.inbound.request`` Rego package.
 
-    Gates a caller reaching the agent. ``allow`` requires ``subject_ok`` (the
-    subject holds a role granting >=1 of ``agent_scopes``) AND ``source_ok``.
+    Gates a caller reaching the agent. The decision is deny-overrides:
+    ``allow`` requires ``subject_allow_ok`` (the subject holds a role granting
+    >=1 of ``agent_scopes`` via the ALLOW map) AND ``source_allow_ok``, and
+    fires only when neither ``subject_deny_ok`` nor ``source_deny_ok`` matches.
 
-    ``source_ok`` passes when there is no calling ``client_id`` (end-user
+    ``source_allow_ok`` passes when there is no calling ``client_id`` (end-user
     traffic), when the ``client_id`` is one of ``platform_clients`` (the
-    mandatory bypass — one ``source_ok if { input.identity.client_id == "<c>" }``
-    rule per client; without it end-user traffic, which carries the platform
-    client, would be denied), or when that client holds a role granting an agent
-    scope. Inbound values are **not** de-prefixed — the gate compares scopes
-    internally, never against ``input.mcp.params.name``.
+    mandatory bypass), or when that client holds a role granting an agent scope.
+    Inbound values are **not** de-prefixed — the gates compare scopes internally
+    against ``agent_scopes``, never against ``input.mcp.params.name``.
     """
-    # This first rule is inbound-only in practice: it fires for unauthenticated
-    # callers (no validated JWT, so input.identity.client_id is unset). It never
-    # fires on the outbound leg, where buildOutboundIdentity always populates
-    # client_id (as "" when agent_id is unset), so `not ...` is never true there.
-    source_ok_rules = ["source_ok if { not input.identity.client_id }"]
-    for client in platform_clients:
-        source_ok_rules.append(
-            f"source_ok if {{ input.identity.client_id == {json.dumps(client)} }}"
-        )
-    source_ok_rules.append(
-        "source_ok if {\n"
-        "    some role in source_roles[input.identity.client_id]\n"
-        "    some scope in role_scopes[role]\n"
-        "    scope in agent_scopes\n"
-        "}"
-    )
     declarations = "\n".join(
         [
             _render_map("subject_roles", _name_map(model.subject_roles)),
             _render_map("source_roles", _name_map(model.source_roles)),
-            _render_map("role_scopes", _group_rules(model.inbound_rules)),
+            _render_map(
+                "subject_role_allow_scopes",
+                _group_rules(model.inbound_subject_allow_rules),
+            ),
+            _render_map(
+                "subject_role_deny_scopes",
+                _group_rules(model.inbound_subject_deny_rules),
+            ),
+            _render_map(
+                "source_role_allow_scopes",
+                _group_rules(model.inbound_source_allow_rules),
+            ),
+            _render_map(
+                "source_role_deny_scopes",
+                _group_rules(model.inbound_source_deny_rules),
+            ),
         ]
     )
     rules = "\n".join(
-        [_INBOUND_SUBJECT_OK]
-        + source_ok_rules
-        + ["default allow := false\nallow if { subject_ok; source_ok }"]
+        [
+            _inbound_subject_gate("subject_allow_ok", "subject_role_allow_scopes"),
+            _inbound_subject_gate("subject_deny_ok", "subject_role_deny_scopes"),
+            _inbound_source_allow_gate(platform_clients),
+            _inbound_source_deny_gate(),
+            # Branch ONLY the trailing decision block on model.default_effect. Under
+            # ALLOW the allow gates / allow scope maps above are inert-but-emitted
+            # (kept for structural symmetry and downstream tooling); the decision
+            # is deny-if-either-side.
+            _decision_block(
+                model.default_effect,
+                "subject_allow_ok; source_allow_ok; "
+                "not subject_deny_ok; not source_deny_ok",
+                ("subject_deny_ok", "source_deny_ok"),
+            ),
+        ]
     )
     parts = [
         "package authbridge.client.inbound.request\nimport rego.v1",
@@ -251,40 +370,64 @@ def generate_outbound_rego(model: AgentPolicyModel) -> str:
     """Render the fixed ``authbridge.client.outbound.request`` Rego package.
 
     Gates the agent's token-exchanged call to a downstream target, per invoked
-    tool. ``allow`` is an AND on the **same** ``input.mcp.params.name``:
-    ``subject_ok`` (the delegated user's role admits the tool, via de-prefixed
-    ``subject_role_scopes``) AND ``target_ok`` (the target service — keyed by the
-    full ``input.identity.service_id`` SPIFFE id — admits the tool, via
-    de-prefixed ``target_scopes`` values).
+    tool. The decision is deny-overrides on the **same** ``input.mcp.params.name``:
+    ``allow`` requires ``subject_allow_ok`` (the delegated user's role admits the
+    tool, via de-prefixed ``subject_role_allow_scopes``) AND ``target_allow_ok``
+    (the target service — keyed by the full ``input.identity.service_id`` SPIFFE
+    id — admits the tool, via de-prefixed ``target_allow_scopes``), and fires only
+    when neither ``subject_deny_ok`` nor ``target_deny_ok`` matches.
 
     ``agent_roles`` / ``agent_role_scopes`` are emitted for debugging but are
-    **not** referenced by ``allow`` — ``target_scopes[input.identity.service_id]``
+    **not** referenced by ``allow`` — ``target_allow_scopes[input.identity.service_id]``
     already *is* the capability gate. This package emits neither ``agent_scopes``
-    nor the inbound ``role_scopes`` gate.
+    nor the inbound scope gates.
     """
     declarations = "\n".join(
         [
             _render_list("agent_roles", _names(model.agent_roles)),
             _render_map("subject_roles", _name_map(model.subject_roles)),
             _render_map(
-                "subject_role_scopes",
-                _group_rules_deprefixed(model.outbound_subject_rules),
+                "subject_role_allow_scopes",
+                _group_rules_deprefixed(model.outbound_subject_allow_rules),
+            ),
+            _render_map(
+                "subject_role_deny_scopes",
+                _group_rules_deprefixed(model.outbound_subject_deny_rules),
             ),
             # agent_role_scopes is emitted for debugging/observability only; the
-            # allow decision never references it (target_scopes is the capability
-            # gate). The leading Rego comment says so in the rendered bundle.
+            # allow decision never references it (target_allow_scopes is the
+            # capability gate). The leading Rego comment says so in the bundle.
             "# informational/debugging only — not referenced by allow\n"
             + _render_map(
-                "agent_role_scopes", _group_rules_deprefixed(model.outbound_rules)
+                "agent_role_scopes",
+                _group_rules_deprefixed(model.outbound_target_allow_rules),
             ),
-            _render_map("target_scopes", _name_map_deprefixed(model.target_scopes)),
+            _render_map(
+                "target_allow_scopes", _name_map_deprefixed(model.target_allow_scopes)
+            ),
+            _render_map(
+                "target_deny_scopes", _name_map_deprefixed(model.target_deny_scopes)
+            ),
         ]
     )
     rules = "\n".join(
         [
-            _OUTBOUND_SUBJECT_OK,
-            _OUTBOUND_TARGET_OK,
-            "default allow := false\nallow if { subject_ok; target_ok }",
+            _outbound_subject_gate("subject_allow_ok", "subject_role_allow_scopes"),
+            _outbound_subject_gate("subject_deny_ok", "subject_role_deny_scopes"),
+            _outbound_target_gate("target_allow_ok", "target_allow_scopes"),
+            _outbound_target_gate("target_deny_ok", "target_deny_scopes"),
+            # Branch ONLY the trailing decision block on model.default_effect.
+            # Under ALLOW this drops the old subject_allow_ok AND target_allow_ok
+            # conjunction (deny-if-either-side): a negated allow-gate AND would
+            # wrongly DENY every unmentioned pair. An unmentioned (role, tool)
+            # pair falls through to the permissive default; an explicit deny on
+            # EITHER gate overrides it.
+            _decision_block(
+                model.default_effect,
+                "subject_allow_ok; target_allow_ok; "
+                "not subject_deny_ok; not target_deny_ok",
+                ("subject_deny_ok", "target_deny_ok"),
+            ),
         ]
     )
     parts = [

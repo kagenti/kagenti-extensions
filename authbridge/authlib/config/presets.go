@@ -19,7 +19,16 @@ func ApplyPreset(cfg *Config) {
 		// it didn't ask for. main.go starts a proxy iff its role is active.
 		roles := cfg.Listener.ActiveRoles()
 		if roles[RoleReverse] {
-			setDefault(&cfg.Listener.ReverseProxyAddr, ":8080")
+			// The two inbound mechanisms are mutually exclusive: transparent
+			// interception REDIRECTs to its own port and leaves the agent on the
+			// port it already binds, so filling reverse_proxy_addr there would
+			// bind a port nothing routes to (and, if it collided with the agent's
+			// own port, would break the pod).
+			if cfg.Listener.InboundTransparent() {
+				setDefault(&cfg.Listener.TransparentInboundAddr, ":8083")
+			} else {
+				setDefault(&cfg.Listener.ReverseProxyAddr, ":8080")
+			}
 		}
 		if roles[RoleForward] {
 			setDefault(&cfg.Listener.ForwardProxyAddr, ":8081")

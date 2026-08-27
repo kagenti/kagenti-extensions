@@ -67,7 +67,7 @@ performs no further flattening.
 
 1. Receives `(list[PolicyRule], override=True)` from the Role sub-agent (PRB already called and merged internally).
 2. Calls `compute_and_apply(rules, override=True)` from `aiac.policy.computation`.
-   - With `override=True`, the PCE purges every input role's existing mappings (both directions, plus `target_scopes` reconciliation) before applying the fresh rules — an authoritative role-keyed replace. Because the sub-agent submits `build_role_rules(r, all_scopes)` output for the full closure, this replaces the complete mapping of the triggering role and every descendant. See [`../policy-computation-engine.md`](../policy-computation-engine.md).
+   - With `override=True`, the PCE purges every input role's existing mappings — across **both** the allow and deny lists (`inbound_allow_rules` + `inbound_deny_rules`) of every SPM containing the role, keyed on `role.id` alone — before applying the fresh rules, an authoritative role-keyed replace. (The target maps `target_allow_scopes` / `target_deny_scopes` are derived, never stored, so nothing to reconcile there.) Because the sub-agent submits `build_role_rules(r, all_scopes)` output for the full closure, this replaces the complete mapping of the triggering role and every descendant. See [`../policy-computation-engine.md`](../policy-computation-engine.md).
 3. Returns bare HTTP status; writes summary + debug to log.
 
 ## File structure

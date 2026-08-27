@@ -102,7 +102,7 @@ Key behaviors to assert:
 
 - **Keycloak interaction:** this library never calls Keycloak directly. All IdP operations go through `aiac.idp.configuration`.
 - **Policy computation:** translating `list[PolicyRule]` into `AgentPolicyModel` objects is the responsibility of `aiac.policy.computation`, not this library.
-- **Policy persistence:** the Policy Model Store (`aiac.policy.model_store`) owns structured `AgentPolicyModel` durability. This library targets the OPA runtime only.
+- **Policy persistence:** the Policy Model Store (`aiac.policy.model_store`) owns structured `ServicePolicyModel` durability (the `AgentPolicyModel` is a derived projection, never persisted). This library targets the OPA runtime only.
 
 ---
 

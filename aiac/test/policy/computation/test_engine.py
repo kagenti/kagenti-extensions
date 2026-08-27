@@ -22,7 +22,7 @@ import pytest
 
 from aiac.idp.configuration.api import Configuration
 from aiac.idp.configuration.models import Role, RoleKind, Scope, Service, ServiceType
-from aiac.policy.model.models import PolicyModel, PolicyRule, ServicePolicyModel
+from aiac.policy.model.models import PolicyModel, PolicyRule, RuleEffect, ServicePolicyModel
 
 
 # --------------------------------------------------------------------------- #
@@ -65,17 +65,30 @@ def _tool(service_id, *, roles=None, scopes=None) -> Service:
     return _service(service_id, type=ServiceType.TOOL, roles=roles, scopes=scopes)
 
 
-def _rule(role, scope) -> PolicyRule:
-    return PolicyRule(role=role, scope=scope)
+def _rule(role, scope, effect=RuleEffect.ALLOW) -> PolicyRule:
+    return PolicyRule(role=role, scope=scope, effect=effect)
+
+
+def _deny(role, scope) -> PolicyRule:
+    return PolicyRule(role=role, scope=scope, effect=RuleEffect.DENY)
 
 
 def _spm(service_id, *, type=ServiceType.AGENT, owned_roles=None, owned_scopes=None,
          inbound=None) -> ServicePolicyModel:
+    # ``inbound`` accepts a mixed list of rules; each is filed into the allow/deny list by its
+    # ``effect`` (so existing all-allow call sites keep working and deny edges route correctly).
+    rules = inbound or []
     return ServicePolicyModel(
         service_id=service_id, service_type=type,
         owned_roles=owned_roles or [], owned_scopes=owned_scopes or [],
-        inbound_rules=inbound or [],
+        inbound_allow_rules=[r for r in rules if r.effect == RuleEffect.ALLOW],
+        inbound_deny_rules=[r for r in rules if r.effect == RuleEffect.DENY],
     )
+
+
+def _inbound(spm) -> list[PolicyRule]:
+    """Both inbound lists of an SPM concatenated — a combined view for assertions."""
+    return spm.inbound_allow_rules + spm.inbound_deny_rules
 
 
 # --------------------------------------------------------------------------- #
@@ -100,7 +113,7 @@ class FakeStore:
         return [
             m.model_copy(deep=True)
             for m in self.data.values()
-            if any(r.role.id == role.id for r in m.inbound_rules)
+            if any(r.role.id == role.id for r in (m.inbound_allow_rules + m.inbound_deny_rules))
         ]
 
     def apply_service_policy(self, service_id, spm):
@@ -161,10 +174,12 @@ def engine_env(catalog, store):
         yield compute_and_apply
 
 
-def run_engine(rules, *, catalog=None, store_initial=None, override=False) -> FakeStore:
+def run_engine(
+    rules, *, catalog=None, store_initial=None, override=False, default_effect=RuleEffect.DENY
+) -> FakeStore:
     store = FakeStore(store_initial)
     with engine_env(catalog or [], store) as compute_and_apply:
-        compute_and_apply(rules, override=override)
+        compute_and_apply(rules, override=override, default_effect=default_effect)
     return store
 
 
@@ -176,16 +191,22 @@ def _pairs(rules):
 
 
 def _norm(apm):
-    """Order-independent view of an APM for equality assertions."""
+    """Order-independent view of an APM for equality assertions — every split bucket."""
     return {
         "agent_roles": sorted(r.id for r in apm.agent_roles),
         "agent_scopes": sorted(s.id for s in apm.agent_scopes),
-        "inbound": _pairs(apm.inbound_rules),
-        "outbound": _pairs(apm.outbound_rules),
-        "outbound_subject": _pairs(apm.outbound_subject_rules),
+        "inbound_subject_allow": _pairs(apm.inbound_subject_allow_rules),
+        "inbound_subject_deny": _pairs(apm.inbound_subject_deny_rules),
+        "inbound_source_allow": _pairs(apm.inbound_source_allow_rules),
+        "inbound_source_deny": _pairs(apm.inbound_source_deny_rules),
+        "outbound_target_allow": _pairs(apm.outbound_target_allow_rules),
+        "outbound_target_deny": _pairs(apm.outbound_target_deny_rules),
+        "outbound_subject_allow": _pairs(apm.outbound_subject_allow_rules),
+        "outbound_subject_deny": _pairs(apm.outbound_subject_deny_rules),
         "source_roles": {k: sorted(r.id for r in v) for k, v in apm.source_roles.items()},
         "subject_roles": {k: sorted(r.id for r in v) for k, v in apm.subject_roles.items()},
-        "target_scopes": {k: sorted(s.id for s in v) for k, v in apm.target_scopes.items()},
+        "target_allow_scopes": {k: sorted(s.id for s in v) for k, v in apm.target_allow_scopes.items()},
+        "target_deny_scopes": {k: sorted(s.id for s in v) for k, v in apm.target_deny_scopes.items()},
     }
 
 
@@ -214,12 +235,13 @@ def test_user_role_agent_scope_lands_inbound_and_pushes_once():
     AR, UR, AS, TS, catalog = _repro()
     store = run_engine([_rule(UR, AS)], catalog=catalog)
 
-    # persisted on SPM(github-agent)
+    # persisted on SPM(github-agent) — an Allow (user role, agent scope) edge
     assert store.service_writes[0][0] == "github-agent"
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
-    # derived onto the agent's APM
+    assert _pairs(store.data["github-agent"].inbound_allow_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert store.data["github-agent"].inbound_deny_rules == []
+    # derived onto the agent's APM — a User role lands in the inbound SUBJECT allow bucket
     apm = store.pushed_agent("github-agent")
-    assert _pairs(apm.inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(apm.inbound_subject_allow_rules) == [("r-user-dev", "s-agent-inbound")]
     assert apm.subject_roles == {"dev-user": [UR]}
     assert store.apply_policy_count == 1
 
@@ -232,10 +254,10 @@ def test_agent_role_tool_scope_derives_outbound_and_target_scopes():
     AR, UR, AS, TS, catalog = _repro()
     store = run_engine([_rule(AR, TS)], catalog=catalog)
 
-    assert _pairs(store.data["github-tool"].inbound_rules) == [("r-agent-src", "s-tool-read")]
+    assert _pairs(store.data["github-tool"].inbound_allow_rules) == [("r-agent-src", "s-tool-read")]
     apm = store.pushed_agent("github-agent")
-    assert _pairs(apm.outbound_rules) == [("r-agent-src", "s-tool-read")]
-    assert {k: [s.id for s in v] for k, v in apm.target_scopes.items()} == {"github-tool": ["s-tool-read"]}
+    assert _pairs(apm.outbound_target_allow_rules) == [("r-agent-src", "s-tool-read")]
+    assert {k: [s.id for s in v] for k, v in apm.target_allow_scopes.items()} == {"github-tool": ["s-tool-read"]}
 
 
 # --------------------------------------------------------------------------- #
@@ -247,7 +269,7 @@ def test_user_role_tool_scope_becomes_outbound_subject_gate():
     store = run_engine([_rule(AR, TS), _rule(UR, TS)], catalog=catalog)
 
     apm = store.pushed_agent("github-agent")
-    assert _pairs(apm.outbound_subject_rules) == [("r-user-dev", "s-tool-read")]
+    assert _pairs(apm.outbound_subject_allow_rules) == [("r-user-dev", "s-tool-read")]
     assert apm.subject_roles == {"dev-user": [UR]}
 
 
@@ -274,9 +296,9 @@ def test_both_orders_yield_identical_agent_policy():
     assert _norm(apm_at) == _norm(apm_ta)
 
     # and it is the expected policy: inbound {UR->AS}, outbound {AR->TS} + subject gate {UR->TS}
-    assert _norm(apm_at)["inbound"] == [("r-user-dev", "s-agent-inbound")]
-    assert _norm(apm_at)["outbound"] == [("r-agent-src", "s-tool-read")]
-    assert _norm(apm_at)["outbound_subject"] == [("r-user-dev", "s-tool-read")]
+    assert _norm(apm_at)["inbound_subject_allow"] == [("r-user-dev", "s-agent-inbound")]
+    assert _norm(apm_at)["outbound_target_allow"] == [("r-agent-src", "s-tool-read")]
+    assert _norm(apm_at)["outbound_subject_allow"] == [("r-user-dev", "s-tool-read")]
 
 
 # --------------------------------------------------------------------------- #
@@ -293,7 +315,7 @@ def test_late_user_role_on_tool_rederives_affected_agent_subject_gate():
         compute([_rule(UR2, TS)])  # late UC3 user role on the tool
 
     apm = store.pushed_agent("github-agent")
-    subject_pairs = _pairs(apm.outbound_subject_rules)
+    subject_pairs = _pairs(apm.outbound_subject_allow_rules)
     assert ("r-user-ops", "s-tool-read") in subject_pairs
     assert "ops-user" in apm.subject_roles
 
@@ -312,8 +334,8 @@ def test_agent_to_agent_edge_projects_into_both_policies():
     store = run_engine([_rule(AR, BS)], catalog=catalog)
 
     apm_a = store.pushed_agent("agent-a")
-    assert _pairs(apm_a.outbound_rules) == [("r-a-caller", "s-b-inbound")]
-    assert {k: [s.id for s in v] for k, v in apm_a.target_scopes.items()} == {"agent-b": ["s-b-inbound"]}
+    assert _pairs(apm_a.outbound_target_allow_rules) == [("r-a-caller", "s-b-inbound")]
+    assert {k: [s.id for s in v] for k, v in apm_a.target_allow_scopes.items()} == {"agent-b": ["s-b-inbound"]}
 
     apm_b = store.pushed_agent("agent-b")
     assert {k: [r.id for r in v] for k, v in apm_b.source_roles.items()} == {"agent-a": ["r-a-caller"]}
@@ -336,8 +358,8 @@ def test_override_purges_input_role_from_every_spm():
     store = run_engine([_rule(shared, s1)], catalog=catalog, store_initial=initial, override=True)
 
     # svc-two's stale mapping for the shared role is gone; svc-one keeps the fresh one
-    assert _pairs(store.data["svc-two"].inbound_rules) == []
-    assert _pairs(store.data["svc-one"].inbound_rules) == [("r-shared", "s-one")]
+    assert _pairs(_inbound(store.data["svc-two"])) == []
+    assert _pairs(_inbound(store.data["svc-one"])) == [("r-shared", "s-one")]
     # purge scanned by role, once for the single distinct input role
     assert [r.id for r in store.by_role_calls].count("r-shared") == 1
 
@@ -360,8 +382,8 @@ def test_override_shared_role_purged_once_second_mapping_survives():
         catalog=catalog, store_initial=initial, override=True,
     )
 
-    assert _pairs(store.data["svc-one"].inbound_rules) == [("r-shared", "s-one")]
-    assert _pairs(store.data["svc-two"].inbound_rules) == [("r-shared", "s-two")]  # not wiped
+    assert _pairs(_inbound(store.data["svc-one"])) == [("r-shared", "s-one")]
+    assert _pairs(_inbound(store.data["svc-two"])) == [("r-shared", "s-two")]  # not wiped
 
 
 # --------------------------------------------------------------------------- #
@@ -373,7 +395,7 @@ def test_duplicate_rule_not_appended_twice():
     initial = {"github-agent": _spm("github-agent", owned_scopes=[AS], inbound=[_rule(UR, AS)])}
     store = run_engine([_rule(UR, AS)], catalog=catalog, store_initial=initial)
 
-    assert len(store.data["github-agent"].inbound_rules) == 1
+    assert len(_inbound(store.data["github-agent"])) == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -402,10 +424,10 @@ def test_tool_gets_spm_but_no_apm():
     AR, UR, AS, TS, catalog = _repro()
     store = run_engine([_rule(AR, TS)], catalog=catalog)
 
-    assert _pairs(store.data["github-tool"].inbound_rules) == [("r-agent-src", "s-tool-read")]
+    assert _pairs(store.data["github-tool"].inbound_allow_rules) == [("r-agent-src", "s-tool-read")]
     assert "github-tool" not in store.pushed_agent_ids  # no tool APM
     apm = store.pushed_agent("github-agent")
-    assert "github-tool" in apm.target_scopes
+    assert "github-tool" in apm.target_allow_scopes
 
 
 # --------------------------------------------------------------------------- #
@@ -449,9 +471,12 @@ def test_shared_user_role_creates_no_false_outbound_edge():
     store = run_engine([_rule(UR, AS), _rule(UR, TS)], catalog=catalog)
 
     apm = store.pushed_agent("github-agent")
-    assert apm.outbound_rules == []
-    assert apm.target_scopes == {}
-    assert apm.outbound_subject_rules == []  # A does not target T, so no gate
+    assert apm.outbound_target_allow_rules == []
+    assert apm.outbound_target_deny_rules == []
+    assert apm.target_allow_scopes == {}
+    assert apm.target_deny_scopes == {}
+    assert apm.outbound_subject_allow_rules == []  # A does not target T, so no gate
+    assert apm.outbound_subject_deny_rules == []
 
 
 # --------------------------------------------------------------------------- #
@@ -485,16 +510,16 @@ def test_multi_role_capability_match_populates_both_outbound_gates():
     store = run_engine(rules, catalog=catalog)
 
     apm = store.pushed_agent("github-agent")
-    # capability gate: all four agent->tool edges + target_scopes covering all four scopes
-    assert _pairs(apm.outbound_rules) == sorted([
+    # capability gate: all four agent->tool edges + target_allow_scopes covering all four scopes
+    assert _pairs(apm.outbound_target_allow_rules) == sorted([
         ("r-src-op", "s-source-read"), ("r-src-op", "s-source-write"),
         ("r-issue-op", "s-issues-read"), ("r-issue-op", "s-issues-write"),
     ])
-    assert {k: sorted(s.id for s in v) for k, v in apm.target_scopes.items()} == {
+    assert {k: sorted(s.id for s in v) for k, v in apm.target_allow_scopes.items()} == {
         "github-tool": ["s-issues-read", "s-issues-write", "s-source-read", "s-source-write"],
     }
     # subject gate: the user->tool grant set (developer: source rw + issues read; tester: issues rw)
-    assert _pairs(apm.outbound_subject_rules) == sorted([
+    assert _pairs(apm.outbound_subject_allow_rules) == sorted([
         ("r-developer", "s-source-read"), ("r-developer", "s-source-write"),
         ("r-developer", "s-issues-read"),
         ("r-tester", "s-issues-read"), ("r-tester", "s-issues-write"),
@@ -536,7 +561,7 @@ def test_absent_service_is_seeded_and_persisted():
     spm = store.data["github-agent"]
     assert spm.service_type == ServiceType.AGENT
     assert [r.id for r in spm.owned_roles] == ["r-agent-src"]  # seeded from catalog
-    assert _pairs(spm.inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(spm.inbound_allow_rules) == [("r-user-dev", "s-agent-inbound")]
 
 
 # --------------------------------------------------------------------------- #
@@ -589,7 +614,7 @@ def test_reconcile_drops_retired_scope_edge():
     }
     store = run_engine([_rule(UR, AS)], catalog=catalog, store_initial=initial)
 
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(_inbound(store.data["github-agent"])) == [("r-user-dev", "s-agent-inbound")]
 
 
 def test_reconcile_drops_churned_scope_uuid_same_name():
@@ -605,7 +630,7 @@ def test_reconcile_drops_churned_scope_uuid_same_name():
     }
     store = run_engine([_rule(UR, as_v2)], catalog=catalog, store_initial=initial)
 
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-as-v2")]
+    assert _pairs(_inbound(store.data["github-agent"])) == [("r-user-dev", "s-as-v2")]
 
 
 def test_reconcile_collapses_churned_duplicate_user_role():
@@ -623,7 +648,7 @@ def test_reconcile_collapses_churned_duplicate_user_role():
     }
     store = run_engine([_rule(dev_new, AS)], catalog=catalog, store_initial=initial)
 
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-dev-v2", "s-agent-inbound")]
+    assert _pairs(_inbound(store.data["github-agent"])) == [("r-dev-v2", "s-agent-inbound")]
     apm = store.pushed_agent("github-agent")
     assert apm.subject_roles == {"dev-user": [dev_new]}
 
@@ -643,7 +668,7 @@ def test_reconcile_drops_retired_agent_role_self_reference():
     }
     store = run_engine([_rule(UR, AS)], catalog=catalog, store_initial=initial)
 
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(_inbound(store.data["github-agent"])) == [("r-user-dev", "s-agent-inbound")]
 
 
 def test_reconcile_preserves_live_edges_and_is_idempotent():
@@ -661,8 +686,8 @@ def test_reconcile_preserves_live_edges_and_is_idempotent():
         [_rule(UR, AS), _rule(AR, TS), _rule(UR, TS)], catalog=catalog, store_initial=initial
     )
 
-    assert _pairs(store.data["github-agent"].inbound_rules) == [("r-user-dev", "s-agent-inbound")]
-    assert _pairs(store.data["github-tool"].inbound_rules) == sorted(
+    assert _pairs(_inbound(store.data["github-agent"])) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(_inbound(store.data["github-tool"])) == sorted(
         [("r-agent-src", "s-tool-read"), ("r-user-dev", "s-tool-read")]
     )
 
@@ -677,7 +702,7 @@ def test_reconcile_skips_when_service_absent_from_catalog():
     }
     store = run_engine([_rule(UR, orphan_scope)], catalog=[], store_initial=initial)
 
-    assert _pairs(store.data["orphan"].inbound_rules) == [("r-user-dev", "s-orphan")]
+    assert _pairs(_inbound(store.data["orphan"])) == [("r-user-dev", "s-orphan")]
 
 
 # --------------------------------------------------------------------------- #
@@ -710,7 +735,7 @@ def test_decommission_tool_strands_no_edges_and_rederives_agent():
     store = FakeStore()
     _onboard_repro(store)
     # sanity: onboarding gave A an outbound edge to the tool.
-    assert _pairs(store.pushed_agent("github-agent").outbound_rules) == [("r-agent-src", "s-tool-read")]
+    assert _pairs(store.pushed_agent("github-agent").outbound_target_allow_rules) == [("r-agent-src", "s-tool-read")]
 
     # Phase 2: the tool is gone from the catalog (its Keycloak client was deleted).
     run_decommission("github-tool", catalog=[_agent("github-agent", scopes=[])], store=store)
@@ -722,10 +747,10 @@ def test_decommission_tool_strands_no_edges_and_rederives_agent():
 
     # A re-derived: outbound to the tool is stranded (edge lived on SPM(T)); inbound UR→AS survives.
     apm = store.pushed_agent("github-agent")
-    assert apm.outbound_rules == []
-    assert apm.target_scopes == {}
-    assert apm.outbound_subject_rules == []
-    assert _pairs(apm.inbound_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert apm.outbound_target_allow_rules == []
+    assert apm.target_allow_scopes == {}
+    assert apm.outbound_subject_allow_rules == []
+    assert _pairs(apm.inbound_subject_allow_rules) == [("r-user-dev", "s-agent-inbound")]
 
 
 def test_decommission_agent_deletes_apm_and_purges_outbound_footprint():
@@ -744,7 +769,305 @@ def test_decommission_agent_deletes_apm_and_purges_outbound_footprint():
     assert store.agent_deletes == ["github-agent"]
 
     # A's outbound footprint purged from the tool; the tool keeps its user→TS grant.
-    assert _pairs(store.data["github-tool"].inbound_rules) == [("r-user-dev", "s-tool-read")]
+    assert _pairs(_inbound(store.data["github-tool"])) == [("r-user-dev", "s-tool-read")]
 
     # No APM re-derived for the deleted agent (nothing targeted it) — no new push.
     assert len(store.policy_pushes) == pushes_before
+
+
+# =========================================================================== #
+# Effect (ALLOW / DENY) routing and derivation (#118). Every inbound edge      #
+# carries a ``RuleEffect``; the engine files each into the owning SPM's         #
+# effect-matching list, and derivation classifies each edge by role.kind AND    #
+# effect into the split APM buckets (deny-overrides at request time).          #
+# =========================================================================== #
+def test_deny_and_allow_rules_route_to_separate_inbound_lists():
+    # A Deny edge lands in the owning SPM's inbound_deny_rules; an Allow edge in inbound_allow_rules.
+    AR, UR, AS, TS, catalog = _repro()
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    store = run_engine([_rule(UR, AS), _deny(barred, AS)], catalog=catalog)
+
+    spm = store.data["github-agent"]
+    assert _pairs(spm.inbound_allow_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(spm.inbound_deny_rules) == [("r-user-ops", "s-agent-inbound")]
+
+
+def test_same_role_scope_allow_and_deny_coexist():
+    # Dedup identity is (role.id, scope.id, effect): the SAME (role, scope) may be present once as
+    # Allow and once as Deny — the two live in the separate lists, neither displacing the other.
+    AR, UR, AS, TS, catalog = _repro()
+    store = run_engine([_rule(UR, AS), _deny(UR, AS)], catalog=catalog)
+
+    spm = store.data["github-agent"]
+    assert _pairs(spm.inbound_allow_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(spm.inbound_deny_rules) == [("r-user-dev", "s-agent-inbound")]
+
+
+def test_override_purges_input_role_from_both_lists_on_one_spm():
+    # override is role-level revocation over BOTH lists: a role present as an Allow edge and a Deny
+    # edge on the same SPM is purged from both before the fresh rule is re-appended.
+    shared = _user_role("r-shared", "shared", users=["u"])
+    s1 = _scope("s-one", service_id="svc")
+    s2 = _scope("s-two", service_id="svc")
+    catalog = [_agent("svc", scopes=[s1, s2])]
+    initial = {
+        "svc": _spm("svc", owned_scopes=[s1, s2], inbound=[_rule(shared, s1), _deny(shared, s2)]),
+    }
+    # re-onboard the shared role as a single Allow edge on s1
+    store = run_engine([_rule(shared, s1)], catalog=catalog, store_initial=initial, override=True)
+
+    assert _pairs(store.data["svc"].inbound_allow_rules) == [("r-shared", "s-one")]
+    assert store.data["svc"].inbound_deny_rules == []  # the stale Deny edge purged too
+
+
+def test_override_purges_role_across_spms_from_the_deny_list():
+    # The role is an Allow edge on svc-one and a Deny edge on svc-two; override purges it from every
+    # SPM containing it in EITHER list, scanning by role once.
+    shared = _user_role("r-shared", "shared", users=["u"])
+    s1 = _scope("s-one", service_id="svc-one")
+    s2 = _scope("s-two", service_id="svc-two")
+    catalog = [_agent("svc-one", scopes=[s1]), _agent("svc-two", scopes=[s2])]
+    initial = {
+        "svc-one": _spm("svc-one", owned_scopes=[s1], inbound=[_rule(shared, s1)]),
+        "svc-two": _spm("svc-two", owned_scopes=[s2], inbound=[_deny(shared, s2)]),
+    }
+    store = run_engine([_rule(shared, s1)], catalog=catalog, store_initial=initial, override=True)
+
+    assert _inbound(store.data["svc-two"]) == []  # stale Deny edge on the other SPM is gone
+    assert _pairs(store.data["svc-one"].inbound_allow_rules) == [("r-shared", "s-one")]
+    assert [r.id for r in store.by_role_calls].count("r-shared") == 1
+
+
+def test_reconcile_drops_dangling_deny_edge_and_keeps_live_deny():
+    # Reconcile scans the deny list too: a retired-scope DENY edge is pruned while the current DENY
+    # edge survives.
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    aud = _scope("s-aud", "agent-team1-github-agent-aud", service_id="github-agent")  # retired
+    catalog = [_agent("github-agent", scopes=[AS])]  # ``aud`` no longer exists
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_deny(barred, aud), _deny(barred, AS)]
+        )
+    }
+    store = run_engine([_deny(barred, AS)], catalog=catalog, store_initial=initial)
+
+    assert store.data["github-agent"].inbound_allow_rules == []
+    assert _pairs(store.data["github-agent"].inbound_deny_rules) == [("r-user-ops", "s-agent-inbound")]
+
+
+def test_reconcile_churn_collapse_is_per_list_so_a_live_deny_survives():
+    # The user-role churn collapse is computed independently per list. An Allow edge whose
+    # (scope, name) matches a Deny edge of a DIFFERENT id must not cause the live Deny edge to be
+    # pruned (a cross-list collapse would be a bug).
+    dev_allow = _user_role("r-dev-allow", "developer", users=["dev-user"])
+    dev_deny = _user_role("r-dev-deny", "developer", users=["dev-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    catalog = [_agent("github-agent", scopes=[AS])]
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_rule(dev_allow, AS), _deny(dev_deny, AS)]
+        )
+    }
+    store = run_engine([_rule(dev_allow, AS)], catalog=catalog, store_initial=initial)  # allow gen only
+
+    assert _pairs(store.data["github-agent"].inbound_allow_rules) == [("r-dev-allow", "s-agent-inbound")]
+    assert _pairs(store.data["github-agent"].inbound_deny_rules) == [("r-dev-deny", "s-agent-inbound")]
+
+
+def test_reconcile_preserves_live_deny_edge_and_is_idempotent():
+    # A live Deny edge (all entities current) is never pruned; a second identical compute leaves both
+    # lists unchanged (order-independence over both lists).
+    AR, UR, AS, TS, catalog = _repro()
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    initial = {
+        "github-agent": _spm(
+            "github-agent", owned_scopes=[AS], inbound=[_rule(UR, AS), _deny(barred, AS)]
+        ),
+    }
+    store = FakeStore(initial)
+    with engine_env(catalog, store) as compute:
+        compute([_rule(UR, AS), _deny(barred, AS)])
+        first = (
+            _pairs(store.data["github-agent"].inbound_allow_rules),
+            _pairs(store.data["github-agent"].inbound_deny_rules),
+        )
+        compute([_rule(UR, AS), _deny(barred, AS)])  # idempotent second pass
+
+    assert first == ([("r-user-dev", "s-agent-inbound")], [("r-user-ops", "s-agent-inbound")])
+    assert _pairs(store.data["github-agent"].inbound_allow_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(store.data["github-agent"].inbound_deny_rules) == [("r-user-ops", "s-agent-inbound")]
+
+
+def test_decommission_tool_deletes_spm_holding_both_allow_and_deny_inbound():
+    # SPM(T) holds an Allow user edge, a Deny user edge, and an agent capability edge on TS.
+    # Offboarding T deletes SPM(T) (both lists at once) and re-derives the agent that targeted it
+    # with its outbound stranded.
+    AR = _agent_role("r-agent-src", "agent-source", owner="github-agent")
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    TS = _scope("s-tool-read", "tool-read", service_id="github-tool")
+    catalog = [_agent("github-agent", roles=[AR], scopes=[AS]), _tool("github-tool", scopes=[TS])]
+    store = FakeStore()
+    with engine_env(catalog, store) as compute:
+        compute([_rule(UR, AS), _rule(AR, TS), _rule(UR, TS), _deny(barred, TS)])
+
+    # sanity: both lists on SPM(T) are populated before offboard.
+    assert _pairs(store.data["github-tool"].inbound_allow_rules) == sorted(
+        [("r-agent-src", "s-tool-read"), ("r-user-dev", "s-tool-read")]
+    )
+    assert _pairs(store.data["github-tool"].inbound_deny_rules) == [("r-user-ops", "s-tool-read")]
+
+    run_decommission(
+        "github-tool", catalog=[_agent("github-agent", roles=[AR], scopes=[AS])], store=store
+    )
+
+    assert "github-tool" in store.service_deletes
+    assert "github-tool" not in store.data  # SPM(T) gone — both lists torn down together
+    apm = store.pushed_agent("github-agent")  # agent re-derived, outbound stranded
+    assert apm.outbound_target_allow_rules == []
+    assert apm.target_allow_scopes == {}
+    assert apm.outbound_subject_allow_rules == []
+
+
+def test_decommission_purges_agent_deny_footprint_from_other_spm():
+    # A's agent role carries a DENY edge on the tool (AR→TS deny). Offboarding A purges that edge
+    # from SPM(T)'s inbound_deny_rules — the footprint scan covers the deny list too — while the
+    # tool keeps its unrelated user allow grant.
+    AR = _agent_role("r-agent-src", "agent-source", owner="github-agent")
+    UR = _user_role("r-user-dev", "developer", users=["dev-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    TS = _scope("s-tool-read", "tool-read", service_id="github-tool")
+    catalog = [_agent("github-agent", roles=[AR], scopes=[AS]), _tool("github-tool", scopes=[TS])]
+    store = FakeStore()
+    with engine_env(catalog, store) as compute:
+        compute([_rule(UR, AS), _deny(AR, TS), _rule(UR, TS)])
+
+    assert _pairs(store.data["github-tool"].inbound_deny_rules) == [("r-agent-src", "s-tool-read")]
+
+    run_decommission("github-agent", catalog=[_tool("github-tool", scopes=[TS])], store=store)
+
+    assert "github-agent" in store.service_deletes
+    assert store.agent_deletes == ["github-agent"]
+    assert store.data["github-tool"].inbound_deny_rules == []  # A's deny footprint purged
+    assert _pairs(store.data["github-tool"].inbound_allow_rules) == [("r-user-dev", "s-tool-read")]
+
+
+def test_derive_classifies_subject_deny_inbound_and_registers_identity():
+    # A User-kind DENY edge on SPM(A) derives into inbound_subject_deny_rules; the barred user is
+    # still registered into the EFFECT-AGNOSTIC subject_roles map alongside the allowed one.
+    AR, UR, AS, TS, catalog = _repro()
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    store = run_engine([_rule(UR, AS), _deny(barred, AS)], catalog=catalog)
+
+    apm = store.pushed_agent("github-agent")
+    assert _pairs(apm.inbound_subject_allow_rules) == [("r-user-dev", "s-agent-inbound")]
+    assert _pairs(apm.inbound_subject_deny_rules) == [("r-user-ops", "s-agent-inbound")]
+    assert apm.subject_roles == {"dev-user": [UR], "ops-user": [barred]}
+
+
+def test_derive_registers_deny_only_subject_into_effect_agnostic_map():
+    # Correctness invariant: a subject appearing ONLY in a DENY edge (no allow anywhere) must still
+    # register in subject_roles, or the generated deny lookup cannot resolve it and the prohibition
+    # silently never fires.
+    AR, UR, AS, TS, catalog = _repro()
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    store = run_engine([_deny(barred, AS)], catalog=catalog)
+
+    apm = store.pushed_agent("github-agent")
+    assert apm.inbound_subject_allow_rules == []
+    assert _pairs(apm.inbound_subject_deny_rules) == [("r-user-ops", "s-agent-inbound")]
+    assert apm.subject_roles == {"ops-user": [barred]}  # deny-only, still registered
+
+
+def test_derive_classifies_source_deny_inbound_and_registers_source_identity():
+    # An Agent-kind DENY edge on SPM(B) derives into inbound_source_deny_rules and registers the
+    # calling agent into the effect-agnostic source_roles; A's outbound sees the deny target.
+    AR = _agent_role("r-a-caller", "a-caller", owner="agent-a")
+    BS = _scope("s-b-inbound", "b-inbound", service_id="agent-b")
+    catalog = [
+        _agent("agent-a", roles=[AR], scopes=[_scope("s-a-inbound", service_id="agent-a")]),
+        _agent("agent-b", scopes=[BS]),
+    ]
+    store = run_engine([_deny(AR, BS)], catalog=catalog)
+
+    apm_b = store.pushed_agent("agent-b")
+    assert _pairs(apm_b.inbound_source_deny_rules) == [("r-a-caller", "s-b-inbound")]
+    assert apm_b.inbound_source_allow_rules == []
+    assert {k: [r.id for r in v] for k, v in apm_b.source_roles.items()} == {"agent-a": ["r-a-caller"]}
+
+    apm_a = store.pushed_agent("agent-a")
+    assert _pairs(apm_a.outbound_target_deny_rules) == [("r-a-caller", "s-b-inbound")]
+    assert {k: [s.id for s in v] for k, v in apm_a.target_deny_scopes.items()} == {"agent-b": ["s-b-inbound"]}
+    assert apm_a.outbound_target_allow_rules == []
+    assert apm_a.target_allow_scopes == {}
+
+
+def test_derive_agent_deny_target_scope_and_outbound_subject_deny_gate():
+    # An agent-role → target-scope DENY edge derives into outbound_target_deny_rules +
+    # target_deny_scopes. Per the spec the subject gate is gathered for every target scope (allow OR
+    # deny), split by the USER edge's own effect: an allowed user lands in the allow gate, a barred
+    # user in the deny gate, and both register into the effect-agnostic subject_roles.
+    AR = _agent_role("r-agent-src", "agent-source", owner="github-agent")
+    allowed = _user_role("r-user-dev", "developer", users=["dev-user"])
+    barred = _user_role("r-user-ops", "ops", users=["ops-user"])
+    AS = _scope("s-agent-inbound", "agent-inbound", service_id="github-agent")
+    TS = _scope("s-tool-read", "tool-read", service_id="github-tool")
+    catalog = [_agent("github-agent", roles=[AR], scopes=[AS]), _tool("github-tool", scopes=[TS])]
+    store = run_engine([_deny(AR, TS), _rule(allowed, TS), _deny(barred, TS)], catalog=catalog)
+
+    apm = store.pushed_agent("github-agent")
+    # agent capability deny -> target_deny_scopes + outbound_target_deny_rules
+    assert _pairs(apm.outbound_target_deny_rules) == [("r-agent-src", "s-tool-read")]
+    assert {k: [s.id for s in v] for k, v in apm.target_deny_scopes.items()} == {"github-tool": ["s-tool-read"]}
+    assert apm.outbound_target_allow_rules == []
+    assert apm.target_allow_scopes == {}
+    # outbound subject gate split by the USER edge's effect
+    assert _pairs(apm.outbound_subject_allow_rules) == [("r-user-dev", "s-tool-read")]
+    assert _pairs(apm.outbound_subject_deny_rules) == [("r-user-ops", "s-tool-read")]
+    assert apm.subject_roles == {"dev-user": [allowed], "ops-user": [barred]}
+
+
+# --------------------------------------------------------------------------- #
+# default_effect threading — PCE stamps default_effect onto every derived APM. #
+# The value is produced at derive time (the APM is a pure projection), defaults #
+# to least-privilege DENY, and an explicitly requested ALLOW propagates.        #
+# --------------------------------------------------------------------------- #
+def test_default_effect_defaults_to_deny_on_derived_apm():
+    # When no default_effect is passed, every emitted APM carries the least-privilege DENY default,
+    # reproducing today's `default allow := false` Rego (byte-for-byte-compatible default).
+    AR, UR, AS, TS, catalog = _repro()
+    store = run_engine([_rule(UR, AS)], catalog=catalog)
+
+    apm = store.pushed_agent("github-agent")
+    assert apm.default_effect == RuleEffect.DENY
+
+
+def test_default_effect_allow_propagates_to_derived_apm():
+    # A caller-requested ALLOW threads compute_and_apply -> _run -> _derive and lands on the APM.
+    AR, UR, AS, TS, catalog = _repro()
+    store = run_engine([_rule(UR, AS)], catalog=catalog, default_effect=RuleEffect.ALLOW)
+
+    apm = store.pushed_agent("github-agent")
+    assert apm.default_effect == RuleEffect.ALLOW
+
+
+def test_default_effect_stamped_on_every_emitted_apm():
+    # The default_effect rides onto EVERY APM a single recompute emits, not just the first.
+    A1 = _agent_role("r-a1", "a1-src", owner="agent-1")
+    A2 = _agent_role("r-a2", "a2-src", owner="agent-2")
+    U = _user_role("r-user", "dev", users=["dev-user"])
+    S1 = _scope("s-a1-in", "a1-inbound", service_id="agent-1")
+    S2 = _scope("s-a2-in", "a2-inbound", service_id="agent-2")
+    catalog = [
+        _agent("agent-1", roles=[A1], scopes=[S1]),
+        _agent("agent-2", roles=[A2], scopes=[S2]),
+    ]
+    store = run_engine(
+        [_rule(U, S1), _rule(U, S2)], catalog=catalog, default_effect=RuleEffect.ALLOW
+    )
+
+    assert store.pushed_agent_ids == {"agent-1", "agent-2"}
+    for agent_id in ("agent-1", "agent-2"):
+        assert store.pushed_agent(agent_id).default_effect == RuleEffect.ALLOW

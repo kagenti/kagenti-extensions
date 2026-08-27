@@ -35,7 +35,8 @@ def _fresh_empty(service_id: str) -> ServicePolicyModel:
         service_type=ServiceType.AGENT,
         owned_roles=[],
         owned_scopes=[],
-        inbound_rules=[],
+        inbound_allow_rules=[],
+        inbound_deny_rules=[],
     )
 
 

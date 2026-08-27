@@ -80,13 +80,13 @@ the optional exchange scope. The script:
 
 1. Open [Import Tool](http://rossoctl-ui.localtest.me:8080/tools/import).
 2. **Namespace**: `team1` · **Tool Name**: `weather-tool-advanced` (exact).
-3. **Deploy From Image** · **Container Image**:
+3. **Deploy from Image** · **Container Image**:
    `ghcr.io/rossoctl/examples/weather_tool` · **Image Tag**: `latest`.
 4. **MCP Transport Protocol**: `streamable HTTP`.
 5. **Enable AuthBridge sidecar injection**: ✅ **check** (advanced demo
    validates JWTs at the tool's ingress — this is the difference vs. the
    standard demo).
-6. **Enable SPIRE identity (spiffe-helper sidecar)**: ✅ **check**.
+6. **Enable SPIRE identity (JWT-SVID via spiffe-helper)**: ✅ **check**.
 7. **Service Port** `8000` · **Target Port** `8000`.
 8. Click **Build & Deploy Tool**.
 
@@ -131,10 +131,9 @@ Now the UI flow (order matches the actual import form top-to-bottom):
    - Git Branch or Tag: `main`
    - Select Agent: `Weather Service Agent`
    - Source Subfolder: `a2a/weather_service`
-4. **Protocol**: `A2A` · **Framework**: `LangGraph` · **Workload Type**:
-   `Deployment`.
-5. **Enable AuthBridge sidecar injection**: ✅ (default).
-6. **Enable SPIRE identity**: ✅ (default).
+4. **Protocol**: `A2A` · **Workload Type**: `Deployment`.
+5. **Secure with AuthBridge**: ✅ (default).
+6. **Enable SPIRE identity (JWT-SVID via spiffe-helper)**: ✅ (default).
 7. Expand **Outbound Routing Rules** and add one route — this is what
    triggers the RFC 8693 exchange when the agent calls the tool. The form
    has three fields (currently unlabeled in the UI); fill them in this
@@ -166,8 +165,8 @@ Now the UI flow (order matches the actual import form top-to-bottom):
    MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
    ```
 10. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
-    **Outbound Ports to Exclude** to `11434`. OpenAI uses HTTPS and needs no
-    exclusion.
+    **Bypass AuthBridge on these outbound ports** to `11434`. OpenAI uses HTTPS
+    and needs no exclusion.
 11. Click **Build & Deploy Agent**.
 
 After the agent pod is **Ready**, re-run the Keycloak script so the agent's
@@ -248,7 +247,7 @@ Useful env knobs:
 
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
-| UI returns `Error: LLM execution failed: Connection error.` | Agent can't reach its LLM. Ollama not running, or Outbound Ports to Exclude not set to `11434`. `deploy_and_verify_advanced.sh` doesn't catch this — it never calls the LLM. | Start Ollama (`ollama serve` + `ollama pull llama3.2:3b-instruct-fp16`), or re-import with the OpenAI `.env` URL. |
+| UI returns `Error: LLM execution failed: Connection error.` | Agent can't reach its LLM. Ollama not running, or **Bypass AuthBridge on these outbound ports** not set to `11434`. `deploy_and_verify_advanced.sh` doesn't catch this — it never calls the LLM. | Start Ollama (`ollama serve` + `ollama pull llama3.2:3b-instruct-fp16`), or re-import with the OpenAI `.env` URL. |
 | UI returns `Error: No LLM API key configured. Set the LLM_API_KEY environment variable.` | `openai-secret` is empty (often because `$OPENAI_API_KEY` wasn't exported when you ran `kubectl create secret`), or the agent wasn't restarted after fixing it. | Recreate with the literal value, then verify `kubectl get secret openai-secret -n team1 -o jsonpath='{.data.apikey}' \| base64 -d \| wc -c` is non-zero, then `kubectl rollout restart deploy/weather-service-advanced -n team1`. |
 | UI: **Outbound Routing Rules** expander missing | Rossoctl backend pre-dates [rossoctl#1194](https://github.com/rossoctl/rossoctl/pull/1194) | `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml` and skip the UI step. |
 | UI: agent card not available | AuthBridge failed to load `authproxy-routes` (invalid YAML shape) | See the same section in the [GitHub Issue UI demo](../github-issue/demo-ui.md#agent-card-not-available-in-the-ui). |

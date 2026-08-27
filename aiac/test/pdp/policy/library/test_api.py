@@ -1,27 +1,83 @@
 """Unit tests for aiac.pdp.policy.library.api.
 
 The PDP Policy Writer HTTP boundary is mocked; no live service is required.
+
+``aiac.pdp.policy.library`` is a *pass-through* over the canonical policy models:
+``api.py`` imports ``AgentPolicyModel`` / ``PolicyModel`` straight from
+``aiac.policy.model.models`` (there is no separate library ``models`` module). So the
+model-shape + round-trip assertions here exercise the same canonical ALLOW/DENY models the
+library serializes over the wire, and the HTTP-client transport stays a pass-through
+``model_dump()`` (no ``?realm=``).
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from aiac.policy.model.models import AgentPolicyModel, PolicyModel
+from aiac.idp.configuration.models import Role, RoleKind, Scope
+from aiac.policy.model.models import (
+    AgentPolicyModel,
+    PolicyModel,
+    PolicyRule,
+    RuleEffect,
+)
 
 BASE = "http://127.0.0.1:7072"
 
-# Minimal valid model fixtures (all eight AgentPolicyModel fields present).
-_AGENT_POLICY_DICT = {
-    "agent_id": "weather-agent",
-    "agent_roles": [],
-    "agent_scopes": [],
-    "subject_roles": {},
-    "source_roles": {},
-    "target_scopes": {},
-    "inbound_rules": [],
-    "outbound_rules": [],
-}
+
+# ---------------------------------------------------------------------------
+# New-shape fixtures (ALLOW/DENY model)
+#
+# Built from real Role/Scope objects so the fixture dicts are exactly what the
+# canonical models serialize to — the HTTP-client body assertions then compare a
+# genuine ``model_dump()`` round-trip, and a DENY tuple is present in the fixture.
+# ---------------------------------------------------------------------------
+
+
+def _role(id: str = "role-1", name: str = "reader") -> Role:
+    return Role(id=id, name=name, composite=False, kind=RoleKind.AGENT, actorIds=["weather-agent"])
+
+
+def _scope(id: str = "scope-1", name: str = "read") -> Scope:
+    return Scope(id=id, name=name, serviceId="weather-tool")
+
+
+def _agent_policy_model() -> AgentPolicyModel:
+    """A representative agent policy exercising the new ALLOW/DENY shape.
+
+    Populates identity maps, both split target-scope maps, and at least one ALLOW rule and one
+    DENY rule across the 8 entity×effect rule lists, so a ``model_dump()`` round-trip is lossless
+    for both effects.
+    """
+    role = _role()
+    deny_role = _role(id="role-2", name="blocked")
+    scope = _scope()
+    allow = PolicyRule(role=role, scope=scope, effect=RuleEffect.ALLOW)
+    deny = PolicyRule(role=deny_role, scope=scope, effect=RuleEffect.DENY)
+    return AgentPolicyModel(
+        agent_id="weather-agent",
+        agent_roles=[role],
+        agent_scopes=[scope],
+        # Effect-agnostic identity maps must include the deny-only role.
+        source_roles={"caller-agent": [role]},
+        subject_roles={"alice": [role, deny_role]},
+        # Split outbound target maps.
+        target_allow_scopes={"weather-tool": [scope]},
+        target_deny_scopes={"secret-tool": [scope]},
+        # 8 entity×effect rule lists (ALLOW + DENY populated).
+        inbound_subject_allow_rules=[allow],
+        inbound_subject_deny_rules=[deny],
+        inbound_source_allow_rules=[allow],
+        inbound_source_deny_rules=[deny],
+        outbound_target_allow_rules=[allow],
+        outbound_target_deny_rules=[deny],
+        outbound_subject_allow_rules=[allow],
+        outbound_subject_deny_rules=[deny],
+    )
+
+
+_AGENT_MODEL = _agent_policy_model()
+_AGENT_POLICY_DICT = _AGENT_MODEL.model_dump()
 _POLICY_DICT = {"agents": [_AGENT_POLICY_DICT]}
 
 
@@ -38,6 +94,76 @@ def _err(status: int = 500) -> MagicMock:
     resp.ok = False
     resp.text = "internal error"
     return resp
+
+
+# ---------------------------------------------------------------------------
+# Model shape — ALLOW/DENY (field-set assertions)
+# ---------------------------------------------------------------------------
+
+
+class TestModelShape:
+    def test_policy_rule_carries_role_scope_effect(self):
+        fields = set(PolicyRule.model_fields)
+        assert {"role", "scope", "effect"} <= fields
+
+    def test_policy_rule_effect_defaults_to_allow(self):
+        rule = PolicyRule(role=_role(), scope=_scope())
+        assert rule.effect == RuleEffect.ALLOW
+
+    def test_agent_policy_model_has_split_target_maps(self):
+        fields = set(AgentPolicyModel.model_fields)
+        assert {"target_allow_scopes", "target_deny_scopes"} <= fields
+        # The pre-ALLOW/DENY single map is gone.
+        assert "target_scopes" not in fields
+
+    def test_agent_policy_model_has_eight_split_rule_lists(self):
+        fields = set(AgentPolicyModel.model_fields)
+        assert {
+            "inbound_subject_allow_rules",
+            "inbound_subject_deny_rules",
+            "inbound_source_allow_rules",
+            "inbound_source_deny_rules",
+            "outbound_target_allow_rules",
+            "outbound_target_deny_rules",
+            "outbound_subject_allow_rules",
+            "outbound_subject_deny_rules",
+        } <= fields
+        # The pre-ALLOW/DENY intermixed lists are gone.
+        assert "inbound_rules" not in fields
+        assert "outbound_rules" not in fields
+
+    def test_agent_policy_model_keeps_effect_agnostic_identity_maps(self):
+        fields = set(AgentPolicyModel.model_fields)
+        assert {"agent_roles", "agent_scopes", "source_roles", "subject_roles"} <= fields
+
+
+# ---------------------------------------------------------------------------
+# Round-trip — lossless, including a DENY tuple
+# ---------------------------------------------------------------------------
+
+
+class TestRoundTrip:
+    def test_agent_policy_model_round_trips_losslessly(self):
+        restored = AgentPolicyModel.model_validate(_AGENT_MODEL.model_dump(mode="json"))
+        assert restored == _AGENT_MODEL
+
+    def test_deny_tuple_survives_round_trip(self):
+        restored = AgentPolicyModel.model_validate(_AGENT_MODEL.model_dump(mode="json"))
+        deny_rule = restored.outbound_target_deny_rules[0]
+        assert deny_rule.effect == RuleEffect.DENY
+        assert deny_rule.role.name == "blocked"
+        assert deny_rule.scope.name == "read"
+        # DENY-only role still resolvable via the effect-agnostic subject map.
+        assert any(r.name == "blocked" for r in restored.subject_roles["alice"])
+        # Split target maps survive with the right sides.
+        assert "weather-tool" in restored.target_allow_scopes
+        assert "secret-tool" in restored.target_deny_scopes
+
+    def test_policy_model_round_trips_losslessly(self):
+        model = PolicyModel(agents=[_agent_policy_model()])
+        restored = PolicyModel.model_validate(model.model_dump(mode="json"))
+        assert restored == model
+        assert restored.agents[0].outbound_subject_deny_rules[0].effect == RuleEffect.DENY
 
 
 # ---------------------------------------------------------------------------

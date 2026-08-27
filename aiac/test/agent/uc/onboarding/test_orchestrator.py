@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from aiac.agent.uc.onboarding import orchestrator
 from aiac.idp.configuration.models import ServiceType
+from aiac.policy.model.models import RuleEffect
 
 SERVICE_ID = "svc-1"
 
@@ -36,8 +37,29 @@ class TestBothStagesSucceed:
 
         # service_type produced by Provision is fed into the Service Policy Builder
         spb.build.assert_called_once_with(SERVICE_ID, ServiceType.AGENT)
-        # Orchestrator returns the builder's rules paired with the append flag
-        assert result == (rules, False)
+        # Orchestrator returns the builder's rules paired with the append flag and the
+        # default_effect (least-privilege DENY when the caller does not request otherwise).
+        assert result == (rules, False, RuleEffect.DENY)
+
+
+class TestDefaultEffectForwarding:
+    def test_caller_requested_default_effect_is_returned_for_forwarding(self):
+        # A caller onboarding a service that should default to ALLOW passes default_effect through;
+        # the orchestrator returns it verbatim so the Controller forwards it to compute_and_apply.
+        graph = MagicMock()
+        graph.invoke.return_value = {"service_type": ServiceType.AGENT}
+
+        with (
+            patch.object(orchestrator, "build_provision_graph", return_value=graph),
+            patch.object(orchestrator, "ServicePolicyBuilder") as spb,
+        ):
+            spb.build.return_value = [object()]
+            rules, override, default_effect = orchestrator.onboard_service(
+                SERVICE_ID, default_effect=RuleEffect.ALLOW
+            )
+
+        assert override is False
+        assert default_effect is RuleEffect.ALLOW
 
     def test_provision_graph_invoked_with_service_id_in_trigger(self):
         # The service_id must reach Provision as the trigger's entity_id (Keycloak

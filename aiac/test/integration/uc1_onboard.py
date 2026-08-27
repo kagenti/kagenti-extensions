@@ -47,8 +47,9 @@ import os
 import subprocess
 import sys
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Sequence
 
 import requests
 
@@ -125,6 +126,20 @@ TRUST_DOMAIN = os.environ.get("AIAC_TRUST_DOMAIN", "localtest.me")
 # restart. ``onboarded_stack`` polls real decisions until they converge, up to this budget (seconds).
 BUNDLE_TIMEOUT = float(os.environ.get("AIAC_BUNDLE_TIMEOUT", "300"))
 BUNDLE_POLL_INTERVAL = float(os.environ.get("AIAC_BUNDLE_POLL_INTERVAL", "10"))
+
+# --- default_effect onboarding hook (#146 coupling seam; see ``_set_controller_default_effect``) ----
+#
+# The derived ``AgentPolicyModel.default_effect`` decides whether the generated Rego is deny-by-default
+# (the shipped ``Deny``) or allow-by-default (``Allow``). It lives on the *derived* APM built in-cluster
+# by the PCE (``engine._fresh_apm``) and defaults to ``Deny``, so a policy-agnostic onboarding run that
+# needs allow-by-default must set it **before** onboarding and reset it on teardown. These are plain
+# strings (matching ``RuleEffect``'s wire values ``"Allow"`` / ``"Deny"``) so the harness keeps its "no
+# ``aiac`` import" property — importable before the env-before-import dance, like ``scenario_uc1``.
+DEFAULT_EFFECT_ALLOW = "Allow"
+DEFAULT_EFFECT_DENY = "Deny"  # the shipped default; the harness never patches this onto the stack
+# The Controller/PCE env the #146 hook reads where it mints the APM. Overridable so this test tracks
+# whatever name #146 ships without a code edit (verify the shape against #146 — handoff §3).
+DEFAULT_EFFECT_ENV = os.environ.get("AIAC_DEFAULT_EFFECT_ENV", "AIAC_DEFAULT_EFFECT")
 
 
 # ======================================================================================
@@ -304,21 +319,28 @@ def clear_policy_store() -> None:
 # ======================================================================================
 
 
-def ensure_agent_policy(namespace: str) -> None:
+def ensure_agent_policy(namespace: str, policy_md: str = scn.POLICY_ABSTRACT) -> None:
     """Ensure the PRB's ``policy.md`` is mounted in the Controller pod — the one mutable stack
     precondition the ladder owns, so a fresh AIAC stack needs no manual patching.
 
     Phase-1's PRB reads the single abstract policy from ``AIAC_POLICY_FILE`` (default
     ``/etc/aiac/policy.md``). This idempotently provisions that file as a ConfigMap and mounts it on
-    the Controller Deployment, rolling out **only** when the mount is absent. The policy text is
-    ``scenario_uc1.POLICY_ABSTRACT`` — the same abstract policy the scenario's verdicts assume. It is
-    never written into a committed deployment manifest (that stays free of test config) and is left
-    in place on teardown (benign, and keeps reruns fast)."""
+    the Controller Deployment, rolling out **only** when the mount is absent. The mounted text is
+    ``policy_md`` — defaulting to ``scenario_uc1.POLICY_ABSTRACT`` (Policy A) so existing callers mount
+    the same abstract policy the scenario's verdicts assume; a second policy (e.g. the denyworld
+    ``POLICY_DENYWORLD``) is driven through the same harness by passing its prose here. It is never
+    written into a committed deployment manifest (that stays free of test config) and is left in place
+    on teardown (benign, and keeps reruns fast).
+
+    The content-diff below (``kubectl apply`` "unchanged" vs "configured") already forces a Controller
+    rollout whenever ``policy.md``'s prose changes, so **switching between policies reloads correctly**:
+    a run that swaps Policy A for Policy B (or back) sees "configured", rolls the Controller, and waits,
+    so the PRB reads the new prose before onboarding."""
     cm = {
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {"name": POLICY_CONFIGMAP, "namespace": namespace},
-        "data": {"policy.md": scn.POLICY_ABSTRACT},
+        "data": {"policy.md": policy_md},
     }
     apply_out = kubectl("apply", "-f", "-", input_text=json.dumps(cm))
     # ``kubectl apply`` reports "created"/"configured" when the ConfigMap's content differs from the
@@ -355,6 +377,31 @@ def ensure_agent_policy(namespace: str) -> None:
         "patch", "deployment", CONTROLLER_DEPLOYMENT, "-n", namespace,
         "--type", "strategic", "-p", json.dumps(patch),
     )
+    kubectl_rollout_status(f"deployment/{CONTROLLER_DEPLOYMENT}", namespace=namespace)
+
+
+def _set_controller_default_effect(namespace: str, effect: str) -> None:
+    """Apply the ``default_effect`` onboarding hook: set the Controller/PCE env the engine reads when
+    it mints the ``AgentPolicyModel`` (``engine._fresh_apm``), then roll the Controller so the new
+    value is live **before** the next ``onboard`` derives a policy under it. Mirrors
+    ``ensure_agent_policy``'s patch-and-rollout precondition-fixup — a test-owned mutation of the
+    running Controller, never written into a committed manifest.
+
+    This is the single hard coupling to Task 1 (#146), which owns the reader side. The env **name**
+    (``DEFAULT_EFFECT_ENV``, default ``AIAC_DEFAULT_EFFECT``) and the string values (``"Allow"`` /
+    ``"Deny"``) are #146's contract — verify/realign them once #146 lands (handoff §3). The strategic
+    merge patch is keyed on the env-var ``name``, so it upserts just this one var and leaves the
+    Controller's other env untouched."""
+    patch = {
+        "spec": {"template": {"spec": {"containers": [
+            {"name": CONTROLLER_DEPLOYMENT, "env": [{"name": DEFAULT_EFFECT_ENV, "value": effect}]}
+        ]}}}
+    }
+    kubectl(
+        "patch", "deployment", CONTROLLER_DEPLOYMENT, "-n", namespace,
+        "--type", "strategic", "-p", json.dumps(patch),
+    )
+    kubectl("rollout", "restart", f"deployment/{CONTROLLER_DEPLOYMENT}", "-n", namespace)
     kubectl_rollout_status(f"deployment/{CONTROLLER_DEPLOYMENT}", namespace=namespace)
 
 
@@ -496,6 +543,18 @@ def inbound_decision(ctx: dict, user: str) -> str:
     return inbound_outcome(code)
 
 
+def resolve_controller_pod() -> str:
+    """Resolve the **current** live Controller pod (newest Running+Ready, non-terminating — see
+    ``resolve_pod``). The onboard leg port-forwards to this resolved pod rather than
+    ``svc/aiac-agent-service`` because both ``_set_controller_default_effect`` and
+    ``ensure_agent_policy`` may roll the Controller Deployment right before onboarding: with
+    ``replicas=1``/``maxUnavailable=0`` the old pod lingers ``Terminating`` (up to its grace period)
+    and the Service can still route a fresh connection to it. Its ``/health`` answers 200 right up
+    until it drops the long onboard POST mid-flight — the ``RemoteDisconnected`` race, the onboard-leg
+    analogue of issue #139. Binding the resolved live pod avoids the doomed endpoint."""
+    return resolve_pod(f"app={CONTROLLER_DEPLOYMENT}", namespace=CONTROLLER_NAMESPACE)
+
+
 def resolve_agent_pod() -> str:
     """Resolve the **current** live agent pod (newest Running+Ready, non-terminating — see
     ``resolve_pod``). Re-resolved per outbound probe rather than pinned once at fixture setup: the
@@ -517,12 +576,76 @@ def outbound_decision(ctx: dict, user: str, tool_bare: str) -> str:
 
 
 # ======================================================================================
+# Convergence probe — the parametrized readiness signal each policy supplies
+# ======================================================================================
+
+
+@dataclass(frozen=True)
+class ReadySignal:
+    """One convergence probe: a live decision this run must reach a **definitive** verdict on before
+    any assertion. ``onboarded_stack`` polls the whole signal set until every one matches, so each
+    signal must be deterministic for its scenario regardless of a stale CR the run replaced (a live
+    ``deny`` that the permissive default would flip to ``allow``, or vice-versa, is the tracer that
+    proves *this* run's bundle is in force). Polling each to a definitive ``allow``/``deny`` (never
+    ``error``) also waits out the post-restart token-exchange 503 window.
+
+    ``kind`` selects the probe: ``"inbound"`` → ``inbound_decision(ctx, subject)``; ``"outbound"`` →
+    ``outbound_decision(ctx, subject, tool_bare)`` (``tool_bare`` required). ``expected`` is the
+    terminal ``"allow"``/``"deny"`` the signal converges to."""
+
+    kind: str
+    subject: str
+    expected: str
+    tool_bare: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in ("inbound", "outbound"):
+            raise ValueError(f"ReadySignal.kind must be 'inbound' or 'outbound', got {self.kind!r}")
+        if self.kind == "outbound" and self.tool_bare is None:
+            raise ValueError("an outbound ReadySignal needs a bare tool name (tool_bare=...)")
+
+    def decide(self, ctx: dict) -> str:
+        """Send this signal's live probe through AuthBridge and return the plugin's classified verdict."""
+        if self.kind == "inbound":
+            return inbound_decision(ctx, self.subject)
+        return outbound_decision(ctx, self.subject, self.tool_bare)
+
+    def label(self) -> str:
+        """Short human-readable probe name for the raw-diagnostics message."""
+        if self.kind == "inbound":
+            return f"inbound({self.subject})"
+        return f"outbound({self.subject},{self.tool_bare})"
+
+
+def _default_ready_signals(tool_onboarded: bool) -> list[ReadySignal]:
+    """The Policy-A convergence signal set — the exact probe the harness has always polled, preserved
+    as the default so existing rung callers are unchanged:
+
+      * ``dev-user`` reaches the agent (inbound allow),
+      * ``devops-user`` is blocked (inbound deny — proves the restrictive client-scoped gate is live,
+        not the allow-all baseline),
+      * ``dev-user``'s outbound ``source-read`` has reached its terminal verdict — ``allow`` once a tool
+        is onboarded (rungs 2 & 3), ``deny`` for the empty-gate agent-only rung (rung 1)."""
+    return [
+        ReadySignal("inbound", "dev-user", "allow"),
+        ReadySignal("inbound", "devops-user", "deny"),
+        ReadySignal("outbound", "dev-user", "allow" if tool_onboarded else "deny", tool_bare="source-read"),
+    ]
+
+
+# ======================================================================================
 # Per-rung fixture flow — cleanup → onboard (in order) → Part B → poll bundle → yield → cleanup
 # ======================================================================================
 
 
 @contextmanager
-def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
+def onboarded_stack(
+    workloads: list[str],
+    *,
+    policy_md: str = scn.POLICY_ABSTRACT,
+    default_effect: str = DEFAULT_EFFECT_DENY,
+    ready_signals: Sequence[ReadySignal] | None = None,
+) -> Iterator[dict]:
     """Run one rung's whole live flow and yield a probe ``ctx`` for its assertions.
 
     ``ctx`` = ``{"admin", "namespace", "agent_pod", "keycloak_url", "realm", "tool_onboarded"}``.
@@ -535,7 +658,24 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
     before yielding. Keycloak cleanup + CR delete run before and after; the clients are left
     registered as before (spec § Per-rung flow). The workload order is the rung's identity — e.g.
     rung 2 passes ``[agent, tool]`` so tool onboarding retroactively completes the agent's outbound
-    gate; rung 3 passes ``[tool, agent]`` and must converge to the same live decisions."""
+    gate; rung 3 passes ``[tool, agent]`` and must converge to the same live decisions.
+
+    **Policy-agnostic parametrization (#149).** Every keyword defaults to today's Policy-A behavior,
+    so the rung callers (which pass only a positional ``workloads``) are byte-for-byte unchanged, while
+    a second policy can drive the very same flow:
+
+    * ``policy_md`` — the ``policy.md`` prose to mount before onboarding (default: Policy A's
+      ``POLICY_ABSTRACT``). Forwarded to ``ensure_agent_policy``; a prose change reloads the Controller
+      via the existing content-diff rollout.
+    * ``default_effect`` — the derived ``AgentPolicyModel.default_effect`` this run onboards under
+      (default: ``DEFAULT_EFFECT_DENY``, the shipped deny-by-default). A non-default value is applied to
+      the Controller **before** onboarding via ``_set_controller_default_effect`` and **reset to
+      ``Deny`` on teardown** so a subsequent Policy-A run on the shared stack is unaffected. ``Deny`` is
+      a no-op (the stack is never patched), keeping Policy-A runs from touching the Controller env.
+    * ``ready_signals`` — the convergence probe set to poll before yielding (default: the Policy-A
+      ``_default_ready_signals``). A policy whose truth differs from Policy A (e.g. denyworld, where
+      ``devops-user`` inbound is *allow*, not *deny*) supplies its own deterministic signals so the run
+      converges on the right decisions; the raw-diagnostics message is recomputed against them."""
     # Skip gates first — before any cluster mutation (acceptance #4: skip, never false-pass).
     require_pipeline(namespace=NAMESPACE, workloads=[scn.AGENT_WORKLOAD, scn.TOOL_WORKLOAD])
     creds = require_env_or_skip("KEYCLOAK_URL", "KEYCLOAK_ADMIN_USERNAME", "KEYCLOAK_ADMIN_PASSWORD")
@@ -551,15 +691,29 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
     verify_subject_mapper(
         keycloak_url=keycloak_url, realm=TEST_REALM, user="dev-user", password=scn.USER_PASSWORD
     )
-    ensure_agent_policy(CONTROLLER_NAMESPACE)  # mount the PRB's policy.md if the stack lacks it
 
     tool_onboarded = scn.TOOL_WORKLOAD in workloads
+    signals = list(ready_signals) if ready_signals is not None else _default_ready_signals(tool_onboarded)
+    # A non-default effect is patched onto the Controller here and reset in ``finally``; ``Deny`` (the
+    # shipped default) never touches the stack, so Policy-A runs are unchanged. Tracked so teardown
+    # only resets what this run actually applied.
+    default_effect_applied = default_effect != DEFAULT_EFFECT_DENY
     try:
+        if default_effect_applied:
+            _set_controller_default_effect(CONTROLLER_NAMESPACE, default_effect)  # BEFORE onboarding
+        ensure_agent_policy(CONTROLLER_NAMESPACE, policy_md=policy_md)  # mount this run's policy.md
         service_ids = [
             resolve_service_id(admin, TEST_REALM, f"{NAMESPACE}/{workload}") for workload in workloads
         ]
+        # Bind the onboard port-forward to the resolved **live** Controller pod, not the Service:
+        # the rollouts above can leave an old pod ``Terminating`` that the Service still routes to,
+        # dropping the long onboard POST mid-flight (see ``resolve_controller_pod``). An explicit
+        # ``AIAC_CONTROLLER_TARGET`` override is still honored verbatim for non-default topologies.
+        controller_target = (
+            CONTROLLER_TARGET if os.environ.get("AIAC_CONTROLLER_TARGET") else f"pod/{resolve_controller_pod()}"
+        )
         with port_forward(
-            CONTROLLER_TARGET,
+            controller_target,
             namespace=CONTROLLER_NAMESPACE,
             local_port=CONTROLLER_LOCAL_PORT,
             remote_port=CONTROLLER_REMOTE_PORT,
@@ -588,21 +742,12 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
         }
 
         # Wait for bundle-service + OPA to reflect THIS run's CR (and token-exchange to settle) before
-        # any assertion. Readiness signals, all deterministic for this scenario regardless of a stale
-        # CR (which the run replaced): dev-user reaches the agent (inbound allow), devops-user is
-        # blocked (inbound deny — proves the restrictive client-scoped gate is live, not the allow-all
-        # baseline), and dev-user's outbound source-read has reached its terminal verdict —
-        # ``allow`` once a tool is onboarded, ``deny`` for the empty-gate agent-only rung. Polling the
-        # outbound signal to a *definitive* allow/deny (not ``error``) also waits out the post-restart
-        # token-exchange 503 window.
-        expected_source_read = "allow" if tool_onboarded else "deny"
-
+        # any assertion. The ``signals`` set (this policy's ``ready_signals``, or the Policy-A default)
+        # is polled until every probe reaches its terminal verdict — each deterministic for its
+        # scenario regardless of a stale CR (which the run replaced), and each polled to a *definitive*
+        # allow/deny (not ``error``) so we also wait out the post-restart token-exchange 503 window.
         def _ready() -> bool:
-            return (
-                inbound_decision(ctx, "dev-user") == "allow"
-                and inbound_decision(ctx, "devops-user") == "deny"
-                and outbound_decision(ctx, "dev-user", "source-read") == expected_source_read
-            )
+            return all(sig.decide(ctx) == sig.expected for sig in signals)
 
         if not poll_until(_ready, timeout=BUNDLE_TIMEOUT, interval=BUNDLE_POLL_INTERVAL):
             # Surface the RAW outbound (code, body) — not just the classified outcome — so a stalled
@@ -614,28 +759,35 @@ def onboarded_stack(workloads: list[str]) -> Iterator[dict]:
             #   * ``code=503`` — the ``token-exchange`` leg failed upstream (audience refused, IdP
             #     unreachable), so OPA was never consulted.
             #   * a genuine OPA policy stall can't show as ``"error"`` at all: it surfaces as ``"deny"``
-            #     (HTTP 200 + an OPA error frame), because the generated Rego always carries
-            #     ``default allow := false``.
+            #     under deny-by-default (HTTP 200 + an OPA error frame), because the generated Rego
+            #     carries ``default allow := false``.
+            # The observed-vs-expected line is recomputed against *this run's* signals so a denyworld
+            # (or any parametrized) run diagnoses itself, not a hardcoded Policy-A probe.
+            observed = "; ".join(f"{sig.label()}={sig.decide(ctx)!r}(want {sig.expected!r})" for sig in signals)
             # Re-resolve the pod fresh here (not the possibly-stale ``ctx["agent_pod"]``) so the raw
-            # line reflects the *current* live pod.
-            ob_token = mint_token(
-                "dev-user", scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"]
-            )
-            ob_code, ob_body = outbound_probe(
-                ob_token, "source-read", namespace=ctx["namespace"], agent_pod=resolve_agent_pod()
-            )
+            # line reflects the *current* live pod. Dump the raw (code, body) for the first outbound
+            # signal — the leg where the #139 stale-pod / 503 failures actually show up.
+            raw_line = ""
+            ob_sig = next((s for s in signals if s.kind == "outbound"), None)
+            if ob_sig is not None:
+                ob_token = mint_token(
+                    ob_sig.subject, scn.USER_PASSWORD, keycloak_url=ctx["keycloak_url"], realm=ctx["realm"]
+                )
+                ob_code, ob_body = outbound_probe(
+                    ob_token, ob_sig.tool_bare, namespace=ctx["namespace"], agent_pod=resolve_agent_pod()
+                )
+                raw_line = f" [raw {ob_sig.label()}: HTTP {ob_code}, body={ob_body[:300]!r}]"
             raise RuntimeError(
                 f"live pipeline did not converge within {BUNDLE_TIMEOUT:.0f}s after onboarding "
-                f"{workloads} + Part B: inbound(dev-user)={inbound_decision(ctx, 'dev-user')!r} "
-                f"inbound(devops-user)={inbound_decision(ctx, 'devops-user')!r} "
-                f"outbound(dev-user,source-read)={outbound_outcome(ob_code, ob_body)!r} "
-                f"[raw: HTTP {ob_code}, body={ob_body[:300]!r}] "
-                f"(expected allow / deny / {expected_source_read}). code=None + 'exec failed' body = a "
+                f"{workloads} + Part B: {observed}.{raw_line} code=None + 'exec failed' body = a "
                 "stale/gone agent pod (harness); 503 = token-exchange never came up (OPA not reached); "
-                "a real policy stall would read 'deny', never 'error' — see k8s/opa-kind-runbook.md "
-                "and issue #139."
+                "under deny-by-default a real policy stall reads 'deny', never 'error' — see "
+                "k8s/opa-kind-runbook.md and issue #139."
             )
         yield ctx
     finally:
+        if default_effect_applied:
+            # Reset the shared stack to the shipped default so a later Policy-A run is unaffected.
+            _set_controller_default_effect(CONTROLLER_NAMESPACE, DEFAULT_EFFECT_DENY)
         delete_agent_cr()  # after — drop this run's CR
         cleanup_provisioned(admin, TEST_REALM)  # after — restore the pre-run Keycloak state

@@ -4,145 +4,131 @@
 > Integration-test specs live **one spec per test** under `docs/specs/integration-test/`
 > (a sibling of `components/`), and the master PRD's *Integration test specifications* section
 > ([../PRD.md](../PRD.md)) is the index of them. This is the **policy-pipeline** integration test —
-> the full identity→policy pipeline — not the definition of integration testing in general, and not
-> the only integration-test PRD.
+> the full identity→policy→**enforcement** pipeline — not the definition of integration testing in
+> general, and not the only integration-test PRD.
 
 ## Location
 `aiac/test/integration/test_policy_pipeline.py` — a pytest module marked `@pytest.mark.integration`.
-It imports two shared modules: `aiac/test/integration/scenario.py` — the canonical `github-agent`
-scenario as pure data (one of the role→access fact sources the *Further Notes* mandate — the pair-lists,
-alongside the *Scenario* table and both `policy.md` variants) — and `aiac/test/integration/launcher.py`
-— the shared `uvicorn` subprocess-lifecycle helpers. It also ships a new
-`aiac/test/integration/probe.rego` — a small standalone Rego module used only as the outbound
-verification query (see *[What it does](#what-it-does)*). The `5.2` launcher
-`test/pdp/policy/generate_rego.py` was refactored onto the same `launcher.py` + `scenario.py` so the two
-launchers cannot drift.
+It imports two shared modules: `aiac/test/integration/scenario_uc1.py` — the canonical `github-agent`
+scenario as pure data (the role→access truth table the *Expected output* renders — the pair-lists,
+expressed over the **discovered, workload-prefixed** names `github-tool.source-read`,
+`github-agent.source_operations`, …) — and `aiac/test/integration/uc1_onboard.py` — the shared live
+harness (Keycloak provisioning/cleanup, the `POST /apply/service/{id}` onboard trigger, the outbound
+token-exchange-leg prep, the bundle-convergence poll, and the live decision oracle + probes). The
+harness in turn builds on `aiac/test/integration/launcher.py`'s live-cluster half (`kubectl` wrappers,
+`port_forward`, `resolve_pod`, `mint_token`, `inbound_probe` / `outbound_probe`, `inbound_outcome` /
+`outbound_outcome`, `poll_until`, and the skip gates). There is **no** standalone Rego module and **no**
+`opa` binary here anymore: the evaluator is the deployed AuthBridge OPA plugin (see *[What it
+does](#what-it-does)*).
 
 ## Description
 
-A `@pytest.mark.integration` test that drives the **whole identity→policy pipeline** —
-**Keycloak → PRB → PCE → OPA Policy Writer** — end-to-end, then **asserts** the generated Rego decides
-correctly by running the standalone `opa eval` binary as its verification oracle. The `.rego` files are
-still left on disk per policy variant, so the test doubles as the eyeball workflow: running the test
-*is* the eyeball. There is no separate standalone script.
+A `@pytest.mark.integration` test that drives the **whole identity→policy→enforcement pipeline** —
+**Keycloak → UC-1 onboarding → PRB → PCE → OPA Policy Writer → AuthBridge OPA plugin** — end-to-end,
+then **asserts** that the **enforced decision** is correct by driving a **real HTTP request through
+AuthBridge** and reading the **deployed OPA plugin's** allow/deny. Nothing is mocked or dumped; the
+artifact under test is the *enforced decision*, not a file on disk.
 
-The generated Rego is the **artifact under test** — the LLM/PCE that produced it might be wrong — so the
-test never trusts it. Instead it feeds `opa eval` requests derived from the **scenario spec (the
-intended policy)** and asserts the real Rego admits/denies each one as the scenario truth table
-requires. A mismatch fails the test and names the exact cell.
+The generated policy is the **artifact under test** — the LLM/PCE that produced it might be wrong — so
+the test never trusts it. Instead it sends requests derived from the **scenario spec (the intended
+policy)** and asserts the real plugin admits/denies each one as the scenario truth table
+(`scenario_uc1.py`) requires. A mismatch fails the test and names the exact `subject[ / tool]` cell.
 
-This is the same *flavor* as the PDP Policy Writer launcher
-([pdp-policy-writer.md](pdp-policy-writer.md), issue `testing/5.2-pdp-writer-integration-test.md`) but
-**broader**: where `5.2` hand-builds a `PolicyModel` in Python and POSTs it to the OPA stub —
-deliberately bypassing Keycloak, the PRB, and the PCE — this test provisions a **live Keycloak** realm,
-calls the real **Policy Rules Builder (PRB)** to map roles→scopes with a real LLM, then calls the real
-**Policy Computation Engine (PCE)** to build the `PolicyModel` and drive the **OPA Policy Writer** to
-emit Rego. Nothing is mocked; the only shortcut is that the OPA target is the filesystem stub
-([../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md) §1.14) rather than the
-Kubernetes-CR implementation, so the output is `.rego` files instead of a patched
-`AuthorizationPolicy` CR — identical to `5.2`.
+This is the **umbrella full-matrix e2e** for the fixed `github-agent` scenario. It onboards **both** the
+`github-agent` and the `github-tool` through the real in-cluster UC-1 Controller
+(`POST /apply/service/{id}`, which upserts the `AuthorizationPolicy` CR on the live Kubernetes API),
+enables the outbound token-exchange leg, waits for `bundle-service` + the AuthBridge OPA sidecars to
+recompose and reload the bundle, then asserts the **full happy-path matrix + negative controls** over
+the fully onboarded stack. Both gates are exercised through AuthBridge's own parsers: `jwt-validation`
+builds `input.identity` on the inbound leg; `token-exchange` + `mcp-parser` build the outbound
+`input.identity` + `input.mcp.params.name` (the **bare** tool name) — so the test never hand-builds an
+input document and there is no standalone probe module.
 
-Because it needs a live Keycloak and a real LLM, it is `@pytest.mark.integration` and stays out of the
-default unit-test run (`-m "not integration"`); it additionally `pytest.skip`s when no `opa` binary is
-found.
+Where this sits vs. the UC-1 ladder ([uc1-onboarding-pipeline.md](uc1-onboarding-pipeline.md)): rungs
+1–3 isolate onboarding-**order** properties (agent-only; agent→tool; tool→agent + order-independence);
+this module is the **full matrix + negative controls** over the fully onboarded stack. Both share the
+same live stack — the `rossoctl` realm and the deployed `team1` workloads — so there is exactly one
+deployed pipeline to enforce against; the former explicit-vs-abstract two-policy equivalence check is
+therefore **deferred to the two-policy rung** `testing/5.4.4` (only one `policy.md` is mounted on the
+live stack).
+
+Because it needs a live rossoctl/Kind cluster with the AuthBridge OPA pipeline wired in, a real LLM,
+and Keycloak admin creds, it is `@pytest.mark.integration` and stays out of the default unit-test run
+(`-m "not integration"`); it **skips cleanly** when the cluster is not wired or the env is unset (it
+never false-passes).
 
 ### What it does
 
-The pipeline (provision → PRB → PCE → OPA) is driven **once per `policy.md` variant** — `explicit` and
-`abstract` — each writing into its own `rego_out/policy_pipeline/<variant>/` directory (a sibling of
-the UC-1 ladder's `rego_out/uc1/`). `opa eval` then asserts the
-scenario truth table against **each** variant's Rego (step 7). Steps 1–6 below describe one such run.
+A single session fixture (`uc1.onboarded_stack([AGENT_WORKLOAD, TOOL_WORKLOAD])`) drives the whole
+identity→policy→enforcement pipeline once; the individual tests then assert the real plugin's decisions
+over the fully onboarded stack.
 
-1. **Set service URLs in env before importing the aiac libraries.** Export `AIAC_PDP_CONFIG_URL`,
-   `AIAC_POLICY_MODEL_STORE_URL`, `AIAC_PDP_POLICY_URL`, and `KEYCLOAK_REALM` *before* importing the aiac
-   libraries — the libraries read env at import time. This is the pattern
-   `test/pdp/policy/generate_rego.py` already follows. (The PCE resolves its realm via
-   `Configuration.for_default_realm()`, the single source of truth reading `KEYCLOAK_REALM`; the
-   former `AIAC_REALM` is retired.)
-2. **Spawn the three services as `uvicorn` subprocesses** (no Docker) and poll each `GET /health`
-   until ready, with a bounded timeout:
-   - IdP Configuration Service — `aiac.idp.service.configuration.keycloak.main:app` on `7071`.
-   - Policy Model Store — its ASGI app on `7074`, with `SERVICEPOLICY_DB_PATH` pointed at a fresh temp dir.
-   - OPA Policy Writer — `aiac.pdp.service.policy.opa.main:app` on `7072`, with `REGO_OUTPUT_DIR`
-     (pointed at the current variant's `rego_out/policy_pipeline/<variant>/`) and the Policy Model Store DB path in its env.
-3. **Provision Keycloak** (idempotent — delete-if-exists the realm first, then create):
-   - via **`python-keycloak` `KeycloakAdmin`** (test fixture): create realm `AIAC_TEST_REALM`; create
-     users `dev-user`, `test-user`, and `devops-user`; create realm roles `developer`, `tester`, and
-     `devops`; assign roles to users (`devops-user`→`devops`, which maps to **no** agent/tool scope —
-     the inbound deny case, see *[Scenario](#scenario)*); create the `github-agent` and `github-tool`
-     clients with the descriptions in
-     *[Scenario inputs](#scenario-inputs-prb-functional-inputs)* and with the `client.type`
-     client attribute set to the plain string `"Agent"` / `"Tool"` respectively, so `Service` type
-     resolution tags them from the attribute (not from description prose). Set the type via the product
-     surface `Configuration.set_service_type(service, type)` (`POST /services/{id}/type`) or by writing
-     the `client.type` attribute directly at client create. The attribute value is a plain string,
-     **not** a list — a list fails the `in ("Agent","Tool")` check, resolves the type to `None`, and
-     yields empty pipeline output.
-   - via the **aiac IdP `Configuration` library** (the real product surface the PCE reads back): create
-     the client roles (`source_operations`, `issue_operations`) and scopes (`source-access`, `issues-access`,
-     `source-read`, `source-write`, `issues-read`, `issues-write`) with the descriptions in
-     *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*, and map roles→services and
-     scopes→services so `get_services_by_role` / `get_services_by_scope` and `get_service().roles` /
-     `.scopes` resolve correctly.
-4. **Read-back type guard** — after provisioning, call `Configuration.get_service` for both clients and
-   assert each resolved `.type` (`github-agent` ⇒ `Agent`, `github-tool` ⇒ `Tool`) **before** spawning
-   the pipeline; abort with a clear message otherwise. This is a provisioning sanity check on the
-   `client.type` attribute, distinct from the step-7 Rego-decision assertions.
-5. **Proto-UC1 orchestration** — run the three PRB mappings against a pinned LLM (`temperature=0`) and
-   concatenate the results into one `list[PolicyRule]`:
-   - **(a)** `build_scope_rules(user_roles, agent_scope)` per agent scope → user→agent-scope rules.
-   - **(b)** `build_scope_rules(user_roles, tool_scope)` per tool scope → user→tool-scope rules.
-   - **(c)** `build_role_rules(agent_role, tool_scopes)` per agent role → agent-role→tool-scope rules.
-
-   Concatenate into a single `list[PolicyRule]` and call
-   `aiac.policy.computation.engine.compute_and_apply(rules, override=False)` against a **fresh** Policy
-   Store. The PCE resolves the IdP relationships, builds the `github-agent` model (with `agent_roles` /
-   `agent_scopes`; mapping (b) routed into `outbound_subject_rules`; and **no** `github-tool` model),
-   writes it to the store, and pushes it to the OPA stub.
-6. **Terminate the three subprocesses in `finally`.** The realm and the `.rego` files are left in
-   place for eyeballing.
-7. **Assert the truth table with `opa eval`.** Once both variants' Rego is on disk, evaluate a matrix of
-   **(request JSON, rego file)** tuples with the standalone `opa` binary and hard-assert each decision
-   against the scenario truth table (see *[Expected output](#expected-output)*):
-   - **`opa` discovery** — `$OPA_BIN` → else `shutil.which("opa")` → else `pytest.skip("opa not
-     found")`. Missing `opa` skips (does not fail) the suite.
-   - **Inbound** — one node per `(variant × subject)`. Request `{"subject": <id>}` (source omitted, so
-     the generated `source_ok` passes) is evaluated against the real
-     `data.authz.github_agent.inbound.allow`. Coarse "can this user reach the agent at all" — there is
-     no intent field.
-   - **Outbound** — one node per `(variant × subject × function_name)`, where `function_name` is the
-     agent's operation (a tool scope). Because the generated `allow` / `subject_ok` are existential and
-     ignore any scope, the outbound decision is evaluated by a **probe query**,
-     `data.probe.outbound.allow` (defined in `test/integration/probe.rego`), which binds
-     `input.function_name` against the generated data maps and requires **both** the user→tool gate and
-     the agent→tool gate to admit the function. Request shape `{"subject", "target", "function_name"}`.
-   - **Soft match** `function_name`↔scope — the probe compares names by splitting **both** on `[._-]+`,
-     lowercasing, and comparing as **sets** (token-set equality): `source.read`, `read_source`, and
-     `Source-Read` all match `source-read`; bare `source` matches nothing.
-   - The expected verdict for every cell is **computed from** the scenario pair-lists
-     (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS` in `scenario.py`), not from a second
-     hand-maintained copy — a wrong LLM/PCE mapping therefore fails the test. A failing node names the
-     exact `variant / subject / function_name` cell.
-8. **Assert grant-set equivalence (semantic, beyond the decision oracle).** The `opa eval` matrix in
-   step 7 is deliberately coarse: inbound `allow` only checks "reaches *some* agent scope," and the
-   agent→tool gate covers all four scopes so only the user gate discriminates — so a **verdict-neutral**
-   mapping error (a missing or spurious `(role, scope)` grant) passes step 7 unseen. To close that gap
-   the test also captures the PRB's `list[PolicyRule]` per variant and asserts, as order-independent
-   `(role, scope)` **sets** per gate, that **each variant equals the `scenario.py` truth table** and
-   **the two variants equal each other**. This compares grant *sets*, not Rego text (formatting/ordering
-   may differ; the grant set may not). This is what enforces the *both variants reproduce the same Rego*
-   intent stated in *Further Notes*.
+1. **Skip gates first — before any cluster mutation.** `require_pipeline` skips cleanly if the live
+   AuthBridge OPA pipeline is not wired (no `kubectl`, `AuthorizationPolicy` CRD not served,
+   `bundle-service` not Running, the `opa` plugin not on **both** legs, or a workload pod not Running);
+   `require_env_or_skip` skips if `KEYCLOAK_URL` / admin creds are unset. The suite never false-passes.
+2. **Clean slate.** Delete the agent's `AuthorizationPolicy` CR, `cleanup_provisioned` (drop the
+   `github-agent.` / `github-tool.`-prefixed realm roles + client scopes UC-1 provisions), and
+   `clear_policy_store` (drop persisted SPMs from the in-cluster Policy Store, whose SQLite outlives
+   redeploys). Then `provision_realm_and_users` idempotently ensures the scenario's three users +
+   realm roles (`developer` / `tester` / `devops`) with the descriptions the PRB reads (the fixture
+   provisions these; UC-1 does not), `verify_subject_mapper` confirms the realm's `username → sub`
+   mapper + Direct Access Grants are in place (else skip), and `ensure_agent_policy` mounts the single
+   abstract `policy.md` on the Controller pod.
+3. **Onboard both workloads through the real in-cluster UC-1 Controller.** `POST /apply/service/{id}`
+   for the `github-tool` and the `github-agent`, where `{id}` is the client's **internal Keycloak
+   UUID** (`resolve_service_id`), not the slash-bearing `clientId`. UC-1 classifies each service,
+   reads the MCP `tools/list` / AgentCard skills, provisions the **workload-prefixed** scopes
+   (`github-tool.{source-read, source-write, issues-read, issues-write}`) and the agent's **one
+   operator role per skill** (`github-agent.{source_operations, issue_operations}`), maps roles→scopes
+   via the real PRB (real LLM, `temperature=0`), and the Controller calls
+   `compute_and_apply(rules, override=False)`; the OPA Policy Writer upserts the agent's
+   `AuthorizationPolicy` CR on the live Kubernetes API.
+4. **Enable the outbound token-exchange leg (Part B).** `ensure_github_tool_route` adds the
+   `github-tool` outbound route to `authproxy-routes`, `grant_exchange_scope` grants the agent's
+   Keycloak client the `github-tool` audience scope as optional, and `restart_agent` restarts the
+   agent so it reloads the route (and its OPA sidecar re-fetches the recomposed bundle). Without this
+   the outbound call would pass through unexchanged and never reach OPA.
+5. **Wait for the pipeline to converge.** `poll_until` drives real decisions until this run's CR is
+   reflected: `dev-user` reaches the agent (inbound allow), `devops-user` is blocked (inbound deny —
+   proving the restrictive client-scoped gate is live, not the allow-all baseline), and `dev-user`'s
+   outbound `source-read` has reached its terminal `allow` (waiting out the post-restart
+   token-exchange window). Keycloak cleanup + CR delete run **before and after**; the clients stay
+   registered as before.
+6. **Assert the enforced decisions over the full matrix.** Each test mints a fresh user token and
+   sends a **real HTTP request through AuthBridge**:
+   - **Inbound** — one node per `subject`. A request as `subject` reaches the agent iff the user's
+     role may reach some agent scope. `jwt-validation` builds `input.identity`; the real OPA plugin
+     decides (200 → `allow`, 403 → `deny`).
+   - **Outbound** — one node per `(subject × bare tool name)`. A real MCP `tools/call` for the **bare**
+     tool through AuthBridge's forward proxy (token-exchange → OPA) is allowed iff **both** the subject
+     and some agent role are entitled to that tool's scope (the per-scope two-gate AND). `mcp-parser`
+     surfaces `input.mcp.params.name`; a denial is a JSON-RPC error frame (`error.data.plugin: "opa"`)
+     at HTTP 200 that the harness classifies as `deny`.
+   - The expected verdict for every cell is **computed from** the `scenario_uc1.py` pair-lists
+     (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_TARGET_PAIRS`), keyed on the **bare**
+     runtime tool names AuthBridge sends — not a second hand-maintained copy. A wrong LLM/PCE mapping
+     therefore fails the exact `subject / tool` cell.
+7. **Negative controls.** An otherwise-allowed subject (`dev-user`) invoking a tool name in **no**
+   allowed scope (`nonexistent-tool`) is denied — the outbound gate matches `input.mcp.params.name`
+   exactly, so an unknown tool falls through to deny-by-default. A bogus, destructive-sounding tool
+   name (`delete_everything`) matching no discovered scope is likewise denied — guarding against an
+   over-broad match letting an unrecognized operation through.
+8. **Oracle-contract tests (fixture-independent).** A handful of tests need neither the cluster nor
+   the env: they assert the intended matrix itself — `expected_inbound` / `expected_outbound_bare`
+   over the scenario pair-lists — the tracer bullet. If these are wrong, every live assertion is
+   meaningless.
 
 ## Expected output
 
-The test passes when `opa eval` decides every cell of the scenario truth table as follows, for **both**
-policy variants. Verdicts are **computed from** the `scenario.py` pair-lists (`INBOUND_PAIRS` /
-`OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`), not a hand-maintained copy — this table is the human-
-readable rendering of them.
+The test passes when the deployed OPA plugin decides every cell of the scenario truth table as follows.
+Verdicts are **computed from** the `scenario_uc1.py` pair-lists (`INBOUND_PAIRS` /
+`OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_TARGET_PAIRS`), keyed on the bare runtime tool names; this table
+is the human-readable rendering of them.
 
 `USERS`: `dev-user`→`developer`, `test-user`→`tester`, `devops-user`→`devops`.
 
-**Inbound allow** (`data.authz.github_agent.inbound.allow`, from `INBOUND_PAIRS`, user-role→agent-scope):
+**Inbound allow** (the real plugin's inbound decision, from `INBOUND_PAIRS`, user-role→agent-scope):
 
 | Subject | Inbound |
 |---|---|
@@ -150,8 +136,8 @@ readable rendering of them.
 | test-user | ✅ |
 | devops-user | ❌ |
 
-**Outbound allow(subject, function)** (`data.probe.outbound.allow`, from `OUTBOUND_SUBJECT_PAIRS`
-user→tool; the agent→tool gate covers all four scopes, so the user gate discriminates):
+**Outbound allow(subject, tool)** (the real plugin's outbound decision, per-scope two-gate AND over
+the **bare** tool names; the agent reaches all four tool scopes, so the user gate discriminates):
 
 | | source-read | source-write | issues-read | issues-write |
 |---|---|---|---|---|
@@ -159,211 +145,210 @@ user→tool; the agent→tool gate covers all four scopes, so the user gate disc
 | test-user | ❌ | ❌ | ✅ | ✅ |
 | devops-user | ❌ | ❌ | ❌ | ❌ |
 
-Alongside the assertions, each variant leaves exactly **two** files on disk in its
-`rego_out/policy_pipeline/<variant>/` for eyeballing:
+Plus the negative controls: `dev-user` invoking `nonexistent-tool` or `delete_everything` is **denied**
+(deny-by-default; no accidental allow on an unknown tool name).
 
-- `github_agent.inbound.rego` — package `authz.github_agent.inbound`; the **user→agent** gate.
-  `subject_roles` = `{dev-user: [developer], test-user: [tester]}`; `agent_scopes` populated.
-  (`devops-user` holds `devops`, which maps to no agent scope, so it is absent from `subject_roles` and
-  denied inbound.)
-- `github_agent.outbound.rego` — package `authz.github_agent.outbound`; `allow if { subject_ok;
-  target_ok }`. Its **`subject_ok`** is the new **user→tool** gate (mapping (b), grouped from
-  `outbound_subject_rules` into `subject_role_scopes`, matched against
-  `target_scopes[input.target]`); its **`target_ok`** is the **agent→tool** gate (mapping (c), over
-  `agent_roles` × `agent_role_scopes`). `agent_roles` and `target_scopes` are populated.
-
-Explicitly **no** `github_tool.*.rego` — the pipeline emits no tool model. Eyeball both files against
-the **ID-only** package shapes in
-[../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md)
-(§ *Rego package structure*), the same source of truth `5.2` uses.
+The pipeline emits an agent `AuthorizationPolicy` CR only — explicitly **no** standalone tool policy
+(the tool is a pure target; no rules are written for it directly). This fixture is **ALLOW-only** (see
+*[Further Notes](#further-notes)*): the single `policy.md` carries only positive fine-grained grants and
+no exclusivity / prohibition prose, and the entity/role descriptions stay deny-neutral, so the
+DENY-aware PRB emits **no** `DENY` rules. Extending the fixture to exercise the PRB's ALLOW+DENY path
+(explicit-prohibition prose and/or description-driven denies, plus a grant-set assertion that compares
+**deny** sets) is deferred to the sibling "for later" issue (#142, ALLOW+DENY policy support); see the
+*Deny-extraction interaction* note under *[Further Notes](#further-notes)*.
 
 ## Scenario
 
-A single agent + tool + three users, fixed so the generated Rego is reproducible and reviewable by
-inspection. This is the same canonical `github-agent` worked example as `5.2`, driven end to end
-through the real pipeline rather than a hand-built `PolicyModel`, plus a third `devops-user` that
-exercises the deny-by-default path.
+A single agent + tool + three users, fixed so the enforced decisions are reproducible and reviewable.
+This is the canonical `github-agent` worked example, driven end to end through the real UC-1 onboarding
+pipeline and enforced by the deployed OPA plugin, plus a third `devops-user` that exercises the
+deny-by-default path. Entities are **discovered** by UC-1 (tool scopes from the MCP `tools/list`
+manifest, agent roles/scopes from the AgentCard skills), so every scope is **workload-prefixed**.
 
 | Element | Value |
 |---------|-------|
-| Realm | `AIAC_TEST_REALM` (default `aiac-pp`) |
-| Agent | `github-agent` (client roles `source_operations`, `issue_operations`; scopes `source-access`, `issues-access`) |
-| Tool | `github-tool` (scopes `source-read`, `source-write`, `issues-read`, `issues-write`) |
+| Realm | `AIAC_TEST_REALM` (must match the deployed stack's `KEYCLOAK_REALM`; default `rossoctl`) |
+| Agent | `github-agent` — **discovered** per-skill operator roles `github-agent.source_operations`, `github-agent.issue_operations` (mirroring the scopes); scopes `github-agent.source_operations`, `github-agent.issue_operations` (from AgentCard skills) |
+| Tool | `github-tool` — **discovered** scopes `github-tool.{source-read, source-write, issues-read, issues-write}` (from MCP `tools/list`) |
 | Users | `dev-user` (role `developer`), `test-user` (role `tester`), `devops-user` (role `devops`) |
 | `developer` | source read/write + issues read |
 | `tester` | issues read/write |
-| `devops` | no access (inbound deny; denied every outbound function) |
+| `devops` | no access (inbound deny; denied every outbound tool) |
 
-Role → access (confirmed with the user; the fixed facts that both `policy.md` versions below and the
-`scenario.py` pair-lists must agree with — the generic descriptions are not part of this triad):
+Role → access (the fixed facts the single `policy.md` and the `scenario_uc1.py` pair-lists must agree
+with — the generic descriptions are not part of this triad):
 
 - `developer` — source read/write, issues read.
 - `tester` — issues read/write.
 - `devops` — no access. Conveyed by the **role description only** — it is absent from every pair-list
-  and both `policy.md` variants are **unchanged** (deny-by-default), so it is denied inbound and on
-  every outbound function.
+  and from the `policy.md` (deny-by-default), so it is denied inbound and on every outbound tool.
 
 ## Configuration (env)
 
+The suite reads its config from `test/integration/.env` (gitignored); source it before running
+(`set -a; . test/integration/.env; set +a`). The drivers read these:
+
 | Variable | Purpose | Default |
 |----------|---------|---------|
+| `KUBECONFIG` | Kubeconfig for the live rossoctl/Kind cluster | — (required) |
 | `KEYCLOAK_URL` | External Keycloak base URL | — (required) |
+| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds (user/realm-role provisioning + cleanup) | — (required) |
 | `KEYCLOAK_ADMIN_REALM` | Realm the admin creds live in | `master` |
-| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Keycloak admin creds | — (required) |
-| `AIAC_TEST_REALM` | Realm the test provisions | `aiac-pp` |
-| `KEYCLOAK_REALM` | Realm the PCE reads back, via `Configuration.for_default_realm()` (single source of truth; = `AIAC_TEST_REALM`) | `aiac-pp` |
-| `AIAC_PDP_CONFIG_URL` | IdP Configuration Service base URL (set before import) | `http://127.0.0.1:7071` |
-| `AIAC_POLICY_MODEL_STORE_URL` | Policy Model Store base URL (set before import) | `http://127.0.0.1:7074` |
-| `AIAC_PDP_POLICY_URL` | OPA Policy Writer base URL (set before import) | `http://127.0.0.1:7072` |
-| `REGO_OUTPUT_DIR` | Base dir the OPA stub subprocess writes `.rego` to; the test points it at `rego_out/policy_pipeline/<variant>/` per variant and leaves the files on disk | operator-chosen local dir |
-| `SERVICEPOLICY_DB_PATH` | Policy Model Store DB path for the subprocess (fresh temp dir) | temp |
-| `AIAC_POLICY_FILE` | PRB whole-file policy — path to the `policy.md` variant fed to the PRB; the test sets it per variant (`policy.explicit.md`, `policy.abstract.md`) | `/etc/aiac/policy.md` |
-| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`) | — (required) |
-| `OPA_BIN` | Path to the standalone `opa` binary used as the verification oracle; else `PATH` (`shutil.which`), else the test `pytest.skip`s | — (optional; PATH lookup) |
+| `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | PRB LLM (pinned `temperature=0`), consumed by the in-cluster AIAC pod | — (required) |
+| `AIAC_TEST_REALM` | Realm the tests resolve/provision against. **Must match the deployed AIAC stack's `KEYCLOAK_REALM`** — the in-cluster Controller resolves the onboarding trigger in *its own* realm | `rossoctl` |
+| `AIAC_DEMO_NAMESPACE` | Namespace the demo workloads are deployed in (precondition) | `team1` |
+| `AIAC_TRUST_DOMAIN` | SPIFFE trust domain the operator registers the demo workloads under | `localtest.me` |
 
-> When the test is written, confirm the Policy Model Store's ASGI import path and its DB-path env-var
-> name against the Policy Model Store component spec / issue — `SERVICEPOLICY_DB_PATH` is the placeholder used
-> here; use the real one. `AIAC_POLICY_FILE` selects which `policy.md` variant (see
-> *[Scenario inputs](#scenario-inputs-prb-functional-inputs)*) the PRB reads.
+> Cluster/stack knobs the harness also honors, with defaults matching the deployed stack (rarely
+> overridden): the Controller target/namespace/ports (`AIAC_CONTROLLER_*`, default
+> `svc/aiac-agent-service` in `aiac-system` on `7070`), the Policy Store target
+> (`AIAC_STORE_*`, `svc/aiac-policy-model-store-service` on `7074`), the policy ConfigMap/mount
+> (`AIAC_POLICY_CONFIGMAP` / `AIAC_POLICY_MOUNT_PATH`), and the timeouts
+> (`AIAC_ONBOARD_TIMEOUT`, `AIAC_BUNDLE_TIMEOUT`, `AIAC_BUNDLE_POLL_INTERVAL`).
 
 ## Runbook
 
-Runnable only once the pipeline fixes (handoffs 01 + 02, P1–P5) have landed, and requires a live
-Keycloak, a real LLM, and an `opa` binary on `PATH` (or `$OPA_BIN`).
+Runnable against a live rossoctl/Kind cluster (operator + Keycloak + SPIRE) with the AuthBridge OPA
+pipeline wired into **both** legs, `github-agent` + `github-tool` **deployed and registered** into
+`AIAC_TEST_REALM`, and a real LLM in-pod. Stand the pipeline up with `k8s/opa-kind-enable.sh`; the full
+prerequisites, wiring, and manual probe commands are in `k8s/opa-kind-runbook.md`.
 
 ```bash
-# env: KEYCLOAK_URL + admin creds + LLM_* set; realm defaults to aiac-pp; opa on PATH or $OPA_BIN
+k8s/opa-kind-enable.sh          # one-time: wire the OPA plugin into both legs of the Kind cluster
+set -a; . test/integration/.env; set +a
 .venv/bin/pytest test/integration/test_policy_pipeline.py -m integration -v
-# ~30 parametrized nodes (variant × subject inbound; variant × subject × function_name outbound).
+# Parametrized over subject inbound + (subject × bare tool) outbound + negative controls.
 # A failing node names the exact cell, e.g.:
-#   test_outbound[abstract-test-user-source-read] — expected deny, opa allowed
-# The generated Rego is left on disk per variant for eyeballing:
-#   rego_out/policy_pipeline/explicit/github_agent.{inbound,outbound}.rego
-#   rego_out/policy_pipeline/abstract/github_agent.{inbound,outbound}.rego
-#   (no github_tool.*.rego in either)
+#   test_outbound[test-user-source-read] — expected deny, plugin allowed
 ```
 
-The suite `pytest.skip`s when no `opa` binary is found (`$OPA_BIN` → `PATH`). Eyeball the persisted
-Rego against the adjusted package shapes in
-[../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md); optionally inspect the
-Policy Model Store DB and the provisioned Keycloak realm.
+Without `-m integration` the suite is not collected; when the cluster is not wired or the env is unset
+it **skips cleanly** (it never false-passes). To eyeball the pipeline manually, follow
+`k8s/opa-kind-runbook.md` (Part A inbound, Part B outbound) and inspect the upserted
+`AuthorizationPolicy` CR and the provisioned Keycloak realm.
 
 ## Testing Decisions
 
-- **Highest seam available, verified by a real oracle.** Real libraries + real services + real Keycloak
-  + real LLM. The test drives the pipeline through its real surfaces — the IdP `Configuration` library,
-  the PRB entry points (`build_scope_rules` / `build_role_rules`), and the PCE's `compute_and_apply` —
-  and then verifies the real filesystem output with the standalone **`opa eval`** binary. The only
-  shortcut is the OPA filesystem stub (same as `5.2`). A good test here asserts only **external
-  behavior** — the policy *decisions* the generated Rego makes for scenario-derived requests — never the
-  internal Rego structure (which the OPA Policy Writer's own unit tests own).
-- **Rego is the artifact under test; the scenario is the oracle.** The LLM/PCE that produced the Rego
-  might be wrong, so the expected verdicts are **computed from** the scenario pair-lists
-  (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`), not from a second hand-maintained
-  copy or from the Rego itself. A wrong role→scope mapping therefore fails the test at the exact cell.
-- **Outbound needs a probe.** The generated `allow` / `subject_ok` are existential and ignore any
-  scope, so a raw query cannot answer "may this subject invoke *this* function." A small
-  `test/integration/probe.rego` (`data.probe.outbound.allow`) binds `input.function_name` against the
-  generated data maps and requires **both** the user→tool and agent→tool gates to admit it. Names are
-  compared by **token-set equality** (split on `[._-]+`, lowercased) so `source.read` / `read_source` /
-  `Source-Read` all match `source-read` while bare `source` matches nothing.
-- **Attribute-based client typing + read-back guard.** Clients are typed by the `client.type`
-  attribute (plain string `"Agent"` / `"Tool"`), provisioned by the test — not by description keywords.
-  Because that attribute drives whether the PCE emits an agent model (and suppresses the tool model),
-  the test reads each service back via `Configuration.get_service` and asserts its `.type` before
-  running the pipeline, aborting on mismatch. This is a **provisioning** sanity check, distinct from the
-  Rego-decision assertions.
-- **Self-contained subprocess lifecycle.** The test spawns IdP (7071), Policy Model Store (7074), and OPA
-  (7072) as `uvicorn` subprocesses, polls each `GET /health` before use, and tears them all down in
-  `finally`. Keycloak and the LLM are **external** (reached via env); `opa` is an external binary.
-- **LLM nondeterminism, contained.** The PRB LLM is pinned to `temperature=0`, and the **explicit**
-  `policy.md` variant states each `(role, scope)` grant outright, so its mapping is stable. The
-  **abstract** variant leans on the LLM to expand prose + descriptions into concrete scopes; both
-  variants are asserted not only cell-by-cell via `opa eval` (step 7) but at the **grant-set** level
-  (step 8) — each variant's `(role, scope)` set must equal the truth table *and* the other variant's.
-  Grant-set equivalence catches the verdict-neutral under/over-grants the decision oracle hides. Some
-  model-dependence remains, which is why the suite is `@pytest.mark.integration`, out of default CI.
-- **Prior art, shared not copied.** `test/pdp/policy/generate_rego.py` (the `5.2` launcher) established
-  the shape this test reuses — `uvicorn` subprocess spawn, `GET /health` poll, env-before-import
-  ordering, and `finally` teardown. Rather than duplicate it, that machinery lives in the shared
-  `test/integration/launcher.py`, and the fixed scenario lives in `test/integration/scenario.py`;
-  `generate_rego.py` was refactored onto both (its `.rego` output verified byte-identical to before the
-  refactor). The live-Keycloak pytest suite (`testing/5.1-integration-tests.md`) is the sibling
-  marker-gated, decision-asserting counterpart for the read-side services and is the prior art for the
-  `@pytest.mark.integration` + `opa eval` shape.
+- **Highest seam available, verified by the real evaluator.** Real deployed workloads + real operator
+  + real UC-1 onboarding + real PRB/PCE + real Keycloak + real LLM, driven through the production
+  trigger (`POST /apply/service/{id}`) and enforced by the **deployed AuthBridge OPA plugin**. The
+  test asserts only **external behavior** — the allow/deny decisions the plugin makes for
+  scenario-derived requests — never internal policy structure (which the OPA Policy Writer's own unit
+  tests own).
+- **The enforced decision is the artifact under test; the scenario is the oracle.** The LLM/PCE that
+  produced the policy might be wrong, so the expected verdicts are **computed from** the
+  `scenario_uc1.py` pair-lists, keyed on the bare runtime tool names — not from a second hand-maintained
+  copy or from the policy itself. A wrong role→scope mapping therefore fails the exact cell.
+- **Both gates go through AuthBridge's own parsers.** Inbound `input.identity` is built by
+  `jwt-validation`; outbound `input.identity` + `input.mcp.params.name` (the **bare** tool name) are
+  built by `token-exchange` + `mcp-parser`. The test never hand-builds an input document and there is
+  no standalone probe module — the deployed plugin sees exactly what production sees.
+- **Outbound needs the token-exchange leg live.** The outbound OPA gate is only reached if
+  `token-exchange` first intercepts + exchanges the agent's call to `github-tool`; Part B (route +
+  optional client scope + agent restart) enables it, and the fixture polls real decisions until it
+  settles before asserting.
+- **Negative controls.** Unknown/bogus tool names (`nonexistent-tool`, `delete_everything`) must be
+  denied — guarding against an over-broad match or accidental allow on a name in no discovered scope.
+- **Skip cleanly, never false-pass.** The suite skips (does not fail) when the pipeline is not wired
+  or the integration env is unset, and it skips before any cluster mutation.
+- **LLM nondeterminism, contained.** The in-cluster PRB LLM is pinned to `temperature=0`, and the
+  single abstract `policy.md` leans on the LLM to expand prose + descriptions into concrete scopes;
+  the enforced decisions are asserted cell-by-cell against the truth table. Some model-dependence
+  remains, which is why the suite is `@pytest.mark.integration`, out of default CI.
+- **Shared harness, one live stack.** The onboarding, Part-B prep, bundle-convergence poll, and live
+  decision oracle live in `test/integration/uc1_onboard.py` and are shared with the UC-1 ladder; the
+  fixed scenario lives in `test/integration/scenario_uc1.py`. Both suites enforce against the same
+  deployed pipeline (the `rossoctl` realm + the `team1` workloads), left in place across runs with
+  per-run cleanup of only the provisioned prefixed roles/scopes — neither suite deletes/recreates the
+  realm.
 
 ## Relationship to other integration tests
 
 This is **one** integration-test spec among several indexed by the master PRD
 ([../PRD.md](../PRD.md), § *Integration test specifications*).
 
-- Same flavor as the **live-Keycloak pytest integration tests** (`testing/5.1-integration-tests.md`) —
-  both are `@pytest.mark.integration`, run outside the default unit run against live dependencies, and
-  assert on decisions. This test additionally uses `opa eval` as its oracle and skips when `opa` is
-  absent.
-- **Broader than** the OPA-stub-only **PDP Policy Writer** launcher
-  ([pdp-policy-writer.md](pdp-policy-writer.md), `testing/5.2-pdp-writer-integration-test.md`): `5.2`
-  hand-builds a `PolicyModel`, exercises only OPA, and is still a write-only eyeball launcher; this test
-  adds Keycloak provisioning + PRB + PCE in front of the **same** OPA stub and **asserts** the resulting
-  decisions with `opa eval`. Both still leave `.rego` on disk against the same package shapes.
+- **Umbrella sibling of the UC-1 onboarding ladder** ([uc1-onboarding-pipeline.md](uc1-onboarding-pipeline.md),
+  `testing/5.4.x`): identical scenario facts/tables and the **same** live enforcement loop (onboard
+  through the Controller → real HTTP through AuthBridge → deployed OPA plugin's allow/deny). The ladder
+  isolates onboarding-**order** properties across three rungs; this test is the **full happy-path
+  matrix + negative controls** over the fully onboarded stack.
+- Same `@pytest.mark.integration` + live-enforcement flavor as `testing/5.1-integration-tests.md`;
+  runs outside the default unit run against live dependencies and skips cleanly when the cluster/env
+  is not wired.
 
 Tracking issue for this test: `testing/5.3-policy-pipeline-integration-test.md`.
 
 ## Out of Scope
 
-- **Writing `test_policy_pipeline.py`, `probe.rego`, or any P1–P5 pipeline code** — this spec
-  *describes* the test; the test itself is written in a later session against the fixed pipeline
-  (tracked by `testing/5.3-policy-pipeline-integration-test.md` and the prerequisite issues).
-- **The Rego generator, the canonical policy model, the PRB, and the PCE implementations** — specified
-  and unit-tested by their own components ([../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md),
+- **Writing `test_policy_pipeline.py` or any pipeline code** — this spec *describes* the test; the
+  implementation is owned by `testing/5.3-policy-pipeline-integration-test.md` and the prerequisite
+  issues.
+- **The Rego generator, the canonical policy model, the PRB, the PCE, and the AuthBridge OPA plugin
+  implementations** — specified and unit-tested by their own components
+  ([../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md),
   [../components/policy-model.md](../components/policy-model.md),
   [../components/policy-computation-engine.md](../components/policy-computation-engine.md), and the PRB
-  component spec), not here. In particular, the internal **structure** of the generated Rego is the
-  Policy Writer's concern; this test asserts only the **decisions** that Rego makes.
-- **The Kubernetes-CR Policy Writer (1.13)** — this test targets the filesystem **stub** (1.14) only.
-- **Default-CI wiring** — the test is `@pytest.mark.integration` and requires live Keycloak + LLM + an
-  `opa` binary, so it runs on demand, not in the default `-m "not integration"` unit run.
+  component spec), not here. This test asserts only the **enforced decisions**, never the internal
+  structure of the generated policy.
+- **Deploying / registering the workloads and wiring the OPA pipeline** — preconditions
+  (`k8s/opa-kind-enable.sh`), not part of the test.
+- **Two-policy explicit-vs-abstract equivalence** — deferred to the two-policy rung
+  `testing/5.4.4`; the live stack mounts a single `policy.md`.
+- **Default-CI wiring** — the test is `@pytest.mark.integration` and requires a live cluster +
+  Keycloak + LLM, so it runs on demand, not in the default `-m "not integration"` unit run.
 
 ## Further Notes
 
-- The scenario is deliberately fixed. The role→access facts are owned by **three** artefacts that must
-  agree: the *Scenario* table, **both** `policy.md` versions in *Scenario inputs*, and the
-  `scenario.py` pair-lists (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`). The
+> **Note — ALLOW-only fixture for now (deny-extraction deferred to #142).** The Policy Rules Builder now
+> emits explicit `DENY` rules from direct-prohibition / exclusivity prose (see
+> [../components/aiac-agent/policy-rules-builder.md](../components/aiac-agent/policy-rules-builder.md),
+> § *Deny extraction*). This fixture is deliberately kept **ALLOW-only for now** so the suite builds and
+> passes under the DENY-aware PRB (split from #140; the ALLOW+DENY half is the sibling "for later"
+> issue #142). The single `policy.md` therefore carries only positive grants — no `exclusively`, no
+> `read-only`, no `no access to source` — and the entity/role descriptions stay deny-neutral, so the PRB
+> emits **no** `DENY` rules and the enforced policy is allow-only. This keeps the two claims below
+> intact: the descriptions stay generic and drop out of the fact triad, and `devops` stays the pure
+> **deny-by-default / silence** exemplar.
+>
+> Exercising the PRB's ALLOW+DENY path against this fixture — explicit-prohibition prose, the
+> description-driven denies the `tester` (*"…not in source"*) and `devops` descriptions would supply
+> under the PRB's symmetric rule, and a grant-set assertion that compares **deny** sets as well as allow
+> sets — is out of scope here and tracked by #142. Note that the enforced **verdicts** (the truth table)
+> are the same either way: `tester` is denied source and `devops` is denied everywhere whether by
+> explicit `DENY` or by deny-by-default; only the generated policy's **deny-map content** would differ.
+
+- The scenario is deliberately fixed. The role→access facts are owned by artefacts that must agree:
+  the *Scenario* table, the single `policy.md` (see *Scenario inputs*), and the `scenario_uc1.py`
+  pair-lists (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_TARGET_PAIRS`). The
   entity/role/scope **descriptions no longer encode those facts** — they are generic and functional and
   drop out of the fact triad; they must stay generic and simply not contradict the facts. If the
-  role→access facts change, update the *Scenario* table, both `policy.md` variants, and the pair-lists
-  together so the eyeballed output stays reviewable.
+  role→access facts change, update the *Scenario* table, the `policy.md`, and the pair-lists together.
 - The least-privilege **deny-by-default** directive is supplied by the PRB prompt itself
   (`_GRANT_ACCESS` in `agent/policy_rules_builder/prompts.py`), which prepends it — followed by the
   bundled generic baseline policy (`generic_policy.md`) — ahead of the scenario `policy.md` on every
-  call, so every policy decision gets it regardless of which variant is read. The **explicit** variant
-  still spells the directive out (its whole point is to state everything outright); the **abstract**
-  variant relies on the prompt and does not restate it — do not re-add it to the abstract variant.
-- Two `policy.md` variants are shipped on purpose (see *Scenario inputs*): an **explicit** one and an
-  **abstract** one. `AIAC_POLICY_FILE` selects which the PRB reads, so a reviewer can compare the PRB's
-  output on explicit vs. abstract policy text against the same expected Rego. The abstract variant
-  carries **no** agent-capability bullet; it relies on the elaborated `source_operations` /
-  `issue_operations` role descriptions (provisioned into Keycloak) for mapping (c), so it survives
-  deny-by-default and both variants reproduce the same Rego.
-- Descriptions are ≤255 characters and written **verbatim** into Keycloak; there is no shortened /
-  verbatim split. (Keycloak caps role and client descriptions at 255 chars, and the generic descriptions
-  are authored to stay within that cap.)
+  call, so every policy decision gets it. The abstract `policy.md` relies on the prompt and does not
+  restate the directive.
+- The single mounted `policy.md` is **user-intent-only** (see *Scenario inputs*): it states only what
+  users may do and does **not** name the agent's operator roles. The agent's own capability (the
+  outbound target gate) comes from the generic rubric (`generic_policy.md`) applied to the operator-role
+  descriptions, not from naming those roles in the policy. Keeping the policy purely fine-grained and
+  positive is also what keeps the fixture ALLOW-only.
+- Descriptions are ≤255 characters and written **verbatim** into Keycloak (Keycloak caps role and
+  client descriptions at 255 chars, and the generic descriptions are authored to stay within that cap).
 - The `devops` role's **zero access** is conveyed by its **role description only**. It is absent from
-  every pair-list (`INBOUND_PAIRS` / `OUTBOUND_SUBJECT_PAIRS` / `OUTBOUND_PAIRS`) and both `policy.md`
-  variants are **unchanged**, so deny-by-default alone denies it inbound and on every outbound function —
-  which is precisely what the truth table's `devops-user` row asserts. Because `devops-user` lives in
-  the shared `scenario.py`, it also appears in the `5.2` launcher's eyeball output (denied everywhere);
-  that is intentional and keeps the two launchers consistent.
+  every pair-list and from the `policy.md`, so deny-by-default alone denies it inbound and on every
+  outbound tool — which is precisely what the truth table's `devops-user` row asserts.
 
-## Blocked-by
+## Prerequisites
 
-The pipeline can only produce correct output once handoffs 01 (P1, P3) and 02 (P2, P4, P5) land; those
-are **resolved**, so this test is ready to be written. Component prerequisites:
+The live enforcement loop is in place (drivers, `k8s/opa-kind-*` scripts + runbook, and the
+AuthBridge OPA plugin), so this test is ready to run once the pipeline is stood up. It requires a wired
+cluster (`k8s/opa-kind-enable.sh`); the components it exercises end-to-end are specified/unit-tested by
+their own issues:
 
 - PRB — `agent/3.20-policy-rules-builder.md`
 - PCE — `policy/pce/8.10-policy-computation-engine.md`
 - Policy model — `policy/model/8.1-policy-model.md`
-- OPA filesystem stub — `pdp-policy-writer/1.14-pdp-policy-writer-opa-stub.md`
 - Rego package generator — `pdp-policy-writer/1.10-rego-package-generator.md`
 - pdp-policy library — `library/pdp/8.9-pdp-policy-library-rename.md`
 - Policy Model Store library / service — `policy/store/8.7-policy-store-library.md` /
@@ -371,103 +356,58 @@ are **resolved**, so this test is ready to be written. Component prerequisites:
 
 ## Scenario inputs (PRB functional inputs)
 
-These are **functional** inputs — the LLM reads the entity/role/scope descriptions and the `policy.md`
-to produce the role→scope mappings, so they are part of the fixed scenario, not decoration. Confirmed
-with the user; keep them in sync with the *Scenario* table (see *Further Notes*).
+These are **functional** inputs — the PRB reads the entity/role/scope descriptions and the `policy.md`
+to produce the role→scope mappings, so they are part of the fixed scenario, not decoration. The
+entity/role descriptions and the agent/tool scopes are **discovered by UC-1** from the deployed
+workloads (MCP `tools/list`, AgentCard skills); the realm roles and the `policy.md` are provisioned by
+the fixture. Keep them in sync with the *Scenario* table (see *Further Notes*).
 
-### Entity descriptions
+### Discovered entities (what UC-1 provisions)
 
-The descriptions are **generic and keyword-free** — they describe what each entity/role/scope *does*,
-carry no policy grant ("Resolves to…") and no owning-client naming, and stay within Keycloak's 255-char
-cap so they are written verbatim (no shortened renderings). Client `type` is **not** inferred from
-description prose: the test sets each client's `client.type` attribute directly — as a plain string
-`"Agent"` / `"Tool"` written onto the client — rather than discovering it from a `rossoctl.io/type`
-label, so `Service` type resolution ([../../../src/aiac/idp/configuration/models.py:79-87](../../../src/aiac/idp/configuration/models.py#L79-L87))
-tags each client from the attribute without touching the TEMP description-keyword fallback.
+Descriptions are **generic and keyword-free** and stay within Keycloak's 255-char cap (written
+verbatim). Client `type` is set by UC-1 from the `rossoctl.io/type` label — not inferred from
+description prose.
 
-**`github-agent`** — client (Agent):
-> Autonomous Agent acting on a user's behalf against source repositories and an issue tracker. It
-> inspects and changes repository source contents and reads, creates, and updates issues and their
-> threads.
+- **`github-tool`** (Tool) → scopes, from MCP `tools/list` (verbatim descriptions):
+  - `github-tool.source-read` — "Read source repository contents: file listings and file bodies. Read-only."
+  - `github-tool.source-write` — "Create, modify, or delete source repository contents; commit file changes."
+  - `github-tool.issues-read` — "Read issues and their comment threads. Read-only."
+  - `github-tool.issues-write` — "Create and update issues: open, edit, comment, and close."
+- **`github-agent`** (Agent) → **one operator role per skill** (name + description mirror each scope) +
+  scopes from the AgentCard skills:
+  - `github-agent.source_operations` — "Browse and search code; read, create, and modify repository file contents, branches, and commits."
+  - `github-agent.issue_operations` — "Read, search, create, and update issues, comments, sub-issues, and pull requests."
 
-**`github-tool`** — client (Tool):
-> Capability provider Tool for source repositories and an issue tracker. It performs read and write
-> operations on repository source contents and on issues and their comment threads.
+  The operator roles carry the same descriptions as the scopes they mirror; those descriptions drive
+  the PRB capability-match that populates the agent→tool gate.
 
-**`developer`** — realm role (user):
-> Developer — an engineering user who develops the source codebase (writing and maintaining code) and
-> fixes code defects reported in the issue tracker; works primarily in source and consults issues for
-> defect reports.
+### Realm roles (provisioned by the fixture)
 
-**`tester`** — realm role (user):
-> Tester — a quality-assurance user who verifies software quality and tracks defects through the issue
-> tracker: filing, triaging, and updating issue reports; works in the issue tracker, not in source.
-
-**`devops`** — realm role (user):
-> DevOps — an operations user who manages deployment infrastructure and runtime environments; does not
-> author source code and does not manage the issue tracker.
+- `developer` — "Developer — an engineering user who develops the source codebase (writing and maintaining code) and fixes code defects reported in the issue tracker; works primarily in source and consults issues for defect reports."
+- `tester` — "Tester — a quality-assurance user who verifies software quality and tracks defects through the issue tracker: filing, triaging, and updating issue reports; works in the issue tracker, not in source."
+- `devops` — "DevOps — an operations user who manages deployment infrastructure and runtime environments; does not author source code and does not manage the issue tracker."
 
 > The `devops` description is deliberately **unrelated** to source and issue work, so the PRB derives no
 > agent or tool scope for it and deny-by-default leaves `devops-user` denied everywhere — the inbound
-> deny case. It is added to the realm-role set only; the pair-lists and both `policy.md` variants stay
-> unchanged (see *Further Notes*).
+> deny case.
 
-### Role & scope descriptions
+### `policy.md` — the single (abstract) variant
 
-**Client roles (agent):**
-
-- `source_operations` — Covers read and write access to source repository contents — listing, reading,
-  creating, and modifying files.
-- `issue_operations` — Covers read and write access to the issue tracker — reading, filing, updating,
-  and commenting on issues and their threads.
-
-**Agent scopes:**
-
-- `source-access` — Scope granting use of a source-code capability — invoking source-code functions such
-  as reading and changing repository contents.
-- `issues-access` — Scope granting use of an issue-management capability — invoking issue functions such
-  as reading and updating issues.
-
-**Tool scopes:**
-
-- `source-read` — Read source repository contents: file listings and file bodies. Read-only.
-- `source-write` — Create, modify, or delete source repository contents; commit file changes.
-- `issues-read` — Read issues and their comment threads. Read-only.
-- `issues-write` — Create and update issues: open, edit, comment, and close.
-
-### `policy.md` — Version 1 (explicit)
-
-Each granted `(role, scope)` pair is spelled out; the three sections map 1:1 to PRB mappings (a)/(b)/(c)
-and to the expected Rego gates.
+Phase-1's intent-only prose. The PRB/LLM expands intent into the discovered scopes via the entity/role
+descriptions. It stays **user-intent-only** and **does not name the agent's operator roles** — the
+agent's capability gate comes from the generic rubric (`generic_policy.md`) matching the operator-role
+descriptions to the tool-scope descriptions, not from the policy naming them. Deny by default. Phrased
+**purely positively** — no `exclusively`, `read-only`, or `no access to source` prose — so absences
+(developer's lack of issues-write, tester's lack of source access) are conveyed by **silence +
+deny-by-default**, not by prohibition triggers that would drive the DENY-aware PRB to emit `DENY` rules
+(kept ALLOW-only for now; see *Further Notes*).
 
 ```markdown
-# Access Control Policy — github-agent / github-tool
+Grant access on a least-privilege basis: allow only what this policy states; deny by default.
 
-Grant access on a least-privilege basis. Only grant a (role, scope) pair when this
-policy supports it; deny by default.
-
-## Users → agent capabilities (inbound; user may call the agent)
-- developer may use source-access and issues-access.
-- tester may use issues-access.
-
-## Users → tool operations (outbound subject; user may reach the tool)
-- developer may perform source-read, source-write, and issues-read.
-- tester may perform issues-read and issues-write.
-
-## Agent roles → tool operations (outbound target; agent may reach the tool)
-- source_operations may perform source-read and source-write.
-- issue_operations may perform issues-read and issues-write.
+- Developers may read and modify source, and read issues.
+- Testers may read and modify issues.
 ```
 
-### `policy.md` — Version 2 (abstract)
-
-Relies on the PRB / LLM to expand "read and modify source" into the concrete scopes. Encodes the same
-role→access facts as Version 1. It carries **no** agent-capability bullet; mapping (c)
-(agent-role→tool-scope) is instead derived from the elaborated `source_operations` / `issue_operations`
-role descriptions (see *Role & scope descriptions*), so it survives the PRB's deny-by-default-on-silence
-rule and both variants reproduce the same Rego.
-
-```markdown
-- Developers work primarily in source — writing and maintaining code — and consult the issue tracker only to follow defect reports; grant them full read and write access to source contents, and read-only access to issues.
-- Testers work exclusively in the issue tracker — filing, triaging, and updating defect reports — and do not work in source; grant them full read and write access to issues, and no access to source.
-```
+> The **explicit** enumerated variant and the cross-variant equivalence check are deferred to the
+> two-policy rung `testing/5.4.4`; the two-stack topology that once served both variants is discarded.

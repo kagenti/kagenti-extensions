@@ -40,11 +40,20 @@ ConfigMap contracts are documented in
 
 | Port | Purpose |
 |---|---|
-| 8080 | Reverse proxy (inbound) |
+| 8080 | Reverse proxy (inbound, `inbound_interception: reverse-proxy` — the default) |
 | 8081 | Forward proxy (outbound; HTTP_PROXY target) |
+| 8082 | Transparent egress listener (enforce-redirect capture target) |
+| 8083 | Transparent inbound listener (`inbound_interception: transparent`) |
 | 9091 | Health |
 | 9093 | Stats / config inspection |
 | 9094 | Session Events API (consumed by `abctl`) |
+
+`8080` and `8083` are mutually exclusive: `inbound_interception` picks one
+inbound mechanism, and the preset fills only that one's address.
+
+`8082` and `8083` are the iptables REDIRECT targets installed by
+[`proxy-init`](../proxy-init/) and must match its `TRANSPARENT_PORT` /
+`INBOUND_TRANSPARENT_PORT`. A mismatch redirects traffic to a dead port.
 
 **Envoy-sidecar (`authbridge-envoy`):**
 
@@ -57,8 +66,10 @@ ConfigMap contracts are documented in
 
 ## Choosing a binary
 
-- **Default deployment**: use `authbridge-proxy`. No iptables, no
-  Envoy, observable via abctl.
+- **Default deployment**: use `authbridge-proxy`. No Envoy, observable via
+  abctl. Cooperative egress (HTTP_PROXY) needs no iptables; the always-on
+  `enforce-redirect` egress guard and the opt-in transparent inbound listener
+  both use [`proxy-init`](../proxy-init/).
 - **Need ambient/transparent interception via Envoy**: use
   `authbridge-envoy`. Requires the [`proxy-init`](../proxy-init/)
   iptables init container.

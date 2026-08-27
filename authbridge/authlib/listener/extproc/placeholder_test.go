@@ -11,7 +11,7 @@ import (
 
 // mintPlugin rewrites the inbound Authorization header to a minted
 // credential. Used to assert handleInbound emits a SetHeaders mutation
-// (via replaceTokenResponse) carrying the new value so Envoy rewrites the
+// (via withHeaderMutation) carrying the new value so Envoy rewrites the
 // request to the agent.
 type mintPlugin struct{}
 
@@ -28,7 +28,7 @@ func (mintPlugin) OnResponse(_ context.Context, _ *pipeline.Context) pipeline.Ac
 }
 
 // setHeaderValue extracts the value for the named SetHeaders key from a
-// RequestHeaders ProcessingResponse. replaceTokenResponse stores the value
+// RequestHeaders ProcessingResponse. withHeaderMutation stores the value
 // in RawValue; fall back to Value for robustness. Returns ("", false) when
 // the key is absent.
 func setHeaderValue(resp *extprocv3.ProcessingResponse, key string) (string, bool) {
@@ -100,12 +100,11 @@ func headerRemoved(cr *extprocv3.CommonResponse, key string) bool {
 }
 
 // bodyHeaderValue extracts the value for the named SetHeaders key from a
-// RequestBody ProcessingResponse. The body path (replaceTokenBodyResponse
-// wrapped by withBodyMutation) nests the SetHeaders mutation inside the
-// RequestBody's CommonResponse rather than the RequestHeaders response that
-// setHeaderValue reads, so it needs its own accessor. replaceTokenBodyResponse
-// stores the value in RawValue; fall back to Value for robustness. Returns
-// ("", false) when the key is absent.
+// RequestBody ProcessingResponse. On the body path withHeaderMutation nests
+// the SetHeaders mutation inside the RequestBody's CommonResponse rather than
+// the RequestHeaders response that setHeaderValue reads, so it needs its own
+// accessor. withHeaderMutation stores the value in RawValue; fall back to
+// Value for robustness. Returns ("", false) when the key is absent.
 func bodyHeaderValue(resp *extprocv3.ProcessingResponse, key string) (string, bool) {
 	rb := resp.GetRequestBody()
 	if rb == nil || rb.GetResponse() == nil || rb.GetResponse().GetHeaderMutation() == nil {
@@ -129,8 +128,8 @@ func bodyHeaderValue(resp *extprocv3.ProcessingResponse, key string) (string, bo
 // (handleInboundBody) instead of the header path. A plugin that rewrites the
 // inbound Authorization header must cause handleInboundBody to emit a
 // SetHeaders mutation carrying the new value — nested in the RequestBody
-// response via replaceTokenBodyResponse/withBodyMutation — so Envoy rewrites
-// the request to the agent on the body phase too.
+// response via withHeaderMutation — so Envoy rewrites the request to the
+// agent on the body phase too.
 func TestExtProc_InboundBody_AuthorizationMutation(t *testing.T) {
 	p, err := pipeline.New([]pipeline.Plugin{mintPlugin{}})
 	if err != nil {

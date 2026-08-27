@@ -20,6 +20,28 @@ import json
 from unittest.mock import MagicMock
 
 import pytest
+"""Unit tests for aiac.pdp.service.policy.opa.main.
+
+Targets the always-on Custom Resource writer. The module builds a
+``CustomObjectsApi`` at import (kube-config load is guarded, so import needs no
+cluster); every test patches that module-level ``_api`` with a ``MagicMock`` so
+no real Kubernetes API is contacted. The additive ``POLICY_WRITER_DUMP_REGO``
+local-dump toggle is covered here too (it never gates or replaces the CR write).
+
+Note on the delete-by-id endpoint: its route param ``{agent_id}`` is a single
+path segment, and a valid namespaced id (``<ns>/<name>`` or a SPIFFE URI) carries
+slashes. The library client percent-encodes them and the ASGI server decodes the
+segment back, but the ``TestClient``/httpx transport collapses ``%2F`` -> ``/``
+before the request is sent, so a namespaced id cannot reach the param through
+``TestClient``. Those cases therefore call the route handler function directly
+(the FastAPI decorators leave the functions callable), which still exercises the
+full write + error-mapping path through the mocked ``_api``.
+"""
+
+import json
+from unittest.mock import MagicMock
+
+import pytest
 from fastapi.testclient import TestClient
 from kubernetes.client import ApiException
 
@@ -48,10 +70,16 @@ def _agent(agent_id: str) -> dict:
         "agent_scopes": [],
         "subject_roles": {},
         "source_roles": {},
-        "target_scopes": {},
-        "inbound_rules": [],
-        "outbound_rules": [],
-        "outbound_subject_rules": [],
+        "target_allow_scopes": {},
+        "target_deny_scopes": {},
+        "inbound_subject_allow_rules": [],
+        "inbound_subject_deny_rules": [],
+        "inbound_source_allow_rules": [],
+        "inbound_source_deny_rules": [],
+        "outbound_target_allow_rules": [],
+        "outbound_target_deny_rules": [],
+        "outbound_subject_allow_rules": [],
+        "outbound_subject_deny_rules": [],
     }
 
 

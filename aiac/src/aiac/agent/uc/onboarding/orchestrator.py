@@ -20,13 +20,22 @@ convergence on NATS redelivery. No rollback logic.
 from aiac.agent.uc.onboarding.policy_builder.builder import ServicePolicyBuilder
 from aiac.agent.uc.onboarding.provision.graph import build_provision_graph
 from aiac.agent.uc.onboarding.provision.state import OnboardingProvisionState, Trigger
-from aiac.policy.model.models import PolicyRule
+from aiac.policy.model.models import PolicyRule, RuleEffect
 
 
-def onboard_service(service_id: str) -> tuple[list[PolicyRule], bool]:
+def onboard_service(
+    service_id: str, default_effect: RuleEffect = RuleEffect.DENY
+) -> tuple[list[PolicyRule], bool, RuleEffect]:
+    """Sequence Provision → Policy Builder and return ``(rules, override=False, default_effect)``.
+
+    ``default_effect`` is passed straight back to the Controller so it reaches the single
+    ``compute_and_apply`` call and lands on every derived ``AgentPolicyModel``. It defaults to
+    ``DENY`` (least-privilege); a caller onboarding a service that should default to ``ALLOW``
+    supplies it here. This is the caller-facing surface for requesting a permissive default
+    end-to-end (onboard → PCE → derived APM → OPA)."""
     provision = build_provision_graph().invoke(
         OnboardingProvisionState(trigger=Trigger(entity_id=service_id))
     )
     service_type = provision["service_type"]
     rules = ServicePolicyBuilder.build(service_id, service_type)
-    return rules, False
+    return rules, False, default_effect

@@ -383,6 +383,34 @@ type ListenerConfig struct {
 	// the reverse role is active. Ignored outside proxy-sidecar mode.
 	Roles []string `yaml:"roles" json:"roles"`
 
+	// InboundInterception selects HOW inbound traffic reaches the reverse
+	// proxy's pipeline, in proxy-sidecar mode with the reverse role active:
+	//
+	//   reverse-proxy (default) — the operator binds AuthBridge on the agent's
+	//                 original port and relocates the agent to a free one
+	//                 ("port stealing"), so the Service needs no patching.
+	//                 Forwards to the single reverse_proxy_backend URL.
+	//   transparent — proxy-init PREROUTING-REDIRECTs inbound TCP to
+	//                 transparent_inbound_addr; the listener recovers the port
+	//                 the client actually addressed via SO_ORIGINAL_DST and
+	//                 forwards there over loopback. The agent keeps its own
+	//                 port, so no PORT env var is imposed on it and every port
+	//                 it listens on is covered — not just the first declared
+	//                 one. Requires proxy-init (NET_ADMIN) and is Linux-only.
+	//
+	// Defaults to reverse-proxy: transparent adds a privileged init container,
+	// so it is opt-in, and leaving it unset keeps existing deployments
+	// byte-identical.
+	InboundInterception string `yaml:"inbound_interception" json:"inbound_interception"`
+
+	// TransparentInboundAddr is the bind address for the inbound transparent
+	// listener (inbound_interception: transparent). The proxy-sidecar preset
+	// defaults it to ":8083" when that mode is selected — 8080 (reverse), 8081
+	// (forward) and 8082 (transparent egress) are already taken. It MUST match
+	// proxy-init's INBOUND_TRANSPARENT_PORT, or PREROUTING will REDIRECT to a
+	// dead port and inbound traffic will break outright.
+	TransparentInboundAddr string `yaml:"transparent_inbound_addr" json:"transparent_inbound_addr"`
+
 	// TransparentProxyAddr is the bind address for the outbound transparent
 	// listener used by proxy-sidecar enforce-redirect mode: iptables REDIRECTs
 	// the agent's bypass egress here, and the listener recovers the original
@@ -468,6 +496,23 @@ const (
 	RoleReverse = "reverse" // inbound reverse proxy
 	RoleForward = "forward" // outbound forward proxy
 )
+
+// Valid ListenerConfig.InboundInterception values. Interception is two
+// independent axes (inbound, outbound), so the inbound mechanism is a field on
+// the reverse role rather than a role of its own — matching the outbound
+// transparent listener, which likewise rides inside the forward role instead of
+// being separately selectable.
+const (
+	InboundInterceptionReverseProxy = "reverse-proxy" // fixed backend (default)
+	InboundInterceptionTransparent  = "transparent"   // SO_ORIGINAL_DST per connection
+)
+
+// InboundTransparent reports whether the inbound transparent listener should
+// run instead of the fixed-backend reverse proxy. Empty means the default
+// (reverse-proxy), so callers need no separate zero-value check.
+func (l ListenerConfig) InboundTransparent() bool {
+	return l.InboundInterception == InboundInterceptionTransparent
+}
 
 // ActiveRoles returns the set of proxy roles to run in proxy-sidecar mode. An
 // empty Roles list defaults to BOTH roles (the full pod deployment), so

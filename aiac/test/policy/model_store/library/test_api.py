@@ -22,7 +22,7 @@ def _spm_dict(service_id: str = "svc-1", role_id: str = "role-1") -> dict:
         service_type=ServiceType.AGENT,
         owned_roles=[],
         owned_scopes=[],
-        inbound_rules=[
+        inbound_allow_rules=[
             PolicyRule(
                 role=Role(id=role_id, name="admin", composite=False),
                 scope=Scope(id="scope-1", name="read", serviceId=service_id),
@@ -68,7 +68,8 @@ class TestGetServicePolicy:
             assert result.service_id == "brand-new"
             assert result.owned_roles == []
             assert result.owned_scopes == []
-            assert result.inbound_rules == []
+            assert result.inbound_allow_rules == []
+            assert result.inbound_deny_rules == []
 
     def test_raises_on_other_error_response(self):
         with patch("requests.get") as mock_get:

@@ -1,2 +1,2 @@
-- Developers work primarily in source — writing and maintaining code — and consult the issue tracker only to follow defect reports; grant them full read and write access to source contents, and read-only access to issues.
-- Testers work exclusively in the issue tracker — filing, triaging, and updating defect reports — and do not work in source; grant them full read and write access to issues, and no access to source.
+- Developers work primarily in source — writing and maintaining code — and consult the issue tracker to follow defect reports; grant them full read and write access to source contents, and read access to issues.
+- Testers work in the issue tracker — filing, triaging, and updating defect reports; grant them full read and write access to issues.

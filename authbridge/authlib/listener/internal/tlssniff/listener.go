@@ -165,6 +165,18 @@ type peekedConn struct {
 // socket reads via net.Conn embedding.
 func (c *peekedConn) Read(p []byte) (int, error) { return c.br.Read(p) }
 
+// NetConn returns the connection this wrapper peeked, so a caller that
+// needs something only a lower layer knows can unwrap through the
+// sniffer. The transparent inbound listener uses it to reach the
+// original destination it recovered via SO_ORIGINAL_DST, which would
+// otherwise be hidden behind this wrapper (and behind *tls.Conn on the
+// TLS path). Deliberately mirrors (*tls.Conn).NetConn so both layers
+// satisfy one structural interface.
+//
+// The returned conn must not be read from directly — buffered bytes
+// live in this wrapper's bufio.Reader.
+func (c *peekedConn) NetConn() net.Conn { return c.Conn }
+
 // ErrUnexpected is returned when the listener encounters a state it
 // can't recover from (e.g. SetReadDeadline failed). Callers don't
 // match against it — it surfaces only via Accept's error return.

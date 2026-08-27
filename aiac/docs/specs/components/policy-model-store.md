@@ -38,7 +38,7 @@ The SPM is the **source of truth**. The PDP Policy Writer retains sole ownership
 
 ### Policy Model Store Service
 
-**Location:** `aiac/src/aiac/policy/store/service/`
+**Location:** `aiac/src/aiac/policy/model_store/service/`
 
 **Port:** `0.0.0.0:7074`
 
@@ -76,9 +76,11 @@ consistent.
 - Per-service upsert (`POST /policy/services/{service_id}`): `INSERT OR REPLACE INTO service_policies VALUES (?, ?)`.
 - Per-service delete (`DELETE /policy/services/{service_id}`): `DELETE FROM service_policies WHERE service_id = ?`; evict the cache entry.
 
-**By-role query:** `GET /policy/services?role={role_id}` scans the cache and returns every SPM whose `inbound_rules` contains a rule referencing `role_id`. **Why a store query and not an IdP lookup:** the SPM is the source of truth, so this must return *stored* rows — including stale role→service mappings that the live IdP no longer reflects, which override-purge depends on to remove access that should no longer exist. It may start as a full scan; a `role.id -> {service_id}` index can be added later behind the same route/signature without changing callers.
+**By-role query:** `GET /policy/services?role={role_id}` scans the cache and returns every SPM whose `inbound_allow_rules` **or** `inbound_deny_rules` contains a rule referencing `role_id` (the scan covers **both** effect lists). **Why a store query and not an IdP lookup:** the SPM is the source of truth, so this must return *stored* rows — including stale role→service mappings that the live IdP no longer reflects, which override-purge depends on to remove access that should no longer exist. It may start as a full scan; a `role.id -> {service_id}` index can be added later behind the same route/signature without changing callers.
 
 **Future normalization:** migrate to `service_policies` + `policy_rules(service_id, role, scope)` tables once `ServicePolicyModel`/rule schema stabilizes — a future observability UI (and a native by-role index) will benefit from queryable columns. JSON column in the current schema avoids migration churn during active development.
+
+**ALLOW/DENY rollout — state reset, no back-compat.** With two-sided rules (see [policy-model.md](policy-model.md)), the stored `ServicePolicyModel.spec` JSON carries `inbound_allow_rules` + `inbound_deny_rules` in place of the former single `inbound_rules`. Because the models use `ConfigDict(extra='ignore')`, loading an old row would **silently drop** the renamed field — a stale half-migrated read. There is **no alias / no dual-read shim / no row migration**: the store's SQLite state is **cleared out-of-band and re-seeded by re-onboarding**. The `spec` JSON column itself needs no schema change (it is opaque to the store), so the reset is a data operation, not a table migration.
 
 **Endpoints:**
 
@@ -87,7 +89,8 @@ consistent.
 | `GET` | `/policy/services/{service_id}` | — | `ServicePolicyModel` (from cache) |
 | `GET` | `/policy/services?role={role_id}` | — | `list[ServicePolicyModel]` (SPMs referencing the role) |
 | `POST` | `/policy/services/{service_id}` | `ServicePolicyModel` | `204 No Content` (upsert) |
-| `DELETE` | `/policy/services/{service_id}` | — | `204 No Content` (off-board) |
+| `DELETE` | `/policy/services/{service_id}` | — | `204 No Content` (off-board a single service) |
+| `DELETE` | `/policy/services` | — | `204 No Content` (clear all SPMs — rebuild / test-harness clean slate) |
 | `GET` | `/health` | — | `200` / `503` |
 
 The by-scope lookup has **no dedicated route** — it collapses to the by-id read via `scope.serviceId` and is implemented entirely in the library.
@@ -100,7 +103,9 @@ decoded real id — every `service_id` in a request/response *body* (including t
 always the decoded, real form. The by-role query's `role={role_id}` param is unaffected (not a path
 segment).
 
-`DELETE /policy/services/{service_id}` removes a single SPM row (SQLite `DELETE` + cache eviction) so a service can be off-boarded when it is decommissioned. Deleting a service that is not present is a no-op (`204`). Override-purge still edits `inbound_rules` in place via the upsert; the delete route is for whole-service removal, not per-rule purging.
+`DELETE /policy/services/{service_id}` removes a single SPM row (SQLite `DELETE` + cache eviction) so a service can be off-boarded when it is decommissioned. Deleting a service that is not present is a no-op (`204`). Override-purge still edits the SPM's `inbound_allow_rules` / `inbound_deny_rules` in place via the upsert; the delete route is for whole-service removal, not per-rule purging.
+
+`DELETE /policy/services` (no `service_id`) is the collection-root **clear-all**: it drops every SPM row and empties the cache, giving a clean slate for a full rebuild or a test harness. Always `204`.
 
 **Error responses:**
 - `404 Not Found` with `{"error": "service {id} not found"}` when `GET /policy/services/{service_id}` finds no entry in cache. The library's `get_service_policy` catches this and returns a fresh empty SPM (per the "engine creates a fresh model on 404" convention); the by-role query never 404s (empty list on no match).
@@ -109,11 +114,12 @@ segment).
 
 **`main.py` functions:**
 
-- `_get_db() -> sqlite3.Connection` — open `SERVICEPOLICY_DB_PATH` with `check_same_thread=False`; run `CREATE TABLE IF NOT EXISTS` on first open.
-- `_upsert_service(service_id: str, model: ServicePolicyModel)` — under the write lock: `INSERT OR REPLACE INTO service_policies VALUES (?, ?)` with `model.model_dump_json()`, then update cache (DB + cache write as one locked critical section).
-- `_delete_service(service_id: str)` — under the write lock: `DELETE FROM service_policies WHERE service_id = ?`, then evict the cache entry (no-op if absent) — DB + cache eviction as one locked critical section.
-- `_get_service(service_id: str) -> ServicePolicyModel` — read from in-memory cache; raise `404` if absent.
-- `_list_by_role(role_id: str) -> list[ServicePolicyModel]` — return every cached SPM whose `inbound_rules` references `role_id`.
+- `get_db() -> sqlite3.Connection` — open `SERVICEPOLICY_DB_PATH` with `check_same_thread=False` (FastAPI dependency); `_init_db` runs `CREATE TABLE IF NOT EXISTS` on first open.
+- `upsert_service_policy(service_id: str, model: ServicePolicyModel)` — `POST /policy/services/{service_id}`; under the write lock: `INSERT OR REPLACE INTO service_policies VALUES (?, ?)` with `model.model_dump_json()`, then update cache (DB + cache write as one locked critical section).
+- `delete_service_policy(service_id: str)` — `DELETE /policy/services/{service_id}`; under the write lock: `DELETE FROM service_policies WHERE service_id = ?`, then evict the cache entry (no-op if absent) — DB + cache eviction as one locked critical section.
+- `clear_service_policies()` — `DELETE /policy/services`; under the write lock: `DELETE FROM service_policies` (all rows) and clear the cache — the collection-root clean slate.
+- `get_service_policy(service_id: str) -> ServicePolicyModel` — `GET /policy/services/{service_id}`; read from in-memory cache; raise `404` if absent.
+- `list_service_policies_by_role(role_id: str) -> list[ServicePolicyModel]` — `GET /policy/services?role={role_id}`; return every cached SPM whose `inbound_allow_rules` or `inbound_deny_rules` references `role_id`.
 - `_load_cache()` — on startup, load all rows from SQLite into the in-memory cache.
 
 **Configuration:**
@@ -129,7 +135,7 @@ segment).
 **File structure:**
 
 ```
-aiac/src/aiac/policy/store/service/
+aiac/src/aiac/policy/model_store/service/
 ├── __init__.py
 ├── Dockerfile
 ├── requirements.txt
@@ -154,7 +160,7 @@ Good tests assert external behavior at the system boundary — not internal impl
 
 Key behaviors to assert:
 - `GET /policy/services/{id}`: returns `ServicePolicyModel` deserialized from cache (hit); `404 {"error": "service {id} not found"}` when the service is not in cache (miss).
-- `GET /policy/services?role={role_id}`: returns every SPM whose `inbound_rules` references the role; `[]` when none match; multiple when several match.
+- `GET /policy/services?role={role_id}`: returns every SPM whose `inbound_allow_rules` or `inbound_deny_rules` references the role; `[]` when none match; multiple when several match.
 - `POST /policy/services/{id}`: `spec` stored in SQLite; cache updated; `204` returned. Upsert round-trip: a second `POST` for the same id replaces the row.
 - `DELETE /policy/services/{id}`: row removed from SQLite; cache entry evicted; `204` returned. Deleting an absent service is a no-op (`204`).
 - SQLite write error on the write or delete endpoint → `502`.

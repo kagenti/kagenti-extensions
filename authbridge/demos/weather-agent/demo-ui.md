@@ -107,12 +107,24 @@ In **`team1`**: `authbridge-config`, `authbridge-runtime-config`, `spiffe-helper
 `envoy-config`. No extra Secrets or ConfigMaps are required for this demo (outbound
 passthrough; inbound JWT uses issuer/signature checks).
 
-**`keycloak-admin-secret` is not in `team1`.** Operator 0.2+ keeps it in
-**`rossoctl-system`** for client registration. `NotFound` in `team1` is expected:
+**No `keycloak-admin-secret` is required — in `team1` or `rossoctl-system`.** On the
+current operator (v0.7.0) the operator registers Keycloak clients using its own **SPIFFE
+workload identity** (federated into Keycloak by the `rossoctl-operator-client-bootstrap`
+post-install job in the `keycloak` namespace), not an admin username/password Secret.
+A `NotFound` for `keycloak-admin-secret` in **either** namespace is expected. Confirm
+registration by the per-workload client credentials the operator writes instead:
 
 ```bash
-kubectl get secret keycloak-admin-secret -n rossoctl-system
+# One Secret per registered workload:
+kubectl get secret -n team1 | grep rossoctl-keycloak-client-credentials
+# ...and/or watch the operator apply registrations:
+kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
+  | grep "client registration applied" | tail
 ```
+
+> Older docs (operator 0.2+) referenced a `keycloak-admin-secret` in `rossoctl-system`.
+> The Helm install no longer creates or uses it; the admin credentials the bootstrap job
+> needs are read from `keycloak-initial-admin` in the `keycloak` namespace.
 
 UI login: secret **`rossoctl-test-user`** in namespace **`keycloak`** (`admin` + password).
 Realm **`rossoctl`** is created by the platform installer.
@@ -126,7 +138,7 @@ Realm **`rossoctl`** is created by the platform installer.
 
 2. In the **Namespace** drop-down, choose `team1`, fill *Tool Name* with `weather-tool` (do not use uppercase)
 
-3. Select **Deploy From Image** as the deployment method.
+3. Select **Deploy from Image** as the deployment method.
 
 4. For **Container Image**, use `ghcr.io/rossoctl/examples/weather_tool`.
 
@@ -137,7 +149,7 @@ Realm **`rossoctl`** is created by the platform installer.
 7. **Enable AuthBridge sidecar injection** is unchecked by default for tools.
    Leave it unchecked.
 
-8. **Enable SPIRE identity (spiffe-helper sidecar)** should be **unchecked**.
+8. **Enable SPIRE identity (JWT-SVID via spiffe-helper)** should be **unchecked**.
 
    > The weather tool is a simple MCP server calling a public weather API. It
    > does not need AuthBridge sidecars or token validation.
@@ -170,19 +182,19 @@ kubectl get pods -n team1 | grep weather-tool
 
 5. **Protocol**: `A2A`
 
-6. **Framework**: `LangGraph`
+6. **Workload Type** select `Deployment`.
 
-7. **Workload Type** select `Deployment`.
-
-8. **Enable AuthBridge sidecar injection** is checked by default for agents.
+7. **Secure with AuthBridge** is checked by default for agents.
    Leave it checked.
 
-9. **Enable SPIRE identity (spiffe-helper sidecar)** is checked by default.
+8. **Enable SPIRE identity (JWT-SVID via spiffe-helper)** is checked by default.
    Leave it checked.
 
-10. Under **Port Configuration**, set **Service Port** to `8080` and **Target Port** to `8000`
+9. The default **Pod Configuration** already maps service port `8080` to target
+   port `8000`, so no change is needed. Expand **Pod Configuration** to verify
+   or adjust the ports.
 
-11. Under **Environment Variables**, click **Import from File/URL**,
+10. Under **Environment Variables**, click **Import from File/URL**,
     Select **From URL** and provide the **URL** from this repo:
     - For Ollama: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.ollama`
     - For OpenAI: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.openai`
@@ -207,13 +219,13 @@ kubectl get pods -n team1 | grep weather-tool
     > kubectl delete secret openai-secret -n team1
     > ```
 
-12. **(Ollama only)** If using Ollama as your LLM provider, expand
+11. **(Ollama only)** If using Ollama as your LLM provider, expand
     **AuthBridge Advanced Configuration** and enter `11434` in the
-    **Outbound Ports to Exclude** field. This prevents AuthBridge from
-    intercepting traffic to Ollama on the host machine. OpenAI users can
+    **Bypass AuthBridge on these outbound ports** field. This prevents AuthBridge
+    from intercepting traffic to Ollama on the host machine. OpenAI users can
     skip this — HTTPS traffic passes through via TLS passthrough.
 
-13. Click **Build & Deploy Agent**.
+12. Click **Build & Deploy Agent**.
 
 Wait for the Shipwright build to complete and the deployment to become ready.
 
@@ -365,8 +377,8 @@ AuthBridge's `proxy-init` init container redirects traffic through Envoy. By
 default, only port 8080 (Keycloak) is excluded. Ollama traffic on port 11434
 gets intercepted, which corrupts LLM streaming responses.
 
-If you set the **Outbound Ports to Exclude** field to `11434` during import
-(Step 2, item 12), this is already handled and no patch is needed.
+If you set the **Bypass AuthBridge on these outbound ports** field to `11434` during
+import (Step 2, item 11), this is already handled and no patch is needed.
 
 Otherwise, add the annotation after deployment:
 
@@ -478,8 +490,8 @@ kubectl exec -it test-client -n team1 -- sh
 Inside the pod, get credentials and send a request:
 
 ```bash
-# Get a Keycloak admin token from the rossoctl realm
-ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/rossoctl/protocol/openid-connect/token \
+# Get a Keycloak admin token from the master realm (admin/admin; the rossoctl realm admin password is randomly generated)
+ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/master/protocol/openid-connect/token \
   -d "grant_type=password" \
   -d "client_id=admin-cli" \
   -d "username=admin" \
@@ -567,15 +579,19 @@ kubectl delete pod test-client -n team1 --ignore-not-found
 
 **Symptom:** `{"error":"invalid_client","error_description":"Invalid client or Invalid client credentials"}`
 
-**Cause:** The `keycloak-admin-secret` Secret or `authbridge-config` ConfigMap was missing
-or incorrect at startup, so the operator's `ClientRegistrationReconciler` couldn't reach
-Keycloak to register the client.
+**Cause:** The operator's `ClientRegistrationReconciler` couldn't complete registration —
+usually because the `authbridge-config` ConfigMap had the wrong realm, or the operator's
+SPIFFE identity was not yet federated into Keycloak (the `rossoctl-operator-client-bootstrap`
+job). On v0.7.0 the operator authenticates via its SPIFFE workload identity, so there is
+**no** `keycloak-admin-secret` to check.
 
 **Fix:**
 
 ```bash
-# 1. Verify the keycloak-admin-secret exists (operator 0.2+ keeps it in rossoctl-system)
-kubectl get secret keycloak-admin-secret -n rossoctl-system
+# 1. Confirm the operator registered a client for the workload
+kubectl get secret -n team1 | grep rossoctl-keycloak-client-credentials
+kubectl logs -n rossoctl-system deployment/rossoctl-controller-manager \
+  | grep -iE "clientregistration|client registration applied" | tail
 
 # 2. Verify the authbridge-config ConfigMap has the correct realm
 kubectl get configmap authbridge-config -n team1 -o jsonpath='{.data.KEYCLOAK_REALM}'

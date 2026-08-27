@@ -3,15 +3,15 @@
 Companion library for the [AIAC Policy Model Store](policy-model-store.md). Follows the same pattern as `aiac.pdp.policy.library` — module-level functions, URL from env var via `python-dotenv`, `RuntimeError` on non-2xx.
 
 ## Location
-`aiac/src/aiac/policy/store/library/`
+`aiac/src/aiac/policy/model_store/library/`
 
 ## Package structure
 
 ```
-aiac/src/aiac/policy/store/
+aiac/src/aiac/policy/model_store/
 └── library/
     ├── __init__.py     # empty
-    └── api.py          # five module-level functions (SPM-centric surface)
+    └── api.py          # six module-level functions (SPM-centric surface)
 ```
 
 All `__init__.py` files are empty. Callers use explicit submodule paths:
@@ -23,6 +23,7 @@ from aiac.policy.model_store.library.api import (
     get_service_policies_by_role,
     apply_service_policy,
     delete_service_policy,
+    clear_service_policies,
 )
 from aiac.policy.model.models import ServicePolicyModel, Scope, Role
 ```
@@ -40,7 +41,7 @@ exposes any per-agent read/write functions. The library surface is entirely SPM-
 ## Submodule: `aiac.policy.model_store.library.api`
 
 ### Description
-HTTP client module wrapping the [AIAC Policy Model Store](policy-model-store.md) REST API. Exposes five module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_MODEL_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
+HTTP client module wrapping the [AIAC Policy Model Store](policy-model-store.md) REST API. Exposes six module-level functions returning `ServicePolicyModel` objects directly — no Kubernetes client boilerplate. Service URL is read from the `AIAC_POLICY_MODEL_STORE_URL` environment variable (default: `http://127.0.0.1:7074`). All functions raise `RuntimeError` on an unexpected non-2xx response (a `404` on the by-id read is handled, not raised — see below).
 
 ### Dependencies
 ```
@@ -71,8 +72,9 @@ def get_service_policy_by_scope(scope: Scope) -> ServicePolicyModel | None
 def get_service_policies_by_role(role: Role) -> list[ServicePolicyModel]
     # GET /policy/services?role={role.id}  (the one genuinely new route)
     # Plural: a role (especially a user role) appears across many SPMs.
-    # Returns every SPM whose inbound_rules contains a rule referencing
-    # role.id. Empty list when none match.
+    # Returns every SPM whose inbound_allow_rules or inbound_deny_rules
+    # contains a rule referencing role.id (both effect lists are scanned).
+    # Empty list when none match.
 
 def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None
     # POST /policy/services/{service_id}  — upsert.
@@ -80,6 +82,10 @@ def apply_service_policy(service_id: str, spm: ServicePolicyModel) -> None
 def delete_service_policy(service_id: str) -> None
     # DELETE /policy/services/{service_id}  — off-board a decommissioned service.
     # No-op on the server if the service is absent (still 204).
+
+def clear_service_policies() -> None
+    # DELETE /policy/services  — drop every SPM (collection-root clear).
+    # Test-harness / rebuild clean-slate reset; always 204.
 ```
 
 `service_id` is a plain string everywhere in this API (slashes and all) — callers never encode

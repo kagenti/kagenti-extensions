@@ -62,9 +62,9 @@ Role → access, as encoded by the model's inbound and outbound rules:
 - `developer` — source read/write, issues read.
 - `tester` — issues read/write.
 
-This user→tool access is encoded in the model's `outbound_subject_rules` (`(user_role, tool_scope)`
-pairs), which the outbound package renders as `subject_role_scopes`. The model's
-`inbound_rules` (user→agent-scope) and `outbound_rules` (agent-role→tool-scope) are unchanged.
+This user→tool access is encoded in the model's `outbound_subject_allow_rules` (`(user_role, tool_scope)`
+pairs — this fixture is allow-only), which the outbound package renders as `subject_role_allow_scopes`. The model's
+`inbound_subject_allow_rules` (user→agent-scope) and `outbound_target_allow_rules` (agent-role→tool-scope) are unchanged.
 
 Applying this `PolicyModel` produces exactly two files in `REGO_OUTPUT_DIR`:
 
@@ -75,12 +75,15 @@ Both must match the **ID-only** package shapes in
 [../components/pdp-policy-writer-opa.md](../components/pdp-policy-writer-opa.md): input is IDs only
 (`{subject, source}` inbound, `{subject, target}` outbound); all role/scope maps are embedded in the
 package; the inbound gate is subject-mandatory + source-optional; the outbound gate requires both
-subject and agent to pass, but its **subject** gate is now user→**tool** — it reads
-`subject_role_scopes` (grouped from `outbound_subject_rules`) and matches against
-`target_scopes[input.target]`, distinct from the inbound user→agent gate — while `target_ok`
-(agent→tool, from `agent_roles` × `agent_role_scopes`) is unchanged; and `target_scopes` is emitted
-verbatim (target id → scopes, no inversion). Because the input carries no per-request scope, the
-decision is coarse — a principal passes on having access to **at least one** relevant scope.
+subject and target capability to pass, but its **subject** gate is now user→**tool** — it reads
+`subject_role_allow_scopes` (grouped from `outbound_subject_allow_rules`) and matches against
+`target_allow_scopes[input.target]`, distinct from the inbound user→agent gate — while `target_allow_ok`
+(the capability gate, `input.function_name in target_allow_scopes[input.target]`) is unchanged; and
+`target_allow_scopes` is emitted verbatim (target id → scopes, no inversion). The `agent_roles` ×
+`agent_role_scopes` maps are still emitted (informational — a single map, no allow/deny split). All rule lists here are allow-only, so no
+deny maps (`*_deny_scopes`) appear; the generated `allow` still applies deny-overrides, which is vacuous when
+the deny lists are empty. Because the input carries no per-request scope on the inbound side, that decision is
+coarse — a principal passes on having access to **at least one** relevant scope.
 
 The `PolicyModel` / `AgentPolicyModel` / `PolicyRule` objects come from `aiac.policy.model.models`
 ([../components/policy-model.md](../components/policy-model.md)); the script constructs them in

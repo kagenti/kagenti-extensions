@@ -33,7 +33,7 @@ from aiac.agent.uc.onboarding.orchestrator import onboard_service
 from aiac.agent.uc.policy_update.build import build_policy
 from aiac.agent.uc.role_update.role import update_role
 from aiac.policy.computation import compute_and_apply
-from aiac.policy.model.models import PolicyRule
+from aiac.policy.model.models import PolicyRule, RuleEffect
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,9 @@ _ROLE_PREFIX = "aiac.apply.role."
 _POLICY_BUILD_SUBJECT = "aiac.apply.policy.build"
 
 
-def _handle(subject: str) -> tuple[list[PolicyRule], bool]:
+def _handle(subject: str) -> tuple[list[PolicyRule], bool, RuleEffect]:
+    # Normalize every handler to ``(rules, override, default_effect)``. Only onboarding carries a
+    # caller-requestable ``default_effect``; the others always emit least-privilege ``DENY``.
     if subject.startswith(_SERVICE_PREFIX):
         return onboard_service(subject[len(_SERVICE_PREFIX) :])
     if subject.startswith(_ROLE_PREFIX):
@@ -55,9 +57,11 @@ def _handle(subject: str) -> tuple[list[PolicyRule], bool]:
         # contain '.', which NATS treats as a token separator, so the SPI percent-encodes them
         # into a single token before publishing. unquote() is the general-purpose inverse; safe
         # here because every literal '%' in the original name was itself escaped to "%25".
-        return update_role(unquote(subject[len(_ROLE_PREFIX) :]))
+        rules, override = update_role(unquote(subject[len(_ROLE_PREFIX) :]))
+        return rules, override, RuleEffect.DENY
     if subject == _POLICY_BUILD_SUBJECT:
-        return build_policy()
+        rules, override = build_policy()
+        return rules, override, RuleEffect.DENY
     raise ValueError(f"no handler for subject {subject!r}")
 
 
@@ -116,8 +120,8 @@ class AiacEventConsumer:
 
     async def _dispatch(self, msg: Msg) -> None:
         try:
-            rules, override = _handle(msg.subject)
-            compute_and_apply(rules, override)
+            rules, override, default_effect = _handle(msg.subject)
+            compute_and_apply(rules, override, default_effect)
         except Exception:
             logger.exception("failed to process %s", msg.subject)
             if msg.metadata.num_delivered >= MAX_DELIVER:

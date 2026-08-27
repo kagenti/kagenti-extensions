@@ -1,5 +1,200 @@
 # Example Rossoctl OPA AuthorizationPolicy (client-scoped, github-agent)
 #
+# A single, client-scoped policy CR for exactly one workload in the `team1`
+# namespace — the github-agent. It carries one rego file per tier
+# (inbound/request + outbound/request), server-side-applied by the PDP Policy
+# Writer (OPA). This file mirrors the current `generate_inbound_rego` /
+# `generate_outbound_rego` output (the ALLOW/DENY split gates) — annotated with
+# explanatory comments and blank-line spacing for readability, so it doubles as
+# documentation of the generated shape. The declaration maps, gates, and
+# decision blocks are identical to the generator's output; only the added
+# comments and spacing differ.
+#
+# TWO-SIDED MODEL (ALLOW / DENY). Each tier evaluates *_allow_ok gates and
+# mirrored *_deny_ok gates and applies DENY-OVERRIDES: a request is permitted
+# only when an allow gate passes AND no deny gate matches. The split *_allow_scopes
+# / *_deny_scopes maps below feed those gates; the identity maps (subject_roles,
+# source_roles) are effect-agnostic and must list a role even if it appears only
+# in a deny edge, or the deny lookup can't resolve it. In this demo the deny maps
+# are empty (allow-only policy), so no request is denied by an explicit prohibition.
+#
+# PER-POLICY DEFAULT EFFECT (default_effect). AgentPolicyModel.default_effect
+# (Allow / Deny, default Deny) decides how a tier treats a (role, scope) pair
+# that NO rule mentions. Three states per pair: explicitly allowed (an allow rule
+# names it), explicitly denied (a deny rule names it), and unspecified (no rule
+# names it -> resolves to default_effect). Both tiers below are generated under
+# the DEFAULT `default_effect: Deny`, which emits `default allow := false` plus a
+# single `allow if { ... }` rule (least-privilege — an unmentioned pair is denied).
+# Only the trailing decision block depends on default_effect; every declaration
+# map and *_allow_ok/*_deny_ok gate is identical in both modes. The `default_effect: Allow`
+# alternative (permissive default, deny-overrides preserved) is shown as a commented
+# block at the end of each tier's content. The generator assumes disjoint allow/deny
+# per (role, scope); a genuine overlap is an upstream conflict (HTTP 422, PRB
+# PolicyContradictionError) and is never reconciled here.
+#
+# OUTBOUND gating fields: the outbound rego keys on input.identity.subject,
+# input.identity.service_id, and input.mcp.params.name — all populated by the
+# live AuthBridge OPA plugin on the outbound leg (see opa-kind-runbook.md Part
+# B.5). input.identity.service_id is the downstream service the exchanged token
+# was minted for (the last delegation hop's target audience — here the
+# github-tool SPIFFE ID). input.mcp.params.name is the specific tool invoked, so
+# the rule gates PER TOOL. The maps key on the actual MCP tool names exposed by
+# the deployed github-tool (aiac/demo/assets/tools/github_tool): source-read,
+# source-write, issues-read, issues-write. MCP methods that invoke no specific
+# tool (e.g. a `tools/list` discovery request) carry no params.name, so they
+# never match and are denied.
+#
+# CLIENT-SCOPE TARGETING: bundle-service looks a client-scope CR up by
+# metadata.name + metadata.namespace, matched against the ServiceAccount segment
+# of the caller's SPIFFE ID (spiffe://<trust-domain>/ns/<namespace>/sa/<name> ->
+# namespace=<namespace>, name=<name>) — see operator/internal/bundleservice/
+# identity/identity.go and watcher.go's GetPolicy(name, namespace). spec.clientID
+# is NOT consulted by that lookup (print-column metadata only); this CR is named
+# `github-agent` — matching `sa/github-agent` of
+# spiffe://localtest.me/ns/team1/sa/github-agent — because that's what scopes it
+# to this one workload. clientID must satisfy the CRD's DNS-label regex (no
+# `spiffe://`, no `/`).
+#
+# Identity note: INBOUND the OPA plugin exposes input.identity.{subject,
+# client_id, scopes} (+ audience when the validated JWT carries it). OUTBOUND
+# there is no validated JWT, so the plugin synthesizes input.identity from the
+# token-exchange delegation hop: subject (delegated caller), client_id (this
+# agent), scopes, and service_id (the downstream target audience). `subject` is
+# the JWT `sub` claim; rossoctl-realm tokens carry the username in `sub` (via a
+# username->sub protocol mapper on the `rossoctl` client — see A.1 in
+# opa-kind-runbook.md, applied cluster-wide).
+apiVersion: agent.rossoctl.dev/v1alpha1
+kind: AuthorizationPolicy
+metadata:
+  name: github-agent
+  namespace: team1
+spec:
+  scope: client
+  clientID: "github-agent"
+  policies:
+    - path: "inbound/request.rego"
+      content: |
+        package authbridge.client.inbound.request
+        import rego.v1
+
+        agent_scopes := ["github-agent.issue_operations", "github-agent.source_operations"]
+
+        subject_roles := {
+            "dev-user": ["developer"],
+            "test-user": ["tester"],
+        }
+
+        source_roles := {}
+
+        subject_role_allow_scopes := {
+            "developer": ["github-agent.issue_operations", "github-agent.source_operations"],
+            "tester": ["github-agent.issue_operations"],
+        }
+        subject_role_deny_scopes := {}
+        source_role_allow_scopes := {}
+        source_role_deny_scopes := {}
+
+        subject_allow_ok if {
+            some role in subject_roles[input.identity.subject]
+            some scope in subject_role_allow_scopes[role]
+            scope in agent_scopes
+        }
+        subject_deny_ok if {
+            some role in subject_roles[input.identity.subject]
+            some scope in subject_role_deny_scopes[role]
+            scope in agent_scopes
+        }
+
+        source_allow_ok if { not input.identity.client_id }
+        source_allow_ok if { input.identity.client_id == "rossoctl" }
+        source_allow_ok if {
+            some role in source_roles[input.identity.client_id]
+            some scope in source_role_allow_scopes[role]
+            scope in agent_scopes
+        }
+        source_deny_ok if {
+            some role in source_roles[input.identity.client_id]
+            some scope in source_role_deny_scopes[role]
+            scope in agent_scopes
+        }
+
+        # default_effect: Deny (the default) — unmentioned (subject, scope) pairs
+        # are denied. Least-privilege; byte-for-byte today's output.
+        default allow := false
+        allow if { subject_allow_ok; source_allow_ok; not subject_deny_ok; not source_deny_ok }
+
+        # default_effect: Allow — the SAME declarations/gates above, only this
+        # trailing block differs. Unmentioned pairs fall through to `true`; an
+        # explicit deny still overrides. (A bare `default allow := true` with the
+        # Deny-mode `allow if { ...; not ... }` body would make every prohibition
+        # evaporate — deny precedence needs its own `allow := false if` rules.)
+        #   default allow := true
+        #   allow := false if { subject_deny_ok }
+        #   allow := false if { source_deny_ok }
+
+    - path: "outbound/request.rego"
+      content: |
+        package authbridge.client.outbound.request
+        import rego.v1
+
+        agent_roles := ["github-agent.issue_operations", "github-agent.source_operations"]
+        subject_roles := {
+            "dev-user": ["developer"],
+            "test-user": ["tester"]
+        }
+        # The deployed github-tool (aiac/demo/assets/tools/github_tool) exposes
+        # exactly four MCP tools — source-read, source-write, issues-read,
+        # issues-write — one per skill. These names ARE the values that arrive in
+        # input.mcp.params.name when a specific tool is invoked, so the maps
+        # below key on them.
+        subject_role_allow_scopes := {
+            "developer": ["issues-read", "source-write", "source-read"],
+            "tester": ["issues-read", "issues-write"],
+        }
+        subject_role_deny_scopes := {}
+        # informational/debugging only — not referenced by allow
+        agent_role_scopes := {
+            "github-agent.issue_operations": ["issues-read", "issues-write"],
+            "github-agent.source_operations": ["source-write", "source-read"],
+        }
+        target_allow_scopes := {
+            "spiffe://localtest.me/ns/team1/sa/github-tool": ["source-read", "source-write", "issues-read", "issues-write"],
+        }
+        target_deny_scopes := {}
+        # user may reach the tool: holds a role granted the invoked tool (input.mcp.params.name)
+        subject_allow_ok if {
+            some role in subject_roles[input.identity.subject]
+            input.mcp.params.name in subject_role_allow_scopes[role]
+        }
+        subject_deny_ok if {
+            some role in subject_roles[input.identity.subject]
+            input.mcp.params.name in subject_role_deny_scopes[role]
+        }
+        # agent may reach the tool: the invoked tool is one the target accepts (direct, per-scope)
+        target_allow_ok if {
+            input.mcp.params.name in target_allow_scopes[input.identity.service_id]
+        }
+        target_deny_ok if {
+            input.mcp.params.name in target_deny_scopes[input.identity.service_id]
+        }
+
+        # default_effect: Deny (the default) — a per-tool AND: allowed only when
+        # the delegated user's role AND the target service both admit the tool,
+        # and neither deny gate matches. Unmentioned pairs are denied.
+        default allow := false
+        allow if { subject_allow_ok; target_allow_ok; not subject_deny_ok; not target_deny_ok }
+
+        # default_effect: Allow — the two-gate AND is DROPPED and replaced by
+        # deny-if-either-side. Do NOT flip to `allow := false if { not subject_allow_ok }`
+        # / `{ not target_allow_ok }`: every unmentioned (role, tool) pair matches
+        # neither allow gate and would be wrongly denied. Instead an unmentioned
+        # pair falls through to `true`; a deny on EITHER side overrides.
+        #   default allow := true
+        #   allow := false if { subject_deny_ok }
+        #   allow := false if { target_deny_ok }
+
+# Example Rossoctl OPA AuthorizationPolicy (client-scoped, github-agent)
+#
 # A single, client-scoped policy CR that enforces one rule for exactly one
 # workload in the `team1` namespace — the github-agent.
 #

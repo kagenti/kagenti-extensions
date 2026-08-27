@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
@@ -272,7 +271,6 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		}
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
 	if !skipped {
 		action := s.OutboundPipeline.Run(r.Context(), pctx)
 
@@ -324,9 +322,34 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		s.Sessions.Append(sid, ev)
 	}
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		r.Header.Set("Authorization", "Bearer "+auth.ExtractBearer(newAuth))
+	// Propagate every header mutation the outbound pipeline made to the
+	// forwarded request. pctx.Headers started as a clone of r.Header, so
+	// plugins' set / replace / delete operations on it are the intended
+	// upstream-facing header set. Only Authorization used to be forwarded,
+	// silently dropping any other injected header (e.g. static-inject's
+	// x-api-key). Content-Length / Content-Encoding are managed by the
+	// body-rewrite block below and the transport, so leave them untouched.
+	// Mirrors reverseproxy's forwarded-request header sync.
+	skip := func(k string) bool {
+		return strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding")
+	}
+	for k := range r.Header {
+		if skip(k) {
+			continue
+		}
+		if _, ok := pctx.Headers[k]; !ok {
+			r.Header.Del(k) // plugin removed it
+		}
+	}
+	for k, vv := range pctx.Headers {
+		if skip(k) {
+			continue
+		}
+		if len(vv) == 0 {
+			r.Header.Del(k) // pctx.Headers[k] = nil is a delete, same as Del(k)
+			continue
+		}
+		r.Header[k] = append([]string(nil), vv...) // set / overwrite
 	}
 
 	// If a WritesBody plugin rewrote pctx.Body, ship the new bytes
@@ -609,7 +632,7 @@ func (s *Server) handleStreamingResponse(w http.ResponseWriter, r *http.Request,
 	defer func() {
 		// Use a detached context for finalization: the client may have
 		// cancelled the request context after reading the full stream,
-		// but aggregating plugins (inference-parser, token-budget) still
+		// but aggregating plugins (inference-parser, session-budget) still
 		// need their last=true dispatch to finalize state.
 		finalCtx := context.WithoutCancel(r.Context())
 		finalAction := s.OutboundPipeline.RunResponseFrame(finalCtx, pctx, nil, true)

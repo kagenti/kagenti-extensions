@@ -1,0 +1,84 @@
+name: Dependabot go mod tidy
+
+# When Dependabot bumps a dep in authbridge/authlib, the cmd/* modules'
+# go.sum files go stale — they reference authlib's transitive deps via
+# replace directives but Dependabot only tidies the directory it updated.
+# CI's `go fmt`/`go vet` then fails with "updates to go.mod needed".
+#
+# Runs only on Dependabot PRs. Human PRs are untouched.
+
+on:
+  pull_request:
+    paths:
+      - "authbridge/**/go.mod"
+      - "authbridge/**/go.sum"
+
+permissions:
+  contents: read
+
+# A Dependabot force-push (rebase) landing while a tidy is in flight would
+# otherwise produce two jobs racing to push the same ref; the loser fails
+# non-fast-forward. Cancel the older run — its tidy is already superseded.
+concurrency:
+  group: dependabot-tidy-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  tidy:
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write        # push tidy commit to the Dependabot PR branch
+      pull-requests: write   # close+reopen the PR to re-trigger CI
+    env:
+      GOWORK: "off"
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.head_ref }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/authlib/go.mod
+
+      - name: Run go mod tidy in every module
+        run: |
+          set -euo pipefail
+          while IFS= read -r -d '' go_mod; do
+            mod=$(dirname "$go_mod")
+            echo "::group::go mod tidy in $mod"
+            (cd "$mod" && go mod tidy)
+            echo "::endgroup::"
+          done < <(find authbridge -name go.mod -not -path '*/demos/*' -print0 | sort -z)
+
+      - name: Commit and push if changed
+        id: commit
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No changes after tidy."
+            exit 0
+          fi
+          git config user.name  "dependabot[bot]"
+          git config user.email "49699333+dependabot[bot]@users.noreply.github.com"
+          git add -A
+          git commit -s -m "chore: go mod tidy across modules
+
+          Auto-tidied by dependabot-tidy workflow to keep cmd/* go.sum
+          files in sync with authlib after a Dependabot bump."
+          git push
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # Commits pushed with the default GITHUB_TOKEN do not re-trigger other
+      # workflows. Close + reopen forces CI to re-run on the new commit.
+      # (@dependabot rebase would discard our tidy commit, so it's not usable.)
+      - name: Re-trigger CI on the PR
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr close  "${{ github.event.pull_request.number }}"
+          gh pr reopen "${{ github.event.pull_request.number }}"

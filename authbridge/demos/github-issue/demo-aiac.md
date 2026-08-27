@@ -415,7 +415,7 @@ Authbridge outbound check will exchange the token, then deny the request since t
 
 REALM_NAME="rossoctl"
 
-ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/${REALM_NAME}/protocol/openid-connect/token \
+ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/master/protocol/openid-connect/token \
   -d "grant_type=password" \
   -d "client_id=admin-cli" \
   -d "username=admin" \
@@ -628,7 +628,7 @@ Test the policy by getting tokens for different users:
 
 REALM_NAME="rossoctl"
 
-ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/${REALM_NAME}/protocol/openid-connect/token \
+ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/master/protocol/openid-connect/token \
   -d "grant_type=password" \
   -d "client_id=admin-cli" \
   -d "username=admin" \

@@ -62,10 +62,10 @@ def build_model() -> PolicyModel:
         agent_scopes=[scope[name] for name in scn.AGENT_SCOPES],
         source_roles={},
         subject_roles={user: [role[role_name]] for user, role_name in scn.USERS.items()},
-        target_scopes={scn.TOOL_ID: [scope[name] for name in scn.TOOL_SCOPES]},
-        inbound_rules=rules(scn.INBOUND_PAIRS),
-        outbound_rules=rules(scn.OUTBOUND_PAIRS),
-        outbound_subject_rules=rules(scn.OUTBOUND_SUBJECT_PAIRS),
+        target_allow_scopes={scn.TOOL_ID: [scope[name] for name in scn.TOOL_SCOPES]},
+        inbound_subject_allow_rules=rules(scn.INBOUND_PAIRS),
+        outbound_target_allow_rules=rules(scn.OUTBOUND_PAIRS),
+        outbound_subject_allow_rules=rules(scn.OUTBOUND_SUBJECT_PAIRS),
     )
     return PolicyModel(agents=[agent])
 

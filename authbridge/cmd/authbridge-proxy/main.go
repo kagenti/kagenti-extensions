@@ -180,6 +180,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to load config %q: %v", *configPath, err)
 	}
+	slog.Debug("config loaded", "configPath", *configPath)
+
 	// Build the SPIFFE Provider only when something actually consumes it —
 	// top-level mTLS (X509Source for the listeners) or a plugin whose identity
 	// is spiffe-based (JWT-SVID for token-exchange). The platform's base config
@@ -195,6 +197,7 @@ func main() {
 		if bootCfg.SPIFFE.MirrorFiles != nil {
 			mirrorFiles = *bootCfg.SPIFFE.MirrorFiles
 		}
+		slog.Debug("About to create SPIFFE Provider", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
 		provider, err = spiffe.NewProvider(context.Background(), spiffe.ProviderConfig{
 			SocketPath:  bootCfg.SPIFFE.Socket,
 			MirrorFiles: mirrorFiles,
@@ -204,9 +207,12 @@ func main() {
 			log.Fatalf("spiffe provider: %v", err)
 		}
 		defer provider.Close()
+		slog.Debug("SPIFFE provider created", "bootCfg.SPIFFE.Socket", bootCfg.SPIFFE.Socket)
 	} else if bootCfg.SPIFFE != nil {
 		slog.Info("spiffe block present but unused (no mTLS, no spiffe-identity plugin) — " +
 			"skipping SPIRE provider; no Workload API connection will be attempted")
+	} else {
+		slog.Debug("Config does not use SPIFFE")
 	}
 
 	// This binary is hardcoded to proxy-sidecar. Rejecting other modes
@@ -384,16 +390,40 @@ func main() {
 	defer sharedStore.Close() // stop the TTL janitor on normal main return
 
 	if roles[config.RoleReverse] {
-		rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
-		if rerr != nil {
-			log.Fatalf("creating reverse proxy: %v", rerr)
+		// Two inbound shapes, selected by listener.inbound_interception:
+		//   transparent   — iptables PREROUTING REDIRECTs here; the forwarding
+		//                   target is per-connection, from SO_ORIGINAL_DST.
+		//   reverse-proxy — the default; one fixed reverse_proxy_backend, reached
+		//                   because the operator stole the agent's port.
+		if cfg.Listener.InboundTransparent() {
+			rpSrv, rerr := reverseproxy.NewTransparentServer(inboundH, sessions, rpMTLS)
+			if rerr != nil {
+				log.Fatalf("creating transparent inbound proxy: %v", rerr)
+			}
+			rpSrv.Shared = sharedStore
+			// Skipped in --demo: there is no iptables there, so nothing would ever
+			// be REDIRECTed to the listener and every request would fail closed.
+			if demoMode {
+				slog.Warn("demo mode: transparent inbound listener not started (no iptables to REDIRECT to it)")
+			} else {
+				rpHTTP, rerr := runtimeutil.StartTransparentInboundServer("transparent-inbound", rpSrv, cfg.Listener.TransparentInboundAddr)
+				if rerr != nil {
+					log.Fatalf("transparent-inbound listen: %v", rerr)
+				}
+				httpServers = append(httpServers, rpHTTP)
+			}
+		} else {
+			rpSrv, rerr := reverseproxy.NewServer(inboundH, sessions, cfg.Listener.ReverseProxyBackend, rpMTLS)
+			if rerr != nil {
+				log.Fatalf("creating reverse proxy: %v", rerr)
+			}
+			rpSrv.Shared = sharedStore
+			rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
+			if rerr != nil {
+				log.Fatalf("reverse-proxy listen: %v", rerr)
+			}
+			httpServers = append(httpServers, rpHTTP)
 		}
-		rpSrv.Shared = sharedStore
-		rpHTTP, rerr := runtimeutil.StartReverseProxyServer("reverse-proxy", rpSrv, cfg.Listener.ReverseProxyAddr)
-		if rerr != nil {
-			log.Fatalf("reverse-proxy listen: %v", rerr)
-		}
-		httpServers = append(httpServers, rpHTTP)
 	}
 
 	// The transparent (enforce-redirect) listener rides with the forward proxy;

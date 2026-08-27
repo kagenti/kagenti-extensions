@@ -667,8 +667,8 @@ kubectl exec -it test-client -n team1 -- sh
 Inside the test-client pod, run:
 
 ```bash
-# Get a Keycloak admin token from the rossoctl realm
-ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/rossoctl/protocol/openid-connect/token \
+# Get a Keycloak admin token from the master realm (admin/admin; the rossoctl realm admin password is randomly generated)
+ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/master/protocol/openid-connect/token \
   -d "grant_type=password" \
   -d "client_id=admin-cli" \
   -d "username=admin" \
@@ -879,7 +879,7 @@ Inside the test-client pod, get the agent's client credentials (needed to reques
 user tokens that include the agent's audience):
 
 ```bash
-ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/rossoctl/protocol/openid-connect/token \
+ADMIN_TOKEN=$(curl -s http://keycloak-service.keycloak.svc:8080/realms/master/protocol/openid-connect/token \
   -d "grant_type=password" \
   -d "client_id=admin-cli" \
   -d "username=admin" \

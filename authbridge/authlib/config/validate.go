@@ -32,12 +32,18 @@ func validateListeners(cfg *Config) error {
 		if cfg.Listener.ReverseProxyAddr != "" {
 			return fmt.Errorf("envoy-sidecar mode does not support reverse_proxy_addr (use proxy-sidecar mode)")
 		}
+		if cfg.Listener.InboundInterception != "" {
+			return fmt.Errorf("envoy-sidecar mode does not support inbound_interception (Envoy already intercepts inbound transparently)")
+		}
 		if cfg.Listener.ExtAuthzAddr != "" {
 			return fmt.Errorf("envoy-sidecar mode does not support ext_authz_addr (use waypoint mode)")
 		}
 	case ModeWaypoint:
 		if cfg.Listener.ExtProcAddr != "" {
 			return fmt.Errorf("waypoint mode does not support ext_proc_addr (use envoy-sidecar mode)")
+		}
+		if cfg.Listener.InboundInterception != "" {
+			return fmt.Errorf("waypoint mode does not support inbound_interception (the waypoint owns inbound)")
 		}
 		if cfg.Listener.ReverseProxyAddr != "" {
 			return fmt.Errorf("waypoint mode does not support reverse_proxy_addr")
@@ -54,11 +60,22 @@ func validateListeners(cfg *Config) error {
 				return fmt.Errorf("listener.roles: %q is not a valid role (use %q and/or %q)", r, RoleReverse, RoleForward)
 			}
 		}
+		switch cfg.Listener.InboundInterception {
+		case "", InboundInterceptionReverseProxy, InboundInterceptionTransparent:
+			// valid
+		default:
+			return fmt.Errorf("listener.inbound_interception: %q is not valid (use %q or %q)",
+				cfg.Listener.InboundInterception, InboundInterceptionReverseProxy, InboundInterceptionTransparent)
+		}
 		roles := cfg.Listener.ActiveRoles()
+		if cfg.Listener.InboundTransparent() && !roles[RoleReverse] {
+			return fmt.Errorf("listener.inbound_interception: transparent requires the %q role (it selects how inbound reaches the inbound pipeline)", RoleReverse)
+		}
 		// The reverse proxy forwards inbound traffic to reverse_proxy_backend,
 		// so it's required only when the reverse role is active. A forward-only
-		// deployment needs no backend.
-		if roles[RoleReverse] && cfg.Listener.ReverseProxyBackend == "" {
+		// deployment needs no backend, and transparent interception derives the
+		// backend per connection from SO_ORIGINAL_DST rather than from config.
+		if roles[RoleReverse] && !cfg.Listener.InboundTransparent() && cfg.Listener.ReverseProxyBackend == "" {
 			return fmt.Errorf("proxy-sidecar mode with the reverse role requires listener.reverse_proxy_backend")
 		}
 		// The TLS bridge only rewrites outbound (forward-proxy) traffic; enabling

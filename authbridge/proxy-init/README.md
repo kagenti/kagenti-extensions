@@ -110,12 +110,65 @@ whichever the host kernel exposes. Override with `IPTABLES_CMD` (and
 | `PROXY_PORT` | `15123` | redirect | AuthBridge outbound listener port |
 | `INBOUND_PROXY_PORT` | `15124` | redirect | AuthBridge inbound listener port |
 | `TRANSPARENT_PORT` | `8082` | enforce-redirect | AuthBridge transparent listener port; REDIRECT target for captured external TCP egress |
+| `INBOUND_TRANSPARENT_PORT` | (empty = off) | enforce-redirect | AuthBridge **inbound** transparent listener port; PREROUTING REDIRECT target. Opt-in — see below. Requires `POD_IP`. |
+| `SIDECAR_PORTS_EXCLUDE` | `8081,9091,9093,9094` | enforce-redirect + inbound | AuthBridge's own listeners, exempted from the inbound REDIRECT. Override when the forward proxy is not on 8081. |
 | `OUTBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated outbound port list to skip (e.g. `8080`) |
-| `INBOUND_PORTS_EXCLUDE` | (empty) | redirect | Comma-separated inbound port list to skip |
-| `POD_IP` | (required in `redirect`) | redirect | Set via Downward API; DNAT target for ambient-mesh inbound. Not used by `enforce-redirect`. |
+| `INBOUND_PORTS_EXCLUDE` | (empty) | redirect + enforce-redirect w/ inbound | Comma-separated inbound app-port list to skip validation for (e.g. an oauth-proxy doing its own auth) |
+| `POD_IP` | required in `redirect` | both | Set via Downward API (`status.podIP`); DNAT target for ambient-mesh inbound |
+| `POD_IPS` | falls back to `POD_IP` | enforce-redirect w/ inbound | Set via Downward API (`status.podIPs`). Supplies a per-family DNAT target so a dual-stack pod covers ambient on BOTH families — `POD_IP` alone is the primary address, leaving the other family's HBONE delivery unvalidated |
+
+With `INBOUND_TRANSPARENT_PORT` set, **either** `POD_IP` or `POD_IPS` satisfies the
+requirement (the guard tests the resolved list). Supplying neither is fail-closed.
 | `RESOLV_CONF` | `/etc/resolv.conf` | enforce-redirect | Path read at init for `nameserver` IPs; DNS (`tcp/53` + `udp/53`) to those IPs is left direct (IPv4→`iptables`, IPv6→`ip6tables`). Override mainly for tests. |
 | `IPTABLES_CMD` | auto-detected | all | Override iptables binary (`iptables-legacy` / `iptables-nft`) |
 | `IP6TABLES_CMD` | derived from `IPTABLES_CMD` | enforce-redirect | Override ip6tables binary |
+
+## Transparent inbound (opt-in)
+
+Setting `INBOUND_TRANSPARENT_PORT` under `MODE=enforce-redirect` adds the
+**inbound** counterpart of the egress guard, so JWT validation cannot be
+sidestepped by another pod dialing the agent's real port. Without it,
+`enforce-redirect` is egress-only.
+
+Inbound arrives by two capturable paths and both are covered — handling only the
+first would silently wave all mesh traffic through:
+
+| Path | Netfilter hook | Rule |
+|---|---|---|
+| Plain network (ClusterIP / NodePort / non-mesh pod) | `nat PREROUTING` | `AB_INBOUND` chain, inserted at position 1 to precede Istio's `ISTIO_PRERT` |
+| Istio ambient HBONE | `nat OUTPUT` | ztunnel terminates mTLS and re-originates a LOCAL connection, so PREROUTING never runs. A mark-based `DNAT` at the **head** of `AB_REDIRECT` — it must precede that chain's ztunnel-mark `RETURN`, which would otherwise let every mesh-delivered request through unvalidated. |
+
+`POD_IP` is required (and its absence is fail-closed at init) because the ambient
+rule DNATs to it. `REDIRECT` cannot be used there: it hardcodes the destination
+to `127.0.0.1`, and ztunnel preserves the client IP via `IP_TRANSPARENT`, so the
+resulting packet is dropped as martian without `route_localnet=1`.
+
+**The exemptions apply to both hooks.** Every port and source exempted from the
+PREROUTING chain is also exempted on the ambient path, emitted from a single
+`emit_inbound_exemptions` function. This is not incidental: ztunnel delivers via
+`OUTPUT`, so an exemption living only in `AB_INBOUND` is a silent no-op for mesh
+traffic — a JWT-gated `:9091` crash-loops the pod, and a captured `:8443` breaks
+an oauth-proxy doing its own auth. The redirect-mode rules drifted in exactly
+this way and needed a second hand-maintained copy in `PROXY_OUTPUT`.
+
+`RETURN` rather than `ACCEPT`, so an exempt port still falls through to Istio's
+appended chain and keeps ambient mTLS. That is also why the exemptions cannot be
+a shared sub-chain: a sub-chain `RETURN` resumes in the caller, landing on the
+terminal `REDIRECT`/`DNAT` it was meant to skip.
+
+On a dual-stack pod set `POD_IPS`; with only `POD_IP` the non-primary family's
+ambient inbound is not captured, and init warns about it explicitly rather than
+leaving it implicit.
+
+Intra-pod loopback is deliberately **not** captured. Containers share a network
+namespace and are a single entity to every network enforcement layer, so that
+traffic is inside the trust boundary — and capturing it would break AuthBridge's
+own forward hop, which targets `127.0.0.1:<recovered port>` by design. That also
+means **the app must bind `0.0.0.0`**, not only its pod IP.
+
+Pair with authbridge's `listener.inbound_interception: transparent` and
+`listener.transparent_inbound_addr` (preset default `:8083`); the ports must
+match or inbound traffic is redirected to a dead port.
 
 ## Required Kubernetes capabilities
 
@@ -142,8 +195,17 @@ in [`.github/workflows/build.yaml`](../../.github/workflows/build.yaml)).
 it asserts the `AB_REDIRECT` / `AB_NOTCP` rule structure, proves external
 TCP is captured to `TRANSPARENT_PORT` while preempting a simulated Istio
 ambient `nat OUTPUT` REDIRECT, and proves external UDP is dropped — all via
-packet counters. Requires root + iptables-nft on Linux (runs on CI; not
-macOS):
+packet counters.
+
+With transparent inbound it additionally asserts that `AB_INBOUND` lands at
+`nat PREROUTING` position 1 with AuthBridge's own ports exempted (gating `9091`
+would put kubelet probes behind JWT validation and crash-loop the pod), that the
+ambient DNAT precedes `AB_REDIRECT`'s ztunnel-mark `RETURN`, that a missing
+`POD_IP` is fail-closed, that the ambient path carries the SAME exemptions as the
+PREROUTING chain and that they precede the DNAT, that every ambient DNAT rule
+negates the proxy UID, that `POD_IPS` yields a DNAT for both families, and that
+re-running init does not stack duplicate mark rules. Requires root + iptables-nft
+on Linux (runs on CI; not macOS):
 
 ```sh
 sudo ./test-enforce-redirect.sh

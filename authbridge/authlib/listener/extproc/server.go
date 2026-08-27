@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -21,7 +22,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/rossoctl/cortex/authbridge/authlib/auth"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
@@ -168,7 +168,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		StartedAt: time.Now(),
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
+	originalHeaders := pctx.Headers.Clone()
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -177,10 +177,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 	}
 
 	s.recordInboundSession(pctx)
-	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
-		return replaceTokenResponse(auth.ExtractBearer(newAuth)), pctx
-	}
-	return allowResponse(), pctx
+	return withHeaderMutation(allowResponse(), pctx, originalHeaders), pctx
 }
 
 func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessServer, headers *corev3.HeaderMap, body []byte) (*extprocv3.ProcessingResponse, *pipeline.Context) {
@@ -196,7 +193,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		StartedAt: time.Now(),
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
+	originalHeaders := pctx.Headers.Clone()
 	action := s.InboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordInboundReject(pctx, action)
@@ -205,10 +202,8 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 	}
 
 	s.recordInboundSession(pctx)
-	if newAuth := pctx.Headers.Get("Authorization"); newAuth != originalAuth {
-		return withBodyMutation(replaceTokenBodyResponse(auth.ExtractBearer(newAuth)), pctx), pctx
-	}
-	return withBodyMutation(allowBodyResponse(), pctx), pctx
+	resp := withHeaderMutation(allowBodyResponse(), pctx, originalHeaders)
+	return withBodyMutation(resp, pctx), pctx
 }
 
 // inboundSessionID returns the bucket ID for an inbound event. Trusts the
@@ -469,15 +464,12 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		Direction: pipeline.Outbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      getHeader(headers, ":authority"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
-	}
-	if pctx.Host == "" {
-		pctx.Host = getHeader(headers, "host")
 	}
 
 	// SkipHosts short-circuit: forward the request as a transparent
@@ -495,7 +487,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		}
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
+	originalHeaders := pctx.Headers.Clone()
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
@@ -505,11 +497,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 
 	s.recordOutboundSession(pctx)
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		return replaceTokenResponse(auth.ExtractBearer(newAuth)), pctx
-	}
-	return passResponse(), pctx
+	return withHeaderMutation(passResponse(), pctx, originalHeaders), pctx
 }
 
 func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessServer, headers *corev3.HeaderMap, body []byte) (*extprocv3.ProcessingResponse, *pipeline.Context) {
@@ -518,15 +506,12 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		Direction: pipeline.Outbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Host:      getHeader(headers, ":authority"),
+		Host:      authorityOf(headers),
 		Path:      getHeader(headers, ":path"),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
 		StartedAt: time.Now(),
-	}
-	if pctx.Host == "" {
-		pctx.Host = getHeader(headers, "host")
 	}
 
 	// SkipHosts short-circuit: see handleOutbound for rationale. The
@@ -547,7 +532,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		}
 	}
 
-	originalAuth := pctx.Headers.Get("Authorization")
+	originalHeaders := pctx.Headers.Clone()
 	action := s.OutboundPipeline.Run(ctx, pctx)
 	if action.Type == pipeline.Reject {
 		s.recordOutboundReject(pctx, action)
@@ -557,11 +542,8 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 
 	s.recordOutboundSession(pctx)
 
-	newAuth := pctx.Headers.Get("Authorization")
-	if newAuth != originalAuth {
-		return withBodyMutation(replaceTokenBodyResponse(auth.ExtractBearer(newAuth)), pctx), pctx
-	}
-	return withBodyMutation(passBodyResponse(), pctx), pctx
+	resp := withHeaderMutation(passBodyResponse(), pctx, originalHeaders)
+	return withBodyMutation(resp, pctx), pctx
 }
 
 func (s *Server) handleResponseHeaders(ctx context.Context, headers *corev3.HeaderMap, pctx *pipeline.Context, direction string) *extprocv3.ProcessingResponse {
@@ -705,6 +687,106 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 	}
 }
 
+// withHeaderMutation emits every header mutation the request pipeline made to
+// pctx.Headers — including the Authorization replacement. ext_proc forwards no
+// header change it does not explicitly emit, so only Authorization used to be
+// propagated, silently dropping any other injected header (e.g. static-inject's
+// x-api-key). Symmetric to withBodyMutation, and to reverseproxy's
+// forwarded-request header sync. Skipped: HTTP/2 pseudo-headers, which
+// headerMapToHTTP copies into pctx.Headers and whose :authority governs routing;
+// and Content-Length / Content-Encoding, managed by withBodyMutation and the
+// transport.
+func withHeaderMutation(resp *extprocv3.ProcessingResponse, pctx *pipeline.Context, orig http.Header) *extprocv3.ProcessingResponse {
+	skip := func(k string) bool {
+		return strings.HasPrefix(k, ":") ||
+			strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Content-Encoding")
+	}
+	var set []*corev3.HeaderValueOption
+	var del []string
+	for k, vv := range pctx.Headers {
+		if skip(k) || slices.Equal(orig[k], vv) {
+			continue
+		}
+		if len(vv) == 0 {
+			// pctx.Headers[k] = nil is a delete, same as Del(k). Emitting
+			// an empty SetHeaders value instead would leave the outcome to
+			// Envoy's keep_empty_value setting.
+			del = append(del, strings.ToLower(k))
+			continue
+		}
+		// Wire header names are lowercase; pctx.Headers keys were
+		// canonicalised by headerMapToHTTP. That helper uses http.Header.Set,
+		// not Add, so a header that arrived with several wire entries is
+		// already collapsed to its last value in pctx.Headers — a lossiness
+		// bug one layer down, not a property to rely on here. Before this PR
+		// the collapse had no wire-facing consequence (mutations were never
+		// emitted); now a mutated header is emitted as a single SetHeaders,
+		// which overwrites every wire entry, so a multi-valued header a plugin
+		// touches loses all but the last. Reachable, not theoretical: cpex's
+		// applyExtensionChanges (plugins/cpex/manager_cpex.go:492) does
+		// pctx.Headers.Set(k, v) for arbitrary CPEX-supplied keys, so a policy
+		// naming a repeated header (X-Forwarded-For in a proxy chain) gets
+		// here. The one-line root fix is Add-not-Set in headerMapToHTTP, which
+		// would make pctx.Headers faithful to the wire and let the join below
+		// produce the full value — a follow-up, not part of this header-
+		// propagation PR.
+		//
+		// Multi-value join uses ",": correct per RFC 9110 for every header a
+		// plugin realistically rewrites, and known-wrong only for Cookie
+		// (whose separator is "; ") — no plugin rewrites Cookie today, and one
+		// that does must split this out rather than discover it here.
+		set = append(set, &corev3.HeaderValueOption{
+			Header: &corev3.HeaderValue{Key: strings.ToLower(k), RawValue: []byte(strings.Join(vv, ","))},
+		})
+	}
+	for k := range orig {
+		if _, ok := pctx.Headers[k]; !ok && !skip(k) {
+			del = append(del, strings.ToLower(k)) // plugin removed it
+		}
+	}
+	if len(set) == 0 && len(del) == 0 {
+		return resp
+	}
+	var cr *extprocv3.CommonResponse
+	switch r := resp.Response.(type) {
+	case *extprocv3.ProcessingResponse_RequestHeaders:
+		if r.RequestHeaders.Response == nil {
+			r.RequestHeaders.Response = &extprocv3.CommonResponse{}
+		}
+		cr = r.RequestHeaders.Response
+	case *extprocv3.ProcessingResponse_RequestBody:
+		if r.RequestBody.Response == nil {
+			r.RequestBody.Response = &extprocv3.CommonResponse{}
+		}
+		cr = r.RequestBody.Response
+	default:
+		return resp // ImmediateResponse or response-phase; nothing to forward.
+	}
+	if cr.HeaderMutation == nil {
+		cr.HeaderMutation = &extprocv3.HeaderMutation{}
+	}
+	// Append, never assign: composes with allowResponse's
+	// x-authbridge-direction removal.
+	cr.HeaderMutation.SetHeaders = append(cr.HeaderMutation.SetHeaders, set...)
+	cr.HeaderMutation.RemoveHeaders = append(cr.HeaderMutation.RemoveHeaders, del...)
+	return resp
+}
+
+// authorityOf returns the request's authority: the HTTP/2 :authority
+// pseudo-header, falling back to the HTTP/1 Host header. Outbound only —
+// there it names the service being called (pipeline.SessionEvent.Host).
+// The inbound handlers deliberately leave pctx.Host empty: the inbound
+// authority is caller-controlled and pctx.Host feeds enforcement decisions
+// (ibac's host-bypass skip, opa's policy input, per-host JWT audiences),
+// so a spoofed Host header must not reach them. See cpex's outbound-only
+// host-bypass guard for the same rule stated plugin-side.
+func authorityOf(headers *corev3.HeaderMap) string {
+	if a := getHeader(headers, ":authority"); a != "" {
+		return a
+	}
+	return getHeader(headers, "host")
+}
+
 func headerMapToHTTP(headers *corev3.HeaderMap) http.Header {
 	h := make(http.Header)
 	if headers != nil {
@@ -794,56 +876,6 @@ func allowBodyResponse() *extprocv3.ProcessingResponse {
 			RequestBody: &extprocv3.BodyResponse{
 				Response: &extprocv3.CommonResponse{
 					HeaderMutation: &extprocv3.HeaderMutation{
-						RemoveHeaders: []string{"x-authbridge-direction"},
-					},
-				},
-			},
-		},
-	}
-}
-
-func replaceTokenBodyResponse(token string) *extprocv3.ProcessingResponse {
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestBody{
-			RequestBody: &extprocv3.BodyResponse{
-				Response: &extprocv3.CommonResponse{
-					HeaderMutation: &extprocv3.HeaderMutation{
-						SetHeaders: []*corev3.HeaderValueOption{
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "authorization",
-									RawValue: []byte("Bearer " + token),
-								},
-							},
-						},
-						// Strip the internal direction header before forwarding,
-						// matching allowResponse/allowBodyResponse — otherwise
-						// Envoy leaks x-authbridge-direction to the agent/target.
-						RemoveHeaders: []string{"x-authbridge-direction"},
-					},
-				},
-			},
-		},
-	}
-}
-
-func replaceTokenResponse(token string) *extprocv3.ProcessingResponse {
-	return &extprocv3.ProcessingResponse{
-		Response: &extprocv3.ProcessingResponse_RequestHeaders{
-			RequestHeaders: &extprocv3.HeadersResponse{
-				Response: &extprocv3.CommonResponse{
-					HeaderMutation: &extprocv3.HeaderMutation{
-						SetHeaders: []*corev3.HeaderValueOption{
-							{
-								Header: &corev3.HeaderValue{
-									Key:      "authorization",
-									RawValue: []byte("Bearer " + token),
-								},
-							},
-						},
-						// Strip the internal direction header before forwarding,
-						// matching allowResponse/allowBodyResponse — otherwise
-						// Envoy leaks x-authbridge-direction to the agent/target.
 						RemoveHeaders: []string{"x-authbridge-direction"},
 					},
 				},

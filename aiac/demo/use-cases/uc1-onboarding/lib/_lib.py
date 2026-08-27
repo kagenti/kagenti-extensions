@@ -548,11 +548,11 @@ def drive(username: str) -> None:
     agent_client_id = admin.get_client(agent_uuid)["clientId"]
     secret = client_secret(admin, cfg, agent_uuid)
 
-    # target_scopes is now keyed by the FULL target service id (a SPIFFE id), with bare
+    # target_allow_scopes is keyed by the FULL target service id (a SPIFFE id), with bare
     # de-prefixed scope values. next(iter(...)) still yields the id to exchange for.
-    target_scopes = opa_eval([outbound_rego], "data.authbridge.client.outbound.request.target_scopes", {}) or {}
+    target_scopes = opa_eval([outbound_rego], "data.authbridge.client.outbound.request.target_allow_scopes", {}) or {}
     if not target_scopes:
-        abort(f"outbound rego at {outbound_rego} has no target_scopes — is the tool onboarded?")
+        abort(f"outbound rego at {outbound_rego} has no target_allow_scopes — is the tool onboarded?")
     target_uri = next(iter(target_scopes))
 
     token_exchange(cfg, client_id=agent_client_id, client_secret_value=secret, subject_token=subject_token, audience=target_uri)

@@ -1,10 +1,11 @@
-go 1.26.4
+go 1.26.5
 
 use (
 	./authlib
 	./cmd/abctl
 	./cmd/authbridge-cpex
 	./cmd/authbridge-envoy
+	./cmd/authbridge-praxis
 	./cmd/authbridge-proxy
 	./storage/redis
 )

@@ -41,7 +41,7 @@ def _spm(
         service_type=service_type,
         owned_roles=[_role()],
         owned_scopes=[_scope(service_id=service_id)],
-        inbound_rules=[PolicyRule(role=_role(id=role_id), scope=_scope(service_id=service_id))],
+        inbound_allow_rules=[PolicyRule(role=_role(id=role_id), scope=_scope(service_id=service_id))],
     )
 
 
@@ -152,6 +152,23 @@ class TestGetServicePoliciesByRole:
         body = resp.json()
         assert [s["service_id"] for s in body] == ["svc-a"]
 
+    def test_returns_spm_when_role_referenced_only_in_deny_rules(self, client):
+        # The scan must cover BOTH parallel lists: a role reference living only in
+        # inbound_deny_rules (with an empty allow list) must still surface here, because
+        # override-purge needs to find stale deny edges just as much as allow edges.
+        deny_spm = ServicePolicyModel(
+            service_id="svc-deny",
+            service_type=ServiceType.AGENT,
+            owned_roles=[_role()],
+            owned_scopes=[_scope(service_id="svc-deny")],
+            inbound_allow_rules=[],
+            inbound_deny_rules=[PolicyRule(role=_role(id="denied-role"), scope=_scope(service_id="svc-deny"))],
+        )
+        _preload(deny_spm)
+        resp = client.get("/policy/services", params={"role": "denied-role"})
+        assert resp.status_code == 200
+        assert [s["service_id"] for s in resp.json()] == ["svc-deny"]
+
     def test_returns_all_spms_when_several_reference_role(self, client):
         _preload(_spm("svc-a", role_id="shared-role"))
         _preload(_spm("svc-b", role_id="shared-role"))
@@ -198,7 +215,7 @@ class TestUpsertServicePolicy:
 
         # The stored/cached SPM now carries the second write's rule.
         resp = client.get(f"/policy/services/{encoded}")
-        rule_role_ids = [r["role"]["id"] for r in resp.json()["inbound_rules"]]
+        rule_role_ids = [r["role"]["id"] for r in resp.json()["inbound_allow_rules"]]
         assert rule_role_ids == ["role-b"]
 
     def test_returns_502_on_sqlite_error(self, client):

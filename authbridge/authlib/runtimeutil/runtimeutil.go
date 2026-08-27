@@ -7,6 +7,7 @@
 package runtimeutil
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/reverseproxy"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/transparentproxy"
 	"github.com/rossoctl/cortex/authbridge/authlib/observe"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
@@ -172,6 +174,50 @@ func StartReverseProxyServer(name string, rp *reverseproxy.Server, addr string) 
 		slog.Info("Reverse server listening", "name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
 		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
 			slog.Error("Reverse server failed", "name", name, "error", err)
+		}
+	}()
+	return srv, nil
+}
+
+// StartTransparentInboundServer binds the inbound transparent listener and
+// serves the reverse proxy's handler over it, resolving each request's
+// forwarding target from the destination the client actually addressed
+// (recovered via SO_ORIGINAL_DST) rather than from a fixed backend URL.
+//
+// Pair with proxy-init's INBOUND_TRANSPARENT_PORT: the port here MUST match the
+// PREROUTING REDIRECT target, or inbound traffic is redirected to a dead port.
+// Callers should treat a returned error as fatal for that reason.
+func StartTransparentInboundServer(name string, rp *reverseproxy.Server, addr string) (*http.Server, error) {
+	if addr == "" {
+		return nil, fmt.Errorf("%s: transparent_inbound_addr is empty but inbound_interception is transparent", name)
+	}
+	// Bind a *net.TCPListener directly rather than via rp.Listen: SO_ORIGINAL_DST
+	// must be read off the raw TCP connection before any bytes are consumed. The
+	// mTLS posture is then applied with the same WrapListener the fixed-backend
+	// reverse proxy uses, so permissive/strict behavior cannot drift between the
+	// two inbound shapes.
+	la, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return nil, fmt.Errorf("%s: resolve addr %q: %w", name, addr, err)
+	}
+	tcpLn, err := net.ListenTCP("tcp", la)
+	if err != nil {
+		return nil, fmt.Errorf("%s: listen on %q: %w", name, addr, err)
+	}
+	listener := rp.WrapListener(transparentproxy.NewInboundListener(tcpLn))
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           rp.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		// Carries each connection's recovered original destination into the
+		// request context, unwrapping through tlssniff / tls.Conn as needed.
+		ConnContext: transparentproxy.ConnContextHook,
+	}
+	go func() {
+		slog.Info("Transparent inbound server listening",
+			"name", name, "addr", listener.Addr().String(), "mtls", rp.MTLSEnabled())
+		if err := srv.Serve(listener); err != nil && err != http.ErrServerClosed {
+			slog.Error("Transparent inbound server failed", "name", name, "error", err)
 		}
 	}()
 	return srv, nil

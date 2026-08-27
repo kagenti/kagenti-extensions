@@ -152,6 +152,17 @@ spec:
               port: 7070
             initialDelaySeconds: 10
             periodSeconds: 20
+          # Optional per-onboarding default effect for pairs no rule mentions.
+          # Unset/unrecognised => "Deny" (least-privilege, today's behavior).
+          # "Allow" opts an onboarding into permissive-default posture (explicit
+          # DENY rules still override). This is an integration-harness knob today
+          # (patched onto this Deployment before onboarding); it is NOT persisted
+          # on the SPM, so an unrelated recompute re-derives the agent at "Deny"
+          # (see the non-durability caveat in policy/computation/engine.py).
+          # Uncomment to set it deployment-wide:
+          # env:
+          #   - name: AIAC_DEFAULT_EFFECT
+          #     value: "Allow"   # or "Deny"
           envFrom:
             - configMapRef:
                 name: aiac-pdp-config

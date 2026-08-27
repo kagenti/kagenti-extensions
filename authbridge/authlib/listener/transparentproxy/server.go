@@ -1,19 +1,27 @@
-// Package transparentproxy implements an outbound transparent proxy listener
-// for proxy-sidecar enforce-redirect mode. Unlike the forward proxy (which
-// requires the agent to honor HTTP_PROXY and speak explicit CONNECT), this
-// listener receives connections that iptables transparently REDIRECTed to it.
-// The agent believes it is connecting directly to the destination, so the
-// listener recovers the original destination from the kernel via
-// SO_ORIGINAL_DST and hands the connection to a ConnHandler that gates and
-// blind-tunnels it — emitting no proxy-protocol bytes back to the agent.
+// Package transparentproxy implements transparent (iptables-REDIRECTed) proxy
+// listeners for proxy-sidecar mode. In both directions the peer believes it is
+// talking directly to its chosen destination, so the listener recovers that
+// destination from the kernel via SO_ORIGINAL_DST rather than from any protocol
+// header. This is the Go equivalent of Envoy's original_dst listener filter +
+// ORIGINAL_DST cluster used by envoy-sidecar mode.
 //
-// This is the Go equivalent of Envoy's original_dst listener filter +
-// ORIGINAL_DST cluster used by envoy-sidecar mode; the auth pipeline behind
-// the ConnHandler is identical to the forward proxy's CONNECT path.
+// Two shapes, because the two directions have different requirements:
+//
+//   - Outbound (Server, enforce-redirect egress guard): dispatches each capture
+//     to a ConnHandler that gates on destination and then blind-tunnels,
+//     emitting no proxy-protocol bytes back to the agent. Policy is host-based,
+//     so the bytes can stay opaque and the agent's end-to-end TLS is preserved.
+//   - Inbound (InboundListener): a net.Listener, because inbound cannot
+//     blind-tunnel. JWT validation reads the Authorization header and Path and
+//     rewrites Authorization to a placeholder before forwarding, which requires
+//     a real HTTP server over the connection.
+//
+// Both share CheckDst and the platform-specific SO_ORIGINAL_DST recovery.
 package transparentproxy
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 )
@@ -76,26 +84,48 @@ func (s *Server) dispatch(conn *net.TCPConn) {
 		_ = conn.Close()
 		return
 	}
-	// Defense-in-depth against a self-redirect loop: a genuinely REDIRECTed
-	// connection's original destination is always some external host — never
-	// this listener itself. Two ways a connection could point back at us:
-	//   - a loopback dst (a direct dial to 127.0.0.1:<port>); the enforce-redirect
-	//     rules RETURN loopback before the REDIRECT, so a real capture never has one;
-	//   - the listener's own address (e.g. a podIP:<port> self-dial that slipped
-	//     past the iptables CLUSTER_CIDRS RETURN under a misconfigured CIDR set).
-	// Tunnelling either would spiral into ever more connections/goroutines. The
-	// iptables layer is the primary control; this is belt-and-suspenders. Drop it.
-	selfLoop := dst == conn.LocalAddr().String()
-	if host, _, splitErr := net.SplitHostPort(dst); !selfLoop && splitErr == nil {
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			selfLoop = true
-		}
-	}
-	if selfLoop {
+	if err := CheckDst(conn.LocalAddr(), dst); err != nil {
 		slog.Warn("transparent-proxy: dropping self-referential connection (would self-loop)",
-			"remote", conn.RemoteAddr().String(), "dst", dst, "local", conn.LocalAddr().String())
+			"remote", conn.RemoteAddr().String(), "dst", dst,
+			"local", conn.LocalAddr().String(), "error", err)
 		_ = conn.Close()
 		return
 	}
 	s.handle(conn, dst)
+}
+
+// ErrSelfReferential reports a recovered original destination that points back
+// at this proxy. Returned by CheckDst.
+var ErrSelfReferential = errors.New("transparentproxy: self-referential destination")
+
+// CheckDst is defense-in-depth against a self-redirect loop. A genuinely
+// REDIRECTed connection's original destination is the address the peer chose —
+// for captured egress some external host, for captured ingress this pod's own
+// IP on the app's port. In neither case is it this listener's own address, and
+// in neither case is it loopback:
+//
+//   - a loopback dst means a direct dial to 127.0.0.1:<port>. The
+//     enforce-redirect rules RETURN loopback before the REDIRECT, and loopback
+//     traffic never traverses PREROUTING, so a real capture never has one.
+//   - the listener's own address means a self-dial that slipped past the
+//     iptables RETURN/exclusion rules (e.g. a misconfigured port-exclusion
+//     list that fails to exempt the transparent port itself).
+//
+// Handing either to a handler would spiral into ever more connections and
+// goroutines — tunnelled straight back into the listener that produced them.
+// The iptables layer is the primary control; this is belt-and-suspenders.
+//
+// local may be nil, in which case only the loopback arm is checked.
+func CheckDst(local net.Addr, dst string) error {
+	if local != nil && dst == local.String() {
+		return fmt.Errorf("%w: dst equals listener address %s", ErrSelfReferential, dst)
+	}
+	host, _, err := net.SplitHostPort(dst)
+	if err != nil {
+		return fmt.Errorf("transparentproxy: malformed destination %q: %w", dst, err)
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return fmt.Errorf("%w: loopback dst %s", ErrSelfReferential, dst)
+	}
+	return nil
 }

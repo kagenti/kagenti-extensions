@@ -33,8 +33,8 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 | [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Alpha | Both | No |
 | [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Alpha | Outbound | No |
 | [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Alpha | Outbound | No |
+| [`session-budget`](#session-budget) | Enforces per-session token, call, and duration budgets via Redis. | Alpha | Outbound | No |
 | [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Alpha | Outbound | No |
-| [`token-budget`](#token-budget) | Enforces per-session token, call, and duration budgets via Redis. | Coming Soon | Outbound | No |
 | [`token-exchange`](#token-exchange) | RFC 8693 outbound token exchange per route. | Ready | Outbound | YES |
 
 ## `a2a-parser`
@@ -169,6 +169,28 @@ outbound requests, so the workload never holds the real secret.
 - `placeholder` (string) — if set, the inbound bearer must exactly equal this value before injection proceeds.
 - `inject_header` (string) — header to inject the credential into. Default `Authorization` (writes `Bearer <value>`); any other value writes the raw credential and drops the inbound `Authorization` header.
 
+## `session-budget`
+
+Enforces per-session token, call-count, and duration budgets via Redis. Opt-in at build time (`-tags include_plugin_sessionbudget`).
+
+- `redis_url` (string) — Redis/Valkey connection URL; required.
+- `max_tokens` (int64) — cumulative token ceiling per session. `0` = no limit.
+- `max_calls` (int64) — max inference calls per session. `0` = no limit.
+- `max_duration_seconds` (int64) — wall-clock session lifetime. `0` = no limit.
+- `on_exceed` (string) — `deny` (default, block), `observe` (log only), or `pause` (HITL webhook approval).
+- `pause_webhook` (string) — URL to POST for approval when `on_exceed=pause`. Required in pause mode.
+- `pause_timeout` (string) — how long to wait for webhook response. Default `30s`.
+- `pause_timeout_action` (string) — fallback on timeout/error: `deny` (default) or `allow`.
+- `pause_grace_period` (string) — suppress repeated webhooks after approval. Default `5m`.
+- `session_ttl_seconds` (int) — Redis key TTL; must be ≥ `max_duration_seconds` when the latter is set (enforced at Configure time). Default 7200.
+- `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
+- `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
+
+Cold-cache behavior is mode-dependent; see
+[session-budget-plugin.md](session-budget-plugin.md#cold-cache-behavior)
+for details.
+
+
 ## `token-broker`
 
 Exchanges incoming tokens against a configured IdP through an external
@@ -182,21 +204,6 @@ token broker service, per host-based routing rules.
   - `action` — `broker` (default) or `passthrough`.
   - `authorization_endpoint` / `token_endpoint` — per-route OAuth endpoint overrides sent to the broker.
 
-## `token-budget`
-
-Enforces per-session token, call-count, and duration budgets via Redis.
-Opt-in at build time (`-tags include_plugin_tokenbudget`).
-
-- `redis_url` (string) — Redis/Valkey connection URL; required.
-- `max_tokens` (int64) — cumulative token ceiling per session. `0` = no limit.
-- `max_calls` (int64) — max inference calls per session. `0` = no limit.
-- `max_duration_seconds` (int64) — wall-clock session lifetime. `0` = no limit.
-- `on_exceed` (string) — `deny` (default, block) or `observe` (log only).
-- `session_ttl_seconds` (int) — Redis key TTL; should be ≥ `max_duration_seconds`. Default 7200.
-- `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
-- `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
-
-Note that enforcement uses a zero-I/O local cache. After a pod restart, the first request can pass while the cache is cold, before Redis refresh restores the counters.
 
 ## `token-exchange`
 
