@@ -93,7 +93,7 @@ def _reverse_dict(d: dict) -> dict:
 
 def _reordered(scenario: ModuleType) -> SimpleNamespace:
     """A view of ``scenario`` with every candidate list's dict-iteration order reversed
-    (``USER_ROLES``, ``AGENTS`` and each agent's ``inbound_scopes``/``target_scopes``/``roles``,
+    (``USER_ROLES``, ``AGENTS`` and each agent's ``inbound_scopes``/``delegation_scopes``/``roles``,
     ``TOOLS`` and each tool's ``scopes``), so ``orchestrate_prb`` sees candidates in reordered
     order with zero production-code changes. Name-keyed pair lists are order-insensitive
     (``grant_sets``/``truth`` compare them as sets) so they're copied through unchanged."""
@@ -101,7 +101,7 @@ def _reordered(scenario: ModuleType) -> SimpleNamespace:
         agent_id: {
             **agent,
             "inbound_scopes": _reverse_dict(agent["inbound_scopes"]),
-            "target_scopes": _reverse_dict(agent.get("target_scopes", {})),
+            "delegation_scopes": _reverse_dict(agent.get("delegation_scopes", {})),
             "roles": _reverse_dict(agent["roles"]),
         }
         for agent_id, agent in reversed(list(scenario.AGENTS.items()))

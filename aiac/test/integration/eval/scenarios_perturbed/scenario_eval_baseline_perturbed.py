@@ -27,14 +27,14 @@ AGENTS: dict[str, dict] = {
             "look at and change what's stored in it."
         ),
         "inbound_scopes": {
-            "repo-access": (
+            "agent-scope-repo-access": (
                 "Lets a holder use the repo agent's source-code abilities: looking at repository "
                 "contents and changing them."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "repo_operations": (
+            "agent-role-repo-operations": (
                 "Covers both reading and writing source repository contents: listing files, "
                 "reading them, creating new ones, and editing existing ones."
             ),
@@ -46,14 +46,14 @@ AGENTS: dict[str, dict] = {
             "filing, and updating issues along with their comment threads."
         ),
         "inbound_scopes": {
-            "tracker-access": (
+            "agent-scope-tracker-access": (
                 "Lets a holder use the tracker agent's issue-tracking abilities: reading and "
                 "updating issues."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "tracker_operations": (
+            "agent-role-tracker-operations": (
                 "Covers both reading and writing on the issue tracker: reading, filing, updating, "
                 "and commenting on issues and their threads."
             ),
@@ -70,8 +70,8 @@ TOOLS: dict[str, dict] = {
             "operations against what's stored in it."
         ),
         "scopes": {
-            "repo-read": "Look at repository contents — file listings and file bodies — without changing anything.",
-            "repo-write": "Add, edit, or remove repository contents, including committing file changes.",
+            "tool-scope-repo-read": "Look at repository contents — file listings and file bodies — without changing anything.",
+            "tool-scope-repo-write": "Add, edit, or remove repository contents, including committing file changes.",
         },
     },
     "tracker-tool": {
@@ -80,8 +80,8 @@ TOOLS: dict[str, dict] = {
             "on issues and their comment threads."
         ),
         "scopes": {
-            "tracker-read": "Look at issues and their comment threads without changing anything.",
-            "tracker-write": "Open, edit, comment on, and close issues.",
+            "tool-scope-tracker-read": "Look at issues and their comment threads without changing anything.",
+            "tool-scope-tracker-write": "Open, edit, comment on, and close issues.",
         },
     },
 }
@@ -91,27 +91,27 @@ TOOLS: dict[str, dict] = {
 # Identical to the original's USERS mapping — same usernames, same realm roles.
 
 USERS: dict[str, str] = {
-    "dev-user": "developer",
-    "test-user": "tester",
-    "devops-user": "devops",
+    "dev-user": "user-role-developer",
+    "test-user": "user-role-tester",
+    "devops-user": "user-role-devops",
 }
 
 USER_PASSWORD = "password"
 
-# name -> description. Reworded from the original; devops still appears in no pair-list below and
+# name -> description. Reworded from the original; user-role-devops still appears in no pair-list below and
 # is denied everywhere by deny-by-default.
 USER_ROLES: dict[str, str] = {
-    "developer": (
+    "user-role-developer": (
         "Developer: an engineer who builds out the codebase and resolves bugs logged in the issue "
         "tracker. Mostly lives in the source tree, checking the tracker for defect reports as "
         "needed."
     ),
-    "tester": (
+    "user-role-tester": (
         "Tester: a QA specialist whose job is verifying quality and following defects through the "
         "issue tracker — filing them, triaging them, and keeping them updated. Doesn't touch the "
         "source tree."
     ),
-    "devops": (
+    "user-role-devops": (
         "DevOps: handles deployment infrastructure and the runtime environment. Doesn't write "
         "source code and doesn't manage the issue tracker."
     ),
@@ -122,22 +122,22 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("developer", "repo-access"),
-    ("developer", "tracker-access"),
-    ("tester", "tracker-access"),
+    ("user-role-developer", "agent-scope-repo-access"),
+    ("user-role-developer", "agent-scope-tracker-access"),
+    ("user-role-tester", "agent-scope-tracker-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("repo_operations", "repo-read"),
-    ("repo_operations", "repo-write"),
-    ("tracker_operations", "tracker-read"),
-    ("tracker_operations", "tracker-write"),
+    ("agent-role-repo-operations", "tool-scope-repo-read"),
+    ("agent-role-repo-operations", "tool-scope-repo-write"),
+    ("agent-role-tracker-operations", "tool-scope-tracker-read"),
+    ("agent-role-tracker-operations", "tool-scope-tracker-write"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("developer", "repo-read"),
-    ("developer", "repo-write"),
-    ("developer", "tracker-read"),
-    ("tester", "tracker-read"),
-    ("tester", "tracker-write"),
+    ("user-role-developer", "tool-scope-repo-read"),
+    ("user-role-developer", "tool-scope-repo-write"),
+    ("user-role-developer", "tool-scope-tracker-read"),
+    ("user-role-tester", "tool-scope-tracker-read"),
+    ("user-role-tester", "tool-scope-tracker-write"),
 ]

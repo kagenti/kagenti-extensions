@@ -24,14 +24,14 @@ AGENTS: dict[str, dict] = {
             "appointments and reading and updating patient records."
         ),
         "inbound_scopes": {
-            "intake-access": (
+            "agent-scope-intake-access": (
                 "Lets a holder use the intake agent's patient-intake abilities — booking "
                 "appointments and reading and updating patient records."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "intake_operations": (
+            "agent-role-intake-operations": (
                 "Covers both reading and writing patient records — looking at record contents and "
                 "updating them."
             ),
@@ -44,14 +44,14 @@ AGENTS: dict[str, dict] = {
             "may call it or what it may reach."
         ),
         "inbound_scopes": {
-            "billing-access": (
+            "agent-scope-billing-access": (
                 "Lets a holder use the billing agent's invoicing abilities — creating and reading "
                 "patient invoices. Not yet handed to any user role in the policy text."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "billing_operations": (
+            "agent-role-billing-operations": (
                 "Covers both reading and writing patient invoices. Not yet handed to any target in "
                 "the policy text."
             ),
@@ -68,8 +68,8 @@ TOOLS: dict[str, dict] = {
             "what's stored in them."
         ),
         "scopes": {
-            "records-read": "Look at patient records — demographics and visit history — without changing anything.",
-            "records-write": "Create and update patient records.",
+            "tool-scope-records-read": "Look at patient records — demographics and visit history — without changing anything.",
+            "tool-scope-records-write": "Create and update patient records.",
         },
     },
     "insurance-tool": {
@@ -79,7 +79,7 @@ TOOLS: dict[str, dict] = {
             "policy text — it's unreachable on purpose."
         ),
         "scopes": {
-            "insurance-verify": (
+            "tool-scope-insurance-verify": (
                 "Look up a patient's insurance coverage details. No agent role is ever handed this "
                 "scope anywhere in the policy text — it's unreachable on purpose."
             ),
@@ -90,13 +90,13 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "clerk-user": "front-desk-clerk",
+    "clerk-user": "user-role-front-desk-clerk",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "front-desk-clerk": (
+    "user-role-front-desk-clerk": (
         "Front Desk Clerk: can book appointments and read and update patient records via the "
         "intake agent. Has nothing to do with billing or insurance verification."
     ),
@@ -107,17 +107,17 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("front-desk-clerk", "intake-access"),
+    ("user-role-front-desk-clerk", "agent-scope-intake-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("intake_operations", "records-read"),
-    ("intake_operations", "records-write"),
+    ("agent-role-intake-operations", "tool-scope-records-read"),
+    ("agent-role-intake-operations", "tool-scope-records-write"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("front-desk-clerk", "records-read"),
-    ("front-desk-clerk", "records-write"),
+    ("user-role-front-desk-clerk", "tool-scope-records-read"),
+    ("user-role-front-desk-clerk", "tool-scope-records-write"),
 ]
 
 # --- Emergent unreachability -----------------------------------------------------------------

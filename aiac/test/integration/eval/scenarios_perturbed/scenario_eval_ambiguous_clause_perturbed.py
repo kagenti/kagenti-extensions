@@ -25,14 +25,14 @@ AGENTS: dict[str, dict] = {
             "looking up a student's current enrollment status and past enrollment record."
         ),
         "inbound_scopes": {
-            "registrar-access": (
+            "agent-scope-registrar-access": (
                 "Lets a holder use the registrar agent's enrollment-information abilities — "
                 "looking up enrollment status and enrollment history."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "registrar_operations": (
+            "agent-role-registrar-operations": (
                 "Covers looking up a student's current enrollment status and past enrollment "
                 "record."
             ),
@@ -49,11 +49,11 @@ TOOLS: dict[str, dict] = {
             "student's current status and past enrollment record."
         ),
         "scopes": {
-            "enrollment-status": (
+            "tool-scope-enrollment-status": (
                 "Look up a student's current enrollment status (enrolled, withdrawn, or on leave). "
                 "No write access."
             ),
-            "enrollment-history": (
+            "tool-scope-enrollment-history": (
                 "Look up a student's past enrollment record across terms, including earlier status "
                 "changes. No write access."
             ),
@@ -64,13 +64,13 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "advisor-user": "enrollment-advisor",
+    "advisor-user": "user-role-enrollment-advisor",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "enrollment-advisor": "Enrollment Advisor: may look up enrollment information for advising purposes.",
+    "user-role-enrollment-advisor": "Enrollment Advisor: may look up enrollment information for advising purposes.",
 }
 
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
@@ -78,14 +78,14 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("enrollment-advisor", "registrar-access"),
+    ("user-role-enrollment-advisor", "agent-scope-registrar-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("registrar_operations", "enrollment-status"),
-    ("registrar_operations", "enrollment-history"),
+    ("agent-role-registrar-operations", "tool-scope-enrollment-status"),
+    ("agent-role-registrar-operations", "tool-scope-enrollment-history"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("enrollment-advisor", "enrollment-status"),
+    ("user-role-enrollment-advisor", "tool-scope-enrollment-status"),
 ]

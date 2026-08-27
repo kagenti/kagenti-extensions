@@ -80,7 +80,7 @@ both an aspect and a domain.
 
 | # | Name | Users | Agents | Tools | Domain | Character | Marker | Assertion shape |
 |---|------|---|---|---|---|---|---|---|
-| 1 | Baseline-scale | 3 | 2 | 2 | Software engineering | Clean, unambiguous, fully specified, at UC1 scale — reuses UC1's `developer`/`tester`/`devops` roles verbatim. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 1 | Baseline-scale | 3 | 2 | 2 | Software engineering | Clean, unambiguous, fully specified, at UC1 scale — reuses UC1's `user-role-developer`/`user-role-tester`/`user-role-devops` roles verbatim. | `integration_extended` | Full per-cell `opa eval` truth table |
 | 2 | Ambiguous-and-contradictory | 2 (conceptual) | — | — | — | Policy text that both grants and permanently revokes the same `(role, scope)` pair — a direct, unresolvable contradiction. | `integration` | Single whole-document-reject `xfail` |
 | 3 | Agent-to-agent delegation | 2 | 2 | 1 | Logistics/shipping | Isolates the `target_scopes` delegation mechanism: one agent owns a target scope delegated to it via another agent's role, with no tools of its own. | `integration_extended` | Full per-cell `opa eval` truth table |
 | 4 | Unreachable resources | 1 | 2 | 2 | Healthcare/clinic | Silent authoring gaps → **emergent** unreachable agent and unreachable tool, under deny-by-default. | `integration_extended` | Full per-cell `opa eval` truth table |
@@ -97,7 +97,7 @@ Ground-truth rules used throughout, all mechanical (no per-cell subjective calls
   ambiguous clause.)
 - **Wildcard phrases → expand to the full named scope set.** (Scenario 7.)
 - **Silence → existing deny-by-default.** (Scenario 4's unreachable agent/tool, and the baseline
-  pipeline's own `devops` role.)
+  pipeline's own `user-role-devops` role.)
 - **Empty descriptions do not change grants either way.** (Scenario 10 — explicit named grants in
   the policy text are honored regardless of absent descriptions, and no access is invented from
   the absence either.)
@@ -117,13 +117,13 @@ session, each against its own realm):
 3. **Provision Keycloak**, generalized to loop over every entry in the scenario module's
    `USERS`/`USER_ROLES`/`AGENTS`/`TOOLS` dicts (`provision_keycloak_admin`), then create every
    scope/role and its service mapping through the IdP `Configuration` library
-   (`provision_via_config`). Each agent's `inbound_scopes` **and** `target_scopes` are mapped onto
+   (`provision_via_config`). Each agent's `inbound_scopes` **and** `delegation_scopes` are mapped onto
    the *same* Keycloak client — this single fact is the root cause of a finding documented in
    [Further Notes](#further-notes), and the reason Scenario 3 (`agent_delegation`) exists as its own
    isolated scenario.
 4. **Run the PRB** (`orchestrate_prb`), generalized from `policy-pipeline.md`'s three fixed loops
    to loop over every agent's inbound scope, every tool/agent-target scope, and every agent role.
-   Agent-to-agent target scopes (Scenario 3: `customs-clearance`, owned by `customs-agent`) are
+   Agent-to-agent target scopes (Scenario 3: `agent-scope-customs-clearance`, owned by `customs-agent`) are
    folded into the same "target" candidate set as tool scopes — from the PRB/PCE's perspective a
    target scope owned by another agent is handled identically to one owned by a tool.
 5. **Run the PCE** (`compute_and_apply`) and assert every expected `.rego` file actually landed on
@@ -197,20 +197,20 @@ cost tier in the same directory — and skip via `pytest.skip` when `LLM_BASE_UR
 ### Scenario 1 — baseline-scale
 
 Realm `aiac-pp-eval-baseline`. 3 users, 2 agents (`repo-agent`, `tracker-agent`), 2 tools
-(`repo-tool`, `tracker-tool`). Reuses UC1's exact 3 roles verbatim (`developer`, `tester`,
-`devops`, from `scenario_uc1.py`), scaled to 2 agents × 2 tools. `devops` is granted nothing —
+(`repo-tool`, `tracker-tool`). Reuses UC1's exact 3 roles verbatim (`user-role-developer`, `user-role-tester`,
+`user-role-devops`, from `scenario_uc1.py`), scaled to 2 agents × 2 tools. `user-role-devops` is granted nothing —
 deny-by-default, mirroring UC1's own `devops-user`.
 
 **Inbound allow** (user may call the agent):
 
 | Subject (role) | repo-agent | tracker-agent |
 |---|---|---|
-| developer | ✅ | ✅ |
-| tester | ❌ | ✅ |
-| devops | ❌ | ❌ |
+| user-role-developer | ✅ | ✅ |
+| user-role-tester | ❌ | ✅ |
+| user-role-devops | ❌ | ❌ |
 
-**Outbound allow** — per `OUTBOUND_SUBJECT_PAIRS` × `OUTBOUND_PAIRS`: `developer` reaches
-`repo-read`/`repo-write`/`tracker-read`; `tester` reaches `tracker-read`/`tracker-write`; `devops`
+**Outbound allow** — per `OUTBOUND_SUBJECT_PAIRS` × `OUTBOUND_PAIRS`: `user-role-developer` reaches
+`tool-scope-repo-read`/`tool-scope-repo-write`/`tool-scope-tracker-read`; `user-role-tester` reaches `tool-scope-tracker-read`/`tool-scope-tracker-write`; `user-role-devops`
 reaches nothing.
 
 Files left on disk per agent under `test/integration/eval/rego_out/policy_pipeline_eval/baseline/`:
@@ -220,18 +220,21 @@ Files left on disk per agent under `test/integration/eval/rego_out/policy_pipeli
 
 Realm `aiac-pp-eval-agent-delegation`. 2 users, 2 agents (`dispatch-agent`, `customs-agent`), 1
 tool (`manifest-tool`). `customs-agent` deliberately has **zero `inbound_scopes` of its own** —
-its only scope, `customs-clearance`, is a `target_scopes` entry on `dispatch-agent`, delegated
-through it. `shipment-coordinator` holds `customs-clearance` as a subject; `dock-worker` does not.
+its only scope, `agent-scope-customs-clearance`, is a `delegation_scopes` entry on `customs-agent`'s own
+fixture definition, delegated through `dispatch-agent` (it also appears in `dispatch-agent`'s
+**derived** `AgentPolicyModel.target_scopes` map, keyed by `customs-agent`'s service id — the
+production, caller's-perspective sense of that name). `user-role-shipment-coordinator` holds
+`agent-scope-customs-clearance` as a subject; `user-role-dock-worker` does not.
 
-Because `customs-clearance` is one of `customs-agent`'s owned Keycloak-client scopes regardless of
-whether it arrived via `inbound_scopes` or `target_scopes` (see [Further
-Notes](#further-notes)), `shipment-coordinator` also passes `customs-agent`'s own inbound gate
+Because `agent-scope-customs-clearance` is one of `customs-agent`'s owned Keycloak-client scopes regardless of
+whether it arrived via `inbound_scopes` or `delegation_scopes` (see [Further
+Notes](#further-notes)), `user-role-shipment-coordinator` also passes `customs-agent`'s own inbound gate
 directly — this is the cleanest demonstration in the suite of that system property, since
 `customs-agent` has no inbound scopes of its own to confuse the picture.
 
 ### Scenario 4 — unreachable resources
 
-Realm `aiac-pp-eval-unreachable-resources`. 1 user (`front-desk-clerk`), 2 agents (`intake-agent`,
+Realm `aiac-pp-eval-unreachable-resources`. 1 user (`user-role-front-desk-clerk`), 2 agents (`intake-agent`,
 `billing-agent`), 2 tools (`records-tool`, `insurance-tool`).
 
 - **`billing-agent` produces no `.rego` at all** (`EXPECT_NO_REGO`) — provisioned like any other
@@ -239,46 +242,46 @@ Realm `aiac-pp-eval-unreachable-resources`. 1 user (`front-desk-clerk`), 2 agent
   grant sections, and no other agent has a `target_scopes` entry pointing at it. `test_inbound`/
   `test_outbound` special-case this: when the expected `.rego` file is absent, they assert ground
   truth agrees no one reaches it, rather than skipping silently.
-- **`insurance-tool`** exists with a real scope (`insurance-verify`) that no agent role is ever
+- **`insurance-tool`** exists with a real scope (`tool-scope-insurance-verify`) that no agent role is ever
   granted anywhere in the policy text — unreachable, but `insurance-tool` isn't itself an agent, so
   there's no `.rego` file for it to be missing from; the scope simply never appears in any
   `target_scopes` map.
 
 ### Scenario 6 — ambiguous clause
 
-Realm `aiac-pp-eval-ambiguous-clause`. 1 user (`enrollment-advisor`), 1 agent
-(`registrar-agent`), 1 tool (`enrollment-tool`, scopes `enrollment-status` + `enrollment-history`).
-`enrollment-advisor` is granted "access to enrollment information" — a genuinely
+Realm `aiac-pp-eval-ambiguous-clause`. 1 user (`user-role-enrollment-advisor`), 1 agent
+(`registrar-agent`), 1 tool (`enrollment-tool`, scopes `tool-scope-enrollment-status` + `tool-scope-enrollment-history`).
+`user-role-enrollment-advisor` is granted "access to enrollment information" — a genuinely
 multi-interpretable, non-contradictory clause. Ground truth encodes only the narrow reading
-(`enrollment-status`), per most-restrictive-reading-wins. A real PRB run landing on the broader
-reading (also `enrollment-history`) is a **legitimate finding** for this cell, not evidence the
-scenario is authored wrong. The agent's own role (`registrar_operations`) is granted both scopes,
+(`tool-scope-enrollment-status`), per most-restrictive-reading-wins. A real PRB run landing on the broader
+reading (also `tool-scope-enrollment-history`) is a **legitimate finding** for this cell, not evidence the
+scenario is authored wrong. The agent's own role (`agent-role-registrar-operations`) is granted both scopes,
 so the ambiguity lives entirely on the subject side.
 
 ### Scenario 7 — wildcard grant
 
-Realm `aiac-pp-eval-wildcard-grant`. 1 user (`inventory-manager`), 1 agent (`inventory-agent`), 1
-tool (`inventory-tool`, scopes `inventory-check`/`inventory-adjust`/`inventory-reorder`). Both the
+Realm `aiac-pp-eval-wildcard-grant`. 1 user (`user-role-inventory-manager`), 1 agent (`inventory-agent`), 1
+tool (`inventory-tool`, scopes `tool-scope-inventory-check`/`tool-scope-inventory-adjust`/`tool-scope-inventory-reorder`). Both the
 user-facing and agent-facing grant text use the wildcard phrase "all inventory operations" rather
 than an enumerated list. Ground truth expands the phrase to all three concrete scopes on both
 sides of the per-scope AND gate, checking whether the real PRB expands a wildcard phrase correctly.
 
 ### Scenario 8 — misleading descriptions
 
-Realm `aiac-pp-eval-misleading-descriptions`. 2 users (`vip-manager`, `front-desk-staff`), 1 agent
-(`guest-services-agent`), 1 tool (`reservation-tool`, scopes `reservation-read` +
-`guest-notes-read` + `master-override`). `vip-manager` is a name-bait role: the name suggests
+Realm `aiac-pp-eval-misleading-descriptions`. 2 users (`user-role-vip-manager`, `user-role-front-desk-staff`), 1 agent
+(`guest-services-agent`), 1 tool (`reservation-tool`, scopes `tool-scope-reservation-read` +
+`tool-scope-guest-notes-read` + `tool-scope-master-override`). `user-role-vip-manager` is a name-bait role: the name suggests
 broad/elevated authority, but its description confines it to the same reads as
-`front-desk-staff`, plus the scary-sounding-but-inert `master-override` scope, which grants no
-real capability beyond itself. `vip-manager` and `front-desk-staff` end up with *functionally
+`user-role-front-desk-staff`, plus the scary-sounding-but-inert `tool-scope-master-override` scope, which grants no
+real capability beyond itself. `user-role-vip-manager` and `user-role-front-desk-staff` end up with *functionally
 identical* real access. Ground truth always follows the **description**, never the **name**.
 
 ### Scenario 9 — confusable agents
 
-Realm `aiac-pp-eval-confusable-agents`. 2 users (`team-trainer`, `performance-analyst`), 2 agents
+Realm `aiac-pp-eval-confusable-agents`. 2 users (`user-role-team-trainer`, `user-role-performance-analyst`), 2 agents
 (`coach-agent`, `coach-review-agent`), 2 tools (`roster-tool`, `evaluation-tool`). The two agent
-names differ by only one word; their access is entirely non-overlapping (`team-trainer` reaches
-only `coach-agent`/`roster-tool`, `performance-analyst` reaches only
+names differ by only one word; their access is entirely non-overlapping (`user-role-team-trainer` reaches
+only `coach-agent`/`roster-tool`, `user-role-performance-analyst` reaches only
 `coach-review-agent`/`evaluation-tool`).
 
 Also carries the suite's **identity/boundary-confusion probe** (`IDENTITY_CONFUSION_PROBES`):
@@ -289,8 +292,8 @@ both directions (`service-account-coach-agent` against `coach-review-agent`'s ga
 
 ### Scenario 10 — empty descriptions
 
-Realm `aiac-pp-eval-empty-descriptions`. 1 user (`field-operator`), 1 agent
-(`irrigation-agent`), 1 tool (`valve-tool`, scopes `valve-open`/`valve-close`). Every entity, role,
+Realm `aiac-pp-eval-empty-descriptions`. 1 user (`user-role-field-operator`), 1 agent
+(`irrigation-agent`), 1 tool (`valve-tool`, scopes `tool-scope-valve-open`/`tool-scope-valve-close`). Every entity, role,
 and scope description is the empty string — the PRB has no semantic content to infer intent from
 beyond the bare identifiers, so every (role, scope) pair is named explicitly in
 `policy.eval_empty_descriptions.md`'s grant sentences. Ground truth: the explicitly named grants
@@ -338,7 +341,7 @@ or OPA URLs, no `opa` binary.
 # Heavy scenarios (needs KEYCLOAK_URL + admin creds + LLM_* + opa on PATH):
 .venv/bin/pytest test/integration/eval/test_policy_pipeline_eval.py -m integration_extended -v
 # A failing node names the exact scenario/agent/subject(/scope) cell, e.g.:
-#   test_inbound[baseline-repo-agent-tester-user] — expected allow, opa denied
+#   test_inbound[baseline-repo-agent-user-role-tester-user] — expected allow, opa denied
 # .rego left on disk per scenario for eyeballing:
 #   test/integration/eval/rego_out/policy_pipeline_eval/{baseline,agent_delegation,unreachable_resources,
 #     ambiguous_clause,wildcard_grant,misleading_descriptions,confusable_agents,empty_descriptions}/{slug}.{inbound,outbound}.rego
@@ -377,7 +380,7 @@ marker.
   spotting which cell did what. Instead of the docstring + crash-message fallback, each entry
   shows:
   - **What it tests:** a concrete sentence naming the actual subject/agent(/scope) under test
-    (e.g. `Can 'analyst-user' (subject, role 'performance-analyst') access 'coach-agent' (agent) in
+    (e.g. `Can 'analyst-user' (subject, role 'user-role-performance-analyst') access 'coach-agent' (agent) in
     the 'confusable_agents' scenario?`).
   - **Expected output:** `True`/`False` plus a short mechanical explanation derived from the
     scenario's truth table (which `INBOUND_PAIRS`/`OUTBOUND_PAIRS`/`OUTBOUND_SUBJECT_PAIRS` row
@@ -422,22 +425,22 @@ scenarios; the heavy scenarios additionally need Keycloak + `opa`, same discover
   package's `subject_role_scopes`/`agent_role_scopes` gates can never distinguish "may reach the
   agent's own scope" from "may reach a delegated target's scope" (see the next point), a single probe
   covers both mechanisms uniformly.
-- **`target_scopes` and `inbound_scopes` are indistinguishable at the real system's data-model
+- **`delegation_scopes` and `inbound_scopes` are indistinguishable at the real system's data-model
   level — this is a property of the system, not a scenario defect.** The PCE resolves an agent's
   `agent_scopes` (the inbound audience gate) directly from the IdP `Service` record's owned scopes
   (`engine.py`: `apm.agent_scopes = list(sa.owned_scopes)`), and the `Service`/`Scope` Pydantic
   models (`idp/configuration/models.py`) carry no scope-kind discriminator — a scope is just "a scope
   this client owns," full stop. Because provisioning necessarily maps both an agent's
-  `inbound_scopes` and its `target_scopes` onto the **same** Keycloak client (there is no second
-  client to put them on), any role granted a `target_scope` for delegation purposes through another
-  agent **also, unavoidably, passes the owning agent's own inbound gate**. Concretely: in Scenario 3
-  (`agent_delegation`), `shipment-coordinator` is granted `customs-clearance` so it can have customs
-  clearance carried out *through* `dispatch-agent` — but because `customs-clearance` is one of
-  `customs-agent`'s owned (target) scopes, `shipment-coordinator` also passes `customs-agent`'s own
-  inbound gate directly, with no delegation involved and no `dispatch-agent` call required.
-  `expected_inbound()` in `test_policy_pipeline_eval.py` encodes this correctly (unions
-  `inbound_scopes ∪ target_scopes` when computing which roles may call an agent) — a truth table that
-  encoded only `INBOUND_PAIRS` here would be *wrong*, not stricter.
+  `inbound_scopes` and its `delegation_scopes` onto the **same** Keycloak client (there is no second
+  client to put them on), any role granted a delegation scope for delegation purposes through
+  another agent **also, unavoidably, passes the owning agent's own inbound gate**. Concretely: in
+  Scenario 3 (`agent_delegation`), `user-role-shipment-coordinator` is granted `agent-scope-customs-clearance` so it can
+  have customs clearance carried out *through* `dispatch-agent` — but because `agent-scope-customs-clearance` is
+  one of `customs-agent`'s own delegation scopes, `user-role-shipment-coordinator` also passes
+  `customs-agent`'s own inbound gate directly, with no delegation involved and no `dispatch-agent`
+  call required. `expected_inbound()` in `test_policy_pipeline_eval.py` encodes this correctly
+  (unions `inbound_scopes ∪ delegation_scopes` when computing which roles may call an agent) — a
+  truth table that encoded only `INBOUND_PAIRS` here would be *wrong*, not stricter.
 - **The pipeline fixture provisions all eight heavy scenarios unconditionally.** The `pipeline`
   fixture is session-scoped and, on first use, provisions all of `SCENARIOS.items()` — even if a
   `-k`/`-m` filter would otherwise only select tests from one scenario. This keeps the fixture simple
@@ -501,13 +504,13 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
 ## Further Notes
 
 - **A genuine, confirmed finding about the real system, not a scenario-authoring flaw**: agent-to-
-  agent `target_scopes` and an agent's own `inbound_scopes` are **indistinguishable** once
+  agent `delegation_scopes` and an agent's own `inbound_scopes` are **indistinguishable** once
   provisioned into Keycloak — see [Testing Decisions](#testing-decisions) for the full mechanism.
   This was originally mistaken, during this suite's own development, for a test bug (an early
   version of `expected_inbound()` checked only `INBOUND_PAIRS`, and failed the delegation scenario's
-  `shipment-coordinator`/`customs-agent` cell identically across repeated runs — ruled out as LLM
+  `user-role-shipment-coordinator`/`customs-agent` cell identically across repeated runs — ruled out as LLM
   nondeterminism precisely *because* it was 100% reproducible). Root-caused by reading the actual
-  generated `customs_agent.inbound.rego` (its `agent_scopes` list includes `customs-clearance`, a
+  generated `customs_agent.inbound.rego` (its `agent_scopes` list includes `agent-scope-customs-clearance`, a
   target scope, despite `customs-agent` having no `inbound_scopes` of its own), cross-referencing
   `pdp-policy-writer-opa.md`'s spec text (`agent_scopes` = "scopes this agent exposes," resolved from
   the IdP `Service` record, with no inbound/target split), and confirming via `engine.py` and
@@ -517,15 +520,15 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
   its module docstring for the full write-up.
 - **Adversarial-scenario failures are the intended signal, not a defect to chase.** Mismatches on
   Scenario 8 (`misleading_descriptions`)'s name-bait cell (whether the LLM correctly resists
-  `vip-manager`'s scary-sounding-but-inert `master-override` scope and still grants it only the same
-  real access as `front-desk-staff`) or on Scenario 9 (`confusable_agents`)'s identity-confusion
+  `user-role-vip-manager`'s scary-sounding-but-inert `tool-scope-master-override` scope and still grants it only the same
+  real access as `user-role-front-desk-staff`) or on Scenario 9 (`confusable_agents`)'s identity-confusion
   probes (whether `coach-agent`'s and `coach-review-agent`'s service-account identities stay refused
   through each other's inbound gate despite the two agent names differing by only one word) may vary
   run-to-run — that variability is exactly what these scenarios are designed to surface, and is
   expected to need re-confirmation across runs rather than being "fixed" by rewording the scenario.
 - **The ambiguous clause in Scenario 6 (`ambiguous_clause`) is a deliberate risk, not a bug.** A real
-  LLM-backed PRB run landing on the broader reading of `enrollment-advisor`'s "access to enrollment
-  information" (i.e. also granting `enrollment-history`, not just `enrollment-status`) is a
+  LLM-backed PRB run landing on the broader reading of `user-role-enrollment-advisor`'s "access to enrollment
+  information" (i.e. also granting `tool-scope-enrollment-history`, not just `tool-scope-enrollment-status`) is a
   legitimate finding for that cell to surface, not evidence Scenario 6 itself is authored
   incorrectly. Ground truth encodes only the narrower reading per this suite's
   most-restrictive-reading-wins convention.

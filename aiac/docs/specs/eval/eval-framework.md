@@ -110,10 +110,12 @@ blended):
    correct grant set.
 2. **Sensitivity family** (meaning-changing minimal edit) — a small but
    meaning-changing edit (e.g. "may access" → "may not access", a role name
-   swapped, an exception clause added), so ground truth is *deliberately
-   different*. Pass = output changes, in the predicted direction. This is
-   the control that proves the system isn't just numb to its input — without
-   it, "robust" and "broken" are indistinguishable.
+   swapped, an exception clause added, a restriction word ("only", "just")
+   inserted or removed to narrow or broaden an otherwise identical grant), so
+   ground truth is *deliberately different*. Pass = output changes, in the
+   predicted direction. This is the control that proves the system isn't just
+   numb to its input — without it, "robust" and "broken" are
+   indistinguishable.
 
 Both families use **two perturbation tiers**:
 
@@ -267,7 +269,7 @@ produced whenever the supporting evidence is present:
 |---|---|
 | Scenario theme with elevated over-grant rate | Identify the specific policy clause or semantic pattern the PRB is over-interpreting; recommend a prompt constraint, a PRB graph edge, or a targeted scenario addition to the training/prompt corpus. |
 | Scenario theme with elevated under-grant rate | Identify whether the miss is a parsing gap (policy text not recognized) or a reasoning gap (text parsed but grant not inferred); recommend either input normalization upstream of the PRB or an explicit reasoning step in the graph. |
-| Sensitivity family failures (output did not change when it should have) | Flag which policy-text edit types the PRB is insensitive to (e.g. negation words, exception clauses); recommend adding those edit patterns to the Robustness corpus and reviewing PRB prompts for those constructs. |
+| Sensitivity family failures (output did not change when it should have) | Flag which policy-text edit types the PRB is insensitive to (e.g. negation words, exception clauses, restriction words like "only"/"just"); recommend adding those edit patterns to the Robustness corpus and reviewing PRB prompts for those constructs. |
 | Invariance family failures (output changed when it shouldn't have) | Flag which surface-form changes destabilize the PRB; recommend prompt hardening or normalization pre-processing. |
 | Consistency disagreements | Note whether disagreements cluster on specific scenarios (structural prompt sensitivity) or appear random (temperature/batching noise); recommend `temperature=0` enforcement or a retry-with-majority-vote strategy accordingly. |
 | Scale correctness degradation above a threshold | Identify whether degradation is in per-decision scale (large candidate lists) or total-corpus scale; recommend context-window management changes (chunking, summarization) or candidate-list pruning strategies respectively. |

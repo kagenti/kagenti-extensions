@@ -25,14 +25,14 @@ AGENTS: dict[str, dict] = {
             "count adjustments, and reorders."
         ),
         "inbound_scopes": {
-            "inventory-access": (
+            "agent-scope-inventory-access": (
                 "Lets a holder use the inventory agent's complete set of inventory abilities — "
                 "stock-level checks, count adjustments, and reorders."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "inventory_operations": (
+            "agent-role-inventory-operations": (
                 "Covers every inventory operation against the inventory tool — stock-level "
                 "checks, count adjustments, and reorders."
             ),
@@ -49,9 +49,9 @@ TOOLS: dict[str, dict] = {
             "count adjustments, and reorders."
         ),
         "scopes": {
-            "inventory-check": "Look up current stock levels for a product without changing anything.",
-            "inventory-adjust": "Change the recorded stock count for a product.",
-            "inventory-reorder": "Place a reorder for a product.",
+            "tool-scope-inventory-check": "Look up current stock levels for a product without changing anything.",
+            "tool-scope-inventory-adjust": "Change the recorded stock count for a product.",
+            "tool-scope-inventory-reorder": "Place a reorder for a product.",
         },
     },
 }
@@ -59,13 +59,13 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "manager-user": "inventory-manager",
+    "manager-user": "user-role-inventory-manager",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "inventory-manager": (
+    "user-role-inventory-manager": (
         "Inventory Manager: may carry out every inventory operation — stock-level checks, count "
         "adjustments, and reorders."
     ),
@@ -76,17 +76,17 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("inventory-manager", "inventory-access"),
+    ("user-role-inventory-manager", "agent-scope-inventory-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("inventory_operations", "inventory-check"),
-    ("inventory_operations", "inventory-adjust"),
-    ("inventory_operations", "inventory-reorder"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-check"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-adjust"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-reorder"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("inventory-manager", "inventory-check"),
-    ("inventory-manager", "inventory-adjust"),
-    ("inventory-manager", "inventory-reorder"),
+    ("user-role-inventory-manager", "tool-scope-inventory-check"),
+    ("user-role-inventory-manager", "tool-scope-inventory-adjust"),
+    ("user-role-inventory-manager", "tool-scope-inventory-reorder"),
 ]

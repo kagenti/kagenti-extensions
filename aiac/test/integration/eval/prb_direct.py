@@ -31,7 +31,7 @@ def build_roles_and_scopes(scenario: ModuleType) -> tuple[dict[str, Role], dict[
     for agent_id, agent in scenario.AGENTS.items():
         for name, desc in agent["inbound_scopes"].items():
             scopes[name] = Scope(id=f"scope-{name}", name=name, description=desc, serviceId=agent_id)
-        for name, desc in agent.get("target_scopes", {}).items():
+        for name, desc in agent.get("delegation_scopes", {}).items():
             scopes[name] = Scope(id=f"scope-{name}", name=name, description=desc, serviceId=agent_id)
         for name, desc in agent["roles"].items():
             roles[name] = Role(

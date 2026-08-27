@@ -11,7 +11,7 @@ of the exact same mechanism (a scope or role simply never named in the policy do
   policy document never mentions it. A plausible real-world cause: the billing service was stood up
   ahead of the access policy meant to cover it, and the policy author never circled back.
 - **``insurance-tool`` is an unreachable tool.** It exists with a real scope
-  (``insurance-verify``) but no agent role is ever granted it anywhere in the policy text — an
+  (``tool-scope-insurance-verify``) but no agent role is ever granted it anywhere in the policy text — an
   omission in the "Agent roles -> tool operations" section, not a deliberate denial.
 
 Pure data: no imports beyond ``__future__``, mirroring ``scenario_eval_baseline.py``.
@@ -33,14 +33,14 @@ AGENTS: dict[str, dict] = {
             "appointments and reads and updates patient records."
         ),
         "inbound_scopes": {
-            "intake-access": (
+            "agent-scope-intake-access": (
                 "Scope granting use of the intake agent's patient-intake capability — scheduling "
                 "appointments and reading and updating patient records."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "intake_operations": (
+            "agent-role-intake-operations": (
                 "Covers read and write access to patient records — reading and updating patient "
                 "record contents."
             ),
@@ -53,15 +53,15 @@ AGENTS: dict[str, dict] = {
             "may call it or what it may reach."
         ),
         "inbound_scopes": {
-            "billing-access": (
+            "agent-scope-billing-access": (
                 "Scope granting use of the billing agent's invoicing capability — creating and "
                 "reading patient invoices. Not yet granted to any user role in the policy "
                 "document."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "billing_operations": (
+            "agent-role-billing-operations": (
                 "Covers read and write access to patient invoices. Not yet granted to any target "
                 "in the policy document."
             ),
@@ -78,8 +78,8 @@ TOOLS: dict[str, dict] = {
             "on patient record contents."
         ),
         "scopes": {
-            "records-read": "Read patient records: demographics and visit history. Read-only.",
-            "records-write": "Create and update patient records.",
+            "tool-scope-records-read": "Read patient records: demographics and visit history. Read-only.",
+            "tool-scope-records-write": "Create and update patient records.",
         },
     },
     "insurance-tool": {
@@ -89,7 +89,7 @@ TOOLS: dict[str, dict] = {
             "scope anywhere in the policy document — it is unreachable by design."
         ),
         "scopes": {
-            "insurance-verify": (
+            "tool-scope-insurance-verify": (
                 "Verify a patient's insurance coverage details. No agent role is ever granted "
                 "this scope anywhere in the policy document — it is unreachable by design."
             ),
@@ -100,13 +100,13 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "clerk-user": "front-desk-clerk",
+    "clerk-user": "user-role-front-desk-clerk",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "front-desk-clerk": (
+    "user-role-front-desk-clerk": (
         "Front Desk Clerk — authorized to schedule appointments and read and update patient "
         "records through the intake agent; not involved in billing or insurance verification."
     ),
@@ -115,25 +115,25 @@ USER_ROLES: dict[str, str] = {
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("front-desk-clerk", "intake-access"),
-    # No row names billing-access (billing-agent is fully unreachable) — a silent gap by design.
+    ("user-role-front-desk-clerk", "agent-scope-intake-access"),
+    # No row names agent-scope-billing-access (billing-agent is fully unreachable) — a silent gap by design.
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("intake_operations", "records-read"),
-    ("intake_operations", "records-write"),
-    # No row names billing_operations (billing-agent is fully unreachable) and no row names
-    # insurance-verify (insurance-tool is unreachable) — both silent gaps by design.
+    ("agent-role-intake-operations", "tool-scope-records-read"),
+    ("agent-role-intake-operations", "tool-scope-records-write"),
+    # No row names agent-role-billing-operations (billing-agent is fully unreachable) and no row names
+    # tool-scope-insurance-verify (insurance-tool is unreachable) — both silent gaps by design.
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("front-desk-clerk", "records-read"),
-    ("front-desk-clerk", "records-write"),
+    ("user-role-front-desk-clerk", "tool-scope-records-read"),
+    ("user-role-front-desk-clerk", "tool-scope-records-write"),
 ]
 
 # --- Emergent unreachability -----------------------------------------------------------------
 #
-# billing-agent: zero rows above name billing-access (its only inbound scope) or
-# billing_operations (its only role), and no other agent has any target_scopes for it to be
+# billing-agent: zero rows above name agent-scope-billing-access (its only inbound scope) or
+# agent-role-billing-operations (its only role), and no other agent has any delegation_scopes for it to be
 # granted through — truly unreachable from every direction in this scenario's own ground truth.
 EXPECT_NO_REGO: frozenset[str] = frozenset({"billing-agent"})

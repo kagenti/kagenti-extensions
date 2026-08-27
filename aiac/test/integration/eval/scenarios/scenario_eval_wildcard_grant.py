@@ -4,10 +4,10 @@ Companion to ``scenario_eval_baseline.py`` (Scenario 1) for ``test_policy_pipeli
 ``docs/specs/integration-test/policy-eval-scenarios.md``). Isolates one aspect: a wildcard-phrased
 grant that must be expanded by the PRB to the correct concrete scope set.
 
-Both the user role (``inventory-manager``) and the agent's own role (``inventory_operations``) are
+Both the user role (``user-role-inventory-manager``) and the agent's own role (``agent-role-inventory-operations``) are
 described using an "all inventory operations" wildcard phrase rather than an enumerated scope list.
 Ground truth expands the phrase to all three concrete scopes on ``inventory-tool``
-(``inventory-check``, ``inventory-adjust``, ``inventory-reorder``) on both sides of the per-scope
+(``tool-scope-inventory-check``, ``tool-scope-inventory-adjust``, ``tool-scope-inventory-reorder``) on both sides of the per-scope
 AND gate — this scenario tests wildcard-phrase expansion specifically, not any subject/target
 asymmetry (that distinction is covered elsewhere, e.g. ``scenario_eval_ambiguous_clause.py``).
 
@@ -31,14 +31,14 @@ AGENTS: dict[str, dict] = {
             "adjusting counts, and placing reorders."
         ),
         "inbound_scopes": {
-            "inventory-access": (
+            "agent-scope-inventory-access": (
                 "Scope granting use of the inventory agent's full inventory-operations "
                 "capability — checking stock levels, adjusting counts, and placing reorders."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "inventory_operations": (
+            "agent-role-inventory-operations": (
                 "Covers all inventory operations against the inventory tool — checking stock "
                 "levels, adjusting counts, and placing reorders."
             ),
@@ -55,9 +55,9 @@ TOOLS: dict[str, dict] = {
             "checks, count adjustments, and reorder placements."
         ),
         "scopes": {
-            "inventory-check": "Check current stock levels for a product. Read-only.",
-            "inventory-adjust": "Adjust the recorded stock count for a product.",
-            "inventory-reorder": "Place a reorder for a product.",
+            "tool-scope-inventory-check": "Check current stock levels for a product. Read-only.",
+            "tool-scope-inventory-adjust": "Adjust the recorded stock count for a product.",
+            "tool-scope-inventory-reorder": "Place a reorder for a product.",
         },
     },
 }
@@ -65,13 +65,13 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "manager-user": "inventory-manager",
+    "manager-user": "user-role-inventory-manager",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "inventory-manager": (
+    "user-role-inventory-manager": (
         "Inventory Manager — authorized to perform all inventory operations: checking stock "
         "levels, adjusting counts, and placing reorders."
     ),
@@ -80,19 +80,19 @@ USER_ROLES: dict[str, str] = {
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("inventory-manager", "inventory-access"),
+    ("user-role-inventory-manager", "agent-scope-inventory-access"),
 ]
 
 # Wildcard phrase "all inventory operations" must expand to all three concrete scopes on both
 # sides of the per-scope AND gate.
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("inventory_operations", "inventory-check"),
-    ("inventory_operations", "inventory-adjust"),
-    ("inventory_operations", "inventory-reorder"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-check"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-adjust"),
+    ("agent-role-inventory-operations", "tool-scope-inventory-reorder"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("inventory-manager", "inventory-check"),
-    ("inventory-manager", "inventory-adjust"),
-    ("inventory-manager", "inventory-reorder"),
+    ("user-role-inventory-manager", "tool-scope-inventory-check"),
+    ("user-role-inventory-manager", "tool-scope-inventory-adjust"),
+    ("user-role-inventory-manager", "tool-scope-inventory-reorder"),
 ]

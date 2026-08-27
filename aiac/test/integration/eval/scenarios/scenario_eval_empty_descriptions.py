@@ -28,11 +28,11 @@ AGENTS: dict[str, dict] = {
     "irrigation-agent": {
         "description": "",
         "inbound_scopes": {
-            "irrigation-access": "",
+            "agent-scope-irrigation-access": "",
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "irrigation_operations": "",
+            "agent-role-irrigation-operations": "",
         },
     },
 }
@@ -43,8 +43,8 @@ TOOLS: dict[str, dict] = {
     "valve-tool": {
         "description": "",
         "scopes": {
-            "valve-open": "",
-            "valve-close": "",
+            "tool-scope-valve-open": "",
+            "tool-scope-valve-close": "",
         },
     },
 }
@@ -52,27 +52,27 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "operator-user": "field-operator",
+    "operator-user": "user-role-field-operator",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "field-operator": "",
+    "user-role-field-operator": "",
 }
 
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("field-operator", "irrigation-access"),
+    ("user-role-field-operator", "agent-scope-irrigation-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("irrigation_operations", "valve-open"),
-    ("irrigation_operations", "valve-close"),
+    ("agent-role-irrigation-operations", "tool-scope-valve-open"),
+    ("agent-role-irrigation-operations", "tool-scope-valve-close"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("field-operator", "valve-open"),
-    ("field-operator", "valve-close"),
+    ("user-role-field-operator", "tool-scope-valve-open"),
+    ("user-role-field-operator", "tool-scope-valve-close"),
 ]

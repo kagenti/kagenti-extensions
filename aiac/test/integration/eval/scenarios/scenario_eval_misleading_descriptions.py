@@ -5,14 +5,14 @@ Companion to ``scenario_eval_baseline.py`` (Scenario 1) for ``test_policy_pipeli
 descriptions are truth. Two misdirection devices, both name-level, neither backed by any real
 extra access:
 
-- **``vip-manager`` is a name-bait role.** The name suggests broad or elevated authority, but its
+- **``user-role-vip-manager`` is a name-bait role.** The name suggests broad or elevated authority, but its
   description confines it to the same guest-service reads as any other front-desk role, plus one
   inert scope (see below). The PRB must resolve access from the grant text, not the role name.
-- **``master-override`` is an inert, scary-named scope.** It reads like a bypass/elevation
+- **``tool-scope-master-override`` is an inert, scary-named scope.** It reads like a bypass/elevation
   capability but is a no-op diagnostic hook that grants nothing beyond itself — holding it does
-  not unlock any additional real capability. ``vip-manager`` and ``front-desk-staff`` end up with
-  *functionally identical* real access (``reservation-read`` + ``guest-notes-read``) despite
-  ``vip-manager`` additionally holding the scarier-sounding scope.
+  not unlock any additional real capability. ``user-role-vip-manager`` and ``user-role-front-desk-staff`` end up with
+  *functionally identical* real access (``tool-scope-reservation-read`` + ``tool-scope-guest-notes-read``) despite
+  ``user-role-vip-manager`` additionally holding the scarier-sounding scope.
 
 Pure data: no imports beyond ``__future__``, mirroring ``scenario_eval_baseline.py``.
 """
@@ -34,14 +34,14 @@ AGENTS: dict[str, dict] = {
             "used for internal testing."
         ),
         "inbound_scopes": {
-            "guest-access": (
+            "agent-scope-guest-access": (
                 "Scope granting use of the guest-services agent's reservation and guest-notes "
                 "read capability."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "guest_operations": (
+            "agent-role-guest-operations": (
                 "Covers reading reservation details and guest notes, and invoking the diagnostic "
                 "no-op hook. The diagnostic hook performs no action and grants no capability "
                 "beyond itself."
@@ -60,9 +60,9 @@ TOOLS: dict[str, dict] = {
             "hook."
         ),
         "scopes": {
-            "reservation-read": "Read a guest's reservation details. Read-only.",
-            "guest-notes-read": "Read staff notes attached to a guest's profile. Read-only.",
-            "master-override": (
+            "tool-scope-reservation-read": "Read a guest's reservation details. Read-only.",
+            "tool-scope-guest-notes-read": "Read staff notes attached to a guest's profile. Read-only.",
+            "tool-scope-master-override": (
                 "Inert diagnostic hook used for internal testing. Despite the name, it performs "
                 "no action and grants no capability beyond itself — holding this scope does not "
                 "unlock any additional real access."
@@ -74,19 +74,19 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "vip-user": "vip-manager",
-    "frontdesk-user": "front-desk-staff",
+    "vip-user": "user-role-vip-manager",
+    "frontdesk-user": "user-role-front-desk-staff",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "vip-manager": (
+    "user-role-vip-manager": (
         "VIP Manager — authorized to read reservation details and guest notes via the "
         "guest-services agent, and to invoke the diagnostic no-op hook, which grants no extra "
-        "capability. Real access matches front-desk-staff."
+        "capability. Real access matches user-role-front-desk-staff."
     ),
-    "front-desk-staff": (
+    "user-role-front-desk-staff": (
         "Front Desk Staff — authorized to read reservation details and guest notes through the "
         "guest-services agent."
     ),
@@ -95,22 +95,22 @@ USER_ROLES: dict[str, str] = {
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("vip-manager", "guest-access"),
-    ("front-desk-staff", "guest-access"),
+    ("user-role-vip-manager", "agent-scope-guest-access"),
+    ("user-role-front-desk-staff", "agent-scope-guest-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("guest_operations", "reservation-read"),
-    ("guest_operations", "guest-notes-read"),
-    ("guest_operations", "master-override"),
+    ("agent-role-guest-operations", "tool-scope-reservation-read"),
+    ("agent-role-guest-operations", "tool-scope-guest-notes-read"),
+    ("agent-role-guest-operations", "tool-scope-master-override"),
 ]
 
-# vip-manager's name suggests elevated authority; its real access (below) is identical to
-# front-desk-staff's except for the inert master-override scope, which grants nothing extra.
+# user-role-vip-manager's name suggests elevated authority; its real access (below) is identical to
+# user-role-front-desk-staff's except for the inert tool-scope-master-override scope, which grants nothing extra.
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("vip-manager", "reservation-read"),
-    ("vip-manager", "guest-notes-read"),
-    ("vip-manager", "master-override"),
-    ("front-desk-staff", "reservation-read"),
-    ("front-desk-staff", "guest-notes-read"),
+    ("user-role-vip-manager", "tool-scope-reservation-read"),
+    ("user-role-vip-manager", "tool-scope-guest-notes-read"),
+    ("user-role-vip-manager", "tool-scope-master-override"),
+    ("user-role-front-desk-staff", "tool-scope-reservation-read"),
+    ("user-role-front-desk-staff", "tool-scope-guest-notes-read"),
 ]

@@ -25,21 +25,21 @@ AGENTS: dict[str, dict] = {
     "dispatch-agent": {
         "description": (
             "An autonomous agent that coordinates shipment dispatch on a user's behalf: creating "
-            "and updating shipment manifests, and able to hand off customs-clearance work to the "
+            "and updating shipment manifests, and able to hand off agent-scope-customs-clearance work to the "
             "customs agent as part of a coordinated shipment."
         ),
         "inbound_scopes": {
-            "dispatch-access": (
+            "agent-scope-dispatch-access": (
                 "Lets a holder use the dispatch agent's shipment-coordination abilities — "
                 "creating and updating manifests, and coordinating customs clearance for a "
                 "shipment."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "dispatch_operations": (
+            "agent-role-dispatch-operations": (
                 "Covers creating and updating shipment manifests, and handing off "
-                "customs-clearance work to the customs agent as part of a coordinated shipment."
+                "agent-scope-customs-clearance work to the customs agent as part of a coordinated shipment."
             ),
         },
     },
@@ -50,8 +50,8 @@ AGENTS: dict[str, dict] = {
             "shipment. Has no tools of its own."
         ),
         "inbound_scopes": {},
-        "target_scopes": {
-            "customs-clearance": (
+        "delegation_scopes": {
+            "agent-scope-customs-clearance": (
                 "Lets a coordinating agent get a shipment cleared through customs on its behalf. "
                 "Owned by the customs agent itself, not by a tool."
             ),
@@ -69,8 +69,8 @@ TOOLS: dict[str, dict] = {
             "manifest contents and status."
         ),
         "scopes": {
-            "manifest-read": "Look up shipment manifests — contents and status — without changing anything.",
-            "manifest-write": "Create and update shipment manifests.",
+            "tool-scope-manifest-read": "Look up shipment manifests — contents and status — without changing anything.",
+            "tool-scope-manifest-write": "Create and update shipment manifests.",
         },
     },
 }
@@ -78,22 +78,22 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 #
 # Two contrasting roles: both may call dispatch-agent and reach manifest-tool; only
-# shipment-coordinator additionally holds the delegated customs-clearance scope.
+# user-role-shipment-coordinator additionally holds the delegated agent-scope-customs-clearance scope.
 
 USERS: dict[str, str] = {
-    "coordinator-user": "shipment-coordinator",
-    "dock-user": "dock-worker",
+    "coordinator-user": "user-role-shipment-coordinator",
+    "dock-user": "user-role-dock-worker",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "shipment-coordinator": (
+    "user-role-shipment-coordinator": (
         "Shipment Coordinator: may create and update shipment manifests via the dispatch agent, "
         "and may have customs clearance carried out on the shipment's behalf as part of that "
         "coordinated process."
     ),
-    "dock-worker": (
+    "user-role-dock-worker": (
         "Dock Worker: may create and update shipment manifests via the dispatch agent for routine "
         "loading and unloading. May not have customs clearance carried out on the shipment's "
         "behalf."
@@ -105,20 +105,20 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("shipment-coordinator", "dispatch-access"),
-    ("dock-worker", "dispatch-access"),
+    ("user-role-shipment-coordinator", "agent-scope-dispatch-access"),
+    ("user-role-dock-worker", "agent-scope-dispatch-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("dispatch_operations", "manifest-read"),
-    ("dispatch_operations", "manifest-write"),
-    ("dispatch_operations", "customs-clearance"),
+    ("agent-role-dispatch-operations", "tool-scope-manifest-read"),
+    ("agent-role-dispatch-operations", "tool-scope-manifest-write"),
+    ("agent-role-dispatch-operations", "agent-scope-customs-clearance"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("shipment-coordinator", "manifest-read"),
-    ("shipment-coordinator", "manifest-write"),
-    ("shipment-coordinator", "customs-clearance"),
-    ("dock-worker", "manifest-read"),
-    ("dock-worker", "manifest-write"),
+    ("user-role-shipment-coordinator", "tool-scope-manifest-read"),
+    ("user-role-shipment-coordinator", "tool-scope-manifest-write"),
+    ("user-role-shipment-coordinator", "agent-scope-customs-clearance"),
+    ("user-role-dock-worker", "tool-scope-manifest-read"),
+    ("user-role-dock-worker", "tool-scope-manifest-write"),
 ]

@@ -12,7 +12,7 @@ scenario):
 
   - ``scenario_eval_baseline`` (Scenario 1)               — software eng.; 3 users / 2 agents / 2
     tools, clean and unambiguous regression baseline at UC1 scale (reuses UC1's
-    developer/tester/devops roles).
+    user-role-developer/user-role-tester/user-role-devops roles).
   - ``scenario_eval_agent_delegation`` (Scenario 3)       — logistics/shipping; 2 users / 2 agents
     / 1 tool, isolates the agent-to-agent ``target_scopes`` delegation mechanism. Lives under
     ``test/integration/`` (not ``eval/`` like the rest) — see the note below.
@@ -188,19 +188,19 @@ def provision_via_config(config: Configuration, scenario: ModuleType) -> None:
     """Provision client roles + scopes and their service mappings through the aiac IdP library.
 
     Generalizes ``test_policy_pipeline.py``'s single-agent/single-tool version to loop over every
-    agent's ``inbound_scopes`` + ``target_scopes`` + ``roles`` and every tool's ``scopes``. NOT
+    agent's ``inbound_scopes`` + ``delegation_scopes`` + ``roles`` and every tool's ``scopes``. NOT
     idempotent — call exactly once per realm.
     """
     inbound_scopes: dict[str, Scope] = {}
-    target_scopes: dict[str, Scope] = {}
+    delegation_scopes: dict[str, Scope] = {}
     agent_roles: dict[str, Role] = {}
     tool_scopes: dict[str, Scope] = {}
 
     for agent in scenario.AGENTS.values():
         for name, desc in agent["inbound_scopes"].items():
             inbound_scopes[name] = config.create_scope(name, desc)
-        for name, desc in agent.get("target_scopes", {}).items():
-            target_scopes[name] = config.create_scope(name, desc)
+        for name, desc in agent.get("delegation_scopes", {}).items():
+            delegation_scopes[name] = config.create_scope(name, desc)
         for name, desc in agent["roles"].items():
             agent_roles[name] = config.create_role(name, desc)
     for tool in scenario.TOOLS.values():
@@ -213,8 +213,8 @@ def provision_via_config(config: Configuration, scenario: ModuleType) -> None:
         agent_svc = services[agent_id]
         for name in agent["inbound_scopes"]:
             config.map_scope_to_service(agent_svc, inbound_scopes[name])
-        for name in agent.get("target_scopes", {}):
-            config.map_scope_to_service(agent_svc, target_scopes[name])
+        for name in agent.get("delegation_scopes", {}):
+            config.map_scope_to_service(agent_svc, delegation_scopes[name])
         for name in agent["roles"]:
             config.map_role_to_service(agent_svc, agent_roles[name])
         config.set_service_type(agent_svc, "Agent")
@@ -300,7 +300,7 @@ def orchestrate_prb(
 
     inbound_scope_names = [n for agent in scenario.AGENTS.values() for n in agent["inbound_scopes"]]
     target_scope_names = [n for tool in scenario.TOOLS.values() for n in tool["scopes"]]
-    target_scope_names += [n for agent in scenario.AGENTS.values() for n in agent.get("target_scopes", {})]
+    target_scope_names += [n for agent in scenario.AGENTS.values() for n in agent.get("delegation_scopes", {})]
     agent_role_names = [n for agent in scenario.AGENTS.values() for n in agent["roles"]]
 
     inbound_scopes = [scopes[n] for n in inbound_scope_names]
@@ -365,8 +365,8 @@ def _agent_inbound_scope_names(scenario: ModuleType) -> set[str]:
     return {n for agent in scenario.AGENTS.values() for n in agent["inbound_scopes"]}
 
 
-def _agent_target_scope_names(scenario: ModuleType) -> set[str]:
-    return {n for agent in scenario.AGENTS.values() for n in agent.get("target_scopes", {})}
+def _agent_delegation_scope_names(scenario: ModuleType) -> set[str]:
+    return {n for agent in scenario.AGENTS.values() for n in agent.get("delegation_scopes", {})}
 
 
 def _tool_scope_names(scenario: ModuleType) -> set[str]:
@@ -384,7 +384,7 @@ def _agent_role_names(scenario: ModuleType) -> set[str]:
 def _scope_owner(scenario: ModuleType, scope_name: str) -> str:
     """Return the serviceId (agent or tool id) that owns ``scope_name``."""
     for agent_id, agent in scenario.AGENTS.items():
-        if scope_name in agent["inbound_scopes"] or scope_name in agent.get("target_scopes", {}):
+        if scope_name in agent["inbound_scopes"] or scope_name in agent.get("delegation_scopes", {}):
             return agent_id
     for tool_id, tool in scenario.TOOLS.items():
         if scope_name in tool["scopes"]:
@@ -394,16 +394,16 @@ def _scope_owner(scenario: ModuleType, scope_name: str) -> str:
 
 def expected_inbound(scenario: ModuleType, subject: str, agent_id: str) -> bool:
     """A user may call ``agent_id`` iff their realm role holds a scope this agent owns. This
-    includes both the agent's ``inbound_scopes`` (via ``INBOUND_PAIRS``) and its ``target_scopes``
-    (via ``OUTBOUND_SUBJECT_PAIRS``): the provisioning step maps both onto the same Keycloak
-    client, so the generated inbound Rego's ``agent_scopes`` — and therefore its audience gate —
-    cannot distinguish "may call me directly" from "may reach me only as a delegation target
-    through another agent". A role granted a target_scope for delegation purposes necessarily also
-    passes the owning agent's own inbound gate; there is no mechanism in the two-layer policy model
-    that would keep the two separate."""
+    includes both the agent's ``inbound_scopes`` (via ``INBOUND_PAIRS``) and its
+    ``delegation_scopes`` (via ``OUTBOUND_SUBJECT_PAIRS``): the provisioning step maps both onto
+    the same Keycloak client, so the generated inbound Rego's ``agent_scopes`` — and therefore its
+    audience gate — cannot distinguish "may call me directly" from "may reach me only as a
+    delegation target through another agent". A role granted a delegation scope for delegation
+    purposes necessarily also passes the owning agent's own inbound gate; there is no mechanism in
+    the two-layer policy model that would keep the two separate."""
     role = scenario.USERS[subject]
     agent = scenario.AGENTS[agent_id]
-    agent_scopes = set(agent["inbound_scopes"]) | set(agent.get("target_scopes", {}))
+    agent_scopes = set(agent["inbound_scopes"]) | set(agent.get("delegation_scopes", {}))
     via_inbound = any(r == role and s in agent_scopes for r, s in scenario.INBOUND_PAIRS)
     via_target_delegation = any(
         r == role and s in agent_scopes for r, s in scenario.OUTBOUND_SUBJECT_PAIRS
@@ -428,7 +428,7 @@ def _inbound_explanation(scenario: ModuleType, subject: str, agent_id: str) -> s
     which of the agent's scopes came up empty."""
     role = scenario.USERS[subject]
     agent = scenario.AGENTS[agent_id]
-    agent_scopes = set(agent["inbound_scopes"]) | set(agent.get("target_scopes", {}))
+    agent_scopes = set(agent["inbound_scopes"]) | set(agent.get("delegation_scopes", {}))
     for r, s in scenario.INBOUND_PAIRS:
         if r == role and s in agent_scopes:
             return f"role '{role}' holds this agent's own scope '{s}' (direct inbound grant)"
@@ -479,7 +479,7 @@ def grant_sets(scenario: ModuleType, rules: list[PolicyRule]) -> dict[str, set[t
     user_role_names = _user_role_names(scenario)
     agent_role_names = _agent_role_names(scenario)
     agent_inbound_names = _agent_inbound_scope_names(scenario)
-    target_names = _tool_scope_names(scenario) | _agent_target_scope_names(scenario)
+    target_names = _tool_scope_names(scenario) | _agent_delegation_scope_names(scenario)
 
     sets: dict[str, set[tuple[str, str]]] = {
         "inbound": set(),
@@ -630,7 +630,7 @@ def test_inbound(
     scenario = SCENARIOS[scenario_name]
     role = scenario.USERS[subject]
     agent = scenario.AGENTS[agent_id]
-    agent_scopes = sorted(set(agent["inbound_scopes"]) | set(agent.get("target_scopes", {})))
+    agent_scopes = sorted(set(agent["inbound_scopes"]) | set(agent.get("delegation_scopes", {})))
     reasoning_by_scope = pipeline[scenario_name]["reasoning_by_scope"]
 
     expected = expected_inbound(scenario, subject, agent_id)
@@ -666,7 +666,7 @@ def test_inbound(
 def _outbound_cases() -> list[tuple[str, str, str, str]]:
     cases = []
     for name, scenario in SCENARIOS.items():
-        target_scopes = sorted(_tool_scope_names(scenario) | _agent_target_scope_names(scenario))
+        target_scopes = sorted(_tool_scope_names(scenario) | _agent_delegation_scope_names(scenario))
         for agent_id in scenario.AGENTS:
             for subject in scenario.USERS:
                 for scope in target_scopes:

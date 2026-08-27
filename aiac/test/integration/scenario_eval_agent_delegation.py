@@ -14,20 +14,20 @@ outbound-reach target for another agent, exercised through the exact same mechan
 separate code path.
 
 ``dispatch-agent`` coordinates shipment dispatch: it owns a tool (``manifest-tool``) and can
-delegate customs-clearance actions to ``customs-agent`` as part of a coordinated shipment.
-``customs-agent`` owns the delegation target (``customs-clearance``, a scope, not a tool) and has
+delegate agent-scope-customs-clearance actions to ``customs-agent`` as part of a coordinated shipment.
+``customs-agent`` owns the delegation target (``agent-scope-customs-clearance``, a scope, not a tool) and has
 **no** ``inbound_scopes`` of its own — it is reachable ONLY as a delegation target. Two contrasting
 realm roles demonstrate the mechanism is a real per-scope grant, not an automatic side effect of
-calling ``dispatch-agent``: ``shipment-coordinator`` holds the delegated scope,
-``dock-worker`` does not, even though both may call ``dispatch-agent`` and both reach
+calling ``dispatch-agent``: ``user-role-shipment-coordinator`` holds the delegated scope,
+``user-role-dock-worker`` does not, even though both may call ``dispatch-agent`` and both reach
 ``manifest-tool``.
 
 Because ``customs-agent`` has no ``inbound_scopes`` of its own, this scenario is also the cleanest
-demonstration of the suite's "Further Notes" finding: ``target_scopes`` and ``inbound_scopes`` are
-indistinguishable once provisioned into Keycloak, because both map onto the same Keycloak client
-(``customs-agent``'s). So ``shipment-coordinator`` — granted ``customs-clearance`` purely for
+demonstration of the suite's "Further Notes" finding: ``delegation_scopes`` and ``inbound_scopes``
+are indistinguishable once provisioned into Keycloak, because both map onto the same Keycloak client
+(``customs-agent``'s). So ``user-role-shipment-coordinator`` — granted ``agent-scope-customs-clearance`` purely for
 delegation purposes — also, unavoidably, passes ``customs-agent``'s own inbound gate *directly*,
-with no delegation involved and no ``dispatch-agent`` call required. ``dock-worker``, holding
+with no delegation involved and no ``dispatch-agent`` call required. ``user-role-dock-worker``, holding
 neither, is refused entry to ``customs-agent`` from either direction.
 
 Pure data: no imports beyond ``__future__``, mirroring ``scenario.py``.
@@ -46,21 +46,21 @@ AGENTS: dict[str, dict] = {
     "dispatch-agent": {
         "description": (
             "Autonomous Agent acting on a user's behalf to coordinate shipment dispatch. It "
-            "creates and updates shipment manifests, and can delegate customs-clearance actions "
+            "creates and updates shipment manifests, and can delegate agent-scope-customs-clearance actions "
             "to the customs agent as part of a coordinated shipment."
         ),
         "inbound_scopes": {
-            "dispatch-access": (
+            "agent-scope-dispatch-access": (
                 "Scope granting use of the dispatch agent's shipment-coordination capability — "
                 "creating and updating manifests, and coordinating customs clearance for a "
                 "shipment."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "dispatch_operations": (
+            "agent-role-dispatch-operations": (
                 "Covers creating and updating shipment manifests, and delegating "
-                "customs-clearance actions to the customs agent as part of a coordinated "
+                "agent-scope-customs-clearance actions to the customs agent as part of a coordinated "
                 "shipment."
             ),
         },
@@ -72,8 +72,8 @@ AGENTS: dict[str, dict] = {
             "coordinated shipment; it has no tools of its own."
         ),
         "inbound_scopes": {},
-        "target_scopes": {
-            "customs-clearance": (
+        "delegation_scopes": {
+            "agent-scope-customs-clearance": (
                 "Scope granting a coordinating agent the ability to have a shipment cleared "
                 "through customs on its behalf. Not owned by a tool — owned by the customs "
                 "agent itself."
@@ -92,8 +92,8 @@ TOOLS: dict[str, dict] = {
             "operations on manifest contents and status."
         ),
         "scopes": {
-            "manifest-read": "Read shipment manifests: contents and status. Read-only.",
-            "manifest-write": "Create and update shipment manifests.",
+            "tool-scope-manifest-read": "Read shipment manifests: contents and status. Read-only.",
+            "tool-scope-manifest-write": "Create and update shipment manifests.",
         },
     },
 }
@@ -101,22 +101,22 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 #
 # Two contrasting roles: both may call dispatch-agent and reach manifest-tool; only
-# shipment-coordinator additionally holds the delegated customs-clearance scope.
+# user-role-shipment-coordinator additionally holds the delegated agent-scope-customs-clearance scope.
 
 USERS: dict[str, str] = {
-    "coordinator-user": "shipment-coordinator",
-    "dock-user": "dock-worker",
+    "coordinator-user": "user-role-shipment-coordinator",
+    "dock-user": "user-role-dock-worker",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "shipment-coordinator": (
+    "user-role-shipment-coordinator": (
         "Shipment Coordinator — authorized to create and update shipment manifests through the "
         "dispatch agent, and to have customs clearance carried out on the shipment's behalf as "
         "part of that coordinated process."
     ),
-    "dock-worker": (
+    "user-role-dock-worker": (
         "Dock Worker — authorized to create and update shipment manifests through the dispatch "
         "agent for day-to-day loading and unloading; not authorized to have customs clearance "
         "carried out on the shipment's behalf."
@@ -126,25 +126,25 @@ USER_ROLES: dict[str, str] = {
 # --- Role -> access facts (name-level; the single source of truth) --------------------------
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("shipment-coordinator", "dispatch-access"),
-    ("dock-worker", "dispatch-access"),
+    ("user-role-shipment-coordinator", "agent-scope-dispatch-access"),
+    ("user-role-dock-worker", "agent-scope-dispatch-access"),
     # No row names customs-agent's own inbound scope — it has none. Reachability comes entirely
     # from OUTBOUND_SUBJECT_PAIRS below, via the target-scope-delegation half of expected_inbound().
 ]
 
-# Agent role -> target scope. Only dispatch_operations is populated — customs-agent's "roles" is
+# Agent role -> target scope. Only agent-role-dispatch-operations is populated — customs-agent's "roles" is
 # empty (it has no tools of its own to reach).
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("dispatch_operations", "manifest-read"),
-    ("dispatch_operations", "manifest-write"),
-    ("dispatch_operations", "customs-clearance"),
+    ("agent-role-dispatch-operations", "tool-scope-manifest-read"),
+    ("agent-role-dispatch-operations", "tool-scope-manifest-write"),
+    ("agent-role-dispatch-operations", "agent-scope-customs-clearance"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("shipment-coordinator", "manifest-read"),
-    ("shipment-coordinator", "manifest-write"),
-    ("shipment-coordinator", "customs-clearance"),
-    ("dock-worker", "manifest-read"),
-    ("dock-worker", "manifest-write"),
-    # No row grants dock-worker customs-clearance — the contrasting role without delegation.
+    ("user-role-shipment-coordinator", "tool-scope-manifest-read"),
+    ("user-role-shipment-coordinator", "tool-scope-manifest-write"),
+    ("user-role-shipment-coordinator", "agent-scope-customs-clearance"),
+    ("user-role-dock-worker", "tool-scope-manifest-read"),
+    ("user-role-dock-worker", "tool-scope-manifest-write"),
+    # No row grants user-role-dock-worker agent-scope-customs-clearance — the contrasting role without delegation.
 ]

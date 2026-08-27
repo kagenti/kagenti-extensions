@@ -24,13 +24,13 @@ AGENTS: dict[str, dict] = {
             "behalf."
         ),
         "inbound_scopes": {
-            "coaching-access": (
+            "agent-scope-coaching-access": (
                 "Lets a holder use the coaching agent's roster and scheduling abilities."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "coaching_operations": "Covers looking up the team roster and updating the practice schedule.",
+            "agent-role-coaching-operations": "Covers looking up the team roster and updating the practice schedule.",
         },
     },
     "coach-review-agent": {
@@ -40,13 +40,13 @@ AGENTS: dict[str, dict] = {
             "coach-agent."
         ),
         "inbound_scopes": {
-            "review-access": (
+            "agent-scope-review-access": (
                 "Lets a holder use the coach-review agent's performance-evaluation abilities."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "review_operations": (
+            "agent-role-review-operations": (
                 "Covers looking up and recording player performance evaluations."
             ),
         },
@@ -62,8 +62,8 @@ TOOLS: dict[str, dict] = {
             "the roster and updates to the practice schedule."
         ),
         "scopes": {
-            "roster-read": "Look up the current team roster without changing anything.",
-            "schedule-write": "Create and update the practice schedule.",
+            "tool-scope-roster-read": "Look up the current team roster without changing anything.",
+            "tool-scope-schedule-write": "Create and update the practice schedule.",
         },
     },
     "evaluation-tool": {
@@ -72,8 +72,8 @@ TOOLS: dict[str, dict] = {
             "updates of evaluation records."
         ),
         "scopes": {
-            "evaluation-read": "Look up a player's performance evaluation records without changing anything.",
-            "evaluation-write": "Create and update a player's performance evaluation records.",
+            "tool-scope-evaluation-read": "Look up a player's performance evaluation records without changing anything.",
+            "tool-scope-evaluation-write": "Create and update a player's performance evaluation records.",
         },
     },
 }
@@ -81,18 +81,18 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "trainer-user": "team-trainer",
-    "analyst-user": "performance-analyst",
+    "trainer-user": "user-role-team-trainer",
+    "analyst-user": "user-role-performance-analyst",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "team-trainer": (
+    "user-role-team-trainer": (
         "Team Trainer: may look up the team roster and update the practice schedule via the "
         "coaching agent. Has nothing to do with performance evaluations."
     ),
-    "performance-analyst": (
+    "user-role-performance-analyst": (
         "Performance Analyst: may look up and record player performance evaluations via the "
         "coach-review agent. Has nothing to do with rosters or scheduling."
     ),
@@ -103,22 +103,22 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("team-trainer", "coaching-access"),
-    ("performance-analyst", "review-access"),
+    ("user-role-team-trainer", "agent-scope-coaching-access"),
+    ("user-role-performance-analyst", "agent-scope-review-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("coaching_operations", "roster-read"),
-    ("coaching_operations", "schedule-write"),
-    ("review_operations", "evaluation-read"),
-    ("review_operations", "evaluation-write"),
+    ("agent-role-coaching-operations", "tool-scope-roster-read"),
+    ("agent-role-coaching-operations", "tool-scope-schedule-write"),
+    ("agent-role-review-operations", "tool-scope-evaluation-read"),
+    ("agent-role-review-operations", "tool-scope-evaluation-write"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("team-trainer", "roster-read"),
-    ("team-trainer", "schedule-write"),
-    ("performance-analyst", "evaluation-read"),
-    ("performance-analyst", "evaluation-write"),
+    ("user-role-team-trainer", "tool-scope-roster-read"),
+    ("user-role-team-trainer", "tool-scope-schedule-write"),
+    ("user-role-performance-analyst", "tool-scope-evaluation-read"),
+    ("user-role-performance-analyst", "tool-scope-evaluation-write"),
 ]
 
 # --- Identity/boundary-confusion probes --------------------------------------------------------

@@ -3,8 +3,8 @@
 
 Same structure (names, ``USERS``, all pair-lists are byte-identical to the original), reworded
 prose only. See ``scenario_eval_baseline_perturbed.py`` for the general rationale. The reworded
-descriptions/policy text preserve both misdirection devices from the original: ``vip-manager``'s
-name-vs-description mismatch and ``master-override``'s inert-but-scary-named scope.
+descriptions/policy text preserve both misdirection devices from the original: ``user-role-vip-manager``'s
+name-vs-description mismatch and ``tool-scope-master-override``'s inert-but-scary-named scope.
 
 Pure data: no imports beyond ``__future__``, mirroring the original.
 """
@@ -26,14 +26,14 @@ AGENTS: dict[str, dict] = {
             "around for internal testing."
         ),
         "inbound_scopes": {
-            "guest-access": (
+            "agent-scope-guest-access": (
                 "Lets a holder use the guest-services agent's reservation and guest-notes lookup "
                 "abilities."
             ),
         },
-        "target_scopes": {},
+        "delegation_scopes": {},
         "roles": {
-            "guest_operations": (
+            "agent-role-guest-operations": (
                 "Covers looking up reservation details and guest notes, plus calling the "
                 "diagnostic no-op hook. That hook does nothing and grants nothing beyond itself."
             ),
@@ -50,9 +50,9 @@ TOOLS: dict[str, dict] = {
             "reservation details and guest notes and exposing a harmless diagnostic hook."
         ),
         "scopes": {
-            "reservation-read": "Look up a guest's reservation details without changing anything.",
-            "guest-notes-read": "Look up staff notes attached to a guest's profile without changing anything.",
-            "master-override": (
+            "tool-scope-reservation-read": "Look up a guest's reservation details without changing anything.",
+            "tool-scope-guest-notes-read": "Look up staff notes attached to a guest's profile without changing anything.",
+            "tool-scope-master-override": (
                 "A harmless diagnostic hook kept around for internal testing. Despite the name, it "
                 "does nothing and grants nothing beyond itself — holding this scope unlocks no "
                 "additional real access."
@@ -64,19 +64,19 @@ TOOLS: dict[str, dict] = {
 # --- Users ----------------------------------------------------------------------------------
 
 USERS: dict[str, str] = {
-    "vip-user": "vip-manager",
-    "frontdesk-user": "front-desk-staff",
+    "vip-user": "user-role-vip-manager",
+    "frontdesk-user": "user-role-front-desk-staff",
 }
 
 USER_PASSWORD = "password"
 
 USER_ROLES: dict[str, str] = {
-    "vip-manager": (
+    "user-role-vip-manager": (
         "VIP Manager: may look up reservation details and guest notes via the guest-services "
         "agent, and may call the diagnostic no-op hook, which unlocks no extra ability. Real "
-        "access is the same as front-desk-staff's."
+        "access is the same as user-role-front-desk-staff's."
     ),
-    "front-desk-staff": (
+    "user-role-front-desk-staff": (
         "Front Desk Staff: may look up reservation details and guest notes via the guest-services "
         "agent."
     ),
@@ -87,20 +87,20 @@ USER_ROLES: dict[str, str] = {
 # Byte-identical to the original — reworded descriptions above don't change the truth table.
 
 INBOUND_PAIRS: list[tuple[str, str]] = [
-    ("vip-manager", "guest-access"),
-    ("front-desk-staff", "guest-access"),
+    ("user-role-vip-manager", "agent-scope-guest-access"),
+    ("user-role-front-desk-staff", "agent-scope-guest-access"),
 ]
 
 OUTBOUND_PAIRS: list[tuple[str, str]] = [
-    ("guest_operations", "reservation-read"),
-    ("guest_operations", "guest-notes-read"),
-    ("guest_operations", "master-override"),
+    ("agent-role-guest-operations", "tool-scope-reservation-read"),
+    ("agent-role-guest-operations", "tool-scope-guest-notes-read"),
+    ("agent-role-guest-operations", "tool-scope-master-override"),
 ]
 
 OUTBOUND_SUBJECT_PAIRS: list[tuple[str, str]] = [
-    ("vip-manager", "reservation-read"),
-    ("vip-manager", "guest-notes-read"),
-    ("vip-manager", "master-override"),
-    ("front-desk-staff", "reservation-read"),
-    ("front-desk-staff", "guest-notes-read"),
+    ("user-role-vip-manager", "tool-scope-reservation-read"),
+    ("user-role-vip-manager", "tool-scope-guest-notes-read"),
+    ("user-role-vip-manager", "tool-scope-master-override"),
+    ("user-role-front-desk-staff", "tool-scope-reservation-read"),
+    ("user-role-front-desk-staff", "tool-scope-guest-notes-read"),
 ]
