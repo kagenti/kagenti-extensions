@@ -470,36 +470,6 @@ func TestInferenceParser_OnResponse_SSE(t *testing.T) {
 	}
 }
 
-// TestFoldOpenAIFrame_PreservesCacheAccumulator pins the field-by-field copy in
-// foldOpenAIFrame. inferenceUsage is both the OpenAI wire shape and the
-// dialect-neutral accumulator, and its two cache fields are json:"-" — so they
-// are always zero in a decoded chunk, and assigning the whole struct would
-// clear whatever had been accumulated.
-//
-// Nothing on the OpenAI path fills those fields today, so this guards a
-// refactor rather than a live bug: the failure mode is silent, and it arrives
-// the moment someone wires up prompt_tokens_details.cached_tokens.
-func TestFoldOpenAIFrame_PreservesCacheAccumulator(t *testing.T) {
-	state := &inferenceStreamState{}
-	state.usage.CacheWriteTokens = 111
-	state.usage.CacheReadTokens = 222
-	ext := &pipeline.InferenceExtension{Model: "gpt-4", Stream: true}
-
-	frame := []byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
-	foldOpenAIFrame(frame, state, ext)
-
-	if state.usage.CacheWriteTokens != 111 || state.usage.CacheReadTokens != 222 {
-		t.Errorf("cache counts = %d/%d, want 111/222 preserved",
-			state.usage.CacheWriteTokens, state.usage.CacheReadTokens)
-	}
-	// The wire-backed counts still land, TotalTokens taken as reported rather
-	// than recomputed from prompt+completion.
-	if state.usage.PromptTokens != 5 || state.usage.CompletionTokens != 2 || state.usage.TotalTokens != 7 {
-		t.Errorf("usage = %d/%d/%d, want 5/2/7",
-			state.usage.PromptTokens, state.usage.CompletionTokens, state.usage.TotalTokens)
-	}
-}
-
 func TestInferenceParser_OnResponse_InvalidJSON(t *testing.T) {
 	p := NewInferenceParser()
 	pctx := &pipeline.Context{

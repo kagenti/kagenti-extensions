@@ -26,6 +26,11 @@ import (
 type config struct {
 	RedisURL               string `json:"redis_url" required:"true" description:"Redis/Valkey connection URL."`
 	MaxTokens              int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
+	MaxInputTokens         int64  `json:"max_input_tokens" description:"Per-kind ceiling for uncached prompt tokens. 0 = no limit."`
+	MaxCacheReadTokens     int64  `json:"max_cache_read_tokens" description:"Per-kind ceiling for prompt tokens served from cache. 0 = no limit."`
+	MaxCacheWriteTokens    int64  `json:"max_cache_write_tokens" description:"Per-kind ceiling for prompt tokens written to cache. 0 = no limit."`
+	MaxOutputTokens        int64  `json:"max_output_tokens" description:"Per-kind ceiling for generated completion tokens. 0 = no limit."`
+	MaxReasoningTokens     int64  `json:"max_reasoning_tokens" description:"Per-kind ceiling for reasoning-only output tokens (subset of output). 0 = no limit."`
 	MaxCalls               int64  `json:"max_calls" description:"Max LLM/inference calls per session. Only inference-parser output increments this counter; MCP tool calls and other outbound traffic do not. Once the limit is reached, all subsequent outbound requests (including MCP tool calls) are blocked until the session resets. 0 = no limit."`
 	MaxDurationSeconds     int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
 	OnExceed               string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
@@ -53,10 +58,18 @@ type approvalFlight struct {
 }
 
 type counters struct {
-	tokens         int64
-	calls          int64
-	startedAt      time.Time
-	lastApprovedAt time.Time
+	tokens int64
+	// Per-kind sub-counters. Stored as separate fields (rather than derived
+	// from tokens) so a future weighted-total policy can multiply them
+	// without reshaping the counter first.
+	inputTokens      int64
+	cacheReadTokens  int64
+	cacheWriteTokens int64
+	outputTokens     int64
+	reasoningTokens  int64
+	calls            int64
+	startedAt        time.Time
+	lastApprovedAt   time.Time
 	// pendingApproval is non-nil while a webhook call for this session is in
 	// flight. Concurrent breaches wait on flight.done; the leader publishes
 	// flight.approved before closing done, then clears this field.
@@ -122,8 +135,10 @@ func (p *SessionBudget) Configure(raw json.RawMessage) error {
 	if p.cfg.RedisURL == "" {
 		return fmt.Errorf("session-budget: redis_url is required")
 	}
-	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 {
-		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_calls, max_duration_seconds) must be > 0")
+	if p.cfg.MaxTokens <= 0 && p.cfg.MaxCalls <= 0 && p.cfg.MaxDurationSeconds <= 0 &&
+		p.cfg.MaxInputTokens <= 0 && p.cfg.MaxCacheReadTokens <= 0 && p.cfg.MaxCacheWriteTokens <= 0 &&
+		p.cfg.MaxOutputTokens <= 0 && p.cfg.MaxReasoningTokens <= 0 {
+		return fmt.Errorf("session-budget: at least one limit (max_tokens, max_input_tokens, max_cache_read_tokens, max_cache_write_tokens, max_output_tokens, max_reasoning_tokens, max_calls, max_duration_seconds) must be > 0")
 	}
 	if p.cfg.SessionTTLSeconds < 0 {
 		return fmt.Errorf("session-budget: session_ttl_seconds must be > 0 (got %d)", p.cfg.SessionTTLSeconds)
@@ -381,7 +396,14 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	tokens := int64(inf.TotalTokens)
+	delta := tokenDelta{
+		total:      int64(inf.TotalTokens),
+		input:      int64(inf.InputTokens),
+		cacheRead:  int64(inf.CacheReadTokens),
+		cacheWrite: int64(inf.CacheWriteTokens),
+		output:     int64(inf.OutputTokens),
+		reasoning:  int64(inf.ReasoningTokens),
+	}
 
 	p.mu.Lock()
 	c, ok := p.cache[sessionID]
@@ -389,22 +411,37 @@ func (p *SessionBudget) OnResponseFrame(_ context.Context, pctx *pipeline.Contex
 		c = &counters{startedAt: time.Now()}
 		p.cache[sessionID] = c
 	}
-	c.tokens += tokens
+	c.tokens += delta.total
+	c.inputTokens += delta.input
+	c.cacheReadTokens += delta.cacheRead
+	c.cacheWriteTokens += delta.cacheWrite
+	c.outputTokens += delta.output
+	c.reasoningTokens += delta.reasoning
 	c.calls++
 	c.pendingWrites++
 	p.mu.Unlock()
 
-	go p.accumulate(sessionID, tokens)
+	go p.accumulate(sessionID, delta)
 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
 func (p *SessionBudget) buildDetails(snap *counters) map[string]any {
 	details := map[string]any{
-		"spent_tokens": snap.tokens,
-		"spent_calls":  snap.calls,
-		"token_limit":  p.cfg.MaxTokens,
-		"call_limit":   p.cfg.MaxCalls,
+		"spent_tokens":             snap.tokens,
+		"spent_input_tokens":       snap.inputTokens,
+		"spent_cache_read_tokens":  snap.cacheReadTokens,
+		"spent_cache_write_tokens": snap.cacheWriteTokens,
+		"spent_output_tokens":      snap.outputTokens,
+		"spent_reasoning_tokens":   snap.reasoningTokens,
+		"spent_calls":              snap.calls,
+		"token_limit":              p.cfg.MaxTokens,
+		"input_token_limit":        p.cfg.MaxInputTokens,
+		"cache_read_token_limit":   p.cfg.MaxCacheReadTokens,
+		"cache_write_token_limit":  p.cfg.MaxCacheWriteTokens,
+		"output_token_limit":       p.cfg.MaxOutputTokens,
+		"reasoning_token_limit":    p.cfg.MaxReasoningTokens,
+		"call_limit":               p.cfg.MaxCalls,
 	}
 	if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
 		details["duration_seconds"] = int64(time.Since(snap.startedAt).Seconds())
@@ -414,14 +451,24 @@ func (p *SessionBudget) buildDetails(snap *counters) map[string]any {
 }
 
 type pauseRequest struct {
-	SessionID       string `json:"session_id"`
-	Reason          string `json:"reason"`
-	SpentTokens     int64  `json:"spent_tokens"`
-	SpentCalls      int64  `json:"spent_calls"`
-	TokenLimit      int64  `json:"token_limit"`
-	CallLimit       int64  `json:"call_limit"`
-	DurationSeconds int64  `json:"duration_seconds,omitempty"`
-	DurationLimit   int64  `json:"duration_limit,omitempty"`
+	SessionID             string `json:"session_id"`
+	Reason                string `json:"reason"`
+	SpentTokens           int64  `json:"spent_tokens"`
+	SpentInputTokens      int64  `json:"spent_input_tokens,omitempty"`
+	SpentCacheReadTokens  int64  `json:"spent_cache_read_tokens,omitempty"`
+	SpentCacheWriteTokens int64  `json:"spent_cache_write_tokens,omitempty"`
+	SpentOutputTokens     int64  `json:"spent_output_tokens,omitempty"`
+	SpentReasoningTokens  int64  `json:"spent_reasoning_tokens,omitempty"`
+	SpentCalls            int64  `json:"spent_calls"`
+	TokenLimit            int64  `json:"token_limit"`
+	InputTokenLimit       int64  `json:"input_token_limit,omitempty"`
+	CacheReadTokenLimit   int64  `json:"cache_read_token_limit,omitempty"`
+	CacheWriteTokenLimit  int64  `json:"cache_write_token_limit,omitempty"`
+	OutputTokenLimit      int64  `json:"output_token_limit,omitempty"`
+	ReasoningTokenLimit   int64  `json:"reasoning_token_limit,omitempty"`
+	CallLimit             int64  `json:"call_limit"`
+	DurationSeconds       int64  `json:"duration_seconds,omitempty"`
+	DurationLimit         int64  `json:"duration_limit,omitempty"`
 }
 
 type pauseResponse struct {
@@ -435,12 +482,22 @@ func (p *SessionBudget) callPauseWebhook(sessionID, reason string, snap *counter
 	defer cancel()
 
 	body := pauseRequest{
-		SessionID:   sessionID,
-		Reason:      reason,
-		SpentTokens: snap.tokens,
-		SpentCalls:  snap.calls,
-		TokenLimit:  p.cfg.MaxTokens,
-		CallLimit:   p.cfg.MaxCalls,
+		SessionID:             sessionID,
+		Reason:                reason,
+		SpentTokens:           snap.tokens,
+		SpentInputTokens:      snap.inputTokens,
+		SpentCacheReadTokens:  snap.cacheReadTokens,
+		SpentCacheWriteTokens: snap.cacheWriteTokens,
+		SpentOutputTokens:     snap.outputTokens,
+		SpentReasoningTokens:  snap.reasoningTokens,
+		SpentCalls:            snap.calls,
+		TokenLimit:            p.cfg.MaxTokens,
+		InputTokenLimit:       p.cfg.MaxInputTokens,
+		CacheReadTokenLimit:   p.cfg.MaxCacheReadTokens,
+		CacheWriteTokenLimit:  p.cfg.MaxCacheWriteTokens,
+		OutputTokenLimit:      p.cfg.MaxOutputTokens,
+		ReasoningTokenLimit:   p.cfg.MaxReasoningTokens,
+		CallLimit:             p.cfg.MaxCalls,
 	}
 	if p.cfg.MaxDurationSeconds > 0 && !snap.startedAt.IsZero() {
 		body.DurationSeconds = int64(time.Since(snap.startedAt).Seconds())
@@ -488,6 +545,21 @@ func (p *SessionBudget) evaluate(c *counters) string {
 	if p.cfg.MaxTokens > 0 && c.tokens >= p.cfg.MaxTokens {
 		return fmt.Sprintf("token limit reached: %d/%d", c.tokens, p.cfg.MaxTokens)
 	}
+	if p.cfg.MaxInputTokens > 0 && c.inputTokens >= p.cfg.MaxInputTokens {
+		return fmt.Sprintf("input token limit reached: %d/%d", c.inputTokens, p.cfg.MaxInputTokens)
+	}
+	if p.cfg.MaxCacheReadTokens > 0 && c.cacheReadTokens >= p.cfg.MaxCacheReadTokens {
+		return fmt.Sprintf("cache-read token limit reached: %d/%d", c.cacheReadTokens, p.cfg.MaxCacheReadTokens)
+	}
+	if p.cfg.MaxCacheWriteTokens > 0 && c.cacheWriteTokens >= p.cfg.MaxCacheWriteTokens {
+		return fmt.Sprintf("cache-write token limit reached: %d/%d", c.cacheWriteTokens, p.cfg.MaxCacheWriteTokens)
+	}
+	if p.cfg.MaxOutputTokens > 0 && c.outputTokens >= p.cfg.MaxOutputTokens {
+		return fmt.Sprintf("output token limit reached: %d/%d", c.outputTokens, p.cfg.MaxOutputTokens)
+	}
+	if p.cfg.MaxReasoningTokens > 0 && c.reasoningTokens >= p.cfg.MaxReasoningTokens {
+		return fmt.Sprintf("reasoning token limit reached: %d/%d", c.reasoningTokens, p.cfg.MaxReasoningTokens)
+	}
 	if p.cfg.MaxCalls > 0 && c.calls >= p.cfg.MaxCalls {
 		return fmt.Sprintf("call limit reached: %d/%d", c.calls, p.cfg.MaxCalls)
 	}
@@ -500,8 +572,20 @@ func (p *SessionBudget) evaluate(c *counters) string {
 	return ""
 }
 
+// tokenDelta is one response's contribution to the counters, both the
+// aggregate `total` and each split sub-kind. Held as one value so the
+// async accumulate goroutine gets everything in one shot.
+type tokenDelta struct {
+	total      int64
+	input      int64
+	cacheRead  int64
+	cacheWrite int64
+	output     int64
+	reasoning  int64
+}
+
 // accumulate writes counters to Redis. On failure, writes are dropped (fail-open).
-func (p *SessionBudget) accumulate(sessionID string, tokens int64) {
+func (p *SessionBudget) accumulate(sessionID string, delta tokenDelta) {
 	defer func() {
 		p.mu.Lock()
 		if cc, ok := p.cache[sessionID]; ok && cc.pendingWrites > 0 {
@@ -516,9 +600,25 @@ func (p *SessionBudget) accumulate(sessionID string, tokens int64) {
 	key := p.redisKey(sessionID)
 	ttl := time.Duration(p.cfg.SessionTTLSeconds) * time.Second
 
-	if tokens > 0 {
-		if _, err := p.store.HashIncr(ctx, key, "tokens", tokens); err != nil {
-			p.log.Warn("redis HashIncr tokens failed", "session", sessionID, "err", err)
+	// One HashIncr per non-zero sub-kind. Zero deltas are skipped so old
+	// sessions whose per-kind counters were never written stay absent in
+	// Redis rather than accumulating a stream of no-op fields.
+	for _, kv := range []struct {
+		field string
+		v     int64
+	}{
+		{"tokens", delta.total},
+		{"input_tokens", delta.input},
+		{"cache_read_tokens", delta.cacheRead},
+		{"cache_write_tokens", delta.cacheWrite},
+		{"output_tokens", delta.output},
+		{"reasoning_tokens", delta.reasoning},
+	} {
+		if kv.v <= 0 {
+			continue
+		}
+		if _, err := p.store.HashIncr(ctx, key, kv.field, kv.v); err != nil {
+			p.log.Warn("redis HashIncr failed", "session", sessionID, "field", kv.field, "err", err)
 		}
 	}
 
@@ -571,17 +671,12 @@ func (p *SessionBudget) hydrateCache(sessionID string) bool {
 		if len(fields) == 0 {
 			return false, nil
 		}
-		tokens, _ := strconv.ParseInt(fields["tokens"], 10, 64)
-		calls, _ := strconv.ParseInt(fields["calls"], 10, 64)
-		var startedAt time.Time
-		if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
-			startedAt = time.Unix(ts, 0)
-		}
+		parsed := parseCountersFromFields(fields)
 		p.mu.Lock()
 		// Do not overwrite: OnResponseFrame may have seeded an entry between
 		// our HashGet and this lock. Its counters are fresher than Redis.
 		if _, exists := p.cache[sessionID]; !exists {
-			p.cache[sessionID] = &counters{tokens: tokens, calls: calls, startedAt: startedAt}
+			p.cache[sessionID] = parsed
 		}
 		p.mu.Unlock()
 		return true, nil
@@ -623,42 +718,44 @@ func (p *SessionBudget) refreshCache() {
 			continue
 		}
 
-		tokens, _ := strconv.ParseInt(fields["tokens"], 10, 64)
-		calls, _ := strconv.ParseInt(fields["calls"], 10, 64)
-		var startedAt time.Time
-		if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
-			startedAt = time.Unix(ts, 0)
-		}
+		parsed := parseCountersFromFields(fields)
 
 		p.mu.Lock()
-		var lastApprovedAt time.Time
-		var pendingApproval *approvalFlight
-		var pendingWrites int
 		if existing, ok := p.cache[sessionID]; ok {
-			// Take the max of local and Redis to avoid regressing counters when
-			// in-flight accumulate goroutines haven't committed to Redis yet.
-			if tokens < existing.tokens {
-				tokens = existing.tokens
+			// Take the max of local and Redis on every counter to avoid
+			// regressing when in-flight accumulate goroutines haven't
+			// committed yet. Applied uniformly across the aggregate and
+			// each per-kind sub-counter.
+			if parsed.tokens < existing.tokens {
+				parsed.tokens = existing.tokens
 			}
-			if calls < existing.calls {
-				calls = existing.calls
+			if parsed.inputTokens < existing.inputTokens {
+				parsed.inputTokens = existing.inputTokens
 			}
-			if startedAt.IsZero() && !existing.startedAt.IsZero() {
-				startedAt = existing.startedAt
+			if parsed.cacheReadTokens < existing.cacheReadTokens {
+				parsed.cacheReadTokens = existing.cacheReadTokens
 			}
-			lastApprovedAt = existing.lastApprovedAt
+			if parsed.cacheWriteTokens < existing.cacheWriteTokens {
+				parsed.cacheWriteTokens = existing.cacheWriteTokens
+			}
+			if parsed.outputTokens < existing.outputTokens {
+				parsed.outputTokens = existing.outputTokens
+			}
+			if parsed.reasoningTokens < existing.reasoningTokens {
+				parsed.reasoningTokens = existing.reasoningTokens
+			}
+			if parsed.calls < existing.calls {
+				parsed.calls = existing.calls
+			}
+			if parsed.startedAt.IsZero() && !existing.startedAt.IsZero() {
+				parsed.startedAt = existing.startedAt
+			}
+			parsed.lastApprovedAt = existing.lastApprovedAt
 			// Preserve mid-webhook: dropping would let a concurrent breach fire a duplicate.
-			pendingApproval = existing.pendingApproval
-			pendingWrites = existing.pendingWrites
+			parsed.pendingApproval = existing.pendingApproval
+			parsed.pendingWrites = existing.pendingWrites
 		}
-		p.cache[sessionID] = &counters{
-			tokens:          tokens,
-			calls:           calls,
-			startedAt:       startedAt,
-			lastApprovedAt:  lastApprovedAt,
-			pendingApproval: pendingApproval,
-			pendingWrites:   pendingWrites,
-		}
+		p.cache[sessionID] = parsed
 		p.mu.Unlock()
 	}
 }
@@ -678,6 +775,25 @@ func (p *SessionBudget) sessionID(pctx *pipeline.Context) string {
 
 func (p *SessionBudget) redisKey(sessionID string) string {
 	return "session-budget:" + sessionID
+}
+
+// parseCountersFromFields turns a Redis hash into a counters value. Missing
+// per-kind fields parse as 0, which is what legacy sessions written before
+// the split-token migration look like — they keep enforcing max_tokens and
+// start their per-kind counters from zero.
+func parseCountersFromFields(fields map[string]string) *counters {
+	c := &counters{}
+	c.tokens, _ = strconv.ParseInt(fields["tokens"], 10, 64)
+	c.inputTokens, _ = strconv.ParseInt(fields["input_tokens"], 10, 64)
+	c.cacheReadTokens, _ = strconv.ParseInt(fields["cache_read_tokens"], 10, 64)
+	c.cacheWriteTokens, _ = strconv.ParseInt(fields["cache_write_tokens"], 10, 64)
+	c.outputTokens, _ = strconv.ParseInt(fields["output_tokens"], 10, 64)
+	c.reasoningTokens, _ = strconv.ParseInt(fields["reasoning_tokens"], 10, 64)
+	c.calls, _ = strconv.ParseInt(fields["calls"], 10, 64)
+	if ts, err := strconv.ParseInt(fields["started_at"], 10, 64); err == nil {
+		c.startedAt = time.Unix(ts, 0)
+	}
+	return c
 }
 
 var (

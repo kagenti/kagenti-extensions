@@ -336,7 +336,7 @@ func TestAccumulate_WritesToStore(t *testing.T) {
 	store := newMemStore()
 	p.store = store
 
-	p.accumulate("sess-1", 100)
+	p.accumulate("sess-1", tokenDelta{total: 100})
 
 	fields, _ := store.HashGet(context.Background(), "session-budget:sess-1")
 	if fields["tokens"] != "100" {
@@ -355,7 +355,7 @@ func TestAccumulate_ZeroTokens(t *testing.T) {
 	store := newMemStore()
 	p.store = store
 
-	p.accumulate("sess-1", 0)
+	p.accumulate("sess-1", tokenDelta{})
 
 	fields, _ := store.HashGet(context.Background(), "session-budget:sess-1")
 	if fields["tokens"] != "" {
@@ -394,7 +394,7 @@ func TestAccumulate_ExpireSelfHealsAfterFailure(t *testing.T) {
 	p.store = spy
 
 	// Call #1: HashSetNX succeeds (started_at recorded), Expire fails.
-	p.accumulate("sess", 10)
+	p.accumulate("sess", tokenDelta{total: 10})
 	inner.mu.Lock()
 	_, hasTTL := inner.ttls["session-budget:sess"]
 	inner.mu.Unlock()
@@ -405,7 +405,7 @@ func TestAccumulate_ExpireSelfHealsAfterFailure(t *testing.T) {
 	// Call #2: HashSetNX returns false (started_at already set), but Expire
 	// must still run and restore the TTL. Pre-fix code gated Expire on
 	// HashSetNX-returned-true and would leave the key TTL-less forever.
-	p.accumulate("sess", 10)
+	p.accumulate("sess", tokenDelta{total: 10})
 	inner.mu.Lock()
 	ttl, hasTTL := inner.ttls["session-budget:sess"]
 	inner.mu.Unlock()

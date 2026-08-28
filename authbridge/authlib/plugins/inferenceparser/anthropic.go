@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/internal/parsercommon"
 )
 
 // anthropicMessagesPath is the Anthropic Messages API endpoint. Clients
@@ -132,7 +133,19 @@ type anthropicUsage struct {
 }
 
 func (u anthropicUsage) promptTotal() int {
-	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+	return u.toNeutral().PromptTotal()
+}
+
+// toNeutral maps Anthropic's usage block onto the neutral TokenUsage.
+// Straight rename — Anthropic already splits input / cache-read /
+// cache-write on the wire.
+func (u anthropicUsage) toNeutral() parsercommon.TokenUsage {
+	return parsercommon.TokenUsage{
+		Input:      u.InputTokens,
+		CacheRead:  u.CacheReadInputTokens,
+		CacheWrite: u.CacheCreationInputTokens,
+		Output:     u.OutputTokens,
+	}
 }
 
 // --- non-streaming response ---
@@ -180,11 +193,7 @@ func parseAnthropicJSON(body []byte, ext *pipeline.InferenceExtension) {
 	if resp.StopReason != "" {
 		ext.FinishReason = resp.StopReason
 	}
-	ext.PromptTokens = resp.Usage.promptTotal()
-	ext.CompletionTokens = resp.Usage.OutputTokens
-	ext.TotalTokens = ext.PromptTokens + ext.CompletionTokens
-	ext.CacheWriteTokens = resp.Usage.CacheCreationInputTokens
-	ext.CacheReadTokens = resp.Usage.CacheReadInputTokens
+	resp.Usage.toNeutral().Fill(ext)
 }
 
 // --- streaming ---
@@ -269,17 +278,6 @@ func (s *inferenceStreamState) closeAnthropicTool() {
 	s.openTool = nil
 }
 
-// totalAnthropicUsage derives the running total from the parts it was given.
-// It runs after every usage update rather than only when output tokens arrive,
-// because TotalTokens is the gate finalize uses to decide whether any count is
-// worth recording — so leaving it at zero discards a prompt size already known.
-// Two streams hit that: a terminal message_delta reporting the prompt with
-// output_tokens == 0, and a turn the caller interrupted after message_start,
-// which never reaches a message_delta at all. Both were billed for the prompt.
-func (s *inferenceStreamState) totalAnthropicUsage() {
-	s.usage.TotalTokens = s.usage.PromptTokens + s.usage.CompletionTokens
-}
-
 // foldAnthropicFrame folds one Messages SSE event into the running stream state.
 // The prompt size is taken as the largest total seen, because different Messages
 // API paths report it on different events: message_start on the plain path,
@@ -295,10 +293,8 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 	switch ev.Type {
 	case "message_start":
 		if ev.Message != nil {
-			state.usage.PromptTokens = ev.Message.Usage.promptTotal()
-			state.usage.CacheWriteTokens = ev.Message.Usage.CacheCreationInputTokens
-			state.usage.CacheReadTokens = ev.Message.Usage.CacheReadInputTokens
-			state.totalAnthropicUsage()
+			mergeAnthropicPromptMaxSeen(state, ev.Message.Usage.toNeutral())
+			state.hasUsage = true
 		}
 	case "content_block_start":
 		// A tool call opens here and is populated by later deltas. Text
@@ -325,30 +321,32 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 			ext.FinishReason = ev.Delta.StopReason
 		}
 		if ev.Usage != nil {
-			// The prompt side can arrive here rather than in message_start.
-			// Clients using the ?beta=true Messages path (Claude Code sends
-			// anthropic-beta: claude-code-*) get a message_start carrying only
-			// input_tokens, with cache_creation_input_tokens and
-			// cache_read_input_tokens deferred to message_delta — so reading
-			// the prompt size from message_start alone undercounts a cached
-			// agent request by orders of magnitude (a 33k-token turn recorded
-			// as 9). Take the larger value: on the non-beta path message_delta
-			// carries no input counts, and assigning unconditionally would
-			// clobber the correct message_start total with zero.
-			if p := ev.Usage.promptTotal(); p > state.usage.PromptTokens {
-				state.usage.PromptTokens = p
-				// Keep the split consistent with whichever usage block
-				// won the total, so the parts always sum into it.
-				state.usage.CacheWriteTokens = ev.Usage.CacheCreationInputTokens
-				state.usage.CacheReadTokens = ev.Usage.CacheReadInputTokens
+			// ?beta=true path defers cache counts from message_start to
+			// message_delta; non-beta path carries no input counts here.
+			// Max-seen per sub-field handles both without clobbering.
+			neutral := ev.Usage.toNeutral()
+			mergeAnthropicPromptMaxSeen(state, neutral)
+			if neutral.Output > 0 {
+				state.usage.Output = neutral.Output // cumulative
 			}
-			if ev.Usage.OutputTokens > 0 {
-				// usage.output_tokens in message_delta is cumulative — take
-				// the latest rather than accumulating.
-				state.usage.CompletionTokens = ev.Usage.OutputTokens
-			}
-			state.totalAnthropicUsage()
+			state.hasUsage = true
 		}
+	}
+}
+
+// mergeAnthropicPromptMaxSeen updates prompt-side sub-fields with
+// max-seen semantics so a later event carrying zero cannot clobber an
+// earlier real count. See foldAnthropicFrame for why both events need
+// this.
+func mergeAnthropicPromptMaxSeen(state *inferenceStreamState, incoming parsercommon.TokenUsage) {
+	if incoming.Input > state.usage.Input {
+		state.usage.Input = incoming.Input
+	}
+	if incoming.CacheRead > state.usage.CacheRead {
+		state.usage.CacheRead = incoming.CacheRead
+	}
+	if incoming.CacheWrite > state.usage.CacheWrite {
+		state.usage.CacheWrite = incoming.CacheWrite
 	}
 }
 

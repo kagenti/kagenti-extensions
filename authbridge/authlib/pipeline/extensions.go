@@ -157,11 +157,8 @@ type InferenceExtension struct {
 	ToolChoice  any                `json:"toolChoice,omitempty"` // "auto" | "none" | {type,function:{name}}
 
 	// Response fields (populated after OnResponse runs).
-	Completion       string `json:"completion,omitempty"`
-	FinishReason     string `json:"finishReason,omitempty"`
-	PromptTokens     int    `json:"promptTokens,omitempty"`
-	CompletionTokens int    `json:"completionTokens,omitempty"`
-	TotalTokens      int    `json:"totalTokens,omitempty"`
+	Completion   string `json:"completion,omitempty"`
+	FinishReason string `json:"finishReason,omitempty"`
 
 	// ToolCalls are the tool invocations the model requested. Populated on
 	// three of the four response paths — both non-streaming dialects and
@@ -176,22 +173,19 @@ type InferenceExtension struct {
 	// whose calls were never captured.
 	ToolCalls []InferenceToolCall `json:"toolCalls,omitempty"`
 
-	// CacheWriteTokens and CacheReadTokens split the cached portion of
-	// PromptTokens by how it was billed. PromptTokens is the whole prompt
-	// (uncached input + cache writes + cache reads), which is the right
-	// number for context-size questions but the wrong one for cost: a
-	// provider that prices prompt caching charges a premium to *write* an
-	// entry and a steep discount to *read* one, so two requests with an
-	// identical PromptTokens can differ by an order of magnitude in price.
-	// Both counts arrive in the same usage block the totals come from, so
-	// recording them separately costs nothing and is the only way a
-	// consumer can tell a cache-warming turn from a cache-hit turn.
-	//
-	// Zero means "not reported" — providers that don't price caching (and
-	// the OpenAI dialect, which reports cached tokens in a different shape)
-	// leave these unset while PromptTokens stays authoritative.
-	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
-	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
+	// Legacy aggregates, derived from the split fields below via
+	// parsercommon.TokenUsage.Fill.
+	PromptTokens     int `json:"promptTokens,omitempty"`
+	CompletionTokens int `json:"completionTokens,omitempty"`
+	TotalTokens      int `json:"totalTokens,omitempty"`
+
+	// Split token counters — provider-neutral shape published by every
+	// inference parser via parsercommon.TokenUsage.Fill.
+	InputTokens      int `json:"inputTokens,omitempty"`      // uncached prompt tokens
+	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`  // served from cache
+	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"` // written to cache
+	OutputTokens     int `json:"outputTokens,omitempty"`     // generated tokens
+	ReasoningTokens  int `json:"reasoningTokens,omitempty"`  // reasoning-only output
 
 	// Classification — see MCPExtension.IsAction.
 	IsAction bool `json:"isAction,omitempty"`
