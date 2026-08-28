@@ -23,12 +23,10 @@ the same namespace.
   reachable, an LLM provider).
 - In **`team1`**: installer-provided `authbridge-config`,
   `authbridge-runtime-config`, `spiffe-helper-config`, `envoy-config`. No
-  extra Secrets or ConfigMaps are required up front. **`keycloak-admin-secret`
-  is not in `team1`.** Operator 0.2+ keeps it in **`rossoctl-system`** for
-  client registration; `NotFound` in `team1` is expected:
-  ```bash
-  kubectl get secret keycloak-admin-secret -n rossoctl-system
-  ```
+  extra Secrets or ConfigMaps are required up front. **No `keycloak-admin-secret`
+  is required in `team1` or `rossoctl-system`.** On the current operator (v0.7.0)
+  client registration uses the operator's own SPIFFE workload identity, not an
+  admin username/password Secret; a `NotFound` in **either** namespace is expected.
 - Python 3.10+ for the Keycloak setup script (Step 1).
 - For OpenAI: a `team1` Secret named `openai-secret` (created in Step 3).
 
@@ -49,16 +47,25 @@ cd authbridge
 python -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# Port-forward Keycloak if your shell can't reach keycloak.localtest.me directly
-kubectl port-forward -n keycloak svc/keycloak-service 8080:8080 &
-
 python demos/weather-agent/setup_keycloak_weather_advanced.py \
   -n team1 --wait-tool-client
 ```
 
-`--wait-tool-client` blocks until the tool pod (Step 2) registers its SPIFFE
-client. **Re-run the same command after Step 3** so the agent client picks up
-the optional exchange scope. The script:
+> **Do not `kubectl port-forward` Keycloak on port 8080.** On a `localtest.me`
+> ingress setup, `keycloak.localtest.me:8080` is already reachable directly, and a
+> port-forward binding local `:8080` hijacks all `:8080` traffic — including the
+> Rossoctl UI at `rossoctl-ui.localtest.me:8080`, which will then redirect into the
+> Keycloak admin console. If you truly need a forward, use a different local port
+> and set `KEYCLOAK_URL` to match.
+
+> **Timing:** `--wait-tool-client` blocks for ~5 minutes waiting for the tool's
+> SPIFFE client to register, then times out. Rather than race that window, the
+> simplest order is to **deploy the tool (Step 2) first**, then run this script —
+> it finds the tool client immediately. If it does time out, just re-run it after
+> the tool is up (the scopes/clients it created persist; the script is idempotent).
+
+**Re-run the same command (without `--wait-tool-client`) after Step 3** so the
+agent client picks up the optional exchange scope. The script:
 
 - Adds realm default scope `agent-team1-weather-service-advanced-aud` (puts the
   agent SPIFFE in `aud` for UI / `alice` tokens).
@@ -95,7 +102,9 @@ Wait for the tool pod to be **Ready**. Once it registers in Keycloak, the
 
 ```bash
 kubectl get pods -n team1 -l app.kubernetes.io/name=weather-tool-advanced
-# Expect 3/3 (mcp + authbridge-proxy + spiffe-helper) in proxy-sidecar mode
+# Expect 2/2 (mcp + authbridge-proxy) in proxy-sidecar mode.
+# spiffe-helper is bundled inside the combined AuthBridge image, not a separate
+# container, so the count is 2/2 rather than 3/3.
 ```
 
 ---
@@ -131,17 +140,26 @@ Now the UI flow (order matches the actual import form top-to-bottom):
    - Git Branch or Tag: `main`
    - Select Agent: `Weather Service Agent`
    - Source Subfolder: `a2a/weather_service`
-4. **Protocol**: `A2A` · **Workload Type**: `Deployment`.
+4. **Protocol**: `A2A` · **Workload Type**: leave the default `Sandbox`.
+
+   > ⚠️ **Do not select `Deployment` for the agent.** Choosing `Deployment`
+   > currently fails: the source build succeeds but the workload create is
+   > rejected by the `agent-label-protection` admission policy (the
+   > `rossoctl.io/type` label may only be set by the operator via an
+   > AgentRuntime CR), so **no agent pod and no AgentRuntime are created**.
+   > The `Sandbox` default goes through the operator and works. The agent
+   > then runs as a bare pod owned by a `Sandbox` CR — verify/exec commands
+   > below use label selectors rather than `deploy/...`.
 5. **Secure with AuthBridge**: ✅ (default).
 6. **Enable SPIRE identity (JWT-SVID via spiffe-helper)**: ✅ (default).
-7. Expand **Outbound Routing Rules** and add one route — this is what
-   triggers the RFC 8693 exchange when the agent calls the tool. The form
-   has three fields (currently unlabeled in the UI); fill them in this
-   order:
+7. Expand **Outbound OIDC token exchange rules** and add one route — this is
+   what triggers the RFC 8693 exchange when the agent calls the tool. The
+   table has three columns; after you add the route the header should read
+   **(1 route)**:
 
-   1. Host: `weather-tool-advanced-mcp`
-   2. Target Audience: `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced`
-   3. Token Scopes: `openid weather-tool-exchange-aud`
+   - **Host Pattern**: `weather-tool-advanced-mcp`
+   - **Target OIDC Audience**: `spiffe://localtest.me/ns/team1/sa/weather-tool-advanced`
+   - **OIDC Token Scopes**: `openid weather-tool-exchange-aud`
 
    > If **Outbound Routing Rules** is missing or unresponsive, your Rossoctl
    > backend may pre-date [rossoctl#1194](https://github.com/rossoctl/rossoctl/pull/1194).
@@ -271,17 +289,21 @@ kubectl logs deploy/weather-service-advanced -n team1 -c authbridge-proxy 2>&1 |
 
 ## Cleanup
 
-Delete via the Rossoctl UI (Tool Catalog / Agent Catalog), or via CLI:
+Delete via the Rossoctl UI (Tool Catalog / Agent Catalog), or via CLI.
+
+**Delete the `AgentRuntime` CRs — they are the parent resource.** The agent runs
+as a `Sandbox` and the tool as a `Deployment`, both owned by an AgentRuntime. If
+you delete the child workload (Sandbox/Deployment) but leave the AgentRuntime, the
+operator enters a reconcile error loop (`Failed to resolve targetRef ... not
+found`) every ~30s. Deleting the AgentRuntime cascades to its children:
 
 ```bash
-kubectl delete deployment,svc,sa -n team1 \
-  -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
-kubectl delete deployment,svc,sa -n team1 \
-  -l app.kubernetes.io/name=weather-tool-advanced --ignore-not-found
+kubectl delete agentruntime -n team1 \
+  weather-service-advanced weather-tool-advanced --ignore-not-found
 
 # Also delete the Shipwright Build/BuildRun, otherwise the Rossoctl
 # backend's reconciliation service treats them as "orphaned" and
-# recreates the Deployment + Service + ServiceAccount within seconds:
+# recreates the workload within seconds:
 kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
   -l app.kubernetes.io/name=weather-service-advanced --ignore-not-found
 kubectl delete build.shipwright.io,buildrun.shipwright.io -n team1 \
