@@ -367,7 +367,10 @@ func parseInferenceJSON(body []byte, ext *pipeline.InferenceExtension) {
 			})
 		}
 	}
-	resp.Usage.toNeutral().Fill(ext)
+	// No usage block: leave PresentKinds at 0 (matches SSE path).
+	if resp.Usage.TotalTokens > 0 {
+		resp.Usage.toNeutral().Fill(ext)
+	}
 }
 
 // parseInferenceSSE concatenates content deltas across SSE events and captures

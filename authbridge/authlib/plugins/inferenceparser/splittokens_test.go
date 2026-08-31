@@ -200,6 +200,19 @@ func TestPresentKinds_OpenAI_WithDetailsBlocks(t *testing.T) {
 	}
 }
 
+// No usage block on the wire: PresentKinds must stay 0 so the
+// log renders -1 (not exposed) rather than 0 (reported zero).
+func TestPresentKinds_OpenAI_NoUsageBlock(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "gpt-4o"}
+	parseInferenceJSON([]byte(`{
+		"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]
+	}`), ext)
+
+	if ext.PresentKinds != 0 {
+		t.Errorf("PresentKinds = %b, want 0", ext.PresentKinds)
+	}
+}
+
 // Anthropic response: Input/CacheRead/CacheWrite/Output always
 // present (Messages API emits all four); Reasoning never present.
 func TestPresentKinds_Anthropic(t *testing.T) {
