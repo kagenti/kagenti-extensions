@@ -158,10 +158,10 @@ func TestSnapshotPlugins_Empty(t *testing.T) {
 
 func TestSnapshotPlugins_FilterAndStripSuffix(t *testing.T) {
 	custom := map[string]any{
-		"rate-limiter" + PluginEventSuffix:  map[string]any{"remaining": 42},
-		"audit" + PluginEventSuffix:         "logged",
-		"some-internal-key":                 "should-not-appear", // no /event suffix
-		"more.internal.state":               struct{ X int }{X: 1},
+		"rate-limiter" + PluginEventSuffix: map[string]any{"remaining": 42},
+		"audit" + PluginEventSuffix:        "logged",
+		"some-internal-key":                "should-not-appear", // no /event suffix
+		"more.internal.state":              struct{ X int }{X: 1},
 	}
 	got := SnapshotPlugins(custom)
 

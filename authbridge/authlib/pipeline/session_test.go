@@ -71,9 +71,9 @@ func TestSessionEvent_JSONRoundTrip(t *testing.T) {
 		MCP: &MCPExtension{Method: "tools/call", RPCID: "m-2"},
 		Inference: &InferenceExtension{
 			Model: "gpt-4", Stream: stream, MaxTokens: &maxTok,
-			Messages:  []InferenceMessage{{Role: "user", Content: "hi"}},
-			Tools:     []InferenceTool{{Name: "get_weather", Description: "d"}},
-			ToolCalls: []InferenceToolCall{{ID: "c1", Name: "get_weather", Arguments: `{"city":"NYC"}`}},
+			Messages:   []InferenceMessage{{Role: "user", Content: "hi"}},
+			Tools:      []InferenceTool{{Name: "get_weather", Description: "d"}},
+			ToolCalls:  []InferenceToolCall{{ID: "c1", Name: "get_weather", Arguments: `{"city":"NYC"}`}},
 			Completion: "Hello, world!", FinishReason: "stop", TotalTokens: 17,
 		},
 		Identity:   &EventIdentity{Subject: "alice", ClientID: "agent-1"},
