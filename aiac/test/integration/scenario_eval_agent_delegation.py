@@ -1,9 +1,9 @@
 """Scenario 3 — agent-to-agent delegation: 2 users, 2 agents, 1 tool, logistics/shipping domain.
 
-Companion to ``scenario_eval_baseline.py`` (``test/integration/eval/``) for
-``test_policy_pipeline_eval.py`` (spec: ``docs/specs/integration-test/policy-eval-scenarios.md``).
+Companion to ``scenario_eval_baseline.py`` (``eval/``) for
+``test_policy_pipeline_eval.py`` (spec: ``docs/specs/eval/policy-eval-scenarios.md``).
 Unlike every other scenario in the family, this module lives directly under ``test/integration/``
-(a sibling of ``scenario.py``/``scenario_uc1.py``), not under ``test/integration/eval/`` — the one
+(a sibling of ``scenario.py``/``scenario_uc1.py``), not under ``eval/`` — the one
 deliberate exception in this suite's file layout, called out in the spec's *Location* section. It
 is still imported and driven by the shared ``eval/test_policy_pipeline_eval.py`` harness; only its
 file location differs, not its test wiring.
@@ -43,7 +43,7 @@ POLICY_FILE = "policy.eval_agent_delegation.md"
 # --- Agents -------------------------------------------------------------------------------------
 
 AGENTS: dict[str, dict] = {
-    "dispatch-agent": {
+    "team1/dispatch-agent": {
         "description": (
             "Autonomous Agent acting on a user's behalf to coordinate shipment dispatch. It "
             "creates and updates shipment manifests, and can delegate agent-scope-customs-clearance actions "
@@ -65,7 +65,7 @@ AGENTS: dict[str, dict] = {
             ),
         },
     },
-    "customs-agent": {
+    "team1/customs-agent": {
         "description": (
             "Autonomous Agent acting on a user's behalf to clear shipments through customs. It "
             "accepts delegated clearance requests from the dispatch agent as part of a "

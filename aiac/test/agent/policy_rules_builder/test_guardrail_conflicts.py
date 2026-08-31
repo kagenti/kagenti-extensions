@@ -17,7 +17,7 @@ absent that guardrail, the call instead proceeds into the normal per-cell propos
 the LLM silently resolves the contradiction one way or the other -- it does not raise. This test is
 therefore expected to fail (XFAIL) against current behavior; it exists to pin the intended contract
 so that a future whole-document guardrail has a regression test waiting for it. See
-docs/specs/integration-test/policy-eval-scenarios.md for the broader guardrail-scenario catalog
+docs/specs/eval/policy-eval-scenarios.md for the broader guardrail-scenario catalog
 this test belongs to.
 
 Requires a live LLM (``@pytest.mark.integration``); skips when ``LLM_BASE_URL`` is unset. It does
@@ -84,7 +84,7 @@ def _conflicting_policy():
 
 @pytest.mark.xfail(
     strict=True,
-    reason="no whole-document guardrail exists yet — see docs/specs/integration-test/policy-eval-scenarios.md",
+    reason="no whole-document guardrail exists yet — see docs/specs/eval/policy-eval-scenarios.md",
 )
 def test_guardrail_rejects_direct_grant_revoke_contradiction(_conflicting_policy):
     """A document that both grants and (elsewhere) permanently revokes the same (release-user,

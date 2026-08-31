@@ -27,7 +27,7 @@ strictness:
    worked, that is a real, current over-grant bug worth failing the suite for, not a documented
    future contract.
 
-See docs/specs/integration-test/policy-eval-scenarios.md for the broader guardrail-scenario
+See docs/specs/eval/policy-eval-scenarios.md for the broader guardrail-scenario
 catalog this test belongs to.
 
 Requires a live LLM (``@pytest.mark.integration``); skips when ``LLM_BASE_URL`` is unset. It does
@@ -110,7 +110,7 @@ def _build_candidate_roles() -> list[Role]:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="no whole-document guardrail exists yet — see docs/specs/integration-test/policy-eval-scenarios.md",
+    reason="no whole-document guardrail exists yet — see docs/specs/eval/policy-eval-scenarios.md",
 )
 def test_guardrail_rejects_prompt_injection_document(_injection_policy):
     """A document containing embedded prompt-injection text ("IGNORE ALL PREVIOUS INSTRUCTIONS

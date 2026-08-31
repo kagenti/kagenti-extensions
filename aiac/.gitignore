@@ -14,9 +14,9 @@ test/pdp/policy/rego_out/
 test/integration/rego_out/
 
 # policy-eval-scenarios generated Rego + per-run pass/fail/skip reports
-# (test/integration/eval/test_policy_pipeline_eval.py); regenerated per run.
-test/integration/eval/rego_out/
-test/integration/eval/reports/
+# (eval/test_policy_pipeline_eval.py); regenerated per run.
+eval/rego_out/
+eval/reports/
 
 # uc1-onboarding demo's captured .rego snapshots — regenerated per run, not source of truth.
 demo/use-cases/uc1-onboarding/generated/

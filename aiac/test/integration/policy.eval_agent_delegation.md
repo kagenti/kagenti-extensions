@@ -4,14 +4,16 @@ Grant access on a least-privilege basis. Only grant a (role, scope) pair when th
 policy supports it; deny by default.
 
 ## Users → agent capabilities (inbound; user may call an agent)
-- shipment-coordinator may use dispatch-access.
-- dock-worker may use dispatch-access.
+- Coordinators may use a dispatch agent.
+- Workers may use the same dispatch agent.
 
 ## Users → tool operations (outbound subject; user may reach a tool operation, or a
 ## capability delegated by one agent to another, through the agent it calls)
-- shipment-coordinator may perform manifest-read, manifest-write, and customs-clearance.
-- dock-worker may perform manifest-read and manifest-write.
+- Coordinators may read records, write records, and have a downstream step carried
+  out on their behalf.
+- Workers may read and write records.
 
 ## Agent roles → tool operations (outbound target; an agent role may reach a tool
 ## operation, or a capability delegated to it by another agent)
-- dispatch_operations may perform manifest-read, manifest-write, and customs-clearance.
+- The dispatch agent's role may read records, write records, and have the
+  downstream step carried out.

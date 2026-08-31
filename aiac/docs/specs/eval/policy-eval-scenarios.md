@@ -15,10 +15,10 @@
 
 Two independent groups of files, split by cost tier:
 
-**Heavy scenarios (1, 3, 4, 6-10) — full pipeline, new marker — under `aiac/test/integration/eval/`,
+**Heavy scenarios (1, 3, 4, 6-10) — full pipeline, new marker — under `aiac/eval/`,
 except `agent_delegation`:**
-- `aiac/test/integration/eval/test_policy_pipeline_eval.py` — the test module, `@pytest.mark.integration_extended`.
-- `aiac/test/integration/eval/scenario_eval_baseline.py` (Scenario 1),
+- `aiac/eval/test_policy_pipeline_eval.py` — the test module, `@pytest.mark.eval_extended`.
+- `aiac/eval/scenario_eval_baseline.py` (Scenario 1),
   `scenario_eval_unreachable_resources.py` (Scenario 4), `scenario_eval_ambiguous_clause.py`
   (Scenario 6), `scenario_eval_wildcard_grant.py` (Scenario 7),
   `scenario_eval_misleading_descriptions.py` (Scenario 8), `scenario_eval_confusable_agents.py`
@@ -36,12 +36,12 @@ except `agent_delegation`:**
 - A matching `policy.eval_<name>.md` next to each scenario module above — the scenario's policy
   text, read by the PRB via `AIAC_POLICY_FILE` (these **are** load-bearing at runtime, unlike the
   two light-scenario `.md` files below).
-- `aiac/test/integration/eval/probe_eval.rego` — a generalized outbound probe, parameterized by
+- `aiac/eval/probe_eval.rego` — a generalized outbound probe, parameterized by
   `input.agent_id`, serving every agent in every heavy scenario (see
   [Testing Decisions](#testing-decisions)).
-- `aiac/test/integration/eval/conftest.py` — writes a per-run pass/fail/skip/error report
+- `aiac/eval/conftest.py` — writes a per-run pass/fail/skip/error report
   (`reports/report_<DD_MM_HH_MM>.md`, Asia/Jerusalem local time) after every session that
-  collects at least one `integration_extended`-marked test (see [Test report](#test-report)).
+  collects at least one `eval_extended`-marked test (see [Test report](#test-report)).
 - `aiac/test/integration/launcher.py` (unmoved, stays in `test/integration/`) — reused
   **unmodified** from `policy-pipeline.md`.
 
@@ -80,21 +80,21 @@ both an aspect and a domain.
 
 | # | Name | Users | Agents | Tools | Domain | Character | Marker | Assertion shape |
 |---|------|---|---|---|---|---|---|---|
-| 1 | Baseline-scale | 3 | 2 | 2 | Software engineering | Clean, unambiguous, fully specified, at UC1 scale — reuses UC1's `user-role-developer`/`user-role-tester`/`user-role-devops` roles verbatim. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 1 | Baseline-scale | 3 | 2 | 2 | Software engineering | Clean, unambiguous, fully specified, at UC1 scale — reuses UC1's `user-role-developer`/`user-role-tester`/`user-role-devops` roles verbatim. | `eval_extended` | Full per-cell `opa eval` truth table |
 | 2 | Ambiguous-and-contradictory | 2 (conceptual) | — | — | — | Policy text that both grants and permanently revokes the same `(role, scope)` pair — a direct, unresolvable contradiction. | `integration` | Single whole-document-reject `xfail` |
-| 3 | Agent-to-agent delegation | 2 | 2 | 1 | Logistics/shipping | Isolates the `target_scopes` delegation mechanism: one agent owns a target scope delegated to it via another agent's role, with no tools of its own. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 4 | Unreachable resources | 1 | 2 | 2 | Healthcare/clinic | Silent authoring gaps → **emergent** unreachable agent and unreachable tool, under deny-by-default. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 3 | Agent-to-agent delegation | 2 | 2 | 1 | Logistics/shipping | Isolates the `target_scopes` delegation mechanism: one agent owns a target scope delegated to it via another agent's role, with no tools of its own. | `eval_extended` | Full per-cell `opa eval` truth table |
+| 4 | Unreachable resources | 1 | 2 | 2 | Healthcare/clinic | Silent authoring gaps → **emergent** unreachable agent and unreachable tool, under deny-by-default. | `eval_extended` | Full per-cell `opa eval` truth table |
 | 5 | Adversarial-injection-and-edge-cases | (conceptual) | — | — | — | A literal prompt-injection string embedded in a clause, plus a duplicate-role-name structural edge case. | `integration` | Whole-document-reject `xfail` + one plain (non-xfail) over-grant assertion |
-| 6 | Ambiguous clause | 1 | 1 | 1 | Education/registrar | One genuinely multi-interpretable (non-contradictory) clause. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 7 | Wildcard grant | 1 | 1 | 1 | Retail/inventory | A wildcard-phrased grant ("all inventory operations") that must expand to the correct concrete scope set. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 8 | Misleading descriptions | 2 | 1 | 1 | Hospitality/hotel | A name-bait role (broad-sounding name, narrow description) and an inert, scary-named scope that grants nothing beyond itself. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 9 | Confusable agents | 2 | 2 | 2 | Sports/coaching | Two agents with deliberately similar names and non-overlapping access, plus an identity/boundary-confusion probe. | `integration_extended` | Full per-cell `opa eval` truth table |
-| 10 | Empty descriptions | 1 | 1 | 1 | Agriculture/irrigation | Every entity/role/scope description is the empty string; only the policy document's plain grant sentences carry meaning. | `integration_extended` | Full per-cell `opa eval` truth table |
+| 6 | Ambiguous clause | 1 | 1 | 1 | Education/registrar | A broad-sounding grant clause narrowed by an explicit in-clause qualifier. | `eval_extended` | Full per-cell `opa eval` truth table |
+| 7 | Wildcard grant | 1 | 1 | 1 | Retail/inventory | A wildcard-phrased grant ("all inventory operations") that must expand to the correct concrete scope set. | `eval_extended` | Full per-cell `opa eval` truth table |
+| 8 | Misleading descriptions | 2 | 1 | 1 | Hospitality/hotel | A name-bait role (broad-sounding name, narrow description) and an inert, scary-named scope that grants nothing beyond itself. | `eval_extended` | Full per-cell `opa eval` truth table |
+| 9 | Confusable agents | 2 | 2 | 2 | Sports/coaching | Two agents with deliberately similar names and non-overlapping access, plus an identity/boundary-confusion probe. | `eval_extended` | Full per-cell `opa eval` truth table |
+| 10 | Empty descriptions | 1 | 1 | 1 | Agriculture/irrigation | Every entity/role/scope description is the empty string; only the policy document's plain grant sentences carry meaning. | `eval_extended` | Full per-cell `opa eval` truth table |
 
 Ground-truth rules used throughout, all mechanical (no per-cell subjective calls):
 - **Direct conflicts → deny-wins.** (Scenario 2's intended future contract.)
-- **Genuinely multi-interpretable phrasing → most-restrictive-reading-wins.** (Scenario 6's
-  ambiguous clause.)
+- **A broad phrase governed by an explicit in-clause qualifier → the qualifier wins.** (Scenario 6's
+  ambiguous clause — the reading is determinate, not a restrictive-reading tiebreak.)
 - **Wildcard phrases → expand to the full named scope set.** (Scenario 7.)
 - **Silence → existing deny-by-default.** (Scenario 4's unreachable agent/tool, and the baseline
   pipeline's own `user-role-devops` role.)
@@ -162,7 +162,7 @@ role-vs-many-scopes/scope-vs-many-roles mapping call at a time; the PRB's own pe
 node, which raises `PolicyRulesBuilderError` after `MAX_AUDIT_RETRIES = 3`, is a narrower per-cell
 check, not a document-wide one), the two intended-contract tests are marked
 `@pytest.mark.xfail(strict=True, reason="no whole-document guardrail exists yet — see
-docs/specs/integration-test/policy-eval-scenarios.md")`:
+docs/specs/eval/policy-eval-scenarios.md")`:
 
 - **Scenario 2** (`test_guardrail_rejects_direct_grant_revoke_contradiction`) — a document that
   grants `release-user` the `deploy-trigger` operation in one clause and permanently revokes the
@@ -213,7 +213,7 @@ deny-by-default, mirroring UC1's own `devops-user`.
 `tool-scope-repo-read`/`tool-scope-repo-write`/`tool-scope-tracker-read`; `user-role-tester` reaches `tool-scope-tracker-read`/`tool-scope-tracker-write`; `user-role-devops`
 reaches nothing.
 
-Files left on disk per agent under `test/integration/eval/rego_out/policy_pipeline_eval/baseline/`:
+Files left on disk per agent under `eval/rego_out/policy_pipeline_eval/baseline/`:
 `repo_agent.{inbound,outbound}.rego`, `tracker_agent.{inbound,outbound}.rego`.
 
 ### Scenario 3 — agent-to-agent delegation
@@ -251,12 +251,15 @@ Realm `aiac-pp-eval-unreachable-resources`. 1 user (`user-role-front-desk-clerk`
 
 Realm `aiac-pp-eval-ambiguous-clause`. 1 user (`user-role-enrollment-advisor`), 1 agent
 (`registrar-agent`), 1 tool (`enrollment-tool`, scopes `tool-scope-enrollment-status` + `tool-scope-enrollment-history`).
-`user-role-enrollment-advisor` is granted "access to enrollment information" — a genuinely
-multi-interpretable, non-contradictory clause. Ground truth encodes only the narrow reading
-(`tool-scope-enrollment-status`), per most-restrictive-reading-wins. A real PRB run landing on the broader
-reading (also `tool-scope-enrollment-history`) is a **legitimate finding** for this cell, not evidence the
-scenario is authored wrong. The agent's own role (`agent-role-registrar-operations`) is granted both scopes,
-so the ambiguity lives entirely on the subject side.
+`user-role-enrollment-advisor` is granted "access to enrollment information" — a phrase that reads
+broadly on its own but is immediately qualified in the same clause: "enrollment information" is
+defined, for advising purposes, as "a student's current enrollment status only." That qualifier
+makes the reading determinate. Ground truth encodes only the qualified reading
+(`tool-scope-enrollment-status`). A real PRB run landing on the broader reading (also
+`tool-scope-enrollment-history`) has missed the qualifier — a genuine over-grant bug for this cell to
+surface, not an excused alternate reading. The agent's own role
+(`agent-role-registrar-operations`) is granted both scopes, so the test lives entirely on the
+subject side.
 
 ### Scenario 7 — wildcard grant
 
@@ -339,14 +342,14 @@ or OPA URLs, no `opa` binary.
 
 ```bash
 # Heavy scenarios (needs KEYCLOAK_URL + admin creds + LLM_* + opa on PATH):
-.venv/bin/pytest test/integration/eval/test_policy_pipeline_eval.py -m integration_extended -v
+.venv/bin/pytest eval/test_policy_pipeline_eval.py -m eval_extended -v
 # A failing node names the exact scenario/agent/subject(/scope) cell, e.g.:
 #   test_inbound[baseline-repo-agent-user-role-tester-user] — expected allow, opa denied
 # .rego left on disk per scenario for eyeballing:
-#   test/integration/eval/rego_out/policy_pipeline_eval/{baseline,agent_delegation,unreachable_resources,
+#   eval/rego_out/policy_pipeline_eval/{baseline,agent_delegation,unreachable_resources,
 #     ambiguous_clause,wildcard_grant,misleading_descriptions,confusable_agents,empty_descriptions}/{slug}.{inbound,outbound}.rego
 # A pass/fail/skip/error report for the run is written alongside it:
-#   test/integration/eval/reports/report_<DD_MM_HH_MM>.md (Asia/Jerusalem local time; see Test report below)
+#   eval/reports/report_<DD_MM_HH_MM>.md (Asia/Jerusalem local time; see Test report below)
 
 # Light scenarios (needs only LLM_BASE_URL/LLM_MODEL/LLM_API_KEY):
 .venv/bin/pytest test/agent/policy_rules_builder/test_guardrail_conflicts.py \
@@ -357,15 +360,15 @@ or OPA URLs, no `opa` binary.
 
 ## Test report
 
-`test/integration/eval/conftest.py` hooks `pytest_runtest_logreport`/`pytest_sessionfinish` to
+`eval/conftest.py` hooks `pytest_runtest_logreport`/`pytest_sessionfinish` to
 write a Markdown report after every session that collects at least one
-`integration_extended`-marked test (i.e. any run touching `test_policy_pipeline_eval.py`,
+`eval_extended`-marked test (i.e. any run touching `test_policy_pipeline_eval.py`,
 regardless of whether it was invoked directly or as part of a broader `pytest test/` run — the
 report is scoped by marker, not by which conftest happened to load). It is **not** produced for
-the light scenarios (2, 5), which live outside `test/integration/eval/` under the `integration`
+the light scenarios (2, 5), which live outside `eval/` under the `integration`
 marker.
 
-- **Location and filename:** `test/integration/eval/reports/report_<DD_MM_HH_MM>.md`, e.g.
+- **Location and filename:** `eval/reports/report_<DD_MM_HH_MM>.md`, e.g.
   `report_04_08_16_37.md` for 04 Aug at 16:37, timestamped in `Asia/Jerusalem` local time (not
   UTC) — regenerated per run, not appended.
 - **Contents:** all six outcome sections (`failed`, `error`, `xpassed`, `xfailed`, `skipped`,
@@ -399,7 +402,7 @@ marker.
   `test_identity_confusion_probes`) don't correspond to one LLM decision or one truth-table cell,
   so they keep the docstring + crash/skip-reason format described above, unchanged.
 - **Not source of truth, not committed:** like `rego_out/`, the `reports/` directory is
-  regenerated scratch output and is gitignored (`test/integration/eval/reports/`).
+  regenerated scratch output and is gitignored (`eval/reports/`).
 
 Both suites `pytest.skip` when their required live infra is absent (`LLM_BASE_URL` for the light
 scenarios; the heavy scenarios additionally need Keycloak + `opa`, same discovery order as
@@ -473,7 +476,7 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
   family generalizes the same pipeline+`opa eval` approach to scale, delegation, ambiguity,
   adversarial input, and the guardrail gap, using new files only.
 - **Heavy scenarios share the `@pytest.mark.integration` + `opa eval` oracle flavor** with
-  `policy-pipeline.md`, under the new `integration_extended` marker (registered in `pyproject.toml`)
+  `policy-pipeline.md`, under the new `eval_extended` marker (registered in `pyproject.toml`)
   to signal the added cost (eight full pipeline runs, many more PRB/LLM calls per session) rather
   than conflating it with the existing single-run suite.
 - **Light scenarios share the direct-PRB-call, no-Keycloak/no-opa flavor** with
@@ -495,7 +498,7 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
 - **The Kubernetes-CR Policy Writer.** Like `policy-pipeline.md`, the heavy scenarios target the
   filesystem stub only.
 - **Default-CI wiring.** Both markers keep this family out of the default `-m "not integration"` unit
-  run; `integration_extended` additionally separates it from `policy-pipeline.md`'s existing
+  run; `eval_extended` additionally separates it from `policy-pipeline.md`'s existing
   `integration` run so the two can be invoked independently.
 - **Reconciling `policy.eval_conflicts.md`/`policy.eval_injection.md` with their tests' inline
   `_POLICY` strings into a single source of truth.** This duplication (see [Location](#location)) is
@@ -526,12 +529,13 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
   through each other's inbound gate despite the two agent names differing by only one word) may vary
   run-to-run — that variability is exactly what these scenarios are designed to surface, and is
   expected to need re-confirmation across runs rather than being "fixed" by rewording the scenario.
-- **The ambiguous clause in Scenario 6 (`ambiguous_clause`) is a deliberate risk, not a bug.** A real
-  LLM-backed PRB run landing on the broader reading of `user-role-enrollment-advisor`'s "access to enrollment
-  information" (i.e. also granting `tool-scope-enrollment-history`, not just `tool-scope-enrollment-status`) is a
-  legitimate finding for that cell to surface, not evidence Scenario 6 itself is authored
-  incorrectly. Ground truth encodes only the narrower reading per this suite's
-  most-restrictive-reading-wins convention.
+- **The ambiguous clause in Scenario 6 (`ambiguous_clause`) has a determinate reading, not a
+  tolerated ambiguity.** `user-role-enrollment-advisor`'s "access to enrollment information" reads
+  broadly on its own, but the same clause's qualifier ("current enrollment status only") makes the
+  narrow reading the only one the text supports. A real LLM-backed PRB run landing on the broader
+  reading (i.e. also granting `tool-scope-enrollment-history`, not just
+  `tool-scope-enrollment-status`) has missed that qualifier — a genuine over-grant bug worth
+  investigating, not a pre-excused finding.
 
 ## Blocked-by
 

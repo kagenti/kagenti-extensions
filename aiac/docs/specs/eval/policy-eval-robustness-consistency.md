@@ -13,24 +13,24 @@
 
 ## Location
 
-Both suites live under `aiac/test/integration/eval/`, alongside `policy-eval-scenarios.md`'s heavy
+Both suites live under `aiac/eval/`, alongside `policy-eval-scenarios.md`'s heavy
 scenarios, and reuse that family's scenario corpus rather than defining their own:
 
-- `aiac/test/integration/eval/test_policy_pipeline_consistency.py` — the consistency suite,
-  `@pytest.mark.integration_consistency`.
-- `aiac/test/integration/eval/test_policy_pipeline_robustness.py` — the robustness suite,
-  `@pytest.mark.integration_robustness`.
-- `aiac/test/integration/eval/prb_direct.py` — shared helper, `build_roles_and_scopes(scenario)`,
+- `aiac/eval/test_policy_pipeline_consistency.py` — the consistency suite,
+  `@pytest.mark.eval_consistency`.
+- `aiac/eval/test_policy_pipeline_robustness.py` — the robustness suite,
+  `@pytest.mark.eval_robustness`.
+- `aiac/eval/prb_direct.py` — shared helper, `build_roles_and_scopes(scenario)`,
   used by both suites (see [No-Keycloak design](#no-keycloak-design) below).
-- `aiac/test/integration/eval/scenarios_perturbed/` — eight hand-authored semantic-sibling scenario
+- `aiac/eval/scenarios_perturbed/` — eight hand-authored semantic-sibling scenario
   modules + policy `.md` files, one per `policy-eval-scenarios.md` scenario (including
   `agent_delegation`, even though its **original** lives at `test/integration/` top level, not
   under `eval/`) — used only by the robustness suite's semantic tier (see
   [Perturbation tiers](#perturbation-tiers)).
 - Both suites import `SCENARIOS`, `orchestrate_prb`, `grant_sets`, `truth` from
-  `test.integration.eval.test_policy_pipeline_eval` **unmodified** — no changes to that module's
+  `eval.test_policy_pipeline_eval` **unmodified** — no changes to that module's
   own logic were needed for this work, beyond the unrelated file-reorg noted below.
-- `aiac/test/integration/eval/conftest.py` — the same per-run Markdown report generator
+- `aiac/eval/conftest.py` — the same per-run Markdown report generator
   `policy-eval-scenarios.md` documents, widened to also cover these two suites' markers (see
   [Test report](#test-report)).
 
@@ -169,15 +169,15 @@ Neither suite reads `KEYCLOAK_URL`, `KEYCLOAK_ADMIN_USERNAME`/`PASSWORD`, `AIAC_
 
 ```bash
 # Both suites need only LLM_BASE_URL/LLM_MODEL/LLM_API_KEY — no Keycloak/opa:
-.venv/bin/pytest test/integration/eval/test_policy_pipeline_consistency.py -m integration_consistency -v
-.venv/bin/pytest test/integration/eval/test_policy_pipeline_robustness.py -m integration_robustness -v
+.venv/bin/pytest eval/test_policy_pipeline_consistency.py -m eval_consistency -v
+.venv/bin/pytest eval/test_policy_pipeline_robustness.py -m eval_robustness -v
 
 # Override repeat count for the consistency suite:
-PRB_CONSISTENCY_REPEATS=10 .venv/bin/pytest test/integration/eval/test_policy_pipeline_consistency.py \
-  -m integration_consistency -v
+PRB_CONSISTENCY_REPEATS=10 .venv/bin/pytest eval/test_policy_pipeline_consistency.py \
+  -m eval_consistency -v
 
 # A pass/fail/skip/error report for the run is written alongside the policy-eval-scenarios one:
-#   test/integration/eval/reports/report_<DD_MM_HH_MM>.md (Asia/Jerusalem local time)
+#   eval/reports/report_<DD_MM_HH_MM>.md (Asia/Jerusalem local time)
 ```
 
 Both suites call `require_env("LLM_BASE_URL", "LLM_MODEL", "LLM_API_KEY")` as the first line of
@@ -188,7 +188,7 @@ existing pattern, this raises `SystemExit(2)` (not a `pytest.skip`) if any is un
 
 Reuses the exact report described in
 [policy-eval-scenarios.md § Test report](policy-eval-scenarios.md#test-report), widened to also
-collect `integration_consistency`/`integration_robustness`-marked tests
+collect `eval_consistency`/`eval_robustness`-marked tests
 (`eval/conftest.py`'s `MARKERS` set now covers all three markers). Both new suites' tests fall
 through to that report's generic docstring + crash-message rendering (neither
 `record_property`s a per-cell description the way `test_inbound`/`test_outbound` do) — a single
@@ -236,8 +236,8 @@ several indexed by the master PRD ([../PRD.md](../PRD.md), § *Integration test 
 - **Independent of [policy-pipeline.md](policy-pipeline.md) and
   [uc1-onboarding-pipeline.md](uc1-onboarding-pipeline.md).** Neither suite here touches Keycloak,
   the PCE, `opa`, or a live cluster — see [No-Keycloak design](#no-keycloak-design).
-- **New markers, registered in `pyproject.toml`** (`integration_consistency`,
-  `integration_robustness`), distinct from `integration`/`integration_extended`, so either suite
+- **New markers, registered in `pyproject.toml`** (`eval_consistency`,
+  `eval_robustness`), distinct from `integration`/`eval_extended`, so either suite
   can be invoked independently and its (lighter) infra requirement is visible from the marker name
   alone.
 
