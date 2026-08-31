@@ -323,22 +323,27 @@ func getOrCreateStreamState(pctx *pipeline.Context) *inferenceStreamState {
 	return s
 }
 
-// logInferenceFinalized emits the operator-facing INFO log + Observe
-// once a response is finalized — shared by OnResponse and
-// OnResponseFrame so streaming and buffered finalize identically.
+// logInferenceFinalized emits the operator-facing INFO log once a
+// response is finalized; shared by the buffered and streaming paths.
+// Split counters render -1 when ext.PresentKinds says the provider
+// did not expose that sub-kind, distinct from a reported 0.
 func logInferenceFinalized(ext *pipeline.InferenceExtension) {
-	// Split counters log unconditionally: zero means the provider did
-	// not report that sub-kind, and stable field names help dashboards.
+	tok := func(bit parsercommon.Kind, v int) int {
+		if ext.PresentKinds&uint8(bit) == 0 {
+			return -1
+		}
+		return v
+	}
 	slog.Info("inference-parser: response",
 		"model", ext.Model,
 		"finishReason", ext.FinishReason,
 		"promptTokens", ext.PromptTokens,
 		"completionTokens", ext.CompletionTokens,
-		"inputTokens", ext.InputTokens,
-		"cacheReadTokens", ext.CacheReadTokens,
-		"cacheWriteTokens", ext.CacheWriteTokens,
-		"outputTokens", ext.OutputTokens,
-		"reasoningTokens", ext.ReasoningTokens,
+		"inputTokens", tok(parsercommon.KindInput, ext.InputTokens),
+		"cacheReadTokens", tok(parsercommon.KindCacheRead, ext.CacheReadTokens),
+		"cacheWriteTokens", tok(parsercommon.KindCacheWrite, ext.CacheWriteTokens),
+		"outputTokens", tok(parsercommon.KindOutput, ext.OutputTokens),
+		"reasoningTokens", tok(parsercommon.KindReasoning, ext.ReasoningTokens),
 	)
 	slog.Debug("inference-parser: completion", "text", parsercommon.Truncate(ext.Completion, parsercommon.DebugBodyMax))
 }
@@ -447,35 +452,49 @@ type inferenceDelta struct {
 
 // inferenceUsage decodes the OpenAI usage block. See toNeutral for the
 // inclusive-prompt normalization.
+//
+// PromptTokensDetails and CompletionTokensDetails are pointers so the
+// parser can tell "block absent" (older API or non-reasoning model)
+// from "block present with cached_tokens/reasoning_tokens = 0."
 type inferenceUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
 
-	PromptTokensDetails struct {
+	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
-	CompletionTokensDetails struct {
+	CompletionTokensDetails *struct {
 		ReasoningTokens int `json:"reasoning_tokens"`
 	} `json:"completion_tokens_details"`
 }
 
 // toNeutral maps OpenAI's usage onto TokenUsage. prompt_tokens includes
 // cached_tokens on the wire — subtract to get uncached input and clamp
-// at 0 for malformed responses. CacheWrite stays 0 (OpenAI bills cache
-// writes as ordinary input).
+// at 0 for malformed responses. CacheWrite stays absent (OpenAI bills
+// cache writes as ordinary input). Input/Output are always present;
+// CacheRead and Reasoning are present only when their _details block
+// is on the wire (hence the pointer fields on inferenceUsage).
 func (u inferenceUsage) toNeutral() parsercommon.TokenUsage {
-	cached := u.PromptTokensDetails.CachedTokens
-	input := u.PromptTokens - cached
-	if input < 0 {
-		input = 0
+	usage := parsercommon.TokenUsage{
+		Input:   u.PromptTokens,
+		Output:  u.CompletionTokens,
+		Present: parsercommon.KindInput | parsercommon.KindOutput,
 	}
-	return parsercommon.TokenUsage{
-		Input:     input,
-		CacheRead: cached,
-		Output:    u.CompletionTokens,
-		Reasoning: u.CompletionTokensDetails.ReasoningTokens,
+	if u.PromptTokensDetails != nil {
+		cached := u.PromptTokensDetails.CachedTokens
+		usage.Input = u.PromptTokens - cached
+		if usage.Input < 0 {
+			usage.Input = 0
+		}
+		usage.CacheRead = cached
+		usage.Present |= parsercommon.KindCacheRead
 	}
+	if u.CompletionTokensDetails != nil {
+		usage.Reasoning = u.CompletionTokensDetails.ReasoningTokens
+		usage.Present |= parsercommon.KindReasoning
+	}
+	return usage
 }
 
 type inferenceRequest struct {

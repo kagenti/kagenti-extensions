@@ -187,6 +187,13 @@ type InferenceExtension struct {
 	OutputTokens     int `json:"outputTokens,omitempty"`     // generated tokens
 	ReasoningTokens  int `json:"reasoningTokens,omitempty"`  // reasoning-only output
 
+	// PresentKinds names which split sub-kinds the provider populated.
+	// Zero on a set bit means "reported zero"; zero on an unset bit
+	// means "not exposed." Bit layout matches parsercommon.Kind
+	// (Input=1, CacheRead=2, CacheWrite=4, Output=8, Reasoning=16);
+	// typed as uint8 to avoid importing parsercommon here.
+	PresentKinds uint8 `json:"presentKinds,omitempty"`
+
 	// Classification — see MCPExtension.IsAction.
 	IsAction bool `json:"isAction,omitempty"`
 }

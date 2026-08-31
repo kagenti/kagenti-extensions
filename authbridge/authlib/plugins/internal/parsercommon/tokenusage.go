@@ -2,15 +2,29 @@ package parsercommon
 
 import "github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 
-// TokenUsage is the provider-neutral token accounting shape. Provider
-// parsers normalize their wire format (e.g. OpenAI's inclusive
-// prompt_tokens) into these fields before publishing via Fill.
+// Kind is a bitmask naming which sub-kinds the provider populated.
+// A zero on a set bit is "reported zero"; a zero on an unset bit is
+// "not exposed."
+type Kind uint8
+
+const (
+	KindInput Kind = 1 << iota
+	KindCacheRead
+	KindCacheWrite
+	KindOutput
+	KindReasoning
+)
+
+// TokenUsage is the provider-neutral token accounting shape. Parsers
+// normalize their wire format into these fields before publishing via
+// Fill, and set Present to name which sub-kinds the wire carried.
 type TokenUsage struct {
-	Input      int // uncached prompt tokens
-	CacheRead  int // prompt tokens served from cache
-	CacheWrite int // prompt tokens written to cache
-	Output     int // generated completion tokens
-	Reasoning  int // reasoning-only output (subset of Output)
+	Input      int  // uncached prompt tokens
+	CacheRead  int  // prompt tokens served from cache
+	CacheWrite int  // prompt tokens written to cache
+	Output     int  // generated completion tokens
+	Reasoning  int  // reasoning-only output (subset of Output)
+	Present    Kind // which sub-kinds the provider reported
 }
 
 // PromptTotal is the sum of all prompt-side sub-kinds.
@@ -24,13 +38,15 @@ func (u TokenUsage) Total() int {
 	return u.PromptTotal() + u.Output
 }
 
-// Fill writes the split counters and derived legacy aggregates onto ext.
+// Fill writes the split counters, the Present bitmask, and the derived
+// legacy aggregates onto ext.
 func (u TokenUsage) Fill(ext *pipeline.InferenceExtension) {
 	ext.InputTokens = u.Input
 	ext.CacheReadTokens = u.CacheRead
 	ext.CacheWriteTokens = u.CacheWrite
 	ext.OutputTokens = u.Output
 	ext.ReasoningTokens = u.Reasoning
+	ext.PresentKinds = uint8(u.Present)
 
 	ext.PromptTokens = u.PromptTotal()
 	ext.CompletionTokens = u.Output

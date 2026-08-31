@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/plugins/internal/parsercommon"
 )
 
 // checkSplit surfaces every split field in one error message so a
@@ -162,4 +163,58 @@ func TestSplitTokens_OpenAISSE(t *testing.T) {
 		CompletionTokens: 150,
 		TotalTokens:      950,
 	})
+}
+
+// OpenAI response without the optional _details blocks: only Input
+// and Output are on the wire, so no cache-read or reasoning bit is set.
+func TestPresentKinds_OpenAI_NoDetailsBlocks(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "llama3.1"}
+	parseInferenceJSON([]byte(`{
+		"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":12,"completion_tokens":3,"total_tokens":15}
+	}`), ext)
+
+	want := uint8(parsercommon.KindInput | parsercommon.KindOutput)
+	if ext.PresentKinds != want {
+		t.Errorf("PresentKinds = %b, want %b (Input|Output only)", ext.PresentKinds, want)
+	}
+}
+
+// OpenAI response WITH both _details blocks, both carrying zero:
+// CacheRead and Reasoning bits set — "reported zero," not "absent."
+// Distinguishability against the previous test is the whole point.
+func TestPresentKinds_OpenAI_WithDetailsBlocks(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "gpt-4o"}
+	parseInferenceJSON([]byte(`{
+		"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],
+		"usage":{
+			"prompt_tokens":12,"completion_tokens":3,"total_tokens":15,
+			"prompt_tokens_details":{"cached_tokens":0},
+			"completion_tokens_details":{"reasoning_tokens":0}
+		}
+	}`), ext)
+
+	want := uint8(parsercommon.KindInput | parsercommon.KindOutput | parsercommon.KindCacheRead | parsercommon.KindReasoning)
+	if ext.PresentKinds != want {
+		t.Errorf("PresentKinds = %b, want %b (all four)", ext.PresentKinds, want)
+	}
+}
+
+// Anthropic response: Input/CacheRead/CacheWrite/Output always
+// present (Messages API emits all four); Reasoning never present.
+func TestPresentKinds_Anthropic(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "claude-haiku-4-5"}
+	parseAnthropicJSON([]byte(`{
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{
+			"input_tokens":8,"output_tokens":2,
+			"cache_creation_input_tokens":0,"cache_read_input_tokens":0
+		}
+	}`), ext)
+
+	want := uint8(parsercommon.KindInput | parsercommon.KindCacheRead | parsercommon.KindCacheWrite | parsercommon.KindOutput)
+	if ext.PresentKinds != want {
+		t.Errorf("PresentKinds = %b, want %b (four kinds, reasoning absent)", ext.PresentKinds, want)
+	}
 }

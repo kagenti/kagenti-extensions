@@ -136,15 +136,16 @@ func (u anthropicUsage) promptTotal() int {
 	return u.toNeutral().PromptTotal()
 }
 
-// toNeutral maps Anthropic's usage block onto the neutral TokenUsage.
-// Straight rename — Anthropic already splits input / cache-read /
-// cache-write on the wire.
+// toNeutral maps Anthropic's usage onto TokenUsage. The Messages API
+// unconditionally emits all four input/cache/output counters, so
+// Present names all four. Reasoning is not exposed by Anthropic.
 func (u anthropicUsage) toNeutral() parsercommon.TokenUsage {
 	return parsercommon.TokenUsage{
 		Input:      u.InputTokens,
 		CacheRead:  u.CacheReadInputTokens,
 		CacheWrite: u.CacheCreationInputTokens,
 		Output:     u.OutputTokens,
+		Present:    parsercommon.KindInput | parsercommon.KindCacheRead | parsercommon.KindCacheWrite | parsercommon.KindOutput,
 	}
 }
 
