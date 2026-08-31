@@ -33,30 +33,37 @@
 #
 # Runtime-agnostic: container-runtime.sh picks docker or podman (override with
 # CONTAINER_TOOL) and kind_load does the right load per runtime.
+#
+# Structure: main() at the bottom is the pipeline — each phase is a function,
+# each phase owns the globals it sets, and a failed phase exits the script
+# (3 = image refused / outside the envelope, 4 = attestation failed).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "${SCRIPT_DIR}/container-runtime.sh"
 
-BASE_IMAGE="${1:?usage: build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]}"
-# derive default wrapper tag: strip registry/path + tag, append -otel
-base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
-WRAPPER_TAG="${2:-${base_name}-otel:latest}"
-# a tag is required downstream (the alias split below keys on it)
-case "${WRAPPER_TAG##*/}" in *:*) ;; *) WRAPPER_TAG="${WRAPPER_TAG}:latest" ;; esac
-VENV_PYTHON="${3:-}"
-APP_UID="${4:-}"
-APP_GID="${APP_UID#*:}"; [ "$APP_GID" = "$APP_UID" ] && APP_GID=""
-APP_UID="${APP_UID%%:*}"
-FORCE_BAKE="${FORCE_BAKE:-0}"
-SELF_ACTIVATE="${SELF_ACTIVATE:-0}"
-NO_KIND_LOAD="${NO_KIND_LOAD:-0}"
+parse_args() {
+  BASE_IMAGE="${1:?usage: build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]}"
+  # derive default wrapper tag: strip registry/path + tag, append -otel
+  local base_short base_name
+  base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
+  WRAPPER_TAG="${2:-${base_name}-otel:latest}"
+  # a tag is required downstream (the alias split in publish() keys on it)
+  case "${WRAPPER_TAG##*/}" in *:*) ;; *) WRAPPER_TAG="${WRAPPER_TAG}:latest" ;; esac
+  VENV_PYTHON="${3:-}"
+  APP_UID="${4:-}"
+  APP_GID="${APP_UID#*:}"; [ "$APP_GID" = "$APP_UID" ] && APP_GID=""
+  APP_UID="${APP_UID%%:*}"
+  FORCE_BAKE="${FORCE_BAKE:-0}"
+  SELF_ACTIVATE="${SELF_ACTIVATE:-0}"
+  NO_KIND_LOAD="${NO_KIND_LOAD:-0}"
 
-# Normalize the base image to the docker.io/library/ name kind resolves against,
-# unless a registry was already given.
-case "$BASE_IMAGE" in
-  */*) base_ref="$BASE_IMAGE" ;;
-  *)   base_ref="docker.io/library/${BASE_IMAGE}" ;;
-esac
+  # Normalize the base image to the docker.io/library/ name kind resolves
+  # against, unless a registry was already given.
+  case "$BASE_IMAGE" in
+    */*) base_ref="$BASE_IMAGE" ;;
+    *)   base_ref="docker.io/library/${BASE_IMAGE}" ;;
+  esac
+}
 
 # ---- detect the two per-image build inputs ----
 # The refuse-to-bake principle applied to the bake's own inputs: everything
@@ -65,60 +72,67 @@ runs_python() {  # $1 = candidate interpreter path/name
   "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$1" "$base_ref" -c 'import sys' >/dev/null 2>&1
 }
 
-if [ -z "$VENV_PYTHON" ]; then
-  # Ordered candidates: the environment the image itself declares first, then
-  # the common venv layouts, then a python3 on PATH (pip/poetry/distro-python
-  # images — squarely in the envelope, no venv at all).
-  candidates=()
-  virtual_env="$("$CONTAINER_TOOL" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$base_ref" \
-    | sed -n 's/^VIRTUAL_ENV=//p' | head -1)"
-  [ -n "$virtual_env" ] && candidates+=("${virtual_env}/bin/python")
-  candidates+=(/app/.venv/bin/python /opt/venv/bin/python python3)
-  for c in "${candidates[@]}"; do
-    if runs_python "$c"; then VENV_PYTHON="$c"; break; fi
-  done
+detect_python() {  # sets VENV_PYTHON (validates it when given explicitly)
   if [ -z "$VENV_PYTHON" ]; then
-    echo "REFUSING to bake ${base_ref}: no runnable Python found." >&2
-    echo "  Probed: ${candidates[*]}" >&2
-    echo "  The image is outside the shim envelope (non-Python, or an unusual layout)." >&2
-    echo "  -> pass the interpreter explicitly as arg 3, or attach the sidecar only:" >&2
-    echo "     DEPLOY=<deployment> ./sidecar-patch.sh   (still captures every HTTP hop," >&2
-    echo "     but pairing under concurrency needs the app to propagate on its own)" >&2
+    # Ordered candidates: the environment the image itself declares first, then
+    # the common venv layouts, then a python3 on PATH (pip/poetry/distro-python
+    # images — squarely in the envelope, no venv at all).
+    local candidates virtual_env c
+    candidates=()
+    virtual_env="$("$CONTAINER_TOOL" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$base_ref" \
+      | sed -n 's/^VIRTUAL_ENV=//p' | head -1)"
+    [ -n "$virtual_env" ] && candidates+=("${virtual_env}/bin/python")
+    candidates+=(/app/.venv/bin/python /opt/venv/bin/python python3)
+    for c in "${candidates[@]}"; do
+      if runs_python "$c"; then VENV_PYTHON="$c"; break; fi
+    done
+    if [ -z "$VENV_PYTHON" ]; then
+      echo "REFUSING to bake ${base_ref}: no runnable Python found." >&2
+      echo "  Probed: ${candidates[*]}" >&2
+      echo "  The image is outside the shim envelope (non-Python, or an unusual layout)." >&2
+      echo "  -> pass the interpreter explicitly as arg 3, or attach the sidecar only:" >&2
+      echo "     DEPLOY=<deployment> ./sidecar-patch.sh   (still captures every HTTP hop," >&2
+      echo "     but pairing under concurrency needs the app to propagate on its own)" >&2
+      exit 3
+    fi
+    echo ">> detected app python: ${VENV_PYTHON}"
+  elif ! runs_python "$VENV_PYTHON"; then
+    echo "REFUSING to bake ${base_ref}: no runnable Python at ${VENV_PYTHON} (explicit arg)." >&2
     exit 3
   fi
-  echo ">> detected app python: ${VENV_PYTHON}"
-elif ! runs_python "$VENV_PYTHON"; then
-  echo "REFUSING to bake ${base_ref}: no runnable Python at ${VENV_PYTHON} (explicit arg)." >&2
-  exit 3
-fi
+}
 
-if [ -z "$APP_UID" ]; then
-  # Restore exactly the user the base image declared — including root (empty
-  # Config.User) — instead of assuming an ecosystem convention. A named user
-  # is resolved to its numeric uid inside the image itself.
-  config_user_full="$("$CONTAINER_TOOL" inspect --format '{{.Config.User}}' "$base_ref")"
-  config_user="${config_user_full%%:*}"
-  case "$config_user" in
-    "")       APP_UID=0 ;;
-    *[!0-9]*) APP_UID="$("$CONTAINER_TOOL" run --rm --network=none --entrypoint id "$base_ref" -u 2>/dev/null)" || {
-                echo "REFUSING to bake ${base_ref}: cannot resolve user '${config_user}' to a uid" >&2
-                echo "  (no 'id' binary in the image?) -> pass the uid explicitly as arg 4." >&2
-                exit 3
-              } ;;
-    *)        APP_UID="$config_user" ;;
-  esac
-  echo ">> detected app user: uid=${APP_UID} (Config.User='${config_user_full:-<root>}')"
-fi
-if [ -z "$APP_GID" ]; then
-  # The gid the base actually ran with: an explicit `USER uid:gid`, else the
-  # primary gid the runtime gives the declared user (0 when the user has no
-  # passwd entry — which is what the base image ran as, so it is reproduced).
-  case "${config_user_full:-}" in
-    *:*) APP_GID="${config_user_full#*:}" ;;
-    *)   APP_GID="$("$CONTAINER_TOOL" run --rm --network=none --entrypoint id "$base_ref" -g 2>/dev/null)" || APP_GID=0 ;;
-  esac
-  echo ">> detected app group: gid=${APP_GID}"
-fi
+detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
+  local config_user_full=""
+  if [ -z "$APP_UID" ]; then
+    # Restore exactly the user the base image declared — including root (empty
+    # Config.User) — instead of assuming an ecosystem convention. A named user
+    # is resolved to its numeric uid inside the image itself.
+    local config_user
+    config_user_full="$("$CONTAINER_TOOL" inspect --format '{{.Config.User}}' "$base_ref")"
+    config_user="${config_user_full%%:*}"
+    case "$config_user" in
+      "")       APP_UID=0 ;;
+      *[!0-9]*) APP_UID="$("$CONTAINER_TOOL" run --rm --network=none --entrypoint id "$base_ref" -u 2>/dev/null)" || {
+                  echo "REFUSING to bake ${base_ref}: cannot resolve user '${config_user}' to a uid" >&2
+                  echo "  (no 'id' binary in the image?) -> pass the uid explicitly as arg 4." >&2
+                  exit 3
+                } ;;
+      *)        APP_UID="$config_user" ;;
+    esac
+    echo ">> detected app user: uid=${APP_UID} (Config.User='${config_user_full:-<root>}')"
+  fi
+  if [ -z "$APP_GID" ]; then
+    # The gid the base actually ran with: an explicit `USER uid:gid`, else the
+    # primary gid the runtime gives the declared user (0 when the user has no
+    # passwd entry — which is what the base image ran as, so it is reproduced).
+    case "$config_user_full" in
+      *:*) APP_GID="${config_user_full#*:}" ;;
+      *)   APP_GID="$("$CONTAINER_TOOL" run --rm --network=none --entrypoint id "$base_ref" -g 2>/dev/null)" || APP_GID=0 ;;
+    esac
+    echo ">> detected app group: gid=${APP_GID}"
+  fi
+}
 
 # ---- refuse-to-bake interlock ----
 # Baking the shim is safe ONLY for an in-envelope image that is not already
@@ -145,9 +159,11 @@ fi
 #     detectable; deciding that needs a runtime probe, which this does not do.
 # FORCE_BAKE=1 overrides, turning the implicit human judgment into an
 # explicit, greppable one.
-if [ "$FORCE_BAKE" != "1" ]; then
+interlock() {
+  [ "$FORCE_BAKE" = "1" ] && return 0
   # The seven this shim installs; presence of ANY means a wrap would stack a
   # second instrumentor on the same library.
+  local already
   if already=$("$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$base_ref" -c '
 import importlib.util as u
 mods = ["starlette", "asgi", "fastapi", "httpx", "requests", "aiohttp_client", "threading"]
@@ -175,15 +191,17 @@ raise SystemExit(0 if u.find_spec("_lineage_propagate") else 1)' >/dev/null 2>&1
     echo "  -> FORCE_BAKE=1 overrides if you know the wrap is safe." >&2
     exit 3
   fi
-fi
+}
 
-echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref} (${CONTAINER_TOOL}, python=${VENV_PYTHON}, uid=${APP_UID})"
-"$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
-  --build-arg "BASE_IMAGE=${base_ref}" \
-  --build-arg "VENV_PYTHON=${VENV_PYTHON}" \
-  --build-arg "APP_UID=${APP_UID}" \
-  --build-arg "APP_GID=${APP_GID}" \
-  -t "${WRAPPER_TAG}" "${SCRIPT_DIR}"
+bake() {
+  echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref} (${CONTAINER_TOOL}, python=${VENV_PYTHON}, uid=${APP_UID})"
+  "$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
+    --build-arg "BASE_IMAGE=${base_ref}" \
+    --build-arg "VENV_PYTHON=${VENV_PYTHON}" \
+    --build-arg "APP_UID=${APP_UID}" \
+    --build-arg "APP_GID=${APP_GID}" \
+    -t "${WRAPPER_TAG}" "${SCRIPT_DIR}"
+}
 
 # ---- post-bake attestation ----
 # The bake proves itself before anything is loaded or deployed. Two probes on
@@ -196,15 +214,18 @@ echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref} (${CONTAINER_TOOL}, pytho
 #            wins over the hook by design), and the propagator must actually
 #            inject a traceparent. This is the in-process half of
 #            propagation proven end-to-end, per image, at build time.
-echo ">> attesting ${WRAPPER_TAG}"
-if ! "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
+attest_inert() {
+  if ! "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import sys
 loaded = sorted(m for m in sys.modules if m.startswith("opentelemetry"))
 raise SystemExit("gate off, yet otel loaded: %s" % loaded if loaded else 0)'; then
-  echo "ATTESTATION FAILED for ${WRAPPER_TAG}: image is not inert with the gate off." >&2
-  exit 4
-fi
-if ! "$CONTAINER_TOOL" run --rm --network=none -e LINEAGE_PROPAGATE=1 --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
+    echo "ATTESTATION FAILED for ${WRAPPER_TAG}: image is not inert with the gate off." >&2
+    exit 4
+  fi
+}
+
+attest_active() {
+  if ! "$CONTAINER_TOOL" run --rm --network=none -e LINEAGE_PROPAGATE=1 --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import os, sys
 assert "opentelemetry.instrumentation.auto_instrumentation" in sys.modules, "hook did not run"
 assert os.environ.get("OTEL_TRACES_EXPORTER") is not None, "exporter selection not pinned"
@@ -214,37 +235,54 @@ with trace.get_tracer("attest").start_as_current_span("attest"):
     carrier = {}
     inject(carrier)
 assert "traceparent" in carrier, "propagator injects nothing: %r" % carrier'; then
-  echo "ATTESTATION FAILED for ${WRAPPER_TAG}: gate on, but the hook did not come up." >&2
-  exit 4
-fi
+    echo "ATTESTATION FAILED for ${WRAPPER_TAG}: gate on, but the hook did not come up." >&2
+    exit 4
+  fi
+}
 
-# ---- optional: bake the activation in ----
-if [ "$SELF_ACTIVATE" = "1" ]; then
+self_activate() {  # optional: bake the activation in
+  [ "$SELF_ACTIVATE" = "1" ] || return 0
   echo ">> baking LINEAGE_PROPAGATE=1 into ${WRAPPER_TAG} (SELF_ACTIVATE=1)"
   printf 'FROM %s\nENV LINEAGE_PROPAGATE=1\n' "$WRAPPER_TAG" \
     | "$CONTAINER_TOOL" build -t "$WRAPPER_TAG" -
-fi
+}
 
-# alias under docker.io/library so containerd resolves the bare name in manifests
-# (split on the LAST colon: a registry with a port has one earlier)
-wrapper_name="${WRAPPER_TAG%:*}"; wrapper_ver="${WRAPPER_TAG##*:}"
-alias_ref="docker.io/library/${wrapper_name}:${wrapper_ver}"
-"$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}"
+publish() {
+  # alias under docker.io/library so containerd resolves the bare name in
+  # manifests (split on the LAST colon: a registry with a port has one earlier)
+  local wrapper_name wrapper_ver alias_ref
+  wrapper_name="${WRAPPER_TAG%:*}"; wrapper_ver="${WRAPPER_TAG##*:}"
+  alias_ref="docker.io/library/${wrapper_name}:${wrapper_ver}"
+  "$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}"
 
-if [ "$NO_KIND_LOAD" = "1" ]; then
-  echo ">> built + attested ${alias_ref} (kind load skipped: NO_KIND_LOAD=1)"
-else
-  kind_load "${alias_ref}"
-  echo ">> loaded ${alias_ref} into kind cluster ${KIND_CLUSTER_NAME}"
-fi
-if [ "$SELF_ACTIVATE" = "1" ]; then
-  echo ">> NOTE: this image is SELF-ACTIVATING (LINEAGE_PROPAGATE=1 baked in) — any"
-  echo ">>       deployment of it propagates. Meant for workloads whose Deployment you"
-  echo ">>       cannot edit; everywhere else prefer the inert default."
-else
-  echo ">> NOTE: the -otel image is INERT — it runs exactly like its base until a"
-  echo ">>       Deployment sets LINEAGE_PROPAGATE=1 in the app container's env"
-  echo ">>       (attach-lineage.sh does this). Deploy it without that env and you"
-  echo ">>       simply get the base image's behavior: no propagation, and the trace"
-  echo ">>       fragments at this pod, visibly (lineage.parent.source=wire)."
-fi
+  if [ "$NO_KIND_LOAD" = "1" ]; then
+    echo ">> built + attested ${alias_ref} (kind load skipped: NO_KIND_LOAD=1)"
+  else
+    kind_load "${alias_ref}"
+    echo ">> loaded ${alias_ref} into kind cluster ${KIND_CLUSTER_NAME}"
+  fi
+  if [ "$SELF_ACTIVATE" = "1" ]; then
+    echo ">> NOTE: this image is SELF-ACTIVATING (LINEAGE_PROPAGATE=1 baked in) — any"
+    echo ">>       deployment of it propagates. Meant for workloads whose Deployment you"
+    echo ">>       cannot edit; everywhere else prefer the inert default."
+  else
+    echo ">> NOTE: the -otel image is INERT — it runs exactly like its base until a"
+    echo ">>       Deployment sets LINEAGE_PROPAGATE=1 in the app container's env"
+    echo ">>       (attach-lineage.sh does this). Deploy it without that env and you"
+    echo ">>       simply get the base image's behavior: no propagation, and the trace"
+    echo ">>       fragments at this pod, visibly (lineage.parent.source=wire)."
+  fi
+}
+
+main() {
+  parse_args "$@"
+  detect_python
+  detect_user
+  interlock
+  bake
+  attest_inert
+  attest_active
+  self_activate
+  publish
+}
+main "$@"
