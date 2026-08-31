@@ -159,7 +159,7 @@ detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
 #     detectable; deciding that needs a runtime probe, which this does not do.
 # FORCE_BAKE=1 overrides, turning the implicit human judgment into an
 # explicit, greppable one.
-interlock() {
+refuse_already_instrumented() {
   [ "$FORCE_BAKE" = "1" ] && return 0
   # The seven this shim installs; presence of ANY means a wrap would stack a
   # second instrumentor on the same library. Keep this list in sync with the
@@ -195,7 +195,7 @@ raise SystemExit(0 if u.find_spec("_lineage_propagate") else 1)' >/dev/null 2>&1
   fi
 }
 
-bake() {
+build_image() {
   echo ">> building shim ${WRAPPER_TAG} FROM ${base_ref} (${CONTAINER_TOOL}, python=${VENV_PYTHON}, uid=${APP_UID})"
   "$CONTAINER_TOOL" build -f "${SCRIPT_DIR}/Dockerfile.otel-shim" \
     --build-arg "BASE_IMAGE=${base_ref}" \
@@ -216,7 +216,7 @@ bake() {
 #            wins over the hook by design), and the propagator must actually
 #            inject a traceparent. This is the in-process half of
 #            propagation proven end-to-end, per image, at build time.
-attest_inert() {
+verify_inert() {
   if ! "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import sys
 loaded = sorted(m for m in sys.modules if m.startswith("opentelemetry"))
@@ -226,7 +226,7 @@ raise SystemExit("gate off, yet otel loaded: %s" % loaded if loaded else 0)'; th
   fi
 }
 
-attest_active() {
+verify_propagates() {
   if ! "$CONTAINER_TOOL" run --rm --network=none -e LINEAGE_PROPAGATE=1 --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import os, sys
 assert "opentelemetry.instrumentation.auto_instrumentation" in sys.modules, "hook did not run"
@@ -277,14 +277,14 @@ publish() {
 }
 
 main() {
-  parse_args "$@"   # args + env -> globals; derive wrapper tag, normalize refs
-  detect_python     # probe the image for its interpreter (or validate arg 3)
-  detect_user       # probe uid:gid from Config.User / in-image id
-  interlock         # refuse if already instrumented or already baked (exit 3)
-  bake              # build Dockerfile.otel-shim with the detected build-args
-  attest_inert      # gate off: not one otel module may load (exit 4)
-  attest_active     # gate on: hook up, exporter explicit, traceparent injected (exit 4)
-  self_activate     # SELF_ACTIVATE=1 only: bake the gate var into the image
-  publish           # alias under docker.io/library, kind-load, print the honest NOTE
+  parse_args "$@"               # args + env -> globals; derive wrapper tag, normalize refs
+  detect_python                 # probe the image for its interpreter (or validate arg 3)
+  detect_user                   # probe uid:gid from Config.User / in-image id
+  refuse_already_instrumented   # a wrap would double-instrument, or already baked (exit 3)
+  build_image                   # build Dockerfile.otel-shim with the detected build-args
+  verify_inert                  # gate off: not one otel module may load (exit 4)
+  verify_propagates             # gate on: hook up, exporter explicit, traceparent injected (exit 4)
+  self_activate                 # SELF_ACTIVATE=1 only: bake the gate var into the image
+  publish                       # alias under docker.io/library, kind-load, print the honest NOTE
 }
 main "$@"
