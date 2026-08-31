@@ -600,9 +600,9 @@ func (p *SessionBudget) accumulate(sessionID string, delta tokenDelta) {
 	key := p.redisKey(sessionID)
 	ttl := time.Duration(p.cfg.SessionTTLSeconds) * time.Second
 
-	// One HashIncr per non-zero sub-kind. Zero deltas are skipped so old
-	// sessions whose per-kind counters were never written stay absent in
-	// Redis rather than accumulating a stream of no-op fields.
+	// One HashIncr per positive sub-kind. Non-positive deltas are skipped
+	// so per-kind fields stay absent on legacy sessions that never wrote
+	// them. Counters only grow, so <= 0 also swallows any stray negative.
 	for _, kv := range []struct {
 		field string
 		v     int64

@@ -327,11 +327,18 @@ func getOrCreateStreamState(pctx *pipeline.Context) *inferenceStreamState {
 // once a response is finalized — shared by OnResponse and
 // OnResponseFrame so streaming and buffered finalize identically.
 func logInferenceFinalized(ext *pipeline.InferenceExtension) {
+	// Split counters log unconditionally: zero means the provider did
+	// not report that sub-kind, and stable field names help dashboards.
 	slog.Info("inference-parser: response",
 		"model", ext.Model,
 		"finishReason", ext.FinishReason,
 		"promptTokens", ext.PromptTokens,
 		"completionTokens", ext.CompletionTokens,
+		"inputTokens", ext.InputTokens,
+		"cacheReadTokens", ext.CacheReadTokens,
+		"cacheWriteTokens", ext.CacheWriteTokens,
+		"outputTokens", ext.OutputTokens,
+		"reasoningTokens", ext.ReasoningTokens,
 	)
 	slog.Debug("inference-parser: completion", "text", parsercommon.Truncate(ext.Completion, parsercommon.DebugBodyMax))
 }
