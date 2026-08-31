@@ -73,6 +73,8 @@ COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97c
 # python (plain pip images, PEP 668-marked distro pythons). `--python` stays
 # the environment selector, so both flags are inert when the target IS a venv
 # (measured: identical install either way).
+# The seven instrumentors below (everything except opentelemetry-distro) are
+# exactly what build-otel-shim.sh's interlock probes for — keep the lists in sync.
 ARG OTEL_CONTRIB_VERSION=0.65b0
 RUN uv pip install --no-cache --python ${VENV_PYTHON} --system --break-system-packages \
       "opentelemetry-distro==${OTEL_CONTRIB_VERSION}" \

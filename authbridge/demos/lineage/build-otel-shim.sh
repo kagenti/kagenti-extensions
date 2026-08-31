@@ -162,7 +162,9 @@ detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
 interlock() {
   [ "$FORCE_BAKE" = "1" ] && return 0
   # The seven this shim installs; presence of ANY means a wrap would stack a
-  # second instrumentor on the same library.
+  # second instrumentor on the same library. Keep this list in sync with the
+  # instrumentor packages in Dockerfile.otel-shim's install RUN (everything
+  # there except opentelemetry-distro, which is the SDK, not an instrumentor).
   local already
   if already=$("$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$base_ref" -c '
 import importlib.util as u
@@ -275,14 +277,14 @@ publish() {
 }
 
 main() {
-  parse_args "$@"
-  detect_python
-  detect_user
-  interlock
-  bake
-  attest_inert
-  attest_active
-  self_activate
-  publish
+  parse_args "$@"   # args + env -> globals; derive wrapper tag, normalize refs
+  detect_python     # probe the image for its interpreter (or validate arg 3)
+  detect_user       # probe uid:gid from Config.User / in-image id
+  interlock         # refuse if already instrumented or already baked (exit 3)
+  bake              # build Dockerfile.otel-shim with the detected build-args
+  attest_inert      # gate off: not one otel module may load (exit 4)
+  attest_active     # gate on: hook up, exporter explicit, traceparent injected (exit 4)
+  self_activate     # SELF_ACTIVATE=1 only: bake the gate var into the image
+  publish           # alias under docker.io/library, kind-load, print the honest NOTE
 }
 main "$@"
