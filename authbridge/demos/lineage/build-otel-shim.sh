@@ -8,7 +8,8 @@
 # Usage:
 #   ./build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]
 #   venv-python / app-uid are escape hatches for when detection picks wrong;
-#   an explicit value is used as-is.
+#   an explicit value is used as-is. Give app-uid as uid:gid — a bare uid
+#   still takes the gid the base image's own user resolves to.
 #
 # Env:
 #   FORCE_BAKE=1     override the refuse-to-bake interlock
@@ -28,9 +29,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 parse_args() {
   BASE_IMAGE="${1:?usage: build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]}"
-  # default wrapper tag: <base name>-otel:latest
+  # default wrapper tag: <base name>-otel:latest (tag or digest stripped)
   local base_short base_name
-  base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
+  base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%[:@]*}"
   WRAPPER_TAG="${2:-${base_name}-otel:latest}"
   case "${WRAPPER_TAG##*/}" in *:*) ;; *) WRAPPER_TAG="${WRAPPER_TAG}:latest" ;; esac
   VENV_PYTHON="${3:-}"

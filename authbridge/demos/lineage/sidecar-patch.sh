@@ -9,9 +9,10 @@
 # This script checks, applies both, and waits for the rollout.
 #
 # Not durable: the owner keeps owning the object, and a platform rewrite (an
-# operator reconcile, a UI redeploy) silently drops the patch. Re-run after
-# any platform-side change, or keep the attachment in your own manifests
-# instead (README.md "Bring your own manifests").
+# operator reconcile, a UI redeploy) silently drops the patch — observed live
+# when an operator reconciled a patched Deployment. Re-run after any
+# platform-side change, or keep the attachment in your own manifests instead
+# (README.md "Bring your own manifests"). To back out: `kubectl rollout undo`.
 #
 # Refused: a target that already carries an AuthBridge sidecar (the operator's
 # is also a container named `envoy-proxy`, so the merge would silently take it
@@ -34,7 +35,7 @@
 #   SELF_ID        lineage identity (default: DEPLOY)
 #   APP_CONTAINER  the app container to switch propagation on (optional)
 # Env — inherited by attach-lineage.sh and validated there (see its header):
-#   APP_IMAGE, OTEL_ENDPOINT, SIDECAR_IMAGE, PROXY_INIT_IMAGE,
+#   APP_IMAGE, OTEL_ENDPOINT, SIDECAR_IMAGE, PROXY_INIT_IMAGE, NO_EMIT,
 #   OUTBOUND_PORTS_EXCLUDE (only an app's OWN telemetry port — never LLM/tool ports).
 #
 # Requires in the namespace: the platform's `envoy-config` ConfigMap; the
@@ -47,7 +48,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 read_inputs() {
-  DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [APP_CONTAINER=<name> [APP_IMAGE=<ref>]] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
+  DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [APP_CONTAINER=<name> [APP_IMAGE=<ref>]] [SIDECAR_IMAGE=<ref> PROXY_INIT_IMAGE=<ref>] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
   NAMESPACE="${NAMESPACE:-team1}"
   SELF_ID="${SELF_ID:-$DEPLOY}"
   APP_CONTAINER="${APP_CONTAINER:-}"
@@ -112,11 +113,13 @@ gen() {  # $1 = EMIT mode; the other knobs reach the generator through the envir
 }
 
 apply() {
-  # ConfigMap first — the patch's volume names it. The patch goes through its
-  # own assignment so a generator failure stops the script.
-  local patch
-  gen cm | kubectl apply -f -
+  # Both objects are generated before the first write, so a generator refusal
+  # stops the script with nothing applied. ConfigMap first — the patch's
+  # volume names it.
+  local cm patch
+  cm="$(gen cm)"
   patch="$(gen patch)"
+  kubectl apply -f - <<<"$cm"
   kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$patch"
   kubectl rollout status -n "$NAMESPACE" "deploy/$DEPLOY" --timeout=180s
   echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"
@@ -133,6 +136,6 @@ main() {
   read_inputs        # DEPLOY required; the rest defaulted or inherited
   preconditions      # four checks that can only stop the script
   note_capture_only  # no APP_CONTAINER → say what that means, once
-  apply              # the only cluster writes: cm → patch → rollout
+  apply              # generate both, then the only cluster writes: cm → patch → rollout
 }
 main "$@"

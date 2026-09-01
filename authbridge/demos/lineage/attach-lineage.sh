@@ -61,13 +61,14 @@
 set -euo pipefail
 
 # Every free-form value lands in a double-quoted YAML scalar, where only '"'
-# and '\' are special — refusing those two is exactly sufficient. Whitespace is
-# refused as well: it is never part of an endpoint or image ref.
+# and '\' are special — refusing those two is exactly sufficient. Whitespace
+# and control characters are refused as well: never part of an endpoint or
+# image ref, and a control character is illegal in YAML even inside quotes.
 yaml_safe() {  # $1 = what it is (for the error), $2 = the value
   local unsafe=$'"\\'
   case "$2" in
-    *["$unsafe"]*|*[[:space:]]*)
-      printf "error: %s '%s' contains whitespace or one of %s, which this script cannot quote safely\n" "$1" "$2" "$unsafe" >&2
+    *["$unsafe"]*|*[[:space:][:cntrl:]]*)
+      printf "error: %s '%s' contains whitespace, a control character or one of %s, which this script cannot quote safely\n" "$1" "$2" "$unsafe" >&2
       exit 2 ;;
   esac
 }
@@ -90,10 +91,11 @@ parse_inputs() {
   EMIT="${EMIT:-patch}"
   NAME="${NAME:?set NAME}"
   NAMESPACE="${NAMESPACE:-team1}"
-  # NAME (RFC 1123 name) and NAMESPACE (DNS label) are interpolated bare.
-  if [ "${#NAME}" -gt 63 ] \
+  # NAME (RFC 1123 subdomain) and NAMESPACE (DNS label) are interpolated bare.
+  # 227 = 253 minus the ConfigMap name's prefix (authbridge-lineage-config-).
+  if [ "${#NAME}" -gt 227 ] \
      || ! [[ "$NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]]; then
-    echo "error: NAME='$NAME' must be a lowercase RFC 1123 name of at most 63 chars" >&2; exit 2
+    echo "error: NAME='$NAME' must be a lowercase RFC 1123 subdomain of at most 227 chars (253 minus the ConfigMap prefix)" >&2; exit 2
   fi
   if ! [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
     echo "error: NAMESPACE='$NAMESPACE' is not a DNS label (lowercase alphanumerics and '-', max 63)" >&2; exit 2
@@ -185,7 +187,8 @@ sidecar_container() {  # the envoy-proxy container (8-space list-item indent)
   cat <<EOF
         # Envoy + authbridge-envoy (ext_proc + the lineage plugin). MUST run as
         # UID 1337: proxy-init exempts that uid from the outbound redirect.
-        # Readiness = the inbound listener accepting; the admin port binds loopback.
+        # Readiness = the inbound listener accepting (without it a Service endpoint
+        # goes Ready before the sidecar can take the redirect); admin binds loopback.
         - name: envoy-proxy
           image: "${SIDECAR_IMAGE}"
           imagePullPolicy: IfNotPresent
@@ -267,8 +270,9 @@ data:
     # The same parser chain in both directions: an app's entry protocol is
     # not knowable from the attach side, and a direction-specific chain would
     # silently mislabel what it was not given as plain http. Uniform is safe —
-    # parsers are content-gated, and the plugin reads payloads only through
-    # the protocol fact it stamped (precedence a2a > mcp > inference).
+    # parsers are content-gated and not mutually exclusive (mcp-parser attaches
+    # to any JSON-RPC body), and the plugin reads payloads only through the
+    # protocol fact it stamped (precedence a2a > mcp > inference).
     pipeline:
       inbound:
         plugins:
@@ -312,6 +316,7 @@ emit() {
 }
 
 main() {
+  [ $# -eq 0 ] || { echo "error: attach-lineage.sh takes no arguments — every input is an environment variable (see the header)" >&2; exit 2; }
   parse_inputs        # every knob: read, default, validate — all refusals live here
   build_proxy_env     # optional OUTBOUND_PORTS_EXCLUDE env for proxy-init
   build_plugin_entry  # the lineage-telemetry pipeline entry (empty under NO_EMIT=1)
