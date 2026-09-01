@@ -188,6 +188,10 @@ Two honest limits:
   stops. Re-run `sidecar-patch.sh` after any platform-side change, or use the
   manifests route so the attachment lives with the source.
 
+To back out — after a failed rollout, or at will — `kubectl rollout undo
+deploy/<name>` returns the owner's spec (the patch is one revision), then
+`kubectl delete cm authbridge-lineage-config-<name>`.
+
 ### Bring your own manifests
 
 If you own the app's manifests, make lineage part of them instead of patching
@@ -231,6 +235,13 @@ container's env (merged by name — nothing else in the container changes) and
 `APP_IMAGE=docker.io/library/<your-app>-otel:latest` points it at the baked
 image. Without `APP_CONTAINER` the app container is not touched at all.
 
+The `-otel` image must be resolvable exactly the way the base image is: the
+patch swaps `image` and leaves the owner's `imagePullPolicy` alone. A
+kind-loaded image satisfies `IfNotPresent` (what the platform's own Deployments
+carry); a Deployment that pulls its base from a registry — or a `:latest` one
+whose policy defaulted to `Always` — needs the `-otel` image pushed to that
+registry and `APP_IMAGE` pointed at it.
+
 **`APP_CONTAINER` must name a container that exists.** A strategic merge
 *adds* a stub container for an unknown name rather than failing;
 `sidecar-patch.sh` verifies the name against the live Deployment before
@@ -266,7 +277,7 @@ per workload and no YAML**:
 | step | command | per | what it detects or generates for you |
 |---|---|---|---|
 | bake the shim | `./build-otel-shim.sh <image>` | image | interpreter, uid:gid, the interlock, the attestation, the kind load |
-| attach | `DEPLOY=<name> APP_CONTAINER=<container> APP_IMAGE=<image>-otel:latest ./sidecar-patch.sh` | Deployment | the ConfigMap, the patch, the four preconditions, the rollout wait |
+| attach | `DEPLOY=<name> APP_CONTAINER=<container> APP_IMAGE=docker.io/library/<image>-otel:latest ./sidecar-patch.sh` | Deployment | the ConfigMap, the patch, the four preconditions, the rollout wait |
 
 Capture only (an app that already propagates, or one the bake refuses) is one
 command: the attach without `APP_CONTAINER`. Two Deployments that run the same
@@ -378,7 +389,7 @@ BAKE — once per app image (laptop)
     └─ output  <app>-otel:latest           inert until LINEAGE_PROPAGATE=1
 
 ATTACH — once per Deployment (cluster)
-  sidecar-patch.sh  DEPLOY=<name> [APP_CONTAINER=<container> APP_IMAGE=<app>-otel:latest]
+  sidecar-patch.sh  DEPLOY=<name> [APP_CONTAINER=<container> APP_IMAGE=docker.io/library/<app>-otel:latest]
     ├─ checks   Deployment exists · envoy-config ConfigMap present ·
     │           no 15123/15124/9090 declared · APP_CONTAINER is a real container
     ├─ runs     attach-lineage.sh EMIT=cm     → kubectl apply        (the sidecar's config)
@@ -511,7 +522,7 @@ keys matter:
 
 | key | meaning |
 |---|---|
-| `otel_endpoint` | OTLP/gRPC endpoint as `host:port` (a URL scheme prefix is accepted). The default targets an in-cluster collector over plaintext. |
+| `otel_endpoint` | OTLP/gRPC endpoint as `host:port` (a URL scheme prefix is accepted). The default targets an in-cluster collector over plaintext — which carries `lineage.principal.*` and, with `capture_io`, full payloads in the clear; the platform collector's 4317 speaks no TLS, so in-cluster that is the accepted trade. For an endpoint outside the cluster use an `https://` prefix, which turns on the plugin's `otel_tls`. |
 | `capture_io` | attach parsed request/response content as `input.value` / `output.value`. **Off by default** in the plugin; this demo turns it on so the worked example shows content — enable it only where the traffic carries no PII, or the backend enforces access control. |
 | `self_id` | this workload's stable identity, emitted as `lineage.self.id`. Falls back to `self_id_file` (default `/shared/client-id.txt`, the operator-mounted credential). |
 
@@ -549,7 +560,8 @@ as a pure proxy that emits nothing — a clean A/B baseline.
 | Nothing captured when testing | You drove the app through `kubectl port-forward`. Loopback bypasses the inbound listener; drive it from inside the cluster. |
 | `kind load` fails under podman | `container-runtime.sh` detects the runtime and saves + loads an image archive for podman, because `kind load docker-image` misbehaves under podman v5. Set `CONTAINER_TOOL` to force a runtime, `KIND_CLUSTER_NAME` for the cluster name. |
 | Pod stuck `ImagePullBackOff` on the sidecar | `SIDECAR_IMAGE` / `PROXY_INIT_IMAGE` point at tags the cluster cannot resolve. Load them locally, or use the published refs. |
+| App container `ErrImagePull` after the patch | `APP_IMAGE` is not resolvable under the container's own `imagePullPolicy` — a kind-loaded image needs `IfNotPresent`; a registry-pulled base needs the `-otel` image pushed beside it ("The propagation half"). `kubectl rollout undo deploy/<name>` restores the owner's spec. |
 | Pod stuck `ContainerCreating` (`configmap "envoy-config" not found`) | The namespace is not one the platform set up (`sidecar-patch.sh` checks; the manifests route cannot). Use a platform namespace, or copy the ConfigMap in. |
-| `envoy-proxy` restarts with `unknown plugin "lineage-telemetry"` | The sidecar image predates the plugin — the published image, until a release carries it. Build from this repo and set `SIDECAR_IMAGE`. Note the patch uses `imagePullPolicy: IfNotPresent`, so once a release does carry the plugin a node that cached the older `:latest` keeps it until that image is removed or a versioned tag is used. |
+| `envoy-proxy` restarts with `unknown plugin "lineage-telemetry"` | The sidecar image predates the plugin — the published image, until a release carries it. Build from this repo and set `SIDECAR_IMAGE`; `kubectl rollout undo deploy/<name>` backs the failed rollout out meanwhile. Note the patch uses `imagePullPolicy: IfNotPresent`, so once a release does carry the plugin a node that cached the older `:latest` keeps it until that image is removed or a versioned tag is used. |
 | `sidecar-patch.sh` refuses: "already declares containerPort …" | The target is operator-enrolled (it has an injected sidecar) or the app itself listens on 9090/15123/15124. Use the namespace-ConfigMap route for enrolled workloads; a colliding app port cannot be adopted. |
 | `sidecar-patch.sh` refuses: "has no container named …" | `APP_CONTAINER` does not match any container in the target Deployment. The check exists because a strategic merge would otherwise *add* a stub container by that name instead of failing. |
