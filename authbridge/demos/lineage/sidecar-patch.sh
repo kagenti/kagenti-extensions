@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
 # sidecar-patch.sh — attach the lineage sidecar to an EXISTING Deployment.
 #
-# attach-lineage.sh owns the deploy-it-yourself path: it EMITS a complete
-# Deployment (app re-wrapped with the OTel shim + sidecar). This script is the
-# complement for apps you do NOT deploy yourself — operator-managed or
-# UI-imported workloads — where the Deployment already exists and must keep its
-# owner's spec. It only ADDS the sidecar pieces via a strategic-merge
-# patch (lists merge by name: the app container is untouched; interception is
-# transparent iptables — no HTTP_PROXY, no code change, no image change).
+# The live applier: the Deployment already exists — deployed by its owner,
+# whoever that is — and must keep its owner's spec. This script only ADDS the
+# lineage pieces via a strategic-merge patch (lists merge by name: the app
+# container is untouched unless APP_CONTAINER opts it in; interception is
+# transparent iptables — no HTTP_PROXY, no code change).
 #
 # Every YAML byte comes from attach-lineage.sh, the ONE generator (EMIT=cm for
 # the per-app plugin ConfigMap, EMIT=patch for the sidecar patch) — this script
-# only applies them and waits. CAVEAT the owner keeps owning the object: a
-# platform rewrite of the Deployment silently drops the patch (observed live
-# when an operator reconciled a patched Deployment) — re-run this script after
-# any platform-side change.
+# only applies them and waits. To keep the attachment in version control
+# instead of patching live, consume the same two outputs in a kustomization
+# (README.md "Bring your own manifests"). CAVEAT the owner keeps owning the
+# object: a platform rewrite of the Deployment silently drops the patch
+# (observed live when an operator reconciled a patched Deployment) — re-run
+# this script after any platform-side change.
 #
 # The target must NOT already carry a platform-injected AuthBridge sidecar
 # (a Deployment enrolled through an AgentRuntime CR / `<prefix>/inject:
@@ -24,11 +24,15 @@
 #
 # NOTE: natively-instrumented apps need no shim — in-process context already
 # propagates. Apps that are NOT instrumented still need the shim for correct
-# pairing under concurrency; for those, use attach-lineage.sh (EMIT=manifest),
-# which deploys the app re-wrapped with the shim. See README.md "Which path".
+# pairing under concurrency: bake it onto the app image (build-otel-shim.sh),
+# then run this script with APP_CONTAINER (and APP_IMAGE pointing at the baked
+# -otel image) so the patch flips the activation env on the app's own
+# container. See README.md "The propagation half".
 #
 # Usage (env-driven, like attach-lineage.sh):
 #   DEPLOY=echo-upstream ./sidecar-patch.sh
+#   DEPLOY=my-agent APP_CONTAINER=agent \
+#     APP_IMAGE=docker.io/library/my-agent-otel:latest ./sidecar-patch.sh
 #
 # Env:
 #   DEPLOY                  target Deployment name (required)
@@ -36,6 +40,11 @@
 #   SELF_ID                 lineage self_id (default: $DEPLOY)
 #   OTEL_ENDPOINT           OTLP/gRPC endpoint the lineage plugin exports to
 #                           (default otel-collector.rossoctl-system.svc.cluster.local:4317).
+#   APP_CONTAINER           the app container's name in the target Deployment —
+#                           when set, the patch also adds LINEAGE_PROPAGATE=1
+#                           to that container's env (propagation on).
+#   APP_IMAGE               with APP_CONTAINER: the -otel image ref to set on
+#                           the app container (build-otel-shim.sh output).
 #   SIDECAR_IMAGE           sidecar image override — read by attach-lineage.sh
 #   PROXY_INIT_IMAGE        from the environment this script inherits (set them
 #                           on the command line like DEPLOY; see its header).
@@ -78,14 +87,32 @@ for p in 15124 15123 9090; do
   esac
 done
 
-# This script attaches capture only. Whether the app carries trace context
-# from its inbound request to its outbound calls is a property of the app
-# (its own instrumentation, or the shim via attach-lineage.sh) that nothing
-# here can see or change — say so once, at attach time, instead of guessing
-# from the Deployment's env.
-echo "NOTE: the sidecar records every hop; whether $DEPLOY's outbound hops attribute to" >&2
-echo "      their inbound depends on the app propagating traceparent itself. Verify" >&2
-echo "      pairing under concurrency before relying on it (README.md, 'The envelope')." >&2
+# APP_CONTAINER must name a container that actually exists: a strategic
+# merge ADDS a stub container for an unknown name rather than failing, so a
+# typo would silently grow the pod a broken extra container.
+if [ -n "${APP_CONTAINER:-}" ]; then
+  containers="$(kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
+    -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" "}{end}')"
+  case " $containers " in
+    *" $APP_CONTAINER "*) ;;
+    *)
+      echo "error: deploy/$DEPLOY has no container named '$APP_CONTAINER' (it has: ${containers% })" >&2
+      echo "  — refusing: the patch would ADD a stub container by that name instead of failing" >&2
+      exit 1 ;;
+  esac
+fi
+
+# Without APP_CONTAINER this attaches capture only. Whether the app carries
+# trace context from its inbound request to its outbound calls is a property
+# of the app (its own instrumentation, or the baked shim activated via
+# APP_CONTAINER) that nothing here can see — say so once, at attach time,
+# instead of guessing from the Deployment's env.
+if [ -z "${APP_CONTAINER:-}" ]; then
+  echo "NOTE: the sidecar records every hop; whether $DEPLOY's outbound hops attribute to" >&2
+  echo "      their inbound depends on the app propagating traceparent itself (its own" >&2
+  echo "      instrumentation, or the baked shim + APP_CONTAINER=<name>). Verify pairing" >&2
+  echo "      under concurrency before relying on it (README.md, 'The envelope')." >&2
+fi
 
 gen() {  # $1 = EMIT mode; forwards the shared knobs to the one generator
   EMIT="$1" NAME="$DEPLOY" SELF_ID="$SELF_ID" NAMESPACE="$NAMESPACE" \

@@ -1,75 +1,70 @@
 #!/usr/bin/env bash
-# Lineage sidecar attachment. Emits (to stdout) a complete manifest — lineage
-# ConfigMap + Service + Deployment — that runs ANY app image with:
-#   (a) the AuthBridge lineage sidecar (proxy-init initContainer + envoy-proxy sidecar,
-#       AuthBridge envoy-sidecar mode, capture_io:true, no auth/SPIRE), and
-#   (b) the propagate-only OTel shim switched ON: one env var
-#       (LINEAGE_PROPAGATE=1) activates the hook baked into the -otel image
-#       (build-otel-shim.sh). The app's own ENTRYPOINT/CMD is NEVER touched —
-#       no command: is emitted at all; the shim exports nothing and only lets
-#       the W3C traceparent flow through the app.
+# Lineage attachment generator. Emits (to stdout) the YAML that attaches the
+# AuthBridge lineage sidecar to an EXISTING Deployment — and nothing else. It
+# does not create, own or describe the application: no Deployment, no Service,
+# no app configuration. The app is deployed however its owner deploys apps;
+# this script produces only the lineage-related additions:
 #
-# Per app, only a handful of variables change (image + self_id + app env).
+#   EMIT=patch (default)  a strategic-merge patch adding the sidecar pieces
+#                         (proxy-init initContainer, envoy-proxy container,
+#                         the two config volumes) to a Deployment. Lists merge
+#                         by name, so nothing already in the Deployment is
+#                         touched. With APP_CONTAINER set, the patch also
+#                         flips the propagation switch on the app's own
+#                         container (see below).
+#   EMIT=cm               the per-app plugin ConfigMap the sidecar mounts
+#                         (parser chain + lineage-telemetry entry).
 #
-# Usage (pipe to kubectl apply):
-#   NAME=my-agent \
-#   IMAGE=docker.io/library/my-agent-otel:latest \
-#   APP_PORT=8000 SVC_PORT=8080 \
-#   ENV_VARS='LLM_API_BASE=<openai-compatible-base-url> LLM_MODEL=<model> LLM_API_KEY=<key>' \
-#   demos/lineage/attach-lineage.sh | kubectl apply -f -
+# Two ways to consume the output:
+#   live    sidecar-patch.sh applies both against a running Deployment
+#           (with preconditions checked); the owner keeps owning the object.
+#   source  commit both outputs next to your own manifests and list the patch
+#           in a kustomization (`patches: - path: lineage-patch.yaml` with
+#           target kind Deployment / name <NAME>) — the attachment then lives
+#           in version control and survives every re-deploy.
+#
+# Propagation (the shim half): capture alone cannot attribute an app's
+# outbound calls to the inbound that caused them — the app must carry
+# `traceparent` through itself. For an uninstrumented Python app, bake the
+# propagate-only shim onto its image first (build-otel-shim.sh) and then let
+# this patch activate it: APP_CONTAINER names the app's container and the
+# patch sets LINEAGE_PROPAGATE=1 in its env (and, when APP_IMAGE is given,
+# points the container at the baked -otel image). Without APP_CONTAINER the
+# patch is capture-only and the app container is not touched at all.
+#
+# Usage:
+#   NAME=echo-upstream ./attach-lineage.sh                     # the patch
+#   NAME=echo-upstream EMIT=cm ./attach-lineage.sh             # the ConfigMap
+#   NAME=my-agent APP_CONTAINER=agent \
+#     APP_IMAGE=docker.io/library/my-agent-otel:latest \
+#     ./attach-lineage.sh                                      # patch + propagation
 #
 # Variables:
-#   NAME               (required) k8s resource name + app.kubernetes.io/name label.
-#   IMAGE              (required for EMIT=manifest) the -otel wrapper image
-#                      (build-otel-shim.sh output).
-#   SELF_ID            lineage self_id (default: NAME). Only this varies in the config.
-#   APP_PORT           app container port (default 8000).
-#   SVC_PORT           service port (default 8080).
-#   APP_COMMAND        optional container command tokens, run AS-IS (no wrapper
-#                      of any kind). A DEPLOY choice, not an instrumentation
-#                      input: set it only when an image hosts several programs
-#                      and this workload runs a non-default one. The shim
-#                      attaches via env either way. Default: empty — the
-#                      image's own ENTRYPOINT/CMD runs untouched.
-#   ENV_VARS           space-separated KEY=VALUE app env (LLM_* etc). Each
-#                      value is emitted as a double-quoted YAML scalar, so a
-#                      value may contain ':' '#' '{' etc. but NOT whitespace,
-#                      '"' or '\' — the script refuses those rather than
-#                      emit YAML that parses to something else. May include
-#                      OTEL_SERVICE_NAME to override the default (SELF_ID).
-#   APP_RESOURCES      the app container's `resources:` block as a one-line
-#                      YAML flow mapping (default: requests 100m/128Mi,
-#                      limits 1 CPU/1Gi; `{}` removes them — your choice,
-#                      spliced verbatim). Sidecar containers carry fixed
-#                      requests/limits (see sidecar_container/proxy_init_container).
-#   OUTBOUND_PORTS_EXCLUDE  iptables outbound excludes (default ''). Set to an
-#                      app's OWN OTLP export port (e.g. 4317/4318) for an app that
-#                      already exports spans, so that export keeps flowing
-#                      untouched. Do NOT exclude LLM/tool ports — we want those seen.
-#   PVC_NAME/PVC_MOUNT optional: mount an existing-or-created RWO PVC into the
-#                      app container at PVC_MOUNT (both must be set).
+#   NAME               (required) the target Deployment's name; also names the
+#                      generated ConfigMap (authbridge-lineage-config-<NAME>)
+#                      and defaults SELF_ID.
 #   NAMESPACE          (default team1, the platform's demo namespace).
+#   SELF_ID            lineage self_id (default: NAME). Only this varies in
+#                      the plugin config.
 #   OTEL_ENDPOINT      OTLP/gRPC endpoint the lineage plugin exports to (default
 #                      otel-collector.rossoctl-system.svc.cluster.local:4317).
 #                      Any OTLP consumer works — Phoenix and Jaeger included;
 #                      nothing downstream of this endpoint is assumed.
-#   WORKLOAD_TYPE      agent | tool. **Empty by default, and leaving it empty
-#                      is the right choice on the rossoctl platform**, which
-#                      forbids setting <prefix>/type by hand: a
-#                      ValidatingAdmissionPolicy reserves that label for the
-#                      operator, so a manifest carrying it is REJECTED at
-#                      admission. Omitting it costs only platform-UI
-#                      registration (use an AgentRuntime CR for that); it costs
-#                      nothing for lineage. Set it only on a platform you know
-#                      does not guard the label.
-#   WORKLOAD_PROTOCOL  protocol label value (default a2a). Set mcp for MCP
-#                      servers — the label is a factual claim a platform UI
-#                      reads — or empty to omit it. Presentational only.
-#   LABEL_PREFIX       platform label domain (default rossoctl.io). Sets
-#                      protocol.<prefix>/<WORKLOAD_PROTOCOL>, the
-#                      <prefix>/inject: disabled opt-out, and <prefix>/type
-#                      when WORKLOAD_TYPE is set. Retarget it for a
-#                      differently-branded platform.
+#   APP_CONTAINER      optional: the app container's name in the target
+#                      Deployment. When set, the patch adds
+#                      LINEAGE_PROPAGATE=1 to that container's env (merged by
+#                      name — its other env entries are untouched). MUST match
+#                      an existing container: a strategic merge ADDS a new
+#                      stub container for an unknown name rather than failing.
+#                      This script cannot check that (it never touches the
+#                      cluster); sidecar-patch.sh does before applying.
+#   APP_IMAGE          optional, needs APP_CONTAINER: image ref to set on the
+#                      app container — the -otel image build-otel-shim.sh
+#                      produced from the container's current image.
+#   OUTBOUND_PORTS_EXCLUDE  iptables outbound excludes (default ''). Set to an
+#                      app's OWN OTLP export port (e.g. 4317/4318) for an app that
+#                      already exports spans, so that export keeps flowing
+#                      untouched. Do NOT exclude LLM/tool ports — we want those seen.
 #   SIDECAR_IMAGE      envoy+authbridge sidecar image (default
 #                      ghcr.io/rossoctl/cortex/authbridge-envoy:latest).
 #                      UNTIL A RELEASE CARRIES THE lineage-telemetry PLUGIN
@@ -79,43 +74,29 @@
 #   PROXY_INIT_IMAGE   iptables init image (default
 #                      ghcr.io/rossoctl/cortex/proxy-init:latest); build it
 #                      alongside SIDECAR_IMAGE when building from source.
-#   NO_PROPAGATE       if set to 1, omit LINEAGE_PROPAGATE=1 from the app env:
-#                      the -otel image's hook stays dormant and the container
-#                      runs EXACTLY like the base image — trace context stops
-#                      flowing THROUGH the app, and nothing more (the sidecar
-#                      still emits). For a baseline/uninstrumented run.
 #   NO_EMIT            if set to 1, omit the lineage-telemetry plugin from the
 #                      generated ConfigMap: the sidecar emits zero spans — and
 #                      nothing more (it still proxies; parsers stay — legal
 #                      alone; the plugin declares RequiresAny{parsers}, not the
-#                      reverse). NO_PROPAGATE=1 NO_EMIT=1 together = lineage
-#                      fully off for this app.
-#   EMIT               what to emit (this script is the ONE source of every
-#                      lineage YAML byte):
-#                        manifest  (default) ConfigMap + Service + Deployment
-#                        cm        the per-app lineage ConfigMap alone
-#                        patch     a strategic-merge patch adding the sidecar
-#                                  pieces to an EXISTING Deployment (used by
-#                                  sidecar-patch.sh; app container untouched)
+#                      reverse). For a baseline run.
+#   EMIT               patch (default) | cm — see above.
 #
 # Structure: main() at the bottom is the pipeline — parse_inputs reads,
 # defaults and validates EVERY knob (all refusals live there; nothing after
 # it can reject), the build_* functions each assemble one YAML fragment into
-# a global, and emit() dispatches to the emitters. The three shared fragment
+# a global, and emit() dispatches to the two emitters. The three fragment
 # functions (sidecar_container / proxy_init_container / sidecar_volumes) are
-# the single source of the sidecar YAML for both the manifest and the patch.
+# the single source of the sidecar YAML.
 set -euo pipefail
 
 # ---- input guard for caller-supplied values ----
 # Every free-form caller value lands in the generated YAML — some inside a
-# double-quoted scalar (SELF_ID, OTEL_ENDPOINT, ENV_VARS values, APP_COMMAND
-# tokens, OUTBOUND_PORTS_EXCLUDE), some bare (IMAGE, LABEL_PREFIX, PVC_*,
-# WORKLOAD_*). In a double-quoted scalar only '"' and '\' are special; bare,
-# whitespace or ':' would be. A value carrying '"', '\' or whitespace
-# (word-splitting has already mangled the latter by the time we see a token)
+# double-quoted scalar (SELF_ID, OTEL_ENDPOINT), some bare (APP_IMAGE, the
+# sidecar image refs). In a double-quoted scalar only '"' and '\' are special;
+# bare, whitespace or ':' would be. A value carrying '"', '\' or whitespace
 # would be emitted as YAML that parses to something other than what the
-# caller meant — refuse instead of guessing. Ports are integers, the exclude
-# list is integers separated by commas (what proxy-init accepts).
+# caller meant — refuse instead of guessing. The exclude list is integers
+# separated by commas (what proxy-init accepts).
 yaml_safe() {  # $1 = what it is (for the error), $2 = the value
   local unsafe=$'"\\'
   case "$2" in
@@ -126,159 +107,63 @@ yaml_safe() {  # $1 = what it is (for the error), $2 = the value
 }
 
 parse_inputs() {
-  EMIT="${EMIT:-manifest}"
+  # Knobs of the removed deploy-the-app-yourself mode (EMIT=manifest). A caller
+  # still passing one is running a stale recipe — refuse so the difference is
+  # loud, not silent. This script attaches lineage; it does not deploy apps.
+  local stale
+  for stale in IMAGE APP_PORT SVC_PORT ENV_VARS APP_COMMAND APP_RESOURCES \
+               PVC_NAME PVC_MOUNT WORKLOAD_TYPE WORKLOAD_PROTOCOL LABEL_PREFIX \
+               NO_PROPAGATE APP_ENTRYPOINT; do
+    if [ -n "${!stale:-}" ]; then
+      echo "error: $stale is not a knob — it was removed with the app-deployment (EMIT=manifest) mode." >&2
+      echo "       This script only attaches lineage to an EXISTING Deployment; the app itself" >&2
+      echo "       is deployed by its owner. See the header and README.md." >&2
+      exit 2
+    fi
+  done
+
+  EMIT="${EMIT:-patch}"
   NAME="${NAME:?set NAME}"
   NAMESPACE="${NAMESPACE:-team1}"
-  # NAME becomes object names AND the app.kubernetes.io/name label value, so it
-  # must satisfy both: lowercase RFC 1123 (dots allowed) within a label's 63
-  # chars. NAMESPACE is a DNS label. Both are then safe everywhere they are
+  # NAME becomes object names, so it must be a lowercase RFC 1123 name;
+  # NAMESPACE is a DNS label. Both are then safe everywhere they are
   # interpolated bare.
   if ! [[ "$NAME" =~ ^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$ ]]; then
-    echo "error: NAME='$NAME' must be a lowercase RFC 1123 name of at most 63 chars (it is also used as a label value)" >&2; exit 2
+    echo "error: NAME='$NAME' must be a lowercase RFC 1123 name of at most 63 chars" >&2; exit 2
   fi
   if ! [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
     echo "error: NAMESPACE='$NAMESPACE' is not a DNS label (lowercase alphanumerics and '-', max 63)" >&2; exit 2
   fi
   case "$EMIT" in
-    manifest) IMAGE="${IMAGE:?set IMAGE}" ;;
-    cm|patch) IMAGE="${IMAGE:-}" ;;
-    *) echo "error: EMIT must be manifest|cm|patch (got '$EMIT')" >&2; exit 2 ;;
+    patch|cm) ;;
+    *) echo "error: EMIT must be patch|cm (got '$EMIT')" >&2; exit 2 ;;
   esac
   SELF_ID="${SELF_ID:-$NAME}"
-  APP_PORT="${APP_PORT:-8000}"
-  SVC_PORT="${SVC_PORT:-8080}"
-  # The shim activates via env; the app command is never known here. A caller
-  # still passing a command-wrap knob is running a stale recipe — refuse so the
-  # difference is loud, not silent.
-  if [ -n "${APP_ENTRYPOINT:-}" ]; then
-    echo "error: APP_ENTRYPOINT is not a knob — the -otel image activates via" >&2
-    echo "       LINEAGE_PROPAGATE=1 (this script sets it) and the app's own" >&2
-    echo "       ENTRYPOINT/CMD runs untouched. Remove APP_ENTRYPOINT." >&2
-    exit 2
-  fi
-  ENV_VARS="${ENV_VARS:-}"
-  APP_COMMAND="${APP_COMMAND:-}"
-  APP_RESOURCES_DEFAULT='{ requests: { cpu: 100m, memory: 128Mi }, limits: { cpu: "1", memory: 1Gi } }'
-  APP_RESOURCES="${APP_RESOURCES:-$APP_RESOURCES_DEFAULT}"
+  APP_CONTAINER="${APP_CONTAINER:-}"
+  APP_IMAGE="${APP_IMAGE:-}"
   OUTBOUND_PORTS_EXCLUDE="${OUTBOUND_PORTS_EXCLUDE:-}"
-  PVC_NAME="${PVC_NAME:-}"
-  PVC_MOUNT="${PVC_MOUNT:-}"
   OTEL_ENDPOINT="${OTEL_ENDPOINT:-otel-collector.rossoctl-system.svc.cluster.local:4317}"
-  LABEL_PREFIX="${LABEL_PREFIX:-rossoctl.io}"
-  WORKLOAD_TYPE="${WORKLOAD_TYPE:-}"
-  WORKLOAD_PROTOCOL="${WORKLOAD_PROTOCOL:-a2a}"
   # Published images by default so the demo runs against a stock platform; point
   # these at locally-built tags when you build the sidecar from source.
   SIDECAR_IMAGE="${SIDECAR_IMAGE:-ghcr.io/rossoctl/cortex/authbridge-envoy:latest}"
   PROXY_INIT_IMAGE="${PROXY_INIT_IMAGE:-ghcr.io/rossoctl/cortex/proxy-init:latest}"
-  # Each toggle kills exactly one layer and nothing more.
-  NO_PROPAGATE="${NO_PROPAGATE:-0}"
   NO_EMIT="${NO_EMIT:-0}"
 
   local v
-  for v in SELF_ID OTEL_ENDPOINT IMAGE LABEL_PREFIX WORKLOAD_TYPE WORKLOAD_PROTOCOL PVC_NAME PVC_MOUNT; do
+  for v in SELF_ID OTEL_ENDPOINT APP_IMAGE SIDECAR_IMAGE PROXY_INIT_IMAGE; do
     yaml_safe "$v" "${!v}"
   done
-  for v in APP_PORT SVC_PORT; do
-    [[ "${!v}" =~ ^[0-9]+$ ]] || { echo "error: $v='${!v}' is not a port number" >&2; exit 2; }
-  done
+  # A container name is a DNS label (it is matched by name in the strategic
+  # merge — a wrong name silently patches nothing, but a malformed one would
+  # emit broken YAML).
+  if [ -n "$APP_CONTAINER" ] && ! [[ "$APP_CONTAINER" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
+    echo "error: APP_CONTAINER='$APP_CONTAINER' is not a valid container name (DNS label)" >&2; exit 2
+  fi
+  if [ -n "$APP_IMAGE" ] && [ -z "$APP_CONTAINER" ]; then
+    echo "error: APP_IMAGE needs APP_CONTAINER — the image lands on a container the patch must name" >&2; exit 2
+  fi
   [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([0-9]+(,[0-9]+)*)?$ ]] \
     || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated port list" >&2; exit 2; }
-  # The header promises a ONE-LINE flow mapping — enforce the shape. Contents
-  # stay the caller's own (garbage inside the braces still fails at kubectl),
-  # but a stray newline can no longer leak keys into the container spec.
-  if [[ "$APP_RESOURCES" == *$'\n'* ]] || ! [[ "$APP_RESOURCES" =~ ^\{.*\}$ ]]; then
-    echo "error: APP_RESOURCES must be a one-line YAML flow mapping '{ ... }' (got '${APP_RESOURCES}')" >&2; exit 2
-  fi
-  # The header says "both must be set" — enforce it. A caller who set one and
-  # typo'd the other would otherwise get a pod with no mount and no error.
-  if { [ -n "$PVC_NAME" ] && [ -z "$PVC_MOUNT" ]; } || { [ -z "$PVC_NAME" ] && [ -n "$PVC_MOUNT" ]; }; then
-    echo "error: PVC_NAME and PVC_MOUNT must be set together (got PVC_NAME='${PVC_NAME}', PVC_MOUNT='${PVC_MOUNT}')" >&2; exit 2
-  fi
-  local tok kv
-  for tok in $APP_COMMAND; do
-    yaml_safe "APP_COMMAND token" "$tok"
-  done
-  for kv in $ENV_VARS; do
-    if ! [[ "$kv" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
-      echo "error: ENV_VARS entry '$kv' is not KEY=VALUE (a value with whitespace?)" >&2; exit 2
-    fi
-    yaml_safe "ENV_VARS value for ${kv%%=*}" "${kv#*=}"
-  done
-}
-
-# Optional labels, emitted only when the caller asks for them — see the header.
-# Selectors key on app.kubernetes.io/name alone, which is already unique per
-# workload, so both labels are presentational and their absence changes nothing
-# functional. The same label lands at two YAML depths (object metadata vs pod
-# template), so each takes its indent as an argument instead of existing as
-# per-depth string variants.
-type_label() {  # $1 = indent width
-  [ -n "$WORKLOAD_TYPE" ] || return 0
-  printf '\n%*s%s/type: %s' "$1" '' "$LABEL_PREFIX" "$WORKLOAD_TYPE"
-}
-# Protocol label: a factual claim a platform UI reads, so it must be true —
-# an MCP tool must not advertise protocol.<prefix>/a2a. Defaults to a2a for
-# the common case; set WORKLOAD_PROTOCOL=mcp for MCP servers, or empty to
-# omit the label entirely. Presentational only, like the type label.
-proto_label() {  # $1 = indent width
-  [ -n "$WORKLOAD_PROTOCOL" ] || return 0
-  printf '\n%*sprotocol.%s/%s: ""' "$1" '' "$LABEL_PREFIX" "$WORKLOAD_PROTOCOL"
-}
-
-build_app_env() {
-  # The whole propagation switch is ONE env var: LINEAGE_PROPAGATE=1 wakes the
-  # hook baked into the -otel image, which pins the propagate-only posture
-  # itself (all exporters none, tracecontext+baggage propagators — as env
-  # DEFAULTS, so a deliberate override here still wins). Under NO_PROPAGATE=1
-  # the var is simply absent and the container runs exactly like the base
-  # image; nothing OTel-shaped is emitted into an unshimmed app's environment.
-  env_block=$(cat <<EOF
-            - { name: PORT, value: "${APP_PORT}" }
-            - { name: HOST, value: "0.0.0.0" }
-            # For the IMAGE's own command, not for the shim (which runs no
-            # launcher): the example agent images start through 'uv run
-            # --no-sync', and under a uid with no home directory that
-            # crash-loops on 'failed to create directory /.cache/uv'
-            # (observed). HOME=/tmp + UV_NO_CACHE sidesteps every cache-dir
-            # variant; harmless for images that do not launch via uv.
-            - { name: HOME, value: "/tmp" }
-            - { name: UV_NO_CACHE, value: "1" }
-EOF
-  )
-  if [ "$NO_PROPAGATE" != "1" ]; then
-    env_block="            - { name: LINEAGE_PROPAGATE,   value: \"1\" }
-${env_block}"
-  fi
-  # OTEL_SERVICE_NAME defaults to SELF_ID — the shim exports nothing, but an
-  # app that runs its OWN exporter then reports under its lineage identity.
-  # Skipped when the caller supplies one via ENV_VARS so the caller's value
-  # wins (no duplicate entry).
-  case " $ENV_VARS" in
-    *" OTEL_SERVICE_NAME="*) ;;
-    *) env_block="${env_block}
-            - { name: OTEL_SERVICE_NAME,     value: \"${SELF_ID}\" }" ;;
-  esac
-  local kv
-  for kv in $ENV_VARS; do
-    env_block="${env_block}
-            - { name: ${kv%%=*}, value: \"${kv#*=}\" }"
-  done
-}
-
-build_command() {
-  # Optional command override (see APP_COMMAND in the header) — emitted
-  # verbatim as command: — replaces the image ENTRYPOINT+CMD with the
-  # caller's tokens and nothing else; propagation still rides the env gate.
-  command_line=""
-  if [ -n "$APP_COMMAND" ]; then
-    local cmd_tokens="" tok
-    for tok in $APP_COMMAND; do
-      cmd_tokens="${cmd_tokens}\"${tok}\","
-    done
-    command_line="
-          command: [${cmd_tokens%,}]"
-  fi
 }
 
 build_proxy_env() {
@@ -288,31 +173,6 @@ build_proxy_env() {
     exclude_env="
             - name: OUTBOUND_PORTS_EXCLUDE
               value: \"${OUTBOUND_PORTS_EXCLUDE}\""
-  fi
-}
-
-build_pvc() {
-  # Optional shared PVC mounted into the app container (only if set).
-  # `kubectl apply` of the same PVC from several manifests is idempotent — a
-  # claim may be shared on purpose (writer + reader pods on single-node kind).
-  pvc_manifest=""; pvc_mount_yaml=""; pvc_volume_yaml=""
-  if [ -n "$PVC_NAME" ] && [ -n "$PVC_MOUNT" ]; then
-    pvc_manifest="---
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: ${PVC_NAME}
-  namespace: ${NAMESPACE}
-spec:
-  accessModes: [\"ReadWriteOnce\"]
-  resources: { requests: { storage: 100Mi } }"
-    pvc_mount_yaml="
-          volumeMounts:
-            - { name: share, mountPath: ${PVC_MOUNT} }"
-    pvc_volume_yaml="
-        - name: share
-          persistentVolumeClaim:
-            claimName: ${PVC_NAME}"
   fi
 }
 
@@ -331,7 +191,30 @@ build_plugin_entry() {
   fi
 }
 
-# ---- shared fragments (identical bytes in EMIT=manifest and EMIT=patch) ----
+build_app_patch() {
+  # The propagation switch on the app's own container, opt-in via
+  # APP_CONTAINER. Strategic merge keys both `containers` and `env` entries by
+  # name, so this adds/updates exactly LINEAGE_PROPAGATE (and the image when
+  # APP_IMAGE is given) and leaves everything else of the container alone.
+  # The whole switch is ONE env var: it wakes the hook baked into the -otel
+  # image (build-otel-shim.sh), which pins the propagate-only posture itself
+  # (all exporters none, tracecontext+baggage propagators — as env DEFAULTS,
+  # so a deliberate override in the Deployment still wins).
+  app_patch=""
+  if [ -n "$APP_CONTAINER" ]; then
+    app_patch="
+        - name: ${APP_CONTAINER}"
+    if [ -n "$APP_IMAGE" ]; then
+      app_patch="${app_patch}
+          image: ${APP_IMAGE}"
+    fi
+    app_patch="${app_patch}
+          env:
+            - { name: LINEAGE_PROPAGATE, value: \"1\" }"
+  fi
+}
+
+# ---- the sidecar fragments (the single source of every sidecar YAML byte) ----
 
 sidecar_container() {  # the envoy-proxy container (8-space list-item indent)
   cat <<EOF
@@ -408,7 +291,7 @@ sidecar_volumes() {  # envoy-config + the per-app runtime ConfigMap
 EOF
 }
 
-# ---- the four emittable objects ----
+# ---- the two emittable objects ----
 
 emit_configmap() {
   cat <<EOF
@@ -450,85 +333,7 @@ data:
 EOF
 }
 
-emit_service() {
-  cat <<EOF
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${NAME}$(type_label 4)$(proto_label 4)
-spec:
-  ports:
-    - name: http
-      port: ${SVC_PORT}
-      protocol: TCP
-      targetPort: ${APP_PORT}
-  selector:
-    app.kubernetes.io/name: ${NAME}
-  type: ClusterIP
-EOF
-}
-
-emit_deployment() {
-  cat <<EOF
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: ${NAME}
-  namespace: ${NAMESPACE}
-  labels:
-    app.kubernetes.io/name: ${NAME}$(type_label 4)
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: ${NAME}
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: ${NAME}$(type_label 8)$(proto_label 8)
-        # opt out of operator-injected sidecars: this manifest injects its own
-        # (auth-free, capture-only) sidecar below, and two would collide.
-        ${LABEL_PREFIX}/inject: disabled
-    spec:
-      securityContext:
-        seccompProfile: { type: RuntimeDefault }
-      containers:
-        # Normally no command: — the image's own ENTRYPOINT/CMD runs as
-        # built; the propagation shim (when present and gated on via env)
-        # attaches at interpreter startup, not by command rewrite. APP_COMMAND
-        # (multi-program images only) is the one exception and carries no
-        # wrapper either.
-        - name: agent
-          image: ${IMAGE}
-          imagePullPolicy: IfNotPresent${command_line}
-          # The app keeps the uid its image declares (root in some images, so
-          # runAsNonRoot is not forced here); it gets no capabilities and no
-          # privilege escalation regardless.
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop: ["ALL"]
-          ports:
-            - { containerPort: ${APP_PORT}, name: http }
-          env:
-${env_block}
-          resources: ${APP_RESOURCES}
-          readinessProbe:
-            tcpSocket: { port: ${APP_PORT} }
-            initialDelaySeconds: 5
-            periodSeconds: 5${pvc_mount_yaml}
-$(sidecar_container)
-      initContainers:
-$(proxy_init_container)
-      volumes:
-$(sidecar_volumes)${pvc_volume_yaml}
-EOF
-}
-
-emit_patch() {  # strategic merge: lists merge by name — the app container is untouched
+emit_patch() {  # strategic merge: lists merge by name — nothing already in the Deployment is touched
   cat <<EOF
 spec:
   template:
@@ -536,40 +341,24 @@ spec:
       initContainers:
 $(proxy_init_container)
       containers:
-$(sidecar_container)
+$(sidecar_container)${app_patch}
       volumes:
 $(sidecar_volumes)
 EOF
 }
 
-emit_manifest() {
-  cat <<EOF
-# GENERATED by demos/lineage/attach-lineage.sh — do not hand-edit; re-run.
-# app=${NAME} self_id=${SELF_ID} image=${IMAGE} propagate=$([ "$NO_PROPAGATE" = 1 ] && echo off || echo on) emit=$([ "$NO_EMIT" = 1 ] && echo off || echo on)${pvc_manifest}
----
-$(emit_configmap)
----
-$(emit_service)
----
-$(emit_deployment)
-EOF
-}
-
 emit() {
   case "$EMIT" in
-    cm)       emit_configmap ;;
-    patch)    emit_patch ;;
-    manifest) emit_manifest ;;
+    cm)    emit_configmap ;;
+    patch) emit_patch ;;
   esac
 }
 
 main() {
   parse_inputs        # every knob: read, default, validate — all refusals live here
-  build_app_env       # app env block: the gate var + uv fix + OTEL_SERVICE_NAME + ENV_VARS
-  build_command       # optional verbatim command: line from APP_COMMAND
   build_proxy_env     # optional OUTBOUND_PORTS_EXCLUDE env for proxy-init
-  build_pvc           # optional PVC manifest + mount + volume fragments
   build_plugin_entry  # the lineage-telemetry pipeline entry (empty under NO_EMIT=1)
-  emit                # dispatch: manifest | cm | patch
+  build_app_patch     # optional propagation switch on the app's own container
+  emit                # dispatch: patch | cm
 }
 main "$@"
