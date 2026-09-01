@@ -61,10 +61,11 @@
 # ConfigMap, and the sidecar + proxy-init images resolvable from the cluster
 # (see README.md "Prerequisites").
 #
-# Structure: main() at the bottom is the pipeline — read_inputs, then the four
-# preconditions (each a require_*/refuse_* function that exits before anything
-# is applied), the capture-only NOTE, then apply (ConfigMap first, patch, wait).
-# gen() is the one bridge to the generator.
+# Structure: main() at the bottom is the pipeline — read_inputs, preconditions
+# (four require_*/refuse_* checks, read-only, each exits before anything is
+# applied), the capture-only NOTE, then apply — the only function that writes
+# to the cluster (ConfigMap first, patch, wait). gen() is the one bridge to
+# the generator.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
@@ -157,13 +158,17 @@ apply() {
   echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"
 }
 
-main() {
-  read_inputs             # DEPLOY required; the rest defaulted or inherited
+preconditions() {  # read-only: each either returns or exits — nothing is applied yet
   require_deployment      # the target exists
   require_envoy_config    # the platform's Envoy config is in the namespace
   refuse_port_collision   # no sidecar there already, app not on a sidecar port
   require_app_container   # APP_CONTAINER, if given, is a real container
+}
+
+main() {
+  read_inputs             # DEPLOY required; the rest defaulted or inherited
+  preconditions           # four checks that can only stop the script
   note_capture_only       # no APP_CONTAINER → say what that means, once
-  apply                   # cm → patch → rollout
+  apply                   # the only cluster writes: cm → patch → rollout
 }
 main "$@"
