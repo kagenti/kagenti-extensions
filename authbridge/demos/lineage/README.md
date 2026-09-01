@@ -141,11 +141,17 @@ an unactivated `-otel` image behaves byte-for-byte like its base —
 `build-otel-shim.sh` attests both halves of that claim on every bake, before
 the image is ever loaded.
 
-An app that configures its **own** exporter in code keeps exporting exactly as
-before; the shim silences only its own auto-instrumentation (`setdefault`, so
-an explicit `OTEL_*_EXPORTER` value in the image or the Deployment always
-wins — the bake attestation accepts either). Nothing about the app's telemetry
-changes.
+An app that already configures OpenTelemetry **itself** is outside the shim's
+envelope, and the bake interlock cannot see that (it probes for instrumentors,
+not for SDK use). The hook's `initialize()` installs the global
+`TracerProvider` first, so a provider the app sets in code is rejected
+(`Overriding of current TracerProvider is not allowed`) and the app's own
+exporter goes silent. An `OTEL_*_EXPORTER` the app sets in its environment
+wins over the hook's `none` (`setdefault`), so the shim's own server and client
+spans then flow to the app's backend — and `otlp` needs an exporter package
+the shim does not install, in which case the hook fails at startup and
+propagation stays off. For such an app attach capture only (no
+`APP_CONTAINER`) and let its own instrumentation carry `traceparent`.
 
 ---
 
@@ -295,7 +301,9 @@ The shim is generic across the mainstream Python stack, not universal:
 - The entry caller supplies the first `traceparent`. Nothing here seeds a root
   for an untraced entry point.
 - **Not covered:** work handed to a `multiprocessing` child or a `subprocess`,
-  and threads started at app boot rather than inside a request.
+  threads started at app boot rather than inside a request, and an app that
+  configures the OpenTelemetry SDK itself — in code or through `OTEL_*`
+  environment variables (see "Why the shim is needed").
 - The base image has a shell and coreutils (`Dockerfile.otel-shim` runs one
   `RUN` step to place the hook); a distroless base fails that step.
 
