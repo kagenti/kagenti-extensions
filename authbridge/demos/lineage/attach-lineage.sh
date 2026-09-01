@@ -184,6 +184,11 @@ parse_inputs() {
   done
   [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([0-9]+(,[0-9]+)*)?$ ]] \
     || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated port list" >&2; exit 2; }
+  # The header says "both must be set" — enforce it. A caller who set one and
+  # typo'd the other would otherwise get a pod with no mount and no error.
+  if { [ -n "$PVC_NAME" ] && [ -z "$PVC_MOUNT" ]; } || { [ -z "$PVC_NAME" ] && [ -n "$PVC_MOUNT" ]; }; then
+    echo "error: PVC_NAME and PVC_MOUNT must be set together (got PVC_NAME='${PVC_NAME}', PVC_MOUNT='${PVC_MOUNT}')" >&2; exit 2
+  fi
   local tok kv
   for tok in $APP_COMMAND; do
     yaml_safe "APP_COMMAND token" "$tok"
@@ -196,30 +201,23 @@ parse_inputs() {
   done
 }
 
-build_labels() {
-  # Emitted only when the caller asks for it — see the header. Selectors key on
-  # app.kubernetes.io/name alone, which is already unique per workload, so the
-  # label is presentational and its absence changes nothing functional.
-  type_label=""
-  type_label_8=""
-  if [ -n "$WORKLOAD_TYPE" ]; then
-    type_label="
-    ${LABEL_PREFIX}/type: ${WORKLOAD_TYPE}"
-    type_label_8="
-        ${LABEL_PREFIX}/type: ${WORKLOAD_TYPE}"
-  fi
-  # Protocol label: a factual claim a platform UI reads, so it must be true —
-  # an MCP tool must not advertise protocol.<prefix>/a2a. Defaults to a2a for
-  # the common case; set WORKLOAD_PROTOCOL=mcp for MCP servers, or empty to
-  # omit the label entirely. Presentational only, like the type label.
-  proto_label=""
-  proto_label_8=""
-  if [ -n "$WORKLOAD_PROTOCOL" ]; then
-    proto_label="
-    protocol.${LABEL_PREFIX}/${WORKLOAD_PROTOCOL}: \"\""
-    proto_label_8="
-        protocol.${LABEL_PREFIX}/${WORKLOAD_PROTOCOL}: \"\""
-  fi
+# Optional labels, emitted only when the caller asks for them — see the header.
+# Selectors key on app.kubernetes.io/name alone, which is already unique per
+# workload, so both labels are presentational and their absence changes nothing
+# functional. The same label lands at two YAML depths (object metadata vs pod
+# template), so each takes its indent as an argument instead of existing as
+# per-depth string variants.
+type_label() {  # $1 = indent width
+  [ -n "$WORKLOAD_TYPE" ] || return 0
+  printf '\n%*s%s/type: %s' "$1" '' "$LABEL_PREFIX" "$WORKLOAD_TYPE"
+}
+# Protocol label: a factual claim a platform UI reads, so it must be true —
+# an MCP tool must not advertise protocol.<prefix>/a2a. Defaults to a2a for
+# the common case; set WORKLOAD_PROTOCOL=mcp for MCP servers, or empty to
+# omit the label entirely. Presentational only, like the type label.
+proto_label() {  # $1 = indent width
+  [ -n "$WORKLOAD_PROTOCOL" ] || return 0
+  printf '\n%*sprotocol.%s/%s: ""' "$1" '' "$LABEL_PREFIX" "$WORKLOAD_PROTOCOL"
 }
 
 build_app_env() {
@@ -454,7 +452,7 @@ metadata:
   name: ${NAME}
   namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: ${NAME}${type_label}${proto_label}
+    app.kubernetes.io/name: ${NAME}$(type_label 4)$(proto_label 4)
 spec:
   ports:
     - name: http
@@ -475,7 +473,7 @@ metadata:
   name: ${NAME}
   namespace: ${NAMESPACE}
   labels:
-    app.kubernetes.io/name: ${NAME}${type_label}
+    app.kubernetes.io/name: ${NAME}$(type_label 4)
 spec:
   replicas: 1
   selector:
@@ -484,7 +482,7 @@ spec:
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: ${NAME}${type_label_8}${proto_label_8}
+        app.kubernetes.io/name: ${NAME}$(type_label 8)$(proto_label 8)
         # opt out of operator-injected sidecars: this manifest injects its own
         # (auth-free, capture-only) sidecar below, and two would collide.
         ${LABEL_PREFIX}/inject: disabled
@@ -561,7 +559,6 @@ emit() {
 
 main() {
   parse_inputs        # every knob: read, default, validate — all refusals live here
-  build_labels        # optional type/protocol label fragments (two indent depths)
   build_app_env       # app env block: the gate var + uv fix + OTEL_SERVICE_NAME + ENV_VARS
   build_command       # optional verbatim command: line from APP_COMMAND
   build_proxy_env     # optional OUTBOUND_PORTS_EXCLUDE env for proxy-init
