@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Given a Deployment's NAME (and, optionally, which of its containers to switch
+# propagation on and with which image), print ONE of the two objects that
+# attach lineage to it: the sidecar's config (EMIT=cm) or the strategic-merge
+# patch that bolts the sidecar onto the Deployment (EMIT=patch). Apply both
+# and the app's traffic flows through the lineage plugin.
+#
 # Lineage attachment generator. Emits (to stdout) the YAML that attaches the
 # AuthBridge lineage sidecar to an EXISTING Deployment — and nothing else. It
 # does not create, own or describe the application: no Deployment, no Service,

@@ -327,6 +327,31 @@ the human judgment explicit and greppable.
 
 ## Files
 
+Two moments, seven files. The bake happens once per image, on a laptop; the
+attach happens once per Deployment, against the cluster. The only thing that
+crosses from one to the other is an image reference.
+
+```
+BAKE — once per app image (laptop)
+  build-otel-shim.sh <app>:latest
+    ├─ sources container-runtime.sh        podman-or-docker, kind load
+    ├─ builds  Dockerfile.otel-shim        which installs lineage-propagate-hook.py
+    └─ output  <app>-otel:latest           inert until LINEAGE_PROPAGATE=1
+
+ATTACH — once per Deployment (cluster)
+  sidecar-patch.sh  DEPLOY=<name> [APP_CONTAINER=<container> APP_IMAGE=<app>-otel:latest]
+    ├─ checks   Deployment exists · envoy-config ConfigMap present ·
+    │           no 15123/15124/9090 declared · APP_CONTAINER is a real container
+    ├─ runs     attach-lineage.sh EMIT=cm     → kubectl apply        (the sidecar's config)
+    ├─ runs     attach-lineage.sh EMIT=patch  → kubectl patch deploy (proxy-init, envoy-proxy,
+    │                                            volumes, + the switch on APP_CONTAINER)
+    └─ waits    kubectl rollout status
+
+  or, without sidecar-patch.sh — bring your own manifests:
+    run attach-lineage.sh twice yourself, commit both files,
+    list the cm under resources: and the patch under patches:, kubectl apply -k
+```
+
 | file | what it is |
 |---|---|
 | `attach-lineage.sh` | **The one generator.** Emits every YAML byte of the attachment: `EMIT=patch` (default — the sidecar pieces as a strategic-merge patch, plus the optional `APP_CONTAINER` propagation switch), `EMIT=cm` (the plugin ConfigMap). Env-driven; writes to stdout; never touches the cluster. Every input is validated or refused — including the knobs of the removed app-deployment mode, which fail loudly rather than being ignored. |
