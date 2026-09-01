@@ -3,8 +3,9 @@
 ## 1. Purpose
 
 This document specifies an evaluation framework for AIAC, designed independently
-of the evaluation suite that currently exists at `test/integration/eval/`
-(the "legacy suite"). The legacy suite's *implementation* — Keycloak
+of the evaluation suite that previously lived at `test/integration/eval/` and
+has since been relocated to `aiac/eval/` (see §11) (the "legacy suite"). The
+legacy suite's *implementation* — Keycloak
 provisioning helpers, the `opa eval` invocation wrapper, the synthetic
 Role/Scope fixture builder, and its report-generation `conftest.py` hooks —
 is reused wherever it already covers something this spec calls for; the
