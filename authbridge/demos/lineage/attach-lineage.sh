@@ -123,11 +123,14 @@ parse_inputs() {
   if [ -n "$APP_IMAGE" ] && [ -z "$APP_CONTAINER" ]; then
     echo "error: APP_IMAGE needs APP_CONTAINER — the image lands on a container the patch must name" >&2; exit 2
   fi
-  [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([0-9]+(,[0-9]+)*)?$ ]] \
-    || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated port list" >&2; exit 2; }
+  # Ports exactly as proxy-init hands them to iptables: no leading zero (iptables
+  # reads `010` as octal and refuses `0080`), at most five digits (a longer
+  # number overflows the `-gt` test below), then the range.
+  [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([1-9][0-9]{0,4}(,[1-9][0-9]{0,4})*)?$ ]] \
+    || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated list of ports (1-65535, no leading zeros)" >&2; exit 2; }
   local port
   for port in ${OUTBOUND_PORTS_EXCLUDE//,/ }; do
-    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+    if [ "$port" -gt 65535 ]; then
       echo "error: OUTBOUND_PORTS_EXCLUDE has '$port', which is not a port (1-65535)" >&2; exit 2
     fi
   done
