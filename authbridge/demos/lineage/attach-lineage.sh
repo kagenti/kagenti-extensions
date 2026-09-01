@@ -334,7 +334,15 @@ EOF
 }
 
 emit_patch() {  # strategic merge: lists merge by name — nothing already in the Deployment is touched
+  # apiVersion/kind/metadata make the patch a complete resource: kustomize
+  # refuses a bare `spec:` fragment ("unable to parse SM or JSON patch"),
+  # and `kubectl patch` merges the identifying fields harmlessly.
   cat <<EOF
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${NAME}
+  namespace: ${NAMESPACE}
 spec:
   template:
     spec:
