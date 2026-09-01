@@ -184,6 +184,12 @@ parse_inputs() {
   done
   [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([0-9]+(,[0-9]+)*)?$ ]] \
     || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated port list" >&2; exit 2; }
+  # The header promises a ONE-LINE flow mapping — enforce the shape. Contents
+  # stay the caller's own (garbage inside the braces still fails at kubectl),
+  # but a stray newline can no longer leak keys into the container spec.
+  if [[ "$APP_RESOURCES" == *$'\n'* ]] || ! [[ "$APP_RESOURCES" =~ ^\{.*\}$ ]]; then
+    echo "error: APP_RESOURCES must be a one-line YAML flow mapping '{ ... }' (got '${APP_RESOURCES}')" >&2; exit 2
+  fi
   # The header says "both must be set" — enforce it. A caller who set one and
   # typo'd the other would otherwise get a pod with no mount and no error.
   if { [ -n "$PVC_NAME" ] && [ -z "$PVC_MOUNT" ]; } || { [ -z "$PVC_NAME" ] && [ -n "$PVC_MOUNT" ]; }; then
