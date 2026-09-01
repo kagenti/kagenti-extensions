@@ -33,9 +33,10 @@ USER root
 # uv nor pip in its runtime layer.
 COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5 /uv /usr/local/bin/uv
 # One contrib release for everything, so a bake never silently upgrades the
-# OTel set under an app. -distro is the SDK; the seven others are the server
-# (starlette/asgi/fastapi) and client (httpx/requests/aiohttp) instrumentors
-# build-otel-shim.sh's interlock probes for — keep the two lists in sync.
+# OTel set under an app. -distro is the SDK; the seven others — server
+# (starlette/asgi/fastapi), client (httpx/requests/aiohttp) and -threading —
+# are the instrumentors build-otel-shim.sh's interlock probes for; keep the
+# two lists in sync.
 # `-threading` is load-bearing: OTel context is contextvars-based and does not
 # cross run_in_executor / ThreadPoolExecutor on its own; without it the LLM or
 # tool call made from a worker thread fragments out of its caller's trace.
