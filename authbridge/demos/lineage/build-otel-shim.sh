@@ -1,53 +1,37 @@
 #!/usr/bin/env bash
-# Build the GENERALIZED propagate-only OTEL shim on top of any Python app image
-# and load it into the kind cluster. Normally only the base image changes per
-# app: the two build inputs a human used to transcribe (the app's python, the
-# app's UID) are DETECTED from the image itself, and the app's command is not
-# an input at all — the shim activates through the environment
-# (LINEAGE_PROPAGATE=1, see Dockerfile.otel-shim), never by rewriting CMD.
+# build-otel-shim.sh — bake the propagate-only OTel shim onto a Python app
+# image and load it into kind. Only the base image changes per app: the
+# interpreter and uid:gid are DETECTED from the image, and the app's command is
+# never touched — the shim activates through the environment
+# (LINEAGE_PROPAGATE=1, see Dockerfile.otel-shim).
 #
 # Usage:
 #   ./build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]
-#
-#   venv-python / app-uid are ESCAPE HATCHES: pass them only when detection
-#   picks the wrong interpreter or user (e.g. an image carrying two pythons).
-#   An explicit value is used as-is, unprobed except by the interlock.
-#
-#   Every probe runs the (unaudited) app image with --network=none: the probes
-#   need neither network nor a writable filesystem.
+#   venv-python / app-uid are escape hatches for when detection picks wrong;
+#   an explicit value is used as-is.
 #
 # Env:
-#   FORCE_BAKE=1     override the refuse-to-bake interlock (see below)
-#   SELF_ACTIVATE=1  bake LINEAGE_PROPAGATE=1 INTO the image, for workloads
-#                    whose Deployment you cannot edit (operator/Helm-owned):
-#                    pointing the owner at the stamped image is then the whole
-#                    change. Default images stay inert and are activated by
-#                    the Deployment env (attach-lineage.sh).
-#   NO_KIND_LOAD=1   build + attest only; skip the kind cluster load (CI /
-#                    offline use)
+#   FORCE_BAKE=1     override the refuse-to-bake interlock
+#   SELF_ACTIVATE=1  bake LINEAGE_PROPAGATE=1 INTO the image — for workloads
+#                    whose Deployment you cannot edit. Default images stay
+#                    inert and are activated by the Deployment env.
+#   NO_KIND_LOAD=1   build + attest only (CI / offline)
 #
-# Examples:
-#   # app image already loaded as docker.io/library/a2a_currency_converter:latest
-#   ./build-otel-shim.sh a2a_currency_converter:latest
-#   # -> builds+attests+loads docker.io/library/a2a_currency_converter-otel:latest
+# Every probe runs the (unaudited) app image with --network=none.
+# container-runtime.sh picks podman or docker (override: CONTAINER_TOOL).
 #
-# Runtime-agnostic: container-runtime.sh picks docker or podman (override with
-# CONTAINER_TOOL) and kind_load does the right load per runtime.
-#
-# Structure: main() at the bottom is the pipeline — each phase is a function,
-# each phase owns the globals it sets, and a failed phase exits the script
-# (3 = image refused / outside the envelope, 4 = attestation failed).
+# Structure: main() at the bottom is the pipeline; each phase is a function
+# and a failed phase exits (3 = image refused, 4 = attestation failed).
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "${SCRIPT_DIR}/container-runtime.sh"
 
 parse_args() {
   BASE_IMAGE="${1:?usage: build-otel-shim.sh <base-image> [wrapper-tag] [venv-python] [app-uid[:gid]]}"
-  # derive default wrapper tag: strip registry/path + tag, append -otel
+  # default wrapper tag: <base name>-otel:latest
   local base_short base_name
   base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
   WRAPPER_TAG="${2:-${base_name}-otel:latest}"
-  # a tag is required downstream (kind_load and publish() take the full ref)
   case "${WRAPPER_TAG##*/}" in *:*) ;; *) WRAPPER_TAG="${WRAPPER_TAG}:latest" ;; esac
   VENV_PYTHON="${3:-}"
   APP_UID="${4:-}"
@@ -57,26 +41,21 @@ parse_args() {
   SELF_ACTIVATE="${SELF_ACTIVATE:-0}"
   NO_KIND_LOAD="${NO_KIND_LOAD:-0}"
 
-  # Normalize the base image to the docker.io/library/ name kind resolves
-  # against, unless a registry was already given.
+  # a bare name resolves under docker.io/library/
   case "$BASE_IMAGE" in
     */*) base_ref="$BASE_IMAGE" ;;
     *)   base_ref="docker.io/library/${BASE_IMAGE}" ;;
   esac
 }
 
-# ---- detect the two per-image build inputs ----
-# The refuse-to-bake principle applied to the bake's own inputs: everything
-# needed is IN the image, so probe it instead of trusting a transcription.
+# The two per-image build inputs are IN the image — probe it, never transcribe.
 runs_python() {  # $1 = candidate interpreter path/name
   "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$1" "$base_ref" -c 'import sys' >/dev/null 2>&1
 }
 
 detect_python() {  # sets VENV_PYTHON (validates it when given explicitly)
   if [ -z "$VENV_PYTHON" ]; then
-    # Ordered candidates: the environment the image itself declares first, then
-    # the common venv layouts, then a python3 on PATH (pip/poetry/distro-python
-    # images — squarely in the envelope, no venv at all).
+    # The env the image declares, then the common venv layouts, then PATH.
     local candidates virtual_env c
     candidates=()
     virtual_env="$("$CONTAINER_TOOL" inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$base_ref" \
@@ -105,9 +84,8 @@ detect_python() {  # sets VENV_PYTHON (validates it when given explicitly)
 detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
   local config_user_full=""
   if [ -z "$APP_UID" ]; then
-    # Restore exactly the user the base image declared — including root (empty
-    # Config.User) — instead of assuming an ecosystem convention. A named user
-    # is resolved to its numeric uid inside the image itself.
+    # Exactly the user the base declared (root when empty); a named user is
+    # resolved to its uid inside the image.
     local config_user
     config_user_full="$("$CONTAINER_TOOL" inspect --format '{{.Config.User}}' "$base_ref")"
     config_user="${config_user_full%%:*}"
@@ -123,9 +101,8 @@ detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
     echo ">> detected app user: uid=${APP_UID} (Config.User='${config_user_full:-<root>}')"
   fi
   if [ -z "$APP_GID" ]; then
-    # The gid the base actually ran with: an explicit `USER uid:gid`, else the
-    # primary gid the runtime gives the declared user (0 when the user has no
-    # passwd entry — which is what the base image ran as, so it is reproduced).
+    # An explicit `USER uid:gid`, else the primary gid the runtime gives that
+    # user (0 without a passwd entry — which is what the base ran as).
     case "$config_user_full" in
       *:*) APP_GID="${config_user_full#*:}" ;;
       *)   APP_GID="$("$CONTAINER_TOOL" run --rm --network=none --entrypoint id "$base_ref" -g 2>/dev/null)" || APP_GID=0 ;;
@@ -134,37 +111,15 @@ detect_user() {  # sets APP_UID and APP_GID (either may be given explicitly)
   fi
 }
 
-# ---- refuse-to-bake interlock ----
-# Baking the shim is safe ONLY for an in-envelope image that is not already
-# auto-instrumented. That judgment must not depend on a human getting a config
-# entry right, so probe the image itself — sufficient, because no entrypoint
-# can activate packages the image lacks.
-#
-# What the probes can and cannot decide (measured across a mixed set of
-# example agent and tool images):
-#   - a runnable python IS the envelope test — a self-instrumenting app
-#     correctly lands in sidecar-only here.
-#   - the refusal test is "would wrapping DOUBLE-instrument?", so it asks
-#     exactly that: is any of the instrumentors this shim installs already
-#     present? Testing for the `opentelemetry.instrumentation` package instead
-#     is far too broad — that namespace exists whenever the *base*
-#     `opentelemetry-instrumentation` package is installed, which arrives as a
-#     transitive dependency of anything OTel-adjacent and brings no library
-#     instrumentation with it. An app carrying only the base package needs the
-#     shim and must not be refused.
-#   - bare SDK/exporter presence is NOT a refusal signal: a2a-sdk ships both
-#     as dormant transitive deps on every stock agent, and the wrap is proven
-#     safe on them (exporters stay off; the shim never sets an endpoint).
-#     An in-envelope app that ACTIVATES its SDK in code is not statically
-#     detectable; deciding that needs a runtime probe, which this does not do.
-# FORCE_BAKE=1 overrides, turning the implicit human judgment into an
-# explicit, greppable one.
+# The interlock asks exactly "would wrapping DOUBLE-instrument?": is any of the
+# seven instrumentors this shim installs already present? Not the
+# `opentelemetry.instrumentation` namespace (a transitive dep of anything
+# OTel-adjacent, no library instrumentation in it) and not a dormant SDK
+# (a2a-sdk ships one on every stock agent) — neither is a refusal signal. An
+# app that activates its SDK in code is not statically detectable.
 refuse_already_instrumented() {
   [ "$FORCE_BAKE" = "1" ] && return 0
-  # The seven this shim installs; presence of ANY means a wrap would stack a
-  # second instrumentor on the same library. Keep this list in sync with the
-  # instrumentor packages in Dockerfile.otel-shim's install RUN (everything
-  # there except opentelemetry-distro, which is the SDK, not an instrumentor).
+  # keep in sync with Dockerfile.otel-shim's install RUN (all but -distro)
   local already
   if already=$("$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$base_ref" -c '
 import importlib.util as u
@@ -180,11 +135,7 @@ raise SystemExit(0 if found else 1)' 2>/dev/null); then
     echo "  -> FORCE_BAKE=1 overrides if you know the wrap is safe." >&2
     exit 3
   fi
-  # The hook itself must not be double-baked: a second bake would leave two
-  # .pth entries importing the same module (harmless but wrong) and marks the
-  # input as an -otel image, not a base. An app's own sitecustomize is NOT
-  # probed — the .pth hook coexists with sitecustomize; only a same-named
-  # module conflicts.
+  # An already-baked -otel image carries the hook; refuse to bake it twice.
   if "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$base_ref" -c '
 import importlib.util as u
 raise SystemExit(0 if u.find_spec("_lineage_propagate") else 1)' >/dev/null 2>&1; then
@@ -205,17 +156,9 @@ build_image() {
     -t "${WRAPPER_TAG}" "${SCRIPT_DIR}"
 }
 
-# ---- post-bake attestation ----
-# The bake proves itself before anything is loaded or deployed. Two probes on
-# the image just built:
-#   inert  — gate off: not a single opentelemetry module may load. The -otel
-#            image must behave exactly like its base until activated.
-#   active — gate on: the hook must have initialized the SDK, the exporter
-#            selection must be explicit (the hook's `none` default, or a
-#            value the base image itself declares — an explicit env value
-#            wins over the hook by design), and the propagator must actually
-#            inject a traceparent. This is the in-process half of
-#            propagation proven end-to-end, per image, at build time.
+# Attestation: the bake proves itself before anything is loaded. Gate off, not
+# one opentelemetry module may load; gate on, the hook ran, the exporter
+# selection is explicit, and the propagator injects a traceparent.
 verify_inert() {
   if ! "$CONTAINER_TOOL" run --rm --network=none --entrypoint "$VENV_PYTHON" "$WRAPPER_TAG" -c '
 import sys
@@ -250,9 +193,8 @@ self_activate() {  # optional: bake the activation in
 }
 
 publish() {
-  # A bare wrapper tag is aliased under docker.io/library so containerd
-  # resolves the name in manifests; a registry-qualified one is already
-  # resolvable and is used as is (same rule as base_ref in parse_args).
+  # A bare tag is aliased under docker.io/library/ so kind resolves it;
+  # a registry-qualified one is used as is.
   local alias_ref
   case "$WRAPPER_TAG" in
     */*) alias_ref="$WRAPPER_TAG" ;;
@@ -280,14 +222,14 @@ publish() {
 }
 
 main() {
-  parse_args "$@"               # args + env -> globals; derive wrapper tag, normalize refs
-  detect_python                 # probe the image for its interpreter (or validate arg 3)
-  detect_user                   # probe uid:gid from Config.User / in-image id
-  refuse_already_instrumented   # a wrap would double-instrument, or already baked (exit 3)
-  build_image                   # build Dockerfile.otel-shim with the detected build-args
-  verify_inert                  # gate off: not one otel module may load (exit 4)
-  verify_propagates             # gate on: hook up, exporter explicit, traceparent injected (exit 4)
-  self_activate                 # SELF_ACTIVATE=1 only: bake the gate var into the image
-  publish                       # alias under docker.io/library, kind-load, print the honest NOTE
+  parse_args "$@"               # args + env → globals
+  detect_python                 # the app's interpreter, probed (or arg 3)
+  detect_user                   # uid:gid, probed (or arg 4)
+  refuse_already_instrumented   # would double-instrument, or already baked → exit 3
+  build_image                   # Dockerfile.otel-shim with the detected build-args
+  verify_inert                  # gate off: nothing OTel loads → else exit 4
+  verify_propagates             # gate on: hook up, traceparent injected → else exit 4
+  self_activate                 # SELF_ACTIVATE=1 only
+  publish                       # alias, kind-load, print the NOTE
 }
 main "$@"

@@ -1,80 +1,46 @@
 # Propagate-only OpenTelemetry shim for an uninstrumented Python app image.
 #
-# Neither the app's source nor its command is touched. OpenTelemetry
-# auto-instrumentation is layered ON TOP of the app image so the app PROPAGATES
-# the W3C traceparent (extract on the inbound ASGI/Starlette/FastAPI request,
-# inject on the outbound httpx/requests/aiohttp call) — nothing more. Spans are
-# NOT exported (the activation hook pins all three exporters to `none`), so the
-# shim adds nothing to your telemetry backend; only the traceparent header flows
-# through the app to the sidecar, which does the actual capture.
+# Auto-instrumentation is layered ON TOP of the app image so the app carries
+# the W3C traceparent through itself: extract on the inbound ASGI/Starlette/
+# FastAPI request, inject on the outbound httpx/requests/aiohttp call. Nothing
+# is exported (the hook pins every exporter to `none`); the sidecar does the
+# capture. Neither the app's source nor its command is touched.
 #
-# ACTIVATION IS ENVIRONMENT, NOT COMMAND. The shim installs a site-packages
-# hook (`.pth` + `_lineage_propagate.py`, see lineage-propagate-hook.py) that
-# runs stock auto-instrumentation at interpreter startup — but ONLY when
-# LINEAGE_PROPAGATE=1 is in the environment. Without that variable the baked
-# image behaves exactly like its base. The image's own ENTRYPOINT/CMD is never
-# rewritten and no launcher is prepended, which is the same attach shape as
-# Java (JAVA_TOOL_OPTIONS) and Node (NODE_OPTIONS): the Deployment sets one
-# env var (attach-lineage.sh does it), or `SELF_ACTIVATE=1 build-otel-shim.sh`
-# bakes the var in for workloads whose Deployment you cannot edit.
+# Activation is environment, not command: a site-packages hook (`.pth` +
+# `_lineage_propagate.py`, see lineage-propagate-hook.py) runs stock
+# auto-instrumentation at interpreter start ONLY when LINEAGE_PROPAGATE=1 is
+# set — the same attach shape as JAVA_TOOL_OPTIONS / NODE_OPTIONS. Without it
+# the baked image behaves exactly like its base.
 #
-# The instrumentors target LIBRARIES, not the app. Auto-instrumentation
-# activates whichever of these the app actually imports, so the SAME image
-# recipe works across every app whose server is ASGI/Starlette/FastAPI and
-# whose client is httpx / requests / aiohttp — the mainstream Python A2A/MCP
-# stack.
+# One recipe for every app: instrumentors target libraries, and only the ones
+# the app imports activate.
 #
-# Build (from authbridge/demos/lineage; normally only BASE_IMAGE changes per
-# app — build-otel-shim.sh detects VENV_PYTHON and APP_UID from the image):
-#   podman build -f Dockerfile.otel-shim \
-#     --build-arg BASE_IMAGE=docker.io/library/<app>:latest \
-#     -t <app>-otel:latest .
-# Prefer build-otel-shim.sh: it detects the build-args, refuses images it
-# cannot safely wrap, attests the result, and kind-loads it.
+# Build with build-otel-shim.sh (detects the build-args, refuses images it
+# cannot safely wrap, attests the result, kind-loads it). Direct:
+#   podman build -f Dockerfile.otel-shim --build-arg BASE_IMAGE=<app> -t <app>-otel:latest .
 #
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# The python whose environment the app actually runs in. build-otel-shim.sh
-# probes the image for it ($VIRTUAL_ENV, the common venv locations, python3 on
-# PATH) rather than trusting a human transcription; the default matches the
-# common uv-built layout for direct `podman build` use.
+# The python the app runs in, and the uid:gid it runs as — detected from the
+# image by build-otel-shim.sh; the defaults match the common uv-built layout.
 ARG VENV_PYTHON=/app/.venv/bin/python
-# The user and group the app runs as, read from the base image's own
-# Config.User (and, for the gid, the runtime's answer to `id -g`) by
-# build-otel-shim.sh — 0 for images that run as root. The defaults match the
-# usual agent-image UID for direct `podman build` use.
 ARG APP_UID=1001
 ARG APP_GID=0
 
 USER root
-# Bring our own uv, pinned by digest. Many app images ship uv on PATH, but an
-# image that builds its venv in a throwaway builder stage has NEITHER uv NOR
-# pip in the runtime layer (`uv venv` makes a pip-less venv). A copied static
-# uv makes this shim work on both without assuming the base carries a Python
-# installer. Overwriting an existing /usr/local/bin/uv is harmless.
+# Our own static uv, pinned by digest: a builder-stage image may have neither
+# uv nor pip in its runtime layer.
 COPY --from=ghcr.io/astral-sh/uv:0.9.24@sha256:816fdce3387ed2142e37d2e56e1b1b97ccc1ea87731ba199dc8a25c04e4997c5 /uv /usr/local/bin/uv
-# One layer, all mainstream instrumentors, pinned to one contrib release so a
-# rebuild is reproducible and a bake never silently upgrades the OTel set
-# under an app. opentelemetry-distro pulls the SDK; the rest are the
-# server/client library instrumentors. starlette+asgi cover the a2a-sdk
-# servers, fastapi+asgi the FastAPI tools, and httpx / requests /
-# aiohttp-client the three client libraries those apps call out with.
-#
-# `-threading` is load-bearing for frameworks that run the LLM/tool call in a
-# worker thread (`loop.run_in_executor`, ThreadPoolExecutor). OTel context is
-# contextvars-based and does NOT cross a thread boundary by default, so without
-# it the inbound trace is lost before the outbound call: that exchange carries
-# no stamp, records `lineage.parent.source=wire`, and fragments out of its
-# caller's trace. The threading instrumentor copies the active context across
-# `Thread.start` / `ThreadPoolExecutor.submit`, restoring propagation.
-#
-# `--system --break-system-packages` lets the same install land in a NON-venv
-# python (plain pip images, PEP 668-marked distro pythons). `--python` stays
-# the environment selector, so both flags are inert when the target IS a venv
-# (measured: identical install either way).
-# The seven instrumentors below (everything except opentelemetry-distro) are
-# exactly what build-otel-shim.sh's interlock probes for — keep the lists in sync.
+# One contrib release for everything, so a bake never silently upgrades the
+# OTel set under an app. -distro is the SDK; the seven others are the server
+# (starlette/asgi/fastapi) and client (httpx/requests/aiohttp) instrumentors
+# build-otel-shim.sh's interlock probes for — keep the two lists in sync.
+# `-threading` is load-bearing: OTel context is contextvars-based and does not
+# cross run_in_executor / ThreadPoolExecutor on its own; without it the LLM or
+# tool call made from a worker thread fragments out of its caller's trace.
+# `--system --break-system-packages` lets the install land in a non-venv
+# python too; both flags are inert when --python is a venv.
 ARG OTEL_CONTRIB_VERSION=0.65b0
 RUN uv pip install --no-cache --python ${VENV_PYTHON} --system --break-system-packages \
       "opentelemetry-distro==${OTEL_CONTRIB_VERSION}" \
@@ -85,11 +51,8 @@ RUN uv pip install --no-cache --python ${VENV_PYTHON} --system --break-system-pa
       "opentelemetry-instrumentation-requests==${OTEL_CONTRIB_VERSION}" \
       "opentelemetry-instrumentation-aiohttp-client==${OTEL_CONTRIB_VERSION}" \
       "opentelemetry-instrumentation-threading==${OTEL_CONTRIB_VERSION}"
-# The env-gated activation hook (see lineage-propagate-hook.py for the full
-# contract). Installed into the SAME environment the instrumentors landed in:
-# the `.pth` line makes `site` import it at every interpreter start, and the
-# module no-ops unless LINEAGE_PROPAGATE=1. `zz-` keeps it after other .pth
-# files; ordering is not load-bearing.
+# The hook, into the same environment: `site` imports every .pth at
+# interpreter start; the module no-ops unless LINEAGE_PROPAGATE=1.
 COPY lineage-propagate-hook.py /tmp/lineage-propagate-hook.py
 RUN sp="$(${VENV_PYTHON} -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')" \
  && install -m 0644 /tmp/lineage-propagate-hook.py "${sp}/_lineage_propagate.py" \

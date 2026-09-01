@@ -1,38 +1,20 @@
-"""Gated activation hook for the propagate-only OTel shim.
+"""Env-gated activation hook for the propagate-only OTel shim.
 
-Dockerfile.otel-shim installs this file into the app environment's
-site-packages as ``_lineage_propagate.py`` next to a one-line ``.pth`` file
-(``import _lineage_propagate``), so Python's ``site`` machinery imports it at
-interpreter startup — before any app code — for every process of that
-environment. That makes the shim attach through the ENVIRONMENT, the same way
-the Java agent (``JAVA_TOOL_OPTIONS``) and Node (``NODE_OPTIONS``) attach:
-the container's own ENTRYPOINT/CMD is never rewritten, and no human ever
-transcribes an app command.
+Dockerfile.otel-shim installs this as ``_lineage_propagate.py`` in the app
+environment's site-packages next to a one-line ``.pth``, so ``site`` imports
+it at every interpreter start, before any app code. The shim thus attaches
+through the environment (like ``JAVA_TOOL_OPTIONS`` / ``NODE_OPTIONS``); the
+container's command is never rewritten.
 
-The hook is inert unless ``LINEAGE_PROPAGATE=1`` is present in the
-environment, so the baked ``-otel`` image behaves byte-for-byte like its base
-image until a Deployment (attach-lineage.sh) or the image itself
-(``SELF_ACTIVATE=1`` bake) switches it on.
+Inert unless ``LINEAGE_PROPAGATE=1``. When active: pin the propagate-only
+posture as env *defaults* (every exporter ``none``, ``tracecontext,baggage``
+propagators — ``setdefault``, so a deliberate override still wins), then run
+stock auto-instrumentation via ``initialize()``; which instrumentors activate
+depends on what the app imports.
 
-When active it does exactly two things:
-
-1. Pins the shim's propagate-only identity as environment DEFAULTS: all
-   three signal exporters ``none`` (nothing is ever exported; only the W3C
-   ``traceparent`` header flows through the app to the sidecar) and the
-   ``tracecontext,baggage`` propagators. ``setdefault`` keeps a deliberate
-   operator override possible while making the safe posture the built-in one.
-
-2. Runs stock OpenTelemetry auto-instrumentation via the same
-   ``initialize()`` the ``opentelemetry-instrument`` launcher and the OTel
-   Kubernetes operator use. Which instrumentors activate is decided by what
-   the app actually imports, exactly as before.
-
-Failure policy: this hook must never take the app down. ``initialize()``
-already swallows its own exceptions; the guard below covers everything else
-(and a broken ``.pth`` line is itself non-fatal — ``site`` prints the error
-and continues). A hook failure means propagation is OFF and the trace
-fragments at this pod, visibly (``lineage.parent.source=wire``) — absent
-lineage, never wrong lineage.
+Failure policy: never take the app down. A hook failure means propagation is
+OFF and the trace fragments at this pod, visibly (``parent.source=wire``) —
+absent lineage, never wrong lineage.
 """
 
 import os
