@@ -299,15 +299,11 @@ func foldOpenAIFrame(frame []byte, state *inferenceStreamState, ext *pipeline.In
 			ext.FinishReason = c.FinishReason
 		}
 	}
-	// Copy the three wire-backed counts field by field rather than assigning
-	// the whole struct. inferenceUsage doubles as the dialect-neutral
-	// accumulator and its two cache fields are json:"-", so they are always
-	// zero in a freshly decoded chunk — a whole-struct assignment would clear
-	// whatever the accumulator held. Nothing on the OpenAI path fills them
-	// today, which is precisely why that clobber would be silent when
-	// something does. TotalTokens is taken off the wire rather than recomputed:
-	// the provider reports it, and it may legitimately differ from
-	// prompt+completion.
+	// OpenAI streams cumulative usage: each usage-bearing chunk restates
+	// the full totals, so replacing state.usage with the latest chunk's
+	// neutral form is correct. Gate on TotalTokens > 0 so chunks with no
+	// usage block (every non-final chunk) don't clear an accumulator that
+	// a prior chunk populated.
 	if chunk.Usage.TotalTokens > 0 {
 		state.usage = chunk.Usage.toNeutral()
 		state.hasUsage = true
@@ -376,8 +372,15 @@ func parseInferenceJSON(body []byte, ext *pipeline.InferenceExtension) {
 // parseInferenceSSE concatenates content deltas across SSE events and captures
 // the last finish_reason and usage block (sent when stream_options.include_usage
 // is set). The stream terminates with a "data: [DONE]" marker which is skipped.
+//
+// OpenAI streams cumulative usage: each usage-bearing chunk restates the full
+// totals, so the latest chunk's neutral form is authoritative. Accumulate into
+// a local TokenUsage and Fill once at the end — matching foldOpenAIFrame's
+// contract, so PresentKinds and ReportedTotal reflect only the final chunk.
 func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
 	var completion strings.Builder
+	var usage parsercommon.TokenUsage
+	var hasUsage bool
 	for _, line := range bytes.Split(body, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if !bytes.HasPrefix(line, []byte("data:")) {
@@ -401,10 +404,14 @@ func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
 			}
 		}
 		if chunk.Usage.TotalTokens > 0 {
-			chunk.Usage.toNeutral().Fill(ext)
+			usage = chunk.Usage.toNeutral()
+			hasUsage = true
 		}
 	}
 	ext.Completion = completion.String()
+	if hasUsage {
+		usage.Fill(ext)
+	}
 }
 
 type inferenceResponse struct {
@@ -480,9 +487,10 @@ type inferenceUsage struct {
 // is on the wire (hence the pointer fields on inferenceUsage).
 func (u inferenceUsage) toNeutral() parsercommon.TokenUsage {
 	usage := parsercommon.TokenUsage{
-		Input:   u.PromptTokens,
-		Output:  u.CompletionTokens,
-		Present: parsercommon.KindInput | parsercommon.KindOutput,
+		Input:         u.PromptTokens,
+		Output:        u.CompletionTokens,
+		ReportedTotal: u.TotalTokens,
+		Present:       parsercommon.KindInput | parsercommon.KindOutput,
 	}
 	if u.PromptTokensDetails != nil {
 		cached := u.PromptTokensDetails.CachedTokens

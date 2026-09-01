@@ -125,28 +125,40 @@ func parseAnthropicRequest(body []byte) *pipeline.InferenceExtension {
 // anthropicUsage mirrors the Messages API usage block. The true input size is
 // input_tokens + cache_creation_input_tokens + cache_read_input_tokens (cached
 // context still counts as input); promptTotal sums them.
+//
+// Cache fields are *int so an omitted field on the wire (e.g. message_start
+// on the ?beta=true path) stays absent in Present rather than being asserted
+// as a reported zero.
 type anthropicUsage struct {
-	InputTokens              int `json:"input_tokens"`
-	OutputTokens             int `json:"output_tokens"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	InputTokens              int  `json:"input_tokens"`
+	OutputTokens             int  `json:"output_tokens"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
 }
 
 func (u anthropicUsage) promptTotal() int {
 	return u.toNeutral().PromptTotal()
 }
 
-// toNeutral maps Anthropic's usage onto TokenUsage. The Messages API
-// unconditionally emits all four input/cache/output counters, so
-// Present names all four. Reasoning is not exposed by Anthropic.
+// toNeutral maps Anthropic's usage onto TokenUsage. Input and Output are
+// always emitted by the Messages API; cache sub-fields are observed via
+// their pointers so an absent field stays absent in Present. Reasoning is
+// not exposed by Anthropic.
 func (u anthropicUsage) toNeutral() parsercommon.TokenUsage {
-	return parsercommon.TokenUsage{
-		Input:      u.InputTokens,
-		CacheRead:  u.CacheReadInputTokens,
-		CacheWrite: u.CacheCreationInputTokens,
-		Output:     u.OutputTokens,
-		Present:    parsercommon.KindInput | parsercommon.KindCacheRead | parsercommon.KindCacheWrite | parsercommon.KindOutput,
+	n := parsercommon.TokenUsage{
+		Input:   u.InputTokens,
+		Output:  u.OutputTokens,
+		Present: parsercommon.KindInput | parsercommon.KindOutput,
 	}
+	if u.CacheReadInputTokens != nil {
+		n.CacheRead = *u.CacheReadInputTokens
+		n.Present |= parsercommon.KindCacheRead
+	}
+	if u.CacheCreationInputTokens != nil {
+		n.CacheWrite = *u.CacheCreationInputTokens
+		n.Present |= parsercommon.KindCacheWrite
+	}
+	return n
 }
 
 // --- non-streaming response ---
@@ -340,6 +352,9 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 // earlier real count. See foldAnthropicFrame for why both events need
 // this.
 func mergeAnthropicPromptMaxSeen(state *inferenceStreamState, incoming parsercommon.TokenUsage) {
+	// Presence is a union across events: once a sub-field is observed on
+	// the wire, later events that omit it must not clear the bit.
+	state.usage.Present |= incoming.Present
 	if incoming.Input > state.usage.Input {
 		state.usage.Input = incoming.Input
 	}

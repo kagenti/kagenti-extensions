@@ -19,12 +19,13 @@ const (
 // normalize their wire format into these fields before publishing via
 // Fill, and set Present to name which sub-kinds the wire carried.
 type TokenUsage struct {
-	Input      int  // uncached prompt tokens
-	CacheRead  int  // prompt tokens served from cache
-	CacheWrite int  // prompt tokens written to cache
-	Output     int  // generated completion tokens
-	Reasoning  int  // reasoning-only output (subset of Output)
-	Present    Kind // which sub-kinds the provider reported
+	Input         int  // uncached prompt tokens
+	CacheRead     int  // prompt tokens served from cache
+	CacheWrite    int  // prompt tokens written to cache
+	Output        int  // generated completion tokens
+	Reasoning     int  // reasoning-only output (subset of Output)
+	ReportedTotal int  // provider's own total_tokens if reported, else 0
+	Present       Kind // which sub-kinds the provider reported
 }
 
 // PromptTotal is the sum of all prompt-side sub-kinds.
@@ -39,7 +40,9 @@ func (u TokenUsage) Total() int {
 }
 
 // Fill writes the split counters, the Present bitmask, and the derived
-// legacy aggregates onto ext.
+// legacy aggregates onto ext. TotalTokens prefers the provider's own
+// reported total when present — a gateway that reports only total_tokens
+// (with prompt/completion zero) would otherwise record 0 here.
 func (u TokenUsage) Fill(ext *pipeline.InferenceExtension) {
 	ext.InputTokens = u.Input
 	ext.CacheReadTokens = u.CacheRead
@@ -50,5 +53,9 @@ func (u TokenUsage) Fill(ext *pipeline.InferenceExtension) {
 
 	ext.PromptTokens = u.PromptTotal()
 	ext.CompletionTokens = u.Output
-	ext.TotalTokens = u.Total()
+	if u.ReportedTotal > 0 {
+		ext.TotalTokens = u.ReportedTotal
+	} else {
+		ext.TotalTokens = u.Total()
+	}
 }

@@ -119,6 +119,20 @@ func TestSplitTokens_OpenAIJSON(t *testing.T) {
 	})
 }
 
+// Gateway reports only total_tokens (prompt/completion zero): the wire
+// total must be preserved rather than recomputed as 0 from the sub-fields.
+func TestSplitTokens_OpenAIJSON_PreservesReportedTotal(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "gpt-4o"}
+	parseInferenceJSON([]byte(`{
+		"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],
+		"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":950}
+	}`), ext)
+
+	if ext.TotalTokens != 950 {
+		t.Errorf("TotalTokens = %d, want 950 (reported total preserved)", ext.TotalTokens)
+	}
+}
+
 // Malformed OpenAI response where cached_tokens > prompt_tokens must
 // clamp InputTokens to 0, not go negative.
 func TestSplitTokens_OpenAIJSON_ClampNegativeInput(t *testing.T) {
@@ -180,9 +194,8 @@ func TestPresentKinds_OpenAI_NoDetailsBlocks(t *testing.T) {
 	}
 }
 
-// OpenAI response WITH both _details blocks, both carrying zero:
-// CacheRead and Reasoning bits set — "reported zero," not "absent."
-// Distinguishability against the previous test is the whole point.
+// _details blocks present but zero: bits set ("reported zero"), not
+// absent — the distinction from the previous test.
 func TestPresentKinds_OpenAI_WithDetailsBlocks(t *testing.T) {
 	ext := &pipeline.InferenceExtension{Model: "gpt-4o"}
 	parseInferenceJSON([]byte(`{
@@ -229,5 +242,53 @@ func TestPresentKinds_Anthropic(t *testing.T) {
 	want := uint8(parsercommon.KindInput | parsercommon.KindCacheRead | parsercommon.KindCacheWrite | parsercommon.KindOutput)
 	if ext.PresentKinds != want {
 		t.Errorf("PresentKinds = %b, want %b (four kinds, reasoning absent)", ext.PresentKinds, want)
+	}
+}
+
+// Anthropic non-streaming response WITHOUT the cache_* fields on the wire:
+// only Input and Output bits should be set.
+func TestPresentKinds_Anthropic_NoCacheFields(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "claude-haiku-4-5"}
+	parseAnthropicJSON([]byte(`{
+		"content":[{"type":"text","text":"ok"}],
+		"stop_reason":"end_turn",
+		"usage":{"input_tokens":8,"output_tokens":2}
+	}`), ext)
+
+	want := uint8(parsercommon.KindInput | parsercommon.KindOutput)
+	if ext.PresentKinds != want {
+		t.Errorf("PresentKinds = %b, want %b (Input|Output only)", ext.PresentKinds, want)
+	}
+}
+
+// Anthropic ?beta=true SSE interrupted after message_start: no cache fields
+// ever land on the wire, so their bits must stay cleared.
+func TestPresentKinds_AnthropicSSE_Beta_MessageStartOnly(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "claude-opus-4-8"}
+	body := []byte("data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":9,\"output_tokens\":0}}}\n")
+	parseAnthropicSSE(body, ext)
+
+	want := uint8(parsercommon.KindInput | parsercommon.KindOutput)
+	if ext.PresentKinds != want {
+		t.Errorf("PresentKinds = %b, want %b (no cache fields observed)", ext.PresentKinds, want)
+	}
+}
+
+// OpenAI streaming: usage is cumulative, so state.usage is replaced on
+// each usage-bearing chunk. A later chunk that omits _details must
+// therefore drop CacheRead — this pins that behavior against a future
+// refactor that turns usage merging back into a merge.
+func TestFoldOpenAIFrame_UsageIsCumulative(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "gpt-4o", Stream: true}
+	body := []byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":null}],\"usage\":{\"prompt_tokens\":800,\"completion_tokens\":100,\"total_tokens\":900,\"prompt_tokens_details\":{\"cached_tokens\":600}}}\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":800,\"completion_tokens\":150,\"total_tokens\":950}}\n" +
+		"data: [DONE]\n")
+	parseInferenceSSE(body, ext)
+
+	if ext.CacheReadTokens != 0 {
+		t.Errorf("CacheReadTokens = %d, want 0 (later cumulative chunk without _details)", ext.CacheReadTokens)
+	}
+	if ext.OutputTokens != 150 {
+		t.Errorf("OutputTokens = %d, want 150 (last chunk wins)", ext.OutputTokens)
 	}
 }
