@@ -1,11 +1,17 @@
 # Lineage — per-request data lineage from the AuthBridge sidecar
 
-Attach the AuthBridge envoy-sidecar to an agent or tool, switch on the
-`lineage-telemetry` plugin, and every HTTP exchange the workload takes part in
-becomes **two OTLP spans**: one when the request is seen, one when the response
-stream ends. They are facts only — who called whom, over which protocol, with
-what outcome — and they go to **any OTLP consumer**: the platform's own
-collector, Jaeger, Phoenix, or your own endpoint.
+Attach the AuthBridge envoy-sidecar to a workload that is **already deployed**,
+switch on the `lineage-telemetry` plugin, and every HTTP exchange the workload
+takes part in becomes **two OTLP spans**: one when the request is seen, one
+when the response stream ends. They are facts only — who called whom, over
+which protocol, with what outcome — and they go to **any OTLP consumer**: the
+platform's own collector, Jaeger, Phoenix, or your own endpoint.
+
+This demo deliberately does **not** deploy applications. Your app is deployed
+however its owner deploys apps — the platform UI, your own manifests, someone
+else's pipeline. Everything here is additive: a strategic-merge patch and a
+ConfigMap that attach lineage to what already runs, plus an image shim that
+makes the capture attributable. Nothing that is not lineage is touched.
 
 > **Before anything else: the sidecar image must carry the plugin.** The
 > `lineage-telemetry` plugin ships in its own pull request; until a release
@@ -15,7 +21,7 @@ collector, Jaeger, Phoenix, or your own endpoint.
 > `proxy-init` from this repo, load them into your cluster, and point
 > `SIDECAR_IMAGE` / `PROXY_INIT_IMAGE` at your tags (see Prerequisites).
 
-> **Where you will actually see them — on the rossoctl platform.** The
+> **Where you will actually see the spans — on the rossoctl platform.** The
 > platform's `rossoctl-deps` chart
 > ([`charts/rossoctl-deps/values.yaml`](https://github.com/rossoctl/rossoctl/blob/main/charts/rossoctl-deps/values.yaml),
 > `otel.collector`) runs an OTel collector (`deploy/otel-collector` in
@@ -39,14 +45,15 @@ collector, Jaeger, Phoenix, or your own endpoint.
 The demo has two halves, and the second is the interesting one:
 
 1. **The sidecar** captures. That part is just configuration — a plugin entry in
-   the pipeline (`attach-lineage.sh` writes it for you).
+   the pipeline (`attach-lineage.sh` writes it for you) plus the sidecar patch.
 2. **A propagate-only OTel shim** makes the capture *attributable*. Without it
    an agent's outbound calls carry no trace context and fragment out of their
    caller's trace. `Dockerfile.otel-shim` + `build-otel-shim.sh` layer it onto
    an app image without touching the app's source — or its command: the shim
    activates through ONE environment variable (`LINEAGE_PROPAGATE=1`), the
    same attach shape as the Java agent (`JAVA_TOOL_OPTIONS`) and Node
-   (`NODE_OPTIONS`).
+   (`NODE_OPTIONS`). The patch can flip that variable on the app's container
+   for you (`APP_CONTAINER`, below).
 
 ---
 
@@ -54,8 +61,8 @@ The demo has two halves, and the second is the interesting one:
 
 Per HTTP exchange, two spans. The request span is named
 `{self_id} {protocol} {operation}` and the response span appends ` response` —
-so an inbound A2A call on a workload called `weather-lineage` produces
-`weather-lineage a2a message/send` and `weather-lineage a2a message/send
+so an inbound A2A call on a workload called `echo-upstream` produces
+`echo-upstream a2a message/send` and `echo-upstream a2a message/send
 response`. The pair is joined by `lineage.exchange.id` (the request span's own
 id) and told apart by `lineage.role`:
 
@@ -128,11 +135,11 @@ The shim supplies it with stock OpenTelemetry auto-instrumentation and
 Activation is a baked, env-gated site hook (`lineage-propagate-hook.py`,
 installed into site-packages as a `.pth` + module pair): every Python process
 of the image checks one variable at startup and either initializes stock
-auto-instrumentation (`LINEAGE_PROPAGATE=1`, set by the generated Deployment)
-or does nothing at all. The image's ENTRYPOINT/CMD is never rewritten, there
-is no launcher process, and an unactivated `-otel` image behaves byte-for-byte
-like its base — `build-otel-shim.sh` attests both halves of that claim on
-every bake, before the image is ever loaded.
+auto-instrumentation (`LINEAGE_PROPAGATE=1`) or does nothing at all. The
+image's ENTRYPOINT/CMD is never rewritten, there is no launcher process, and
+an unactivated `-otel` image behaves byte-for-byte like its base —
+`build-otel-shim.sh` attests both halves of that claim on every bake, before
+the image is ever loaded.
 
 An app that configures its **own** exporter in code keeps exporting exactly as
 before; the shim silences only its own auto-instrumentation (`setdefault`, so
@@ -142,45 +149,104 @@ changes.
 
 ---
 
-## Which path — decide this before you run anything
+## How to attach
 
-**Two paths ship here, and choosing the wrong one destroys resources.** The
-question is not what your app is; it is **who owns the Deployment**.
+The target is a Deployment that already exists. `attach-lineage.sh` generates
+exactly two things — the per-app plugin ConfigMap (`EMIT=cm`) and a
+strategic-merge patch with the sidecar pieces (`EMIT=patch`, the default) —
+and there are two ways to consume them:
 
-| | you own the Deployment | an operator, controller or UI owns it |
-|---|---|---|
-| **use** | `attach-lineage.sh` (`EMIT=manifest`) | `sidecar-patch.sh` |
-| **what it does** | emits a complete ConfigMap + Service + Deployment and you apply it | strategic-merge patch that **adds** the sidecar containers to what is already there |
-| **if you get it wrong** | **it replaces the existing Deployment.** Applying a generated manifest over an operator-managed workload overwrites the owner's spec — every field the owner set is gone | the patch is additive and safe, but its owner keeps owning the object (see below) |
+### Adopt a live Deployment
 
-`EMIT=manifest` is a *replacement*, by design: it is how you deploy an app under
-lineage in one step. Point it at a name some other controller manages and you
-have silently rewritten that controller's object.
+```sh
+DEPLOY=<deployment> [APP_CONTAINER=<container>] ./sidecar-patch.sh
+```
 
-Two honest limits on the patch path:
+`sidecar-patch.sh` checks the preconditions (the Deployment exists, the
+platform-rendered `envoy-config` ConfigMap is in the namespace, no port
+collision, `APP_CONTAINER` — if given — names a real container), applies the
+ConfigMap, patches the Deployment, and waits for the rollout. The patch only
+*adds*: lists merge by name, so everything the owner wrote stays as written.
 
+Two honest limits:
+
+- **The target must not already carry an AuthBridge sidecar.** A workload the
+  platform enrolled (an `AgentRuntime` CR / `<prefix>/inject: enabled`) has an
+  injected one; the patch would add a second sidecar on the same ports, so the
+  script refuses. For enrolled workloads, see the namespace-ConfigMap route
+  below.
 - **A patch is not durable.** The owner still owns the Deployment. Any
-  platform-side rewrite — an operator reconcile, a chart upgrade, a UI redeploy —
-  silently drops the sidecar. There is no error; lineage just stops. Re-run
-  `sidecar-patch.sh` after any platform-side change.
-- **Uninstrumented *and* operator-owned has exactly one lever: the image.**
-  The owner's Deployment cannot carry the activation env — but if you can
-  point the owner at a different image ref, `SELF_ACTIVATE=1
-  build-otel-shim.sh` bakes the gate in and the image swap is the entire
-  change. If you cannot even repoint the image, the corner stays unsolved: the
-  sidecar still captures every hop, but nothing carries context through the
-  app and its outbound exchanges fragment into their own traces.
+  platform-side rewrite — an operator reconcile, a chart upgrade, a UI
+  redeploy — silently drops the sidecar. There is no error; lineage just
+  stops. Re-run `sidecar-patch.sh` after any platform-side change, or use the
+  manifests route so the attachment lives with the source.
+
+### Bring your own manifests
+
+If you own the app's manifests, make lineage part of them instead of patching
+live — the attachment then survives every re-deploy:
+
+```sh
+NAME=my-agent EMIT=cm    ./attach-lineage.sh > lineage-cm.yaml
+NAME=my-agent EMIT=patch APP_CONTAINER=agent \
+  APP_IMAGE=docker.io/library/my-agent-otel:latest \
+  ./attach-lineage.sh > lineage-patch.yaml
+```
+
+and in your `kustomization.yaml`:
+
+```yaml
+resources:
+  - deployment.yaml        # yours, untouched
+  - service.yaml           # yours, untouched
+  - lineage-cm.yaml        # generated
+patches:
+  - path: lineage-patch.yaml
+    target: { kind: Deployment, name: my-agent }
+```
+
+`kubectl apply -k .` deploys your app exactly as you wrote it, with lineage
+attached as a version-controlled, reviewable layer.
+
+### The propagation half
+
+Both routes above attach **capture**. For *attribution* (outbound hops landing
+in the trace of the inbound that caused them) the app must propagate
+`traceparent` — its own instrumentation, or the shim:
+
+```sh
+./build-otel-shim.sh <your-app>:latest    # -> <your-app>-otel:latest, attested, kind-loaded
+```
+
+then hand the patch the container to switch on:
+`APP_CONTAINER=<container-name>` adds `LINEAGE_PROPAGATE=1` to that
+container's env (merged by name — nothing else in the container changes) and
+`APP_IMAGE=docker.io/library/<your-app>-otel:latest` points it at the baked
+image. Without `APP_CONTAINER` the app container is not touched at all.
+
+**`APP_CONTAINER` must name a container that exists.** A strategic merge
+*adds* a stub container for an unknown name rather than failing;
+`sidecar-patch.sh` verifies the name against the live Deployment before
+applying, but on the manifests route the check is yours.
+
+One corner case: a Deployment whose env you cannot control at all
+(operator-owned, and the operator wipes your patch) has exactly one lever —
+the image reference. `SELF_ACTIVATE=1 build-otel-shim.sh` bakes
+`LINEAGE_PROPAGATE=1` *into* the image, and pointing the owner at the `-otel`
+tag is then the entire change.
+
+### Enrolled workloads: the namespace-ConfigMap route
 
 One more route exists on the rossoctl platform, and it touches no Deployment
 at all: when the platform injects its own AuthBridge sidecar (via an
 `AgentRuntime` CR), lineage can be enabled for the whole namespace by adding the
 three parsers + `lineage-telemetry` to both directions of the namespace's
-`authbridge-runtime-config` ConfigMap (the operator-rendered one; this repo's
-`aiac/k8s/opa-kind-*.sh` edits the same object). Leave `self_id` unset — each pod resolves
-its own identity from the operator-mounted credential via `self_id_file`. The
-propagation question is unchanged (the app still needs the shim or its own
-instrumentation), and a platform upgrade re-renders the namespace ConfigMaps,
-reverting the edit — re-apply it after any upgrade.
+`authbridge-runtime-config` ConfigMap (the operator-rendered one). Leave
+`self_id` unset — each pod resolves its own identity from the operator-mounted
+credential via `self_id_file`. The propagation question is unchanged (the app
+still needs the shim or its own instrumentation), and a platform upgrade
+re-renders the namespace ConfigMaps, reverting the edit — re-apply it after
+any upgrade.
 
 ---
 
@@ -201,9 +267,10 @@ The shim is generic across the mainstream Python stack, not universal:
 - The base image has a shell and coreutils (`Dockerfile.otel-shim` runs one
   `RUN` step to place the hook); a distroless base fails that step.
 
-Outside the envelope, use the sidecar alone: every hop is still captured. Whether
-those hops are *correctly attributed* depends entirely on the app propagating
-`traceparent` itself — and that is a stronger condition than it sounds.
+Outside the envelope, attach capture only (no `APP_CONTAINER`): every hop is
+still recorded. Whether those hops are *correctly attributed* depends entirely
+on the app propagating `traceparent` itself — and that is a stronger condition
+than it sounds.
 
 ### Half-instrumented apps: the case that looks fine and is not
 
@@ -216,7 +283,7 @@ That app is in a corner this demo cannot get you out of:
 
 - **The shim refuses it**, correctly — its client instrumentor is one this shim
   installs, so wrapping would stack a second one on the same library.
-- **Sidecar-only does not save it** — with no server-side extraction, every
+- **Capture-only does not save it** — with no server-side extraction, every
   outbound call starts a *fresh* trace.
 
 Measured on exactly such an app: it served requests, called its LLM
@@ -234,8 +301,9 @@ otherwise a total attribution failure reads as a clean run.
 
 If you own the image, the fix is to add the missing server-side instrumentor
 (or activate stock auto-instrumentation, which brings both halves — that is
-what the shim's hook does). If you do not, this is the same corner as the
-operator-owned quadrant: solvable only if you can at least repoint the image.
+what the shim's hook does). If you do not, the image reference is the only
+lever left (`SELF_ACTIVATE=1`, above) — and only if the shim's interlock lets
+the image through.
 
 **Baking is not purely additive.** The shim installs one pinned OpenTelemetry
 contrib release (`OTEL_CONTRIB_VERSION` in `Dockerfile.otel-shim`), and the
@@ -250,8 +318,9 @@ if it finds no runnable Python, or if any of the seven instrumentors the shim
 installs is already present (wrapping would stack a second instrumentor on the
 same library), or if the image already carries the shim's own hook. It does
 **not** refuse on the mere presence of the `opentelemetry.instrumentation`
-namespace or of a dormant SDK — see the worked example for why. `FORCE_BAKE=1`
-overrides, which makes the human judgment explicit and greppable.
+namespace or of a dormant SDK — an image can carry those as transitive
+dependencies and still need the shim. `FORCE_BAKE=1` overrides, which makes
+the human judgment explicit and greppable.
 
 ---
 
@@ -259,11 +328,11 @@ overrides, which makes the human judgment explicit and greppable.
 
 | file | what it is |
 |---|---|
-| `attach-lineage.sh` | **The one generator.** Emits every YAML byte: `EMIT=manifest` (ConfigMap + Service + Deployment), `EMIT=cm` (the plugin ConfigMap alone), `EMIT=patch` (sidecar pieces for an existing Deployment). Env-driven; writes to stdout; `NAME`/`NAMESPACE` are validated as Kubernetes names, ports as integers, and every free-form value is refused if it cannot be quoted safely into YAML. Generated containers carry resources (unless `APP_RESOURCES={}`), `seccompProfile: RuntimeDefault`, dropped capabilities (`proxy-init` adds back only `NET_ADMIN`/`NET_RAW`). |
+| `attach-lineage.sh` | **The one generator.** Emits every YAML byte of the attachment: `EMIT=patch` (default — the sidecar pieces as a strategic-merge patch, plus the optional `APP_CONTAINER` propagation switch), `EMIT=cm` (the plugin ConfigMap). Env-driven; writes to stdout; never touches the cluster. Every input is validated or refused — including the knobs of the removed app-deployment mode, which fail loudly rather than being ignored. |
+| `sidecar-patch.sh` | The live applier: precondition checks (Deployment exists, `envoy-config` present, no port collision, `APP_CONTAINER` names a real container), then ConfigMap + patch + rollout wait. Owns no YAML — it calls the generator twice. |
 | `Dockerfile.otel-shim` | The propagate-only shim layer. One recipe for every in-envelope app; only `BASE_IMAGE` changes. Instrumentors pinned to one contrib release. |
-| `build-otel-shim.sh` | Builds the shim onto an app image, loads it into kind, and refuses images it cannot safely wrap. Detects the app's interpreter, uid and gid from the image itself (explicit arguments override; every probe runs the image with `--network=none`), then **attests the result before loading it**: gate off, nothing OTel-shaped may load; gate on, the SDK must come up and actually inject a `traceparent`. **The baked image is inert by default** — activation is the Deployment's `LINEAGE_PROPAGATE=1` env (`attach-lineage.sh` sets it), or `SELF_ACTIVATE=1` bakes it in for image-swap-only workloads. Deployed unactivated, it simply behaves like the base image: no propagation, honest fragmentation (`lineage.parent.source=wire`). |
+| `build-otel-shim.sh` | Builds the shim onto an app image, loads it into kind, and refuses images it cannot safely wrap. Detects the app's interpreter, uid and gid from the image itself (explicit arguments override; every probe runs the image with `--network=none`), then **attests the result before loading it**: gate off, nothing OTel-shaped may load; gate on, the SDK must come up and actually inject a `traceparent`. **The baked image is inert by default** — activation is the `LINEAGE_PROPAGATE=1` env (the patch's `APP_CONTAINER` sets it), or `SELF_ACTIVATE=1` bakes it in for image-swap-only workloads. Deployed unactivated, it simply behaves like the base image: no propagation, honest fragmentation (`lineage.parent.source=wire`). |
 | `lineage-propagate-hook.py` | The activation hook the Dockerfile bakes into site-packages (`.pth` + module). Checks one env var per interpreter start; when set, pins exporters off + `tracecontext,baggage` as env defaults and runs stock `initialize()`. Read its docstring for the full contract, including why a hook failure can never take the app down. |
-| `sidecar-patch.sh` | The patch path — attaches the sidecar to a Deployment you do not own. Generates its YAML from `attach-lineage.sh`; refuses a target whose pod already binds a port the sidecar needs. |
 | `container-runtime.sh` | Sourced helper: picks docker vs podman and loads images into kind either way. |
 
 ---
@@ -272,9 +341,9 @@ overrides, which makes the human judgment explicit and greppable.
 
 - A Kubernetes cluster with the platform installed, and the platform-rendered
   **`envoy-config` ConfigMap** present in your target namespace — the sidecar
-  mounts it. `sidecar-patch.sh` checks for it; `attach-lineage.sh` only prints
-  YAML, so on the manifest path a missing ConfigMap shows up as a pod stuck in
-  `ContainerCreating` (see Troubleshooting).
+  mounts it. `sidecar-patch.sh` checks for it; on the manifests route a missing
+  ConfigMap shows up as a pod stuck in `ContainerCreating` (see
+  Troubleshooting).
 - The sidecar images resolvable from the cluster. Defaults are the published
   ones:
 
@@ -299,152 +368,66 @@ overrides, which makes the human judgment explicit and greppable.
 
 ---
 
-## Worked example — the weather agent
-
-Using the weather agent image this repo's weather demos deploy, measured as of
-writing:
-
-```console
-$ podman inspect --format '{{json .Config.Cmd}}' ghcr.io/rossoctl/examples/weather_service:latest
-["uv","run","--no-sync","server"]
-```
-
-It is a Python app with its venv at `/app/.venv`, running as UID 1001 — inside
-the envelope. It also ships the **httpx** instrumentor already, which is one of
-the seven this shim installs, so wrapping it would stack a second instrumentor
-on the same library. The interlock says so and stops:
-
-```console
-$ ./build-otel-shim.sh ghcr.io/rossoctl/examples/weather_service:latest
-REFUSING to bake ...: it already instruments httpx
-```
-
-Note what the check is asking: *would wrapping double-instrument?* Not "does this
-image contain anything OpenTelemetry-shaped". The base
-`opentelemetry-instrumentation` package arrives as a transitive dependency of
-plenty of things and carries no library instrumentation at all — an app holding
-only that still needs the shim, and refusing it would cost you propagation for
-no reason.
-
-**Read that refusal precisely: it means "do not wrap this", not "this one is
-fine".** The probe detects that one of the shim's instrumentors is *installed*.
-Whether the app actually *activates* it — and therefore whether it propagates
-`traceparent` on its outbound calls — is not statically detectable, because
-activation happens at runtime through `opentelemetry-instrument` or in the app's
-own code. An image can carry the packages as dormant dependencies and propagate
-nothing.
-
-So the recipe for such an app is sidecar-only, with `NO_PROPAGATE=1` — the
-image runs exactly as built (nothing is ever known or said about its command)
-— and then **verify pairing before trusting it**. Drive several concurrent
-requests, each with a distinct `traceparent`, and check that every outbound
-hop lands in the trace of the inbound that caused it. Hops that don't are
-provably un-propagated (`lineage.parent.source=wire`) and there is no way to
-fix that from outside the process. That is the same corner as the
-operator-owned quadrant, reached from a different direction.
-
-```sh
-cd authbridge/demos/lineage
-
-NAME=weather-lineage \
-IMAGE=ghcr.io/rossoctl/examples/weather_service:latest \
-SELF_ID=weather-lineage \
-APP_PORT=8000 SVC_PORT=8080 \
-NO_PROPAGATE=1 \
-NAMESPACE=team1 \
-ENV_VARS="MCP_URL=http://weather-tool-advanced-mcp:8000/mcp LLM_API_BASE=${LLM_API_BASE} LLM_API_KEY=${LLM_API_KEY} LLM_MODEL=${LLM_MODEL}" \
-OTEL_ENDPOINT=otel-collector.rossoctl-system.svc.cluster.local:4317 \
-./attach-lineage.sh | kubectl apply -f -
-```
-
-`LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` are whatever OpenAI-compatible
-endpoint the agent should talk to — the same values the
-[weather-agent demo](../weather-agent/demo-ui-advanced.md) uses. (For an LLM
-served on the kind host, Docker Desktop resolves `host.docker.internal` and
-podman `host.containers.internal`.)
-
-Read the manifest before you apply it — drop the `| kubectl apply -f -` and the
-script just prints. Then drive one A2A request from **inside** the cluster (a
-`kubectl port-forward` reaches the app on loopback and bypasses the sidecar's
-inbound listener, so it captures nothing — and an agent-card fetch is bypassed
-too, since `/.well-known/` is on the plugin's default `bypass_paths`):
-
-```sh
-kubectl run -n team1 --rm -i drive --image=curlimages/curl:8.11.1 --restart=Never -- \
-  curl -s -X POST http://weather-lineage:8080/ \
-    -H 'content-type: application/json' \
-    -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":
-         {"role":"user","messageId":"m1",
-          "parts":[{"kind":"text","text":"what is the weather in Haifa?"}]}}}'
-```
-
-Two spans for that exchange now exist, in one trace. On the rossoctl platform
-they land in the collector's `debug` exporter, so:
-
-```sh
-kubectl logs -n rossoctl-system deploy/otel-collector | grep -A2 lineage.exchange.id
-```
-
-This is the collector's output for the run above, cut to the lineage lines:
-
-```
-    Name           : weather-lineage a2a message/send
-     -> lineage.role: Str(request)
-     -> lineage.direction: Str(inbound)
-     -> lineage.self.id: Str(weather-lineage)
-     -> lineage.protocol: Str(a2a)
-     -> lineage.parent.source: Str(wire)
-     -> lineage.exchange.id: Str(e589944672fcf224)
-    Name           : weather-lineage a2a message/send response
-     -> lineage.role: Str(response)
-     -> lineage.direction: Str(inbound)
-     -> lineage.self.id: Str(weather-lineage)
-     -> lineage.protocol: Str(a2a)
-     -> lineage.exchange.id: Str(e589944672fcf224)
-     -> lineage.outcome: Str(ok)
-```
-
-Two spans, one `lineage.exchange.id`. That pair is the whole claim: the
-sidecar saw an exchange and recorded it as facts.
-
-**The agent's own outbound hops are a separate matter.** The `MCP_URL` above
-points at the weather tool from this repo's
-[weather-agent advanced demo](../weather-agent/demo-ui-advanced.md) — if you have
-not deployed it, the agent answers with a tool-connection error and you see only
-the inbound pair, because a connection that never completes is not an exchange
-to record. Deploy that demo's tool first and the same request adds a hop pair for
-the MCP call and another for the LLM, linked to the inbound one through the
-`traceparent` the app propagated.
-
-For an app that does **not** instrument itself, the same flow gains one step —
-bake the shim first, deploy the `-otel` image, and drop `NO_PROPAGATE=1`:
-
-```sh
-./build-otel-shim.sh <your-app>:latest        # -> <your-app>-otel:latest, attested, kind-loaded
-NAME=... IMAGE=docker.io/library/<your-app>-otel:latest ... ./attach-lineage.sh | kubectl apply -f -
-```
-
-### The other path: adopt a Deployment you do not own
+## Worked example — adopt the echo upstream
 
 The target must be a Deployment the platform has **not** enrolled — no
 `AgentRuntime` CR, no `<prefix>/inject: enabled` — because an enrolled workload
 already carries an injected AuthBridge sidecar and the script refuses to add a
 second one. It must also not listen on 9090, 15123 or 15124 itself. In this
 repo, the [echo demo](../echo/README.md)'s `echo-upstream` is exactly such a
-workload (plain HTTP on 8888, deliberately un-labelled):
+workload (plain HTTP on its own port, deliberately un-labelled):
 
 ```sh
+cd authbridge/demos/lineage
 DEPLOY=echo-upstream NAMESPACE=team1 ./sidecar-patch.sh
 ```
 
 This adds the sidecar and leaves the app container exactly as its owner wrote
 it; from then on every request the upstream serves is recorded as an inbound
-pair under `lineage.self.id=echo-upstream`. `OUTBOUND_PORTS_EXCLUDE` keeps a
-port out of the iptables redirect — use it for a port the app exports its *own*
-telemetry on, so that keeps flowing untouched. Do **not** exclude LLM or tool
-ports; those are the hops lineage exists to observe.
+span pair under `lineage.self.id=echo-upstream`. Drive one request from
+**inside** the cluster (a `kubectl port-forward` reaches the app on loopback
+and bypasses the sidecar's inbound listener, so it captures nothing):
 
-Re-read the two limits above before you rely on this path.
+```sh
+kubectl run -n team1 --rm -i drive --image=curlimages/curl:8.11.1 --restart=Never -- \
+  curl -s http://echo-upstream:8888/echo -d 'hello lineage'
+```
+
+and read the pair off the collector:
+
+```sh
+kubectl logs -n rossoctl-system deploy/otel-collector | grep -A2 lineage.exchange.id
+```
+
+Two spans with one shared `lineage.exchange.id` — a request span
+(`lineage.role=request`, `lineage.direction=inbound`) and its response twin
+carrying `lineage.outcome`. That pair is the whole claim: the sidecar saw an
+exchange and recorded it as facts.
+
+`OUTBOUND_PORTS_EXCLUDE` keeps a port out of the iptables redirect — use it
+for a port the app exports its *own* telemetry on, so that keeps flowing
+untouched. Do **not** exclude LLM or tool ports; those are the hops lineage
+exists to observe.
+
+### With propagation: bake, then flip the switch
+
+For an app that makes outbound calls and does not instrument itself, add the
+shim so those calls land in their caller's trace:
+
+```sh
+./build-otel-shim.sh <your-app>:latest      # -> <your-app>-otel:latest, attested, kind-loaded
+DEPLOY=<deployment> APP_CONTAINER=<container> \
+  APP_IMAGE=docker.io/library/<your-app>-otel:latest \
+  ./sidecar-patch.sh
+```
+
+The patch swaps the container's image to the baked one and adds
+`LINEAGE_PROPAGATE=1` to its env — nothing else in the Deployment changes.
+Then verify **pairing under concurrency** before relying on it: drive several
+concurrent requests, each with a distinct `traceparent`, and check that every
+outbound hop lands in the trace of the inbound that caused it
+(`lineage.parent.source=tracestate` on hops after the first). Hops that
+fragment instead are provably un-propagated (`lineage.parent.source=wire`).
 
 ---
 
@@ -458,7 +441,7 @@ keys matter:
   config:
     otel_endpoint: "otel-collector.rossoctl-system.svc.cluster.local:4317"
     capture_io: true
-    self_id: "weather-lineage"
+    self_id: "echo-upstream"
 ```
 
 | key | meaning |
@@ -471,46 +454,11 @@ keys matter:
 their defaults already cover agent-card discovery, health probes and the common
 telemetry backends.
 
-Script-level knobs (both paths): `NAME`, `IMAGE`, `SELF_ID`, `APP_PORT`,
-`SVC_PORT`, `ENV_VARS`, `APP_RESOURCES`, `APP_COMMAND`, `NAMESPACE`,
-`OTEL_ENDPOINT`, `OUTBOUND_PORTS_EXCLUDE`, `WORKLOAD_TYPE`,
-`WORKLOAD_PROTOCOL`, `LABEL_PREFIX`, `SIDECAR_IMAGE`, `PROXY_INIT_IMAGE`,
-`NO_PROPAGATE`, `NO_EMIT`, `EMIT`. Each script's header documents its own;
-`NO_PROPAGATE=1 NO_EMIT=1` together is lineage fully off for one app, which
-makes a clean A/B baseline.
-
-`LABEL_PREFIX` (default `rossoctl.io`) sets the platform labels the generated
-workload carries — `protocol.<prefix>/a2a`, and the `<prefix>/inject: disabled`
-opt-out that keeps the platform from injecting a second sidecar next to the one
-this manifest already brings. Retarget it for a differently-branded platform.
-
-### Why the generated workload has no `<prefix>/type` label
-
-Because the rossoctl platform will not let you set one, and it is right not to.
-
-The platform installs a `ValidatingAdmissionPolicy` named
-`agent-label-protection` (shipped by the platform operator, not by this repo —
-`kubectl get validatingadmissionpolicy` shows it) that reserves
-`<prefix>/type` for the operator, on `deployments` and `statefulsets`, with
-`validationActions: [Deny]`. Apply a manifest carrying that label by hand and
-admission rejects it, with a message saying the label can only be applied by
-the operator via an `AgentRuntime` CR.
-
-So this demo does not set it. Nothing is lost for lineage: the label is how the
-platform *registers and classifies* a workload, not how this manifest attaches
-its sidecar — the sidecar is in the manifest already, as an explicit
-`proxy-init` initContainer and `envoy-proxy` container. Service and Deployment
-selectors key on `app.kubernetes.io/name`, which is unique per workload, so
-routing is unaffected.
-
-What you give up is the workload appearing in the platform's agent inventory.
-If you want that, the supported route is to create an **AgentRuntime CR**
-targeting the workload and let the operator apply the label — which is exactly
-what the policy's message tells you.
-
-`WORKLOAD_TYPE` exists for platforms that do *not* guard the label: set it to
-`agent` or `tool` and the label is emitted. It is empty by default, deliberately,
-because the default has to work on a stock install.
+Script-level knobs: `NAME` (the generator) / `DEPLOY` (the applier),
+`NAMESPACE`, `SELF_ID`, `OTEL_ENDPOINT`, `APP_CONTAINER`, `APP_IMAGE`,
+`OUTBOUND_PORTS_EXCLUDE`, `SIDECAR_IMAGE`, `PROXY_INIT_IMAGE`, `NO_EMIT`,
+`EMIT`. Each script's header documents its own. `NO_EMIT=1` keeps the sidecar
+as a pure proxy that emits nothing — a clean A/B baseline.
 
 ---
 
@@ -522,9 +470,9 @@ because the default has to work on a stock install.
   is attached whole.
 - **Trace-context propagation is the app's job** — the shim does it for the
   in-envelope stack, and nothing else can do it from outside the process.
-- **The patch path is not durable** and the uninstrumented + operator-owned
-  quadrant is unsolved. Both are spelled out above; they are the two things most
-  likely to surprise you in production.
+- **The patch path is not durable** and a workload whose image *and* env you
+  cannot influence stays capture-only. Both are spelled out above; they are
+  the two things most likely to surprise you in production.
 
 ---
 
@@ -534,10 +482,11 @@ because the default has to work on a stock install.
 |---|---|
 | No spans at all | Wrong `OTEL_ENDPOINT`, or the sidecar image predates the plugin. Check the `envoy-proxy` container's logs. |
 | Only inbound hops, never outbound | `proxy-init` did not install its iptables rules — check the init container's logs. |
-| Outbound hops fragment into their own traces (`lineage.parent.source=wire`) | `traceparent` is not propagating. Check the app container carries `LINEAGE_PROPAGATE=1` (the generated Deployment sets it; an operator-owned Deployment needs the `SELF_ACTIVATE=1` image instead). If the app runs the LLM/tool call in a worker thread, the `threading` instrumentor is required — it is bundled in `Dockerfile.otel-shim`. If only the entry hop dangles, the caller is not sending a `traceparent` at all — expected at the trace edge. |
+| Outbound hops fragment into their own traces (`lineage.parent.source=wire`) | `traceparent` is not propagating. Check the app container carries `LINEAGE_PROPAGATE=1` (the patch sets it when `APP_CONTAINER` is given; an operator-owned Deployment needs the `SELF_ACTIVATE=1` image instead). If the app runs the LLM/tool call in a worker thread, the `threading` instrumentor is required — it is bundled in `Dockerfile.otel-shim`. If only the entry hop dangles, the caller is not sending a `traceparent` at all — expected at the trace edge. |
 | Nothing captured when testing | You drove the app through `kubectl port-forward`. Loopback bypasses the inbound listener; drive it from inside the cluster. |
 | `kind load` fails under podman | `container-runtime.sh` detects the runtime and saves + loads an image archive for podman, because `kind load docker-image` misbehaves under podman v5. Set `CONTAINER_TOOL` to force a runtime, `KIND_CLUSTER_NAME` for the cluster name. |
 | Pod stuck `ImagePullBackOff` on the sidecar | `SIDECAR_IMAGE` / `PROXY_INIT_IMAGE` point at tags the cluster cannot resolve. Load them locally, or use the published refs. |
-| Pod stuck `ContainerCreating` (`configmap "envoy-config" not found`) | The manifest path does not check for the platform-rendered `envoy-config` ConfigMap; the namespace is not one the platform set up. Use a platform namespace, or copy the ConfigMap in. |
-| `envoy-proxy` restarts with `unknown plugin "lineage-telemetry"` | The sidecar image predates the plugin — the published image, until a release carries it. Build from this repo and set `SIDECAR_IMAGE`. Note the generated manifest uses `imagePullPolicy: IfNotPresent`, so once a release does carry the plugin a node that cached the older `:latest` keeps it until that image is removed or a versioned tag is used. |
+| Pod stuck `ContainerCreating` (`configmap "envoy-config" not found`) | The namespace is not one the platform set up (`sidecar-patch.sh` checks; the manifests route cannot). Use a platform namespace, or copy the ConfigMap in. |
+| `envoy-proxy` restarts with `unknown plugin "lineage-telemetry"` | The sidecar image predates the plugin — the published image, until a release carries it. Build from this repo and set `SIDECAR_IMAGE`. Note the patch uses `imagePullPolicy: IfNotPresent`, so once a release does carry the plugin a node that cached the older `:latest` keeps it until that image is removed or a versioned tag is used. |
 | `sidecar-patch.sh` refuses: "already declares containerPort …" | The target is operator-enrolled (it has an injected sidecar) or the app itself listens on 9090/15123/15124. Use the namespace-ConfigMap route for enrolled workloads; a colliding app port cannot be adopted. |
+| `sidecar-patch.sh` refuses: "has no container named …" | `APP_CONTAINER` does not match any container in the target Deployment. The check exists because a strategic merge would otherwise *add* a stub container by that name instead of failing. |
