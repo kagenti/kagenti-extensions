@@ -251,6 +251,37 @@ any upgrade.
 
 ---
 
+## What it costs, per workload
+
+Deploying an app is your work and stays your work: an image, a Deployment, a
+Service, whatever wiring the app needs. Attaching lineage adds **two commands
+per workload and no YAML**:
+
+| step | command | per | what it detects or generates for you |
+|---|---|---|---|
+| bake the shim | `./build-otel-shim.sh <image>` | image | interpreter, uid:gid, the interlock, the attestation, the kind load |
+| attach | `DEPLOY=<name> APP_CONTAINER=<container> APP_IMAGE=<image>-otel:latest ./sidecar-patch.sh` | Deployment | the ConfigMap, the patch, the four preconditions, the rollout wait |
+
+Capture only (an app that already propagates, or one the bake refuses) is one
+command: the attach without `APP_CONTAINER`. Two Deployments that run the same
+image bake once and attach twice — the image is the shim's unit, the
+Deployment is the sidecar's.
+
+For a fleet of ten, that is two loops:
+
+```sh
+for a in agent-a agent-b tool-x tool-y …; do ./build-otel-shim.sh "$a:latest"; done
+for a in agent-a agent-b tool-x tool-y …; do
+  DEPLOY=$a APP_CONTAINER=app APP_IMAGE=docker.io/library/$a-otel:latest ./sidecar-patch.sh
+done
+```
+
+(naming every app container the same — `app` — is what makes the second loop
+a loop). Then check the *shape* of one end-to-end trace, not just that spans
+arrived: one root per user turn, and `lineage.parent.source=wire` only at the
+entry edge — a workload whose shim did not activate shows up as extra roots,
+not as missing spans (see "The envelope").
+
 ## The envelope
 
 The shim is generic across the mainstream Python stack, not universal:
