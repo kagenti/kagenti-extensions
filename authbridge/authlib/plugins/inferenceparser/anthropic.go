@@ -136,10 +136,6 @@ type anthropicUsage struct {
 	CacheReadInputTokens     *int `json:"cache_read_input_tokens"`
 }
 
-func (u anthropicUsage) promptTotal() int {
-	return u.toNeutral().PromptTotal()
-}
-
 // toNeutral maps Anthropic's usage onto TokenUsage. Input and Output are
 // always emitted by the Messages API; cache sub-fields are observed via
 // their pointers so an absent field stays absent in Present. Reasoning is

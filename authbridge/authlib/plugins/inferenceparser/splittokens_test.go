@@ -133,6 +133,27 @@ func TestSplitTokens_OpenAIJSON_PreservesReportedTotal(t *testing.T) {
 	}
 }
 
+// prompt_tokens/completion_tokens keys absent (not zero): both bits
+// must stay cleared. Contrast with PreservesReportedTotal, where the
+// keys are present with value 0 and the bits stay set.
+func TestPresentKinds_OpenAI_TotalOnly(t *testing.T) {
+	ext := &pipeline.InferenceExtension{Model: "gpt-4o"}
+	parseInferenceJSON([]byte(`{
+		"choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],
+		"usage":{"total_tokens":950}
+	}`), ext)
+
+	if ext.PresentKinds&uint8(parsercommon.KindInput) != 0 {
+		t.Errorf("KindInput set, want cleared (prompt_tokens absent from wire)")
+	}
+	if ext.PresentKinds&uint8(parsercommon.KindOutput) != 0 {
+		t.Errorf("KindOutput set, want cleared (completion_tokens absent from wire)")
+	}
+	if ext.TotalTokens != 950 {
+		t.Errorf("TotalTokens = %d, want 950", ext.TotalTokens)
+	}
+}
+
 // Malformed OpenAI response where cached_tokens > prompt_tokens must
 // clamp InputTokens to 0, not go negative.
 func TestSplitTokens_OpenAIJSON_ClampNegativeInput(t *testing.T) {

@@ -301,10 +301,10 @@ func foldOpenAIFrame(frame []byte, state *inferenceStreamState, ext *pipeline.In
 	}
 	// OpenAI streams cumulative usage: each usage-bearing chunk restates
 	// the full totals, so replacing state.usage with the latest chunk's
-	// neutral form is correct. Gate on TotalTokens > 0 so chunks with no
-	// usage block (every non-final chunk) don't clear an accumulator that
-	// a prior chunk populated.
-	if chunk.Usage.TotalTokens > 0 {
+	// neutral form is correct. Gate on hasAny so chunks with no usage
+	// block (every non-final chunk) don't clear an accumulator that a
+	// prior chunk populated.
+	if chunk.Usage.hasAny() {
 		state.usage = chunk.Usage.toNeutral()
 		state.hasUsage = true
 	}
@@ -364,7 +364,7 @@ func parseInferenceJSON(body []byte, ext *pipeline.InferenceExtension) {
 		}
 	}
 	// No usage block: leave PresentKinds at 0 (matches SSE path).
-	if resp.Usage.TotalTokens > 0 {
+	if resp.Usage.hasAny() {
 		resp.Usage.toNeutral().Fill(ext)
 	}
 }
@@ -403,7 +403,7 @@ func parseInferenceSSE(body []byte, ext *pipeline.InferenceExtension) {
 				ext.FinishReason = c.FinishReason
 			}
 		}
-		if chunk.Usage.TotalTokens > 0 {
+		if chunk.Usage.hasAny() {
 			usage = chunk.Usage.toNeutral()
 			hasUsage = true
 		}
@@ -460,16 +460,13 @@ type inferenceDelta struct {
 	Content string `json:"content"`
 }
 
-// inferenceUsage decodes the OpenAI usage block. See toNeutral for the
-// inclusive-prompt normalization.
-//
-// PromptTokensDetails and CompletionTokensDetails are pointers so the
-// parser can tell "block absent" (older API or non-reasoning model)
-// from "block present with cached_tokens/reasoning_tokens = 0."
+// inferenceUsage decodes the OpenAI usage block. All fields are pointers
+// so "key absent" is distinguishable from "key present with value 0" —
+// a total-only response must not assert KindInput/KindOutput.
 type inferenceUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens     *int `json:"prompt_tokens"`
+	CompletionTokens *int `json:"completion_tokens"`
+	TotalTokens      *int `json:"total_tokens"`
 
 	PromptTokensDetails *struct {
 		CachedTokens int `json:"cached_tokens"`
@@ -479,22 +476,36 @@ type inferenceUsage struct {
 	} `json:"completion_tokens_details"`
 }
 
+// hasAny reports whether any recognized field was on the wire. Call
+// sites gate toNeutral on this so an omitted or empty usage block
+// doesn't overwrite a prior chunk's state.
+func (u inferenceUsage) hasAny() bool {
+	return u.PromptTokens != nil || u.CompletionTokens != nil || u.TotalTokens != nil ||
+		u.PromptTokensDetails != nil || u.CompletionTokensDetails != nil
+}
+
 // toNeutral maps OpenAI's usage onto TokenUsage. prompt_tokens includes
 // cached_tokens on the wire — subtract to get uncached input and clamp
 // at 0 for malformed responses. CacheWrite stays absent (OpenAI bills
-// cache writes as ordinary input). Input/Output are always present;
-// CacheRead and Reasoning are present only when their _details block
-// is on the wire (hence the pointer fields on inferenceUsage).
+// cache writes as ordinary input). Each Present bit is set only when
+// its key was on the wire, so an absent key stays "not exposed"
+// (-1 sentinel) rather than "reported zero."
 func (u inferenceUsage) toNeutral() parsercommon.TokenUsage {
-	usage := parsercommon.TokenUsage{
-		Input:         u.PromptTokens,
-		Output:        u.CompletionTokens,
-		ReportedTotal: u.TotalTokens,
-		Present:       parsercommon.KindInput | parsercommon.KindOutput,
+	usage := parsercommon.TokenUsage{}
+	if u.TotalTokens != nil {
+		usage.ReportedTotal = *u.TotalTokens
+	}
+	if u.PromptTokens != nil {
+		usage.Input = *u.PromptTokens
+		usage.Present |= parsercommon.KindInput
+	}
+	if u.CompletionTokens != nil {
+		usage.Output = *u.CompletionTokens
+		usage.Present |= parsercommon.KindOutput
 	}
 	if u.PromptTokensDetails != nil {
 		cached := u.PromptTokensDetails.CachedTokens
-		usage.Input = u.PromptTokens - cached
+		usage.Input -= cached
 		if usage.Input < 0 {
 			usage.Input = 0
 		}
