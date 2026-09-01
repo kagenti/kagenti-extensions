@@ -60,40 +60,62 @@
 # Requires in the target namespace: the platform-rendered `envoy-config`
 # ConfigMap, and the sidecar + proxy-init images resolvable from the cluster
 # (see README.md "Prerequisites").
+#
+# Structure: main() at the bottom is the pipeline — read_inputs, then the four
+# preconditions (each a require_*/refuse_* function that exits before anything
+# is applied), the capture-only NOTE, then apply (ConfigMap first, patch, wait).
+# gen() is the one bridge to the generator.
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [APP_CONTAINER=<name> [APP_IMAGE=<ref>]] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
-NAMESPACE="${NAMESPACE:-team1}"
-SELF_ID="${SELF_ID:-$DEPLOY}"
-
-kubectl get deploy -n "$NAMESPACE" "$DEPLOY" >/dev/null
-kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
-  echo "error: ConfigMap envoy-config missing in $NAMESPACE (rendered by the platform chart)" >&2
-  exit 1
+read_inputs() {
+  DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [APP_CONTAINER=<name> [APP_IMAGE=<ref>]] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
+  NAMESPACE="${NAMESPACE:-team1}"
+  SELF_ID="${SELF_ID:-$DEPLOY}"
+  APP_CONTAINER="${APP_CONTAINER:-}"
+  # Everything else (APP_IMAGE, *_IMAGE, OTEL_ENDPOINT, OUTBOUND_PORTS_EXCLUDE)
+  # is inherited by attach-lineage.sh from the environment and validated there.
 }
-# Refuse a target whose pod already binds a port the sidecar needs: either an
-# injected AuthBridge sidecar is present (15123/15124/9090 all taken — the
-# patch would merge INTO that `envoy-proxy` container and re-point it at this
-# ConfigMap, silently taking it away from the operator), or the app itself
-# listens on one of them. Detected by declared container ports rather than a
-# container name, which the operator owns. An app port that is not declared
-# cannot be seen from here.
-declared_ports="$(kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
-  -o jsonpath='{range .spec.template.spec.containers[*].ports[*]}{.containerPort}{" "}{end}')"
-for p in 15124 15123 9090; do
-  case " $declared_ports " in
-    *" $p "*)
-      echo "error: $DEPLOY already declares containerPort $p, which the lineage sidecar binds" >&2
-      echo "  (an operator-injected sidecar, or the app itself on that port) — refusing to patch over it" >&2
-      exit 1 ;;
-  esac
-done
 
-# APP_CONTAINER must name a container that actually exists: a strategic
-# merge ADDS a stub container for an unknown name rather than failing, so a
-# typo would silently grow the pod a broken extra container.
-if [ -n "${APP_CONTAINER:-}" ]; then
+require_deployment() {
+  kubectl get deploy -n "$NAMESPACE" "$DEPLOY" >/dev/null
+}
+
+require_envoy_config() {
+  # The patch mounts it; without it the new pod sits in ContainerCreating.
+  kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
+    echo "error: ConfigMap envoy-config missing in $NAMESPACE (rendered by the platform chart)" >&2
+    exit 1
+  }
+}
+
+refuse_port_collision() {
+  # Refuse a target whose pod already binds a port the sidecar needs: either an
+  # injected AuthBridge sidecar is present (15123/15124/9090 all taken — the
+  # patch would merge INTO that `envoy-proxy` container and re-point it at this
+  # ConfigMap, silently taking it away from the operator), or the app itself
+  # listens on one of them. Detected by declared container ports rather than a
+  # container name, which the operator owns. An app port that is not declared
+  # cannot be seen from here.
+  local declared_ports p
+  declared_ports="$(kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
+    -o jsonpath='{range .spec.template.spec.containers[*].ports[*]}{.containerPort}{" "}{end}')"
+  for p in 15124 15123 9090; do
+    case " $declared_ports " in
+      *" $p "*)
+        echo "error: $DEPLOY already declares containerPort $p, which the lineage sidecar binds" >&2
+        echo "  (an operator-injected sidecar, or the app itself on that port) — refusing to patch over it" >&2
+        exit 1 ;;
+    esac
+  done
+}
+
+require_app_container() {
+  # APP_CONTAINER must name a container that actually exists: a strategic
+  # merge ADDS a stub container for an unknown name rather than failing, so a
+  # typo would silently grow the pod a broken extra container.
+  [ -n "$APP_CONTAINER" ] || return 0
+  local containers
   containers="$(kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
     -o jsonpath='{range .spec.template.spec.containers[*]}{.name}{" "}{end}')"
   case " $containers " in
@@ -103,28 +125,45 @@ if [ -n "${APP_CONTAINER:-}" ]; then
       echo "  — refusing: the patch would ADD a stub container by that name instead of failing" >&2
       exit 1 ;;
   esac
-fi
+}
 
-# Without APP_CONTAINER this attaches capture only. Whether the app carries
-# trace context from its inbound request to its outbound calls is a property
-# of the app (its own instrumentation, or the baked shim activated via
-# APP_CONTAINER) that nothing here can see — say so once, at attach time,
-# instead of guessing from the Deployment's env.
-if [ -z "${APP_CONTAINER:-}" ]; then
+note_capture_only() {
+  # Without APP_CONTAINER this attaches capture only. Whether the app carries
+  # trace context from its inbound request to its outbound calls is a property
+  # of the app (its own instrumentation, or the baked shim activated via
+  # APP_CONTAINER) that nothing here can see — say so once, at attach time,
+  # instead of guessing from the Deployment's env.
+  [ -z "$APP_CONTAINER" ] || return 0
   echo "NOTE: the sidecar records every hop; whether $DEPLOY's outbound hops attribute to" >&2
   echo "      their inbound depends on the app propagating traceparent itself (its own" >&2
   echo "      instrumentation, or the baked shim + APP_CONTAINER=<name>). Verify pairing" >&2
   echo "      under concurrency before relying on it (README.md, 'The envelope')." >&2
-fi
+}
 
 gen() {  # $1 = EMIT mode; forwards the shared knobs to the one generator
   EMIT="$1" NAME="$DEPLOY" SELF_ID="$SELF_ID" NAMESPACE="$NAMESPACE" \
     "${SCRIPT_DIR}/attach-lineage.sh"
 }
 
-gen cm | kubectl apply -f -
-patch="$(gen patch)"  # its own assignment, so a generator failure stops the script
-kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$patch"
+apply() {
+  # ConfigMap first: the patch's volume names it, and the new pod cannot start
+  # without it. The patch goes through its own assignment so a generator
+  # failure stops the script (a $(...) inside an argument would not).
+  local patch
+  gen cm | kubectl apply -f -
+  patch="$(gen patch)"
+  kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$patch"
+  kubectl rollout status -n "$NAMESPACE" "deploy/$DEPLOY" --timeout=180s
+  echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"
+}
 
-kubectl rollout status -n "$NAMESPACE" "deploy/$DEPLOY" --timeout=180s
-echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"
+main() {
+  read_inputs             # DEPLOY required; the rest defaulted or inherited
+  require_deployment      # the target exists
+  require_envoy_config    # the platform's Envoy config is in the namespace
+  refuse_port_collision   # no sidecar there already, app not on a sidecar port
+  require_app_container   # APP_CONTAINER, if given, is a real container
+  note_capture_only       # no APP_CONTAINER → say what that means, once
+  apply                   # cm → patch → rollout
+}
+main "$@"
