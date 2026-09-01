@@ -121,8 +121,9 @@ The shim supplies it with stock OpenTelemetry auto-instrumentation and
 
 - **server side** (`starlette` / `asgi` / `fastapi`) — extract the inbound
   `traceparent`, make it the active context.
-- **client side** (`httpx` / `requests` / `aiohttp-client`) — inject
-  `traceparent` on outbound calls.
+- **client side** (`httpx` / `requests` / `aiohttp-client` / `urllib3`) — inject
+  `traceparent` on outbound calls. `urllib3` is what covers `boto3`/`botocore`:
+  an S3 read from a tool otherwise escapes into a trace of its own.
 - **`threading`** — carry the active context across `Thread.start` /
   `ThreadPoolExecutor.submit`. **Load-bearing**: frameworks that run the LLM
   call in a worker thread (anything using `loop.run_in_executor`) otherwise
@@ -308,7 +309,7 @@ The shim is generic across the mainstream Python stack, not universal:
   `build-otel-shim.sh` probes the image for the interpreter the app runs and
   refuses when it finds none (an explicit argument overrides the probe).
 - Server is **ASGI / Starlette / FastAPI**; HTTP client is **httpx**,
-  **requests** or **aiohttp**.
+  **requests**, **aiohttp** or **urllib3** (which is how `boto3` talks).
 - The entry caller supplies the first `traceparent`. Nothing here seeds a root
   for an untraced entry point.
 - **Not covered:** work handed to a `multiprocessing` child or a `subprocess`,
@@ -327,7 +328,8 @@ than it sounds.
 
 Propagation needs **two** halves: something that extracts the inbound
 `traceparent` into an active context (`starlette` / `asgi` / `fastapi`), and
-something that injects it on the way out (`httpx` / `requests` / `aiohttp`). An
+something that injects it on the way out (`httpx` / `requests` / `aiohttp` /
+`urllib3`). An
 app carrying only the client half can inject, but has nothing to inject *from*.
 
 That app is in a corner this demo cannot get you out of:
@@ -482,8 +484,13 @@ exchange and recorded it as facts.
 
 `OUTBOUND_PORTS_EXCLUDE` keeps a port out of the iptables redirect — use it
 for a port the app exports its *own* telemetry on, so that keeps flowing
-untouched. Do **not** exclude LLM or tool ports; those are the hops lineage
-exists to observe.
+untouched, and for a **plaintext non-HTTP store** the app talks to (Postgres
+5432, SMTP 1025, Redis 6379, …): the sidecar's outbound listener hands every
+non-TLS connection to its HTTP codec, which closes a foreign wire protocol —
+seen live as `psycopg` "server terminated abnormally". Those hops are
+invisible to lineage either way (no HTTP, no facts); excluding them just
+lets the app work. Do **not** exclude LLM or tool ports, nor S3 or any other
+HTTP-spoken store; those are the hops lineage exists to observe.
 
 ### With propagation: bake, then flip the switch
 

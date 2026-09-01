@@ -36,7 +36,8 @@
 #   APP_CONTAINER  the app container to switch propagation on (optional)
 # Env — inherited by attach-lineage.sh and validated there (see its header):
 #   APP_IMAGE, OTEL_ENDPOINT, SIDECAR_IMAGE, PROXY_INIT_IMAGE, NO_EMIT,
-#   OUTBOUND_PORTS_EXCLUDE (only an app's OWN telemetry port — never LLM/tool ports).
+#   OUTBOUND_PORTS_EXCLUDE (an app's OWN telemetry port, or a plaintext non-HTTP store
+#                   port such as Postgres/SMTP — never LLM/tool/S3 ports).
 #
 # Requires in the namespace: the platform's `envoy-config` ConfigMap; the
 # sidecar + proxy-init images resolvable from the cluster (README "Prerequisites").

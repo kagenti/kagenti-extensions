@@ -44,8 +44,10 @@
 #   APP_IMAGE       needs APP_CONTAINER: the -otel image to set on it
 #   OTEL_ENDPOINT   OTLP/gRPC target for the plugin's spans (default: the
 #                   platform collector). Any OTLP consumer works.
-#   OUTBOUND_PORTS_EXCLUDE  ports proxy-init must not intercept — only an app's
-#                   OWN telemetry export port (e.g. 4317). Never LLM/tool ports.
+#   OUTBOUND_PORTS_EXCLUDE  ports proxy-init must not intercept — an app's OWN
+#                   telemetry export port (e.g. 4317), or a plaintext non-HTTP
+#                   store (Postgres 5432, SMTP 1025: the outbound HTTP codec
+#                   would close them). Never LLM/tool/S3 ports.
 #   SIDECAR_IMAGE   default ghcr.io/rossoctl/cortex/authbridge-envoy:latest —
 #                   UNTIL A RELEASE CARRIES lineage-telemetry it boots without
 #                   the plugin; build from this repo and point this at your tag
