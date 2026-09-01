@@ -20,7 +20,7 @@ more AuthBridge capabilities.
 | **[GitHub Issue Agent](github-issue/demo.md)** | Intermediate | Inbound validation + outbound token exchange + scope-based access control | [UI](github-issue/demo-ui.md) or [Manual](github-issue/demo-manual.md) |
 | **[Token-Exchange Routes](token-exchange-routes/README.md)** | Reference | How to write `authproxy-routes` for single- and multi-target token exchange | Configuration only |
 | **[MCP Parser Plugin](mcp-parser/README.md)** | Reference | Enable the `mcp-parser` plugin to surface tool calls / resource reads in session events | Configuration only |
-| **[Session Budget](session-budget/README.md)** | Reference | Test assets for the `session-budget` plugin, including a pause-mode webhook stub | kubectl |
+| **[Session Budget](session-budget/README.md)** | Reference | Test assets for the `session-budget` plugin, including a pause-mode webhook stub. Also see [`hitl-local.md`](session-budget/hitl-local.md) for a laptop-only walkthrough of `on_exceed: pause` (no Kubernetes required). | kubectl or local |
 | **[abctl Walkthrough](weather-agent/demo-with-abctl.md)** | Reference | Watch the AuthBridge plugin pipeline live with the `abctl` TUI | Tooling only |
 | **[IBAC](ibac/README.md)** | Intermediate | Intent-Based Access Control: LLM judge denies outbound HTTP that doesn't align with the user's recorded intent. Reproduces the email-poison / prompt-injection attack from `huang195/ibac`; chat with the agent through the rossoctl UI and see the exfiltration blocked, then `make show-result` for a pipeline-level forensic | UI + kubectl |
 | **[SPARC (finance)](finance-sparc/README.md)** | Intermediate | SPARC pre-tool reflection: the `sparc` plugin blocks a hallucinated/ungrounded tool argument (an invented transaction id) before it executes and transparently asks the user to clarify, then approves the corrected call. Complements IBAC — SPARC verifies argument grounding, IBAC verifies intent alignment | UI + kubectl |
@@ -88,6 +88,22 @@ more AuthBridge capabilities.
 - Required `allow_mode_override: true` on the outbound ext_proc filter
   in envoy-sidecar mode
 
+### Session Budget
+- Cap how much an agent can spend per session — inference calls,
+  tokens, or wall-clock time with Redis-backed counters shared
+  across pods
+- Three responses when a session hits its cap: `deny` (return 403),
+  `observe` (log only, don't block), or `pause` (call a webhook and
+  let a human approve or reject before the request continues)
+- Cluster path ([`README.md`](session-budget/README.md)): production
+  shape — plugin runs as a sidecar, session IDs come from inbound
+  A2A requests, pause approvals go to a webhook stub deployed via
+  `kubectl`
+- Local path ([`hitl-local.md`](session-budget/hitl-local.md)):
+  laptop-only walkthrough with Docker, `go run`, and `curl` — the
+  fastest way to see pause-mode approval end-to-end, no Kubernetes
+  required
+
 ### abctl Walkthrough (Tooling Reference)
 - Run the `abctl` TUI against the weather-agent's session API
 - See inbound JWT validation → protocol parsers → outbound exchange
@@ -112,7 +128,8 @@ more AuthBridge capabilities.
 
 ## Prerequisites
 
-All demos require:
+Cluster-backed demos (everything above except the session-budget local
+walkthrough) require:
 - A Kubernetes cluster with the Rossoctl platform installed
   ([Installation Guide](https://github.com/rossoctl/rossoctl/blob/main/docs/getting-started/install.md))
 - Keycloak deployed in the `keycloak` namespace
@@ -120,6 +137,10 @@ All demos require:
 
 UI-based demos additionally require:
 - The Rossoctl UI running at `http://rossoctl-ui.localtest.me:8080`
+
+The session-budget [`hitl-local.md`](session-budget/hitl-local.md)
+walkthrough is Kubernetes-free — see its own Prerequisites section
+(Docker, Ollama, Go).
 
 ## Common Setup: Keycloak Port-Forward
 

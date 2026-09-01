@@ -16,14 +16,17 @@ import os
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
 
 from aiac.agent.eventbus.consumer import lifespan
+from aiac.agent.policy_rules_builder.diagnostic_models import ConflictReport
 from aiac.agent.policy_rules_builder.graph import (
     PolicyContradictionError,
     PolicyRulesBuilderError,
 )
 from aiac.agent.uc.offboarding.offboard import offboard_service
 from aiac.agent.uc.onboarding.orchestrator import onboard_service
+from aiac.agent.uc.policy_check.check import check_policy_conflicts
 from aiac.agent.uc.policy_update.build import build_policy
 from aiac.agent.uc.policy_update.rebuild import rebuild_policy
 from aiac.agent.uc.role_update.role import update_role
@@ -105,6 +108,27 @@ def apply_role(role_id: str) -> Response:
 def apply_offboard(service_id: str) -> Response:
     decommission(offboard_service(service_id))
     return Response(status_code=200)
+
+
+class PolicyCheckRequest(BaseModel):
+    """Body for ``POST /policy/check``: candidate ``policy_text`` to survey against the focal
+    entities of ``service_id`` (the Keycloak internal client UUID, matching
+    ``/apply/service/{service_id}``). ``policy_text`` is required — its absence is a FastAPI
+    validation 422 with no report body."""
+
+    policy_text: str
+    service_id: str
+
+
+# The read-only conflict-check survey (feature #154). UNLIKE the live /apply routes, this is a
+# diagnostic: ANY completed survey is a success and returns 200 with the ConflictReport body —
+# a found conflict is a recorded finding, NOT a 422. Only the resolver's pre-survey boundary
+# (HTTPException 502 IdP-unreachable / 404 unknown-service) propagates, unchanged, as the bare
+# non-2xx error with no report body (we deliberately do NOT catch it). FastAPI serializes the
+# returned ConflictReport pydantic model to the JSON response body.
+@app.post("/policy/check")
+def policy_check(body: PolicyCheckRequest) -> ConflictReport:
+    return check_policy_conflicts(body.policy_text, body.service_id)
 
 
 def main() -> None:

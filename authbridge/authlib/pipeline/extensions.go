@@ -157,12 +157,41 @@ type InferenceExtension struct {
 	ToolChoice  any                `json:"toolChoice,omitempty"` // "auto" | "none" | {type,function:{name}}
 
 	// Response fields (populated after OnResponse runs).
-	Completion       string              `json:"completion,omitempty"`
-	FinishReason     string              `json:"finishReason,omitempty"`
-	PromptTokens     int                 `json:"promptTokens,omitempty"`
-	CompletionTokens int                 `json:"completionTokens,omitempty"`
-	TotalTokens      int                 `json:"totalTokens,omitempty"`
-	ToolCalls        []InferenceToolCall `json:"toolCalls,omitempty"`
+	Completion       string `json:"completion,omitempty"`
+	FinishReason     string `json:"finishReason,omitempty"`
+	PromptTokens     int    `json:"promptTokens,omitempty"`
+	CompletionTokens int    `json:"completionTokens,omitempty"`
+	TotalTokens      int    `json:"totalTokens,omitempty"`
+
+	// ToolCalls are the tool invocations the model requested. Populated on
+	// three of the four response paths — both non-streaming dialects and
+	// Anthropic streaming. An OpenAI *stream* leaves it empty: that dialect
+	// splits each call across `choices[].delta.tool_calls[]` fragments keyed
+	// by their own index, a shape the streaming chunk decoder does not read.
+	//
+	// So empty means "the model requested no tools" only for a non-streaming
+	// response or an Anthropic stream. A consumer that spans dialects — cost
+	// accounting, per-tool attribution — must not read absence as a negative
+	// on a streamed OpenAI turn, where it is indistinguishable from a turn
+	// whose calls were never captured.
+	ToolCalls []InferenceToolCall `json:"toolCalls,omitempty"`
+
+	// CacheWriteTokens and CacheReadTokens split the cached portion of
+	// PromptTokens by how it was billed. PromptTokens is the whole prompt
+	// (uncached input + cache writes + cache reads), which is the right
+	// number for context-size questions but the wrong one for cost: a
+	// provider that prices prompt caching charges a premium to *write* an
+	// entry and a steep discount to *read* one, so two requests with an
+	// identical PromptTokens can differ by an order of magnitude in price.
+	// Both counts arrive in the same usage block the totals come from, so
+	// recording them separately costs nothing and is the only way a
+	// consumer can tell a cache-warming turn from a cache-hit turn.
+	//
+	// Zero means "not reported" — providers that don't price caching (and
+	// the OpenAI dialect, which reports cached tokens in a different shape)
+	// leave these unset while PromptTokens stays authoritative.
+	CacheWriteTokens int `json:"cacheWriteTokens,omitempty"`
+	CacheReadTokens  int `json:"cacheReadTokens,omitempty"`
 
 	// Classification — see MCPExtension.IsAction.
 	IsAction bool `json:"isAction,omitempty"`
@@ -172,6 +201,22 @@ type InferenceExtension struct {
 type InferenceMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content,omitempty"`
+
+	// ContentBytes is the wire size of this message's content value as the
+	// client sent it, before the parser reduced it to text. Content keeps
+	// only text blocks, so a message whose payload is a tool result, an
+	// image, or any other non-text block flattens to "" and looks free —
+	// while the model was billed for all of it. ContentBytes is what those
+	// messages contribute, without recording their contents: it is a byte
+	// count of the raw JSON (syntax and escapes included), not a token
+	// count, and is a size signal rather than an exact one.
+	//
+	// Whitespace counts too, because the measure is of what was sent, not of
+	// a normalized form of it. A client that pretty-prints its request bodies
+	// therefore reports a higher count than one sending compact JSON for the
+	// same content — tens of percent apart on a deeply nested tool result.
+	// Comparable across messages from one client; not across clients.
+	ContentBytes int `json:"contentBytes,omitempty"`
 }
 
 // InferenceTool is a function/tool the client declared the model may call.

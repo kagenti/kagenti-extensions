@@ -157,6 +157,7 @@ var (
 	inferenceRespKeys = []string{
 		"model", "completion", "finishReason", "promptTokens",
 		"completionTokens", "totalTokens", "toolCalls",
+		"cacheWriteTokens", "cacheReadTokens",
 	}
 	mcpReqKeys  = []string{"method", "rpcId", "params"}
 	mcpRespKeys = []string{"method", "rpcId", "result", "error"}

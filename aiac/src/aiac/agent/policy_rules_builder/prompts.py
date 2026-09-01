@@ -189,3 +189,64 @@ def build_auditor_messages(
             "mistake, leave `contradictions` empty and reject with a reason so it can re-propose."
         )
     return [SystemMessage(content=_AUDITOR_SYSTEM), HumanMessage(content=body)]
+
+
+# --------------------------------------------------------------------------- #
+# Explain prompt — read-only policy Conflict-Check diagnostic (feature #154).   #
+#                                                                              #
+# Used ONLY by the diagnostic assembly's terminal `explain` node, once per     #
+# auditor-confirmed (role, scope) contradiction. It does NOT re-adjudicate the  #
+# conflict; the auditor already ruled it genuine. It (1) CLASSIFIES the kind    #
+# (direct vs coarse_scope -- D11: the typed kind is produced here, not read     #
+# from the auditor), (2) extracts VERBATIM granting/prohibiting quotes from the #
+# candidate policy text, and (3) explains the collision in plain language.      #
+#                                                                              #
+# The candidate policy_text is shown RAW (not wrapped in _policy_block): the    #
+# quotes are validated as substrings of exactly this text, and the baseline     #
+# layer is grants-only so it can never be a source of a prohibiting quote.      #
+# The auditor's own `description` is passed as a HINT ONLY (D9/D11) -- never     #
+# the proposer's free-form reasoning, which could anchor extraction onto a      #
+# hallucinated justification.                                                   #
+# --------------------------------------------------------------------------- #
+_EXPLAIN_SYSTEM = (
+    "You explain a single, ALREADY-CONFIRMED access-policy contradiction for one (role, scope) pair. "
+    "An auditor has already ruled that the policy genuinely BOTH grants and prohibits this pair -- do "
+    "NOT re-litigate whether the conflict exists. Your job has three parts.\n"
+    "1) CLASSIFY the kind, choosing EXACTLY one:\n"
+    "   - \"direct\": the policy grants and prohibits the SAME capability for this pair -- a head-on "
+    "grant-vs-prohibit collision on the same scope.\n"
+    "   - \"coarse_scope\": a coarse/broad capability is granted while a finer operation it INCLUDES is "
+    "prohibited (or vice versa) -- a granularity mismatch (e.g. management granted, writing forbidden).\n"
+    "2) QUOTE the colliding statements VERBATIM. granting_quotes and prohibiting_quotes are each a list "
+    "of one or more EXACT substrings copied character-for-character from the POLICY text below: the "
+    "statement(s) that GRANT access go in granting_quotes, the statement(s) that PROHIBIT or RESTRICT "
+    "it go in prohibiting_quotes. Copy the author's words exactly -- do NOT paraphrase, fix spelling or "
+    "punctuation, change quotation marks, or add ellipses. Quote ONLY from the POLICY text, never from "
+    "the auditor hint.\n"
+    "3) EXPLAIN the collision in one or two plain sentences.\n"
+    "The AUDITOR HINT describes the collision to help you locate and classify it; treat it strictly as "
+    "a hint -- it is NOT policy text and must never be quoted."
+)
+
+
+def build_explain_messages(
+    policy_text: str,
+    role: str,
+    scope: str,
+    description_hint: str,
+) -> list[BaseMessage]:
+    """Messages for the diagnostic `explain` node: classify a confirmed (role, scope) contradiction
+    and extract verbatim granting/prohibiting quotes from ``policy_text``.
+
+    ``policy_text`` is the RAW candidate policy (the same text the quote validator checks substrings
+    against -- deliberately NOT wrapped in the baseline ``_policy_block``). ``role`` / ``scope`` are
+    human-readable descriptions of the colliding pair. ``description_hint`` is the auditor's own
+    ``Contradiction.description`` (a hint for classification/location only -- never a quote source)."""
+    body = (
+        f"POLICY:\n{policy_text}\n\n"
+        f"ROLE:\n{role}\n\nSCOPE:\n{scope}\n\n"
+        f"AUDITOR HINT (not policy text -- do not quote):\n{description_hint}\n\n"
+        "Classify the conflict kind, extract verbatim granting_quotes and prohibiting_quotes from the "
+        "POLICY text above, and explain the collision."
+    )
+    return [SystemMessage(content=_EXPLAIN_SYSTEM), HumanMessage(content=body)]

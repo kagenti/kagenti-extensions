@@ -132,8 +132,9 @@ Each use case (and the UC1 Orchestrator) is specified in a dedicated sub-PRD:
 | Policy Update | [aiac-agent/uc2-policy-update.md](aiac-agent/uc2-policy-update.md) | `aiac.apply.policy.build`, `POST /apply/policy/build`, `POST /apply/policy/rebuild` | |
 | Role Update | [aiac-agent/uc3-role-update.md](aiac-agent/uc3-role-update.md) | `aiac.apply.role.{id}`, `POST /apply/role/{id}` | |
 | Service Offboarding | (see PCE `decommission`) | `POST /apply/offboard/{service_id}` (`aiac.apply.offboard.{id}` — NATS wiring is a follow-up) | Thin sub-agent; calls the PCE's `decommission(service_id)` **directly** (whole-service teardown, not a rule fold — bypasses the PRB and `compute_and_apply`). Keyed by **clientId, not UUID** (an offboarded client is gone from `get_services()`). |
+| Policy Conflict Check (pre-commit diagnostic) | [aiac-agent/policy-conflict-check.md](aiac-agent/policy-conflict-check.md) | `POST /policy/check` (HTTP only — not routed through the Event Broker) | **Read-only** diagnostic: candidate `policy_text` + service id → `ConflictReport`. Reuses the PRB propose/precheck/audit machinery in a **separate assembly** (record-not-raise + `explain`). Does **not** call the PCE / `compute_and_apply`; never mutates policy; returns `200` on a found conflict. |
 
-> **Note:** Each producing sub-agent (UC1–UC3) calls the **shared Policy Rules Builder** directly, merges the results, and returns `list[PolicyRule]` to the Controller. The Controller calls `compute_and_apply(merged_rules)` from `aiac.policy.computation` (PCE) once. Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md). The Policy Rules Builder is specified in [aiac-agent/policy-rules-builder.md](aiac-agent/policy-rules-builder.md). **UC4 (Service Offboarding) is the exception:** it produces no rules — its handler resolves the clientId and calls the PCE's authoritative `decommission(service_id)` (specified in [policy-computation-engine.md → Decommission](policy-computation-engine.md#decommission-service-offboard)) to tear down the service's entire policy footprint.
+> **Note:** Each producing sub-agent (UC1–UC3) calls the **shared Policy Rules Builder** directly, merges the results, and returns `list[PolicyRule]` to the Controller. The Controller calls `compute_and_apply(merged_rules)` from `aiac.policy.computation` (PCE) once. Policy rule application is fully specified in [policy-computation-engine.md](policy-computation-engine.md). The Policy Rules Builder is specified in [aiac-agent/policy-rules-builder.md](aiac-agent/policy-rules-builder.md). **UC4 (Service Offboarding) is the exception:** it produces no rules — its handler resolves the clientId and calls the PCE's authoritative `decommission(service_id)` (specified in [policy-computation-engine.md → Decommission](policy-computation-engine.md#decommission-service-offboard)) to tear down the service's entire policy footprint. **Policy Conflict Check is a further exception:** it is a **read-only** agent capability (not a UC number — the informal "UC4" is offboarding's), producing neither rules nor any PCE call. It surveys a candidate policy and returns a `ConflictReport`; the caller decides what to do with it. Full spec: [aiac-agent/policy-conflict-check.md](aiac-agent/policy-conflict-check.md).
 
 ### IdP access — library, not service
 
@@ -151,12 +152,15 @@ Every sub-agent (UC1 Provision + Service Policy Builder, UC2 Build + Rebuild, UC
 | POST | `/apply/role/{role_id}` | Role Update | Role |
 | POST | `/apply/service/{service_id}` | Service Onboarding | Provision |
 | POST | `/apply/offboard/{service_id}` | Service Offboarding | Offboard (calls PCE `decommission` directly) |
+| POST | `/policy/check` | Policy Conflict Check (diagnostic) | `check_policy_conflicts` — read-only; returns a `ConflictReport` JSON body |
 
 `GET /health` is a bare liveness/readiness probe: the Controller is stateless (no local state, no connection held at rest), so it answers `200 {"status": "ok"}` whenever the process is serving, dispatching to no handler and touching no upstream. Upstream reachability (IdP, PCE, NATS) is validated per-request by the handlers. The k8s Deployment wires both the readiness and liveness probes to it.
 
 The `/apply/offboard/{service_id}` path uses the `{service_id:path}` converter (slash-bearing SPIFFE-URI clientIds) and is keyed on the **clientId (SPM key)**, not the Keycloak UUID that `/apply/service/{service_id}` carries — an offboarded client is gone from `get_services()`, so UUID→clientId resolution is impossible.
 
 The `/apply/*` endpoints return bare HTTP status codes: `200 OK` on success (no response body), and the status codes from the Error Handling table on upstream failure. Success responses carry no body; upstream failures are raised as FastAPI `HTTPException`s, so error responses carry FastAPI's default JSON error body (`{"detail": ...}`) alongside the status code. Summary, applied-rule details, and debug information are written to the service log. Validation failures surface as an error status and log entry; detailed reporting is specified in [policy-rules-builder.md](aiac-agent/policy-rules-builder.md).
+
+`POST /policy/check` is the **first endpoint that returns a JSON success body** (a `ConflictReport`), unlike the bare-status-code `/apply/*` routes. It is the read-only pre-commit conflict diagnostic: a **found conflict is a successful `200` diagnosis, NOT `422`** — only a pre-survey failure (IdP unreachable, unknown service, missing `policy_text`) is non-2xx. This is the opposite of the live `/apply` contradiction path, which raises `PolicyContradictionError` → `422`. Full spec: [aiac-agent/policy-conflict-check.md](aiac-agent/policy-conflict-check.md).
 
 ---
 
@@ -214,7 +218,7 @@ aiac/src/aiac/
 ├── shared/                             ← project-level shared: run_upstream (upstream.py) — transport retry primitive
 └── agent/
     ├── controller/
-    ├── shared/                         ← flatten_role (roles.py)
+    ├── shared/                         ← flatten_role (roles.py); focal_entities.py (resolve_focal_entities — D13, shared by live build() + diagnostic)
     ├── uc/
     │   ├── onboarding/
     │   │   ├── orchestrator.py         ← sequences provision → policy_builder, returns list[PolicyRule]
@@ -223,8 +227,11 @@ aiac/src/aiac/
     │   ├── policy_update/
     │   │   ├── build/                  ← calls PRB, returns list[PolicyRule]; TBD internals
     │   │   └── rebuild/                ← delegates to Build; TBD internals
-    │   └── role_update/                ← calls PRB with (role, all_scopes), returns list[PolicyRule]
+    │   ├── role_update/                ← calls PRB with (role, all_scopes), returns list[PolicyRule]
+    │   └── policy_check/               ← read-only diagnostic: check_policy_conflicts(policy_text, service_id) → ConflictReport
     └── policy_rules_builder/           ← shared; called by Service Policy Builder, Build, and Role sub-agent
+        ├── diagnostic.py               ← parallel diagnostic assembly (START-seeds-text, _audit_diagnostic record-not-raise, terminal _explain)
+        └── diagnostic_models.py        ← ConflictReport + conflict/unevaluated row models
 ```
 
 Docker build command (run from repo root):

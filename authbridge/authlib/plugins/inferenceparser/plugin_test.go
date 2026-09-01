@@ -470,6 +470,36 @@ func TestInferenceParser_OnResponse_SSE(t *testing.T) {
 	}
 }
 
+// TestFoldOpenAIFrame_PreservesCacheAccumulator pins the field-by-field copy in
+// foldOpenAIFrame. inferenceUsage is both the OpenAI wire shape and the
+// dialect-neutral accumulator, and its two cache fields are json:"-" — so they
+// are always zero in a decoded chunk, and assigning the whole struct would
+// clear whatever had been accumulated.
+//
+// Nothing on the OpenAI path fills those fields today, so this guards a
+// refactor rather than a live bug: the failure mode is silent, and it arrives
+// the moment someone wires up prompt_tokens_details.cached_tokens.
+func TestFoldOpenAIFrame_PreservesCacheAccumulator(t *testing.T) {
+	state := &inferenceStreamState{}
+	state.usage.CacheWriteTokens = 111
+	state.usage.CacheReadTokens = 222
+	ext := &pipeline.InferenceExtension{Model: "gpt-4", Stream: true}
+
+	frame := []byte(`{"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`)
+	foldOpenAIFrame(frame, state, ext)
+
+	if state.usage.CacheWriteTokens != 111 || state.usage.CacheReadTokens != 222 {
+		t.Errorf("cache counts = %d/%d, want 111/222 preserved",
+			state.usage.CacheWriteTokens, state.usage.CacheReadTokens)
+	}
+	// The wire-backed counts still land, TotalTokens taken as reported rather
+	// than recomputed from prompt+completion.
+	if state.usage.PromptTokens != 5 || state.usage.CompletionTokens != 2 || state.usage.TotalTokens != 7 {
+		t.Errorf("usage = %d/%d/%d, want 5/2/7",
+			state.usage.PromptTokens, state.usage.CompletionTokens, state.usage.TotalTokens)
+	}
+}
+
 func TestInferenceParser_OnResponse_InvalidJSON(t *testing.T) {
 	p := NewInferenceParser()
 	pctx := &pipeline.Context{
@@ -528,6 +558,44 @@ func TestInferenceParser_MultipartContent(t *testing.T) {
 	// Non-text parts dropped, multiple text parts joined with newline.
 	if msgs[2].Content != "hello\nthere" {
 		t.Errorf("msg[2].Content = %q, want %q", msgs[2].Content, "hello\nthere")
+	}
+}
+
+// TestInferenceParser_ContentBytes covers the OpenAI dialect's own
+// ContentBytes accounting — a separate UnmarshalJSON from the Anthropic path.
+// A tool-result message whose content is an array flattens to text only for
+// the text parts; the dropped parts (images, tool payloads) still cost prompt
+// tokens, and ContentBytes is what they contribute.
+func TestInferenceParser_ContentBytes(t *testing.T) {
+	p := NewInferenceParser()
+	body := `{
+		"model": "gpt-4",
+		"messages": [
+			{"role": "user", "content": "hi"},
+			{"role": "tool", "content": [{"type":"image_url","image_url":{"url":"http://x/very/long/path"}}]},
+			{"role": "assistant", "content": null, "tool_calls": []}
+		]
+	}`
+	pctx := &pipeline.Context{Path: "/v1/chat/completions", Body: []byte(body)}
+	p.OnRequest(context.Background(), pctx)
+
+	msgs := pctx.Extensions.Inference.Messages
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	// `"hi"` on the wire — the quotes are part of the JSON value.
+	if msgs[0].ContentBytes != 4 {
+		t.Errorf("msgs[0].ContentBytes = %d, want 4", msgs[0].ContentBytes)
+	}
+	// No text parts, so Content is empty — but the message is far from free.
+	if msgs[1].Content != "" || msgs[1].ContentBytes <= msgs[0].ContentBytes {
+		t.Errorf("msgs[1] = %q / %d bytes, want empty text and > %d bytes",
+			msgs[1].Content, msgs[1].ContentBytes, msgs[0].ContentBytes)
+	}
+	// content: null has no content to size — reporting the 4 bytes of the
+	// literal would make an empty assistant turn look like a small payload.
+	if msgs[2].ContentBytes != 0 {
+		t.Errorf("msgs[2].ContentBytes = %d, want 0 for null content", msgs[2].ContentBytes)
 	}
 }
 

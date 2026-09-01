@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/storage"
 )
 
@@ -145,14 +146,19 @@ func init() {
 }
 
 func newTestPlugin(maxTokens, maxCalls, maxDuration int64) *SessionBudget {
+	return newTestPluginWithFallback(maxTokens, maxCalls, maxDuration, false)
+}
+
+func newTestPluginWithFallback(maxTokens, maxCalls, maxDuration int64, defaultSessionFallback bool) *SessionBudget {
 	p := New()
 	cfg := fmt.Sprintf(`{
 		"redis_url": "mem://test",
 		"max_tokens": %d,
 		"max_calls": %d,
 		"max_duration_seconds": %d,
-		"refresh_interval": "100ms"
-	}`, maxTokens, maxCalls, maxDuration)
+		"refresh_interval": "100ms",
+		"default_session_fallback": %t
+	}`, maxTokens, maxCalls, maxDuration, defaultSessionFallback)
 	if err := p.Configure(json.RawMessage(cfg)); err != nil {
 		panic(err)
 	}
@@ -258,6 +264,70 @@ func TestOnRequest_NoSession(t *testing.T) {
 	action := p.OnRequest(context.Background(), pctx)
 	if action.Type != pipeline.Continue {
 		t.Fatalf("expected Continue for nil session, got %v", action.Type)
+	}
+
+	// Pin the mechanism, not just the outcome: with fallback off (the
+	// default), sessionless traffic must record a no_session_id skip so
+	// operators can distinguish it from real-session traffic.
+	if pctx.Extensions.Invocations == nil {
+		t.Fatal("expected invocation recorded, got none")
+	}
+	out := pctx.Extensions.Invocations.Outbound
+	if len(out) != 1 {
+		t.Fatalf("expected 1 outbound invocation, got %d", len(out))
+	}
+	if out[0].Action != pipeline.ActionSkip || out[0].Reason != "no_session_id" {
+		t.Errorf("invocation = {%s, %s}, want {skip, no_session_id}", out[0].Action, out[0].Reason)
+	}
+}
+
+// With default_session_fallback enabled, sessionless response frames
+// accumulate under session.DefaultSessionID instead of being skipped.
+func TestOnResponseFrame_NoSession_UsesDefaultBucket(t *testing.T) {
+	p := newTestPluginWithFallback(1000, 0, 0, true)
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Headers:   http.Header{},
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{TotalTokens: 42},
+		},
+	}
+
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	p.mu.RLock()
+	c := p.cache[session.DefaultSessionID]
+	p.mu.RUnlock()
+	if c == nil {
+		t.Fatalf("expected cache entry under %q, got none", session.DefaultSessionID)
+	}
+	if c.tokens != 42 {
+		t.Errorf("tokens = %d, want 42", c.tokens)
+	}
+	if c.calls != 1 {
+		t.Errorf("calls = %d, want 1", c.calls)
+	}
+}
+
+// With default_session_fallback disabled (the default), sessionless response
+// frames are skipped and nothing accumulates.
+func TestOnResponseFrame_NoSession_FallbackOff_Skips(t *testing.T) {
+	p := newTestPlugin(1000, 0, 0)
+	pctx := &pipeline.Context{
+		Direction: pipeline.Outbound,
+		Headers:   http.Header{},
+		Extensions: pipeline.Extensions{
+			Inference: &pipeline.InferenceExtension{TotalTokens: 42},
+		},
+	}
+
+	p.OnResponseFrame(context.Background(), pctx, nil, true)
+
+	p.mu.RLock()
+	_, ok := p.cache[session.DefaultSessionID]
+	p.mu.RUnlock()
+	if ok {
+		t.Errorf("expected no cache entry under %q when fallback is off", session.DefaultSessionID)
 	}
 }
 

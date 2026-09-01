@@ -250,6 +250,13 @@ The PRB is the producer that must **guarantee** this — it must never pass a co
 downstream. Detection and reporting live here; the **treatment** of a reported contradiction (surface
 to a human, partial-apply, re-author the policy, split the scope) is a **separate, deferred** task.
 
+> **Read-only pre-commit diagnostic.** The collect-all, quote-bearing form of that treatment — a
+> read-only pre-commit tool that surveys a candidate policy, records **all** genuine conflicts at once
+> (never aborting on the first), and returns a `ConflictReport` with verbatim quotes — is now specified
+> in [`policy-conflict-check.md`](policy-conflict-check.md). It reuses this module's proposer / precheck
+> / audit machinery but is a **separate assembly**; the live `/apply` → `PolicyContradictionError` → 422
+> path documented in this section is **UNCHANGED** by it.
+
 - **Detection is deterministic** (in `precheck`): `conflict_names = granted_names ∩ denied_names`,
   after candidate-set filtering. Precheck resolves nothing; it only stores the overlap. Because the
   derived exclusivity complement is disjoint from grants by construction, overlap can arise **only**
@@ -319,6 +326,7 @@ needs the full onboarding stack), `llm` needs only an LLM endpoint. Both are des
 | UC1 — Service Onboarding | Service Policy Builder sub-agent | `build_scope_rules(other_roles, scope)` per agent/tool scope + `build_role_rules(role, other_scopes)` per agent role (agent path only) |
 | UC2 — Policy Update (Build) | Build sub-agent | TBD |
 | UC3 — Role Update | Role sub-agent | `build_role_rules(role, all_scopes)` — one call |
+| Policy Conflict Check (diagnostic) | Controller (`POST /policy/check`) → `check_policy_conflicts` | A parallel diagnostic assembly reusing propose / precheck / audit (record-not-raise + a terminal `explain` node) — see [`policy-conflict-check.md`](policy-conflict-check.md) |
 
 ---
 

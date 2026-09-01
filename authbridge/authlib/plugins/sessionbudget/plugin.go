@@ -18,23 +18,25 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/storage"
 	"golang.org/x/sync/singleflight"
 )
 
 type config struct {
-	RedisURL           string `json:"redis_url" required:"true" description:"Redis/Valkey connection URL."`
-	MaxTokens          int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
-	MaxCalls           int64  `json:"max_calls" description:"Max LLM/inference calls per session. Only inference-parser output increments this counter; MCP tool calls and other outbound traffic do not. Once the limit is reached, all subsequent outbound requests (including MCP tool calls) are blocked until the session resets. 0 = no limit."`
-	MaxDurationSeconds int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
-	OnExceed           string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
-	PauseWebhook       string `json:"pause_webhook" description:"URL to POST for approval when on_exceed=pause. Required when on_exceed=pause."`
-	PauseTimeout       string `json:"pause_timeout" description:"How long to wait for webhook response." default:"30s"`
-	PauseTimeoutAction string `json:"pause_timeout_action" description:"Action on webhook timeout/error: deny or allow." default:"deny" enum:"deny,allow"`
-	PauseGracePeriod   string `json:"pause_grace_period" description:"After approval, suppress further webhooks for this duration." default:"5m"`
-	SessionTTLSeconds  int    `json:"session_ttl_seconds" description:"Redis key TTL; should be >= max_duration_seconds." default:"7200"`
-	RefreshInterval    string `json:"refresh_interval" description:"How often to sync local cache from Redis." default:"5s"`
-	RedisUnavailable   string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
+	RedisURL               string `json:"redis_url" required:"true" description:"Redis/Valkey connection URL."`
+	MaxTokens              int64  `json:"max_tokens" description:"Cumulative token ceiling per session. 0 = no limit."`
+	MaxCalls               int64  `json:"max_calls" description:"Max LLM/inference calls per session. Only inference-parser output increments this counter; MCP tool calls and other outbound traffic do not. Once the limit is reached, all subsequent outbound requests (including MCP tool calls) are blocked until the session resets. 0 = no limit."`
+	MaxDurationSeconds     int64  `json:"max_duration_seconds" description:"Wall-clock session lifetime in seconds. 0 = no limit."`
+	OnExceed               string `json:"on_exceed" description:"Action on breach: deny, observe (shadow), or pause (HITL webhook approval)." default:"deny" enum:"deny,observe,pause"`
+	PauseWebhook           string `json:"pause_webhook" description:"URL to POST for approval when on_exceed=pause. Required when on_exceed=pause."`
+	PauseTimeout           string `json:"pause_timeout" description:"How long to wait for webhook response." default:"30s"`
+	PauseTimeoutAction     string `json:"pause_timeout_action" description:"Action on webhook timeout/error: deny or allow." default:"deny" enum:"deny,allow"`
+	PauseGracePeriod       string `json:"pause_grace_period" description:"After approval, suppress further webhooks for this duration." default:"5m"`
+	SessionTTLSeconds      int    `json:"session_ttl_seconds" description:"Redis key TTL; should be >= max_duration_seconds." default:"7200"`
+	RefreshInterval        string `json:"refresh_interval" description:"How often to sync local cache from Redis." default:"5s"`
+	RedisUnavailable       string `json:"redis_unavailable" description:"Behavior when Redis is unreachable. Only fail_open is supported; fail_closed is reserved." default:"fail_open"`
+	DefaultSessionFallback bool   `json:"default_session_fallback" description:"Pool sessionless traffic into a shared 'default' bucket. Off by default. Single-workload only." default:"false"`
 }
 
 // approvalFlight carries the outcome of one webhook call. The leader writes
@@ -664,6 +666,12 @@ func (p *SessionBudget) refreshCache() {
 func (p *SessionBudget) sessionID(pctx *pipeline.Context) string {
 	if pctx.Session != nil && pctx.Session.ID != "" {
 		return pctx.Session.ID
+	}
+	// Opt-in fallback for single-workload deployments where all sessionless
+	// egress should share one bucket. Off by default; callers with no
+	// session then skip enforcement (existing no_session_id path).
+	if p.cfg.DefaultSessionFallback {
+		return session.DefaultSessionID
 	}
 	return ""
 }

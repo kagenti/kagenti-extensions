@@ -30,9 +30,45 @@ Agent → cortex.py → AuthBridge (litellm-budget-track) → LiteLLM upstream
                                            └── spend-authbridge.json (daily ledger)
 ```
 
-The plugin runs in the **inbound** pipeline direction:
-- `OnRequest` — pre-flight budget check (reject if over limit)
-- `OnResponse` — post-flight cost accumulation (read header, update ledger)
+The plugin hooks:
+- `OnRequest` — pre-flight budget check (reject if over limit).
+- `OnResponseFrame` — post-flight cost accounting for **every** response. Because the
+  plugin is a `StreamingResponder`, in-tree listeners route all responses through this
+  hook — a buffered `application/json` body as a single terminal frame, a streamed
+  `text/event-stream` body frame-by-frame — and `pipeline.RunResponse` skips the plugin
+  unconditionally. (`OnResponse` remains only as a fallback for a hypothetical listener
+  that calls it but never `OnResponseFrame`; no in-tree listener does.)
+
+### Cost source (what the terminal frame charges)
+
+The cost is settled **once**, on the terminal frame, from one of two sources:
+
+- **Response header** — `x-litellm-response-cost`, falling back to the pre-discount
+  `-original` variant. Used whenever the header carries a usable positive cost. A
+  header of `0` on a non-streamed response is a genuine free call (cache hit / error)
+  and is charged `0` — it is **not** re-priced from usage.
+- **Parsed token usage × configured rates** — used only when the cost header is
+  **absent**, or the response is `text/event-stream` (LiteLLM always reports `0` in the
+  header for streams, e.g. Claude Code's `/v1/messages`). The plugin sums the token
+  usage from the terminal SSE events and prices each **prompt-cache tier separately**:
+  uncached input × `input_cost_per_token`, cache writes × `cache_write_cost_per_token`,
+  cache reads × `cache_read_cost_per_token`, output × `output_cost_per_token`. Without
+  any input rate a streamed response contributes `0`.
+
+  **Cache tiers matter.** Providers charge a premium to *write* a cache entry and a
+  steep discount to *read* one, so two requests with identical prompt-token counts can
+  differ ~10× in price. If `cache_write_cost_per_token` / `cache_read_cost_per_token`
+  are unset they default to `input_cost_per_token` (flat pricing), which **overstates
+  cache-heavy traffic like Claude Code by up to ~10×** and would trip the 429 that much
+  earlier. Set the two cache rates to your provider's real prices for accurate budgets.
+  (This only affects the usage-fallback path; when LiteLLM's `x-litellm-response-cost`
+  header is present it already accounts for cache tiers and wins.)
+
+> **envoy-sidecar note.** Because the plugin declares `ReadsBody`, the extproc listener
+> requests `ResponseBodyMode: BUFFERED` — so on the envoy-sidecar path the SSE body is
+> buffered (capped at that listener's 1 MB `maxBodySize`) and "frame-by-frame" means
+> re-parsed from the buffered body, not incrementally as events arrive. The proxy
+> (forward/reverse) listeners stream frame-by-frame as normal.
 
 ## Files
 
@@ -59,6 +95,10 @@ pipeline:
 |-------|------|----------|-------------|
 | `spend_file` | string | yes | Path to the JSON ledger file (created if missing) |
 | `max_budget` | float | yes | Daily budget in USD (must be > 0) |
+| `input_cost_per_token` | float | no | USD per **uncached** input token; prices streamed responses (whose header cost is 0) from parsed usage |
+| `output_cost_per_token` | float | no | USD per output/completion token; prices streamed responses from parsed usage |
+| `cache_write_cost_per_token` | float | no | USD per cache-write (creation) input token; defaults to `input_cost_per_token` when unset |
+| `cache_read_cost_per_token` | float | no | USD per cache-read input token; defaults to `input_cost_per_token` when unset |
 
 ## Ledger Format
 
@@ -90,7 +130,12 @@ The spend file (`spend-authbridge.json`) is a simple JSON object:
 
 ### OnResponse (cost accumulation)
 
-1. Read `X-Litellm-Response-Cost` header from upstream response
+1. Read the cost from the **response** headers (`pctx.ResponseHeaders`):
+   `X-Litellm-Response-Cost`, falling back to `X-Litellm-Response-Cost-Original`
+   when the bare header is absent. The bare (effective, post-discount) header is
+   present on OpenAI `/v1/chat/completions` responses; the Anthropic `/v1/messages`
+   endpoint used by Claude Code — and newer LiteLLM releases — emit only the
+   pre-discount `-original` variant.
 2. If missing or non-positive → continue (no cost to track)
 3. Lock mutex, reset if new day
 4. Add cost to `total_spend`, increment `total_calls`

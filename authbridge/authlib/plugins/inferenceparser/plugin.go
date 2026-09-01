@@ -31,13 +31,31 @@ func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {
 	}
 }
 
+// endpointPath returns pctx.Path with any query string removed.
+//
+// The listeners disagree on what Path holds, and dialect dispatch below is
+// exact-match, so this has to be normalised in one place. The HTTP listeners
+// set Path from r.URL.Path, which already excludes the query; extproc sets it
+// from the HTTP/2 :path pseudo-header, which per RFC 9113 §8.3.1 includes it.
+//
+// Claude Code posts to /v1/messages?beta=true, so without this the request
+// falls to the default arm on the envoy-sidecar path and the parser records no
+// inference telemetry at all — and once OnRequest did match, the four
+// dialect-selection sites below would send an Anthropic stream to the OpenAI
+// parser. Both failure modes are silent, which is why every site normalises
+// rather than only the dispatch switch.
+func endpointPath(pctx *pipeline.Context) string {
+	path, _, _ := strings.Cut(pctx.Path, "?")
+	return path
+}
+
 func (p *InferenceParser) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	// Dispatch by endpoint dialect: OpenAI chat/completions vs Anthropic
 	// Messages. No Invocation is recorded when the parser doesn't apply
 	// (unrecognized path, empty body, or non-JSON body) — operators infer
 	// "inference-parser is in this pipeline" from config, not per-event rows.
 	var ext *pipeline.InferenceExtension
-	switch pctx.Path {
+	switch endpointPath(pctx) {
 	case "/v1/chat/completions", "/v1/completions":
 		ext = parseOpenAIRequest(pctx.Body)
 	case anthropicMessagesPath:
@@ -86,8 +104,9 @@ func parseOpenAIRequest(body []byte) *pipeline.InferenceExtension {
 	}
 	for _, msg := range req.Messages {
 		ext.Messages = append(ext.Messages, pipeline.InferenceMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
+			Role:         msg.Role,
+			Content:      msg.Content,
+			ContentBytes: msg.ContentBytes,
 		})
 	}
 	for _, tool := range req.Tools {
@@ -124,13 +143,13 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 	}
 
 	if ext.Stream {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicSSE(pctx.ResponseBody, ext)
 		} else {
 			parseInferenceSSE(pctx.ResponseBody, ext)
 		}
 	} else {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicJSON(pctx.ResponseBody, ext)
 		} else {
 			parseInferenceJSON(pctx.ResponseBody, ext)
@@ -147,9 +166,48 @@ func (p *InferenceParser) OnResponse(_ context.Context, pctx *pipeline.Context) 
 // under a private key — kept off the public InferenceExtension shape so
 // the API stays clean. The struct accumulates the in-progress
 // completion until last=true triggers finalization.
+//
+// A streamed tool call is spread over many frames — id and name on the
+// opening frame, arguments as fragments after it — so it has to be
+// assembled here rather than read off any single frame. toolCalls keeps
+// emission order; toolsByIndex resolves a fragment to its call, since
+// interleaved blocks (a text block and two tool calls) are only
+// distinguishable by the block index the provider stamps on each frame.
+// openTool is the fallback for a provider that omits the index.
 type inferenceStreamState struct {
 	completion strings.Builder
 	usage      inferenceUsage
+
+	toolCalls    []*anthropicToolCallState
+	toolsByIndex map[int]*anthropicToolCallState
+	openTool     *anthropicToolCallState
+}
+
+// finalize copies the accumulated stream state onto the public extension
+// fields. Every write is an assignment rather than an accumulation, so a
+// second finalize on the same state (the buffered OnResponse path running
+// after a streaming pass) is a no-op instead of a double-count.
+func (s *inferenceStreamState) finalize(ext *pipeline.InferenceExtension) {
+	ext.Completion = s.completion.String()
+	if s.usage.TotalTokens > 0 {
+		ext.PromptTokens = s.usage.PromptTokens
+		ext.CompletionTokens = s.usage.CompletionTokens
+		ext.TotalTokens = s.usage.TotalTokens
+		ext.CacheWriteTokens = s.usage.CacheWriteTokens
+		ext.CacheReadTokens = s.usage.CacheReadTokens
+	}
+	if len(s.toolCalls) == 0 {
+		return
+	}
+	calls := make([]pipeline.InferenceToolCall, 0, len(s.toolCalls))
+	for _, tc := range s.toolCalls {
+		calls = append(calls, pipeline.InferenceToolCall{
+			ID:        tc.id,
+			Name:      tc.name,
+			Arguments: tc.args.String(),
+		})
+	}
+	ext.ToolCalls = calls
 }
 
 // streamStateKey scopes the scratch state to this plugin in
@@ -179,7 +237,7 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 			pctx.Skip("no_response_body")
 			return pipeline.Action{Type: pipeline.Continue}
 		}
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			parseAnthropicJSON(frame, ext)
 		} else {
 			parseInferenceJSON(frame, ext)
@@ -194,7 +252,7 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 	state := getOrCreateStreamState(pctx)
 
 	if len(frame) > 0 {
-		if pctx.Path == anthropicMessagesPath {
+		if endpointPath(pctx) == anthropicMessagesPath {
 			foldAnthropicFrame(frame, state, ext)
 		} else {
 			foldOpenAIFrame(frame, state, ext)
@@ -202,15 +260,18 @@ func (p *InferenceParser) OnResponseFrame(_ context.Context, pctx *pipeline.Cont
 	}
 
 	if last {
-		ext.Completion = state.completion.String()
-		if state.usage.TotalTokens > 0 {
-			ext.PromptTokens = state.usage.PromptTokens
-			ext.CompletionTokens = state.usage.CompletionTokens
-			ext.TotalTokens = state.usage.TotalTokens
-		}
+		state.finalize(ext)
 		// Empty stream with no body and no chunks — record Skip to
 		// pair the response row with the request row.
-		if ext.Completion == "" && ext.FinishReason == "" && ext.TotalTokens == 0 {
+		//
+		// Tool calls count as a body. A turn cancelled while the model was
+		// still emitting tool arguments has no completion text, no finish
+		// reason, and no usage block, but finalize has captured the call —
+		// so skipping here would label a stream that demonstrably carried
+		// content as having none, and drop it out of any timeline filtered
+		// on observe.
+		if ext.Completion == "" && ext.FinishReason == "" && ext.TotalTokens == 0 &&
+			len(ext.ToolCalls) == 0 {
 			pctx.Skip("no_response_body")
 			return pipeline.Action{Type: pipeline.Continue}
 		}
@@ -241,8 +302,19 @@ func foldOpenAIFrame(frame []byte, state *inferenceStreamState, ext *pipeline.In
 			ext.FinishReason = c.FinishReason
 		}
 	}
+	// Copy the three wire-backed counts field by field rather than assigning
+	// the whole struct. inferenceUsage doubles as the dialect-neutral
+	// accumulator and its two cache fields are json:"-", so they are always
+	// zero in a freshly decoded chunk — a whole-struct assignment would clear
+	// whatever the accumulator held. Nothing on the OpenAI path fills them
+	// today, which is precisely why that clobber would be silent when
+	// something does. TotalTokens is taken off the wire rather than recomputed:
+	// the provider reports it, and it may legitimately differ from
+	// prompt+completion.
 	if chunk.Usage.TotalTokens > 0 {
-		state.usage = chunk.Usage
+		state.usage.PromptTokens = chunk.Usage.PromptTokens
+		state.usage.CompletionTokens = chunk.Usage.CompletionTokens
+		state.usage.TotalTokens = chunk.Usage.TotalTokens
 	}
 }
 
@@ -374,10 +446,21 @@ type inferenceDelta struct {
 	Content string `json:"content"`
 }
 
+// inferenceUsage decodes the OpenAI usage block and doubles as the
+// dialect-neutral accumulator for a streaming response's token counts.
+//
+// The two cache fields are json:"-" because nothing on the wire fills them
+// in this shape: the Anthropic path sets them from its own usage struct
+// (see anthropicUsage), and the OpenAI dialect reports cached tokens under
+// a different key entirely. They live here so the shared finalize has one
+// place to read every count from.
 type inferenceUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+
+	CacheWriteTokens int `json:"-"`
+	CacheReadTokens  int `json:"-"`
 }
 
 type inferenceRequest struct {
@@ -398,9 +481,14 @@ type inferenceRequest struct {
 // The array form is used for multi-modal input and tool-result messages.
 // Non-text parts (image_url, tool_use objects, etc.) are dropped since the
 // parser only exposes text for downstream policy plugins.
+//
+// ContentBytes records the size of the content value before that reduction,
+// so a message the model was billed for doesn't read as empty just because
+// none of it was text.
 type inferenceMessage struct {
-	Role    string
-	Content string
+	Role         string
+	Content      string
+	ContentBytes int
 }
 
 func (m *inferenceMessage) UnmarshalJSON(data []byte) error {
@@ -413,7 +501,26 @@ func (m *inferenceMessage) UnmarshalJSON(data []byte) error {
 	}
 	m.Role = raw.Role
 	m.Content = flattenContent(raw.Content)
+	m.ContentBytes = contentBytes(raw.Content)
 	return nil
+}
+
+// contentBytes is the wire size of a message's content value, and the source
+// of InferenceMessage.ContentBytes. Absent and null content report 0 rather
+// than the 4 bytes the literal `null` occupies — the field is a size signal
+// for content that exists, and an assistant turn that carries only tool_calls
+// has none.
+//
+// raw is the client's bytes verbatim, so the count includes any whitespace the
+// client's serializer emitted. That is deliberate: this measures what was
+// sent. Compacting first would buy comparability across clients at the cost of
+// an allocation per message on every request-body parse, and would no longer
+// answer "how big was this on the wire".
+func contentBytes(raw json.RawMessage) int {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return 0
+	}
+	return len(raw)
 }
 
 // flattenContent returns the text representation of an OpenAI content value.
