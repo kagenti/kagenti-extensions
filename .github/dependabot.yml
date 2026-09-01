@@ -31,6 +31,22 @@ updates:
       # ignore once OPA is on the glob v1 API.
       - dependency-name: "github.com/gobwas/glob"
         update-types: ["version-update:semver-major"]
+      # bifrost/core v1.8.0 raised its own go directive to 1.27.0, which Go
+      # propagates into every module in the workspace. Adopting it is a Go
+      # 1.27 migration, not a dependency bump: it needs authbridge/go.work
+      # bumped and the four digest-pinned golang:1.26-alpine builders in
+      # cmd/*/Dockerfile moved to 1.27 (they set GOWORK=off but not
+      # GOTOOLCHAIN, so they would silently download the 1.27 toolchain
+      # mid-build rather than fail). authlib uses three symbols from
+      # core/schemas, so v1.8 buys nothing today.
+      #
+      # Range rather than update-types, so v1.7.x patches keep flowing —
+      # v1.7.15 is the newest release still on go 1.26.5 (see #840). There is
+      # no API break waiting: v1.8.4 was built and tested against authlib
+      # with go.work at 1.27.0 and the suite passed. Drop this range when the
+      # Go 1.27 move is made deliberately.
+      - dependency-name: "github.com/maximhq/bifrost/core"
+        versions: [">=1.8.0"]
 
   # Go - mode-specific binaries
   - package-ecosystem: gomod
@@ -41,6 +57,10 @@ updates:
       # See the authlib entry above for why glob v1 is blocked.
       - dependency-name: "github.com/gobwas/glob"
         update-types: ["version-update:semver-major"]
+      # Indirect via authlib. See the authlib entry above for why bifrost
+      # v1.8+ is gated on the Go 1.27 move.
+      - dependency-name: "github.com/maximhq/bifrost/core"
+        versions: [">=1.8.0"]
   - package-ecosystem: gomod
     directory: /authbridge/cmd/authbridge-envoy
     schedule:
@@ -49,6 +69,10 @@ updates:
       # See the authlib entry above for why glob v1 is blocked.
       - dependency-name: "github.com/gobwas/glob"
         update-types: ["version-update:semver-major"]
+      # Indirect via authlib. See the authlib entry above for why bifrost
+      # v1.8+ is gated on the Go 1.27 move.
+      - dependency-name: "github.com/maximhq/bifrost/core"
+        versions: [">=1.8.0"]
   # Go - abctl TUI
   - package-ecosystem: gomod
     directory: /authbridge/cmd/abctl
