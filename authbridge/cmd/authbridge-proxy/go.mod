@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/cmd/authbridge-proxy
 
-go 1.26.5
+go 1.27.0
 
 require (
 	github.com/rossoctl/cortex/authbridge/authlib v0.0.0
@@ -30,8 +30,8 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/jsonparser v1.2.0 // indirect
 	github.com/bytedance/gopkg v0.1.3 // indirect
-	github.com/bytedance/sonic v1.15.1 // indirect
-	github.com/bytedance/sonic/loader v0.5.1 // indirect
+	github.com/bytedance/sonic v1.15.3-0.20260730064818-2a36d6da63e2 // indirect
+	github.com/bytedance/sonic/loader v0.5.2 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.1 // indirect
@@ -64,7 +64,7 @@ require (
 	github.com/mailru/easyjson v0.9.1 // indirect
 	github.com/mark3labs/mcp-go v0.43.2 // indirect
 	github.com/mattn/go-pointer v0.0.1 // indirect
-	github.com/maximhq/bifrost/core v1.7.13 // indirect
+	github.com/maximhq/bifrost/core v1.8.4 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/open-policy-agent/opa v1.20.1 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect

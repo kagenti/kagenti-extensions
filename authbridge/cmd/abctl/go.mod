@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/cmd/abctl
 
-go 1.26.5
+go 1.27.0
 
 // Workspace-only: this replace is satisfied by authbridge/go.work during
 // local development. Standalone `go get` / `go install` outside the

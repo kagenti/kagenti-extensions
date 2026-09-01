@@ -1,6 +1,6 @@
 module github.com/rossoctl/cortex/authbridge/cmd/authbridge-cpex
 
-go 1.26.5
+go 1.27.0
 
 require github.com/rossoctl/cortex/authbridge/authlib v0.0.0-00010101000000-000000000000
 
