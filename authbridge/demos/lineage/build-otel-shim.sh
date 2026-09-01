@@ -47,7 +47,7 @@ parse_args() {
   local base_short base_name
   base_short="${BASE_IMAGE##*/}"; base_name="${base_short%%:*}"
   WRAPPER_TAG="${2:-${base_name}-otel:latest}"
-  # a tag is required downstream (the alias split in publish() keys on it)
+  # a tag is required downstream (kind_load and publish() take the full ref)
   case "${WRAPPER_TAG##*/}" in *:*) ;; *) WRAPPER_TAG="${WRAPPER_TAG}:latest" ;; esac
   VENV_PYTHON="${3:-}"
   APP_UID="${4:-}"
@@ -250,12 +250,15 @@ self_activate() {  # optional: bake the activation in
 }
 
 publish() {
-  # alias under docker.io/library so containerd resolves the bare name in
-  # manifests (split on the LAST colon: a registry with a port has one earlier)
-  local wrapper_name wrapper_ver alias_ref
-  wrapper_name="${WRAPPER_TAG%:*}"; wrapper_ver="${WRAPPER_TAG##*:}"
-  alias_ref="docker.io/library/${wrapper_name}:${wrapper_ver}"
-  "$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}"
+  # A bare wrapper tag is aliased under docker.io/library so containerd
+  # resolves the name in manifests; a registry-qualified one is already
+  # resolvable and is used as is (same rule as base_ref in parse_args).
+  local alias_ref
+  case "$WRAPPER_TAG" in
+    */*) alias_ref="$WRAPPER_TAG" ;;
+    *)   alias_ref="docker.io/library/${WRAPPER_TAG}"
+         "$CONTAINER_TOOL" tag "${WRAPPER_TAG}" "${alias_ref}" ;;
+  esac
 
   if [ "$NO_KIND_LOAD" = "1" ]; then
     echo ">> built + attested ${alias_ref} (kind load skipped: NO_KIND_LOAD=1)"

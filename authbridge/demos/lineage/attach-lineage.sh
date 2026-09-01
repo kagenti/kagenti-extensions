@@ -90,13 +90,12 @@
 set -euo pipefail
 
 # ---- input guard for caller-supplied values ----
-# Every free-form caller value lands in the generated YAML — some inside a
-# double-quoted scalar (SELF_ID, OTEL_ENDPOINT), some bare (APP_IMAGE, the
-# sidecar image refs). In a double-quoted scalar only '"' and '\' are special;
-# bare, whitespace or ':' would be. A value carrying '"', '\' or whitespace
-# would be emitted as YAML that parses to something other than what the
-# caller meant — refuse instead of guessing. The exclude list is integers
-# separated by commas (what proxy-init accepts).
+# Every free-form caller value (SELF_ID, OTEL_ENDPOINT, the three image refs)
+# lands in the generated YAML inside a double-quoted scalar, where only '"'
+# and '\' are special — so refusing those two is exactly sufficient for the
+# output to parse back to the caller's string. Whitespace is refused too: it
+# is never part of an endpoint or image ref, so it can only be a mistake.
+# The exclude list is integers separated by commas (what proxy-init accepts).
 yaml_safe() {  # $1 = what it is (for the error), $2 = the value
   local unsafe=$'"\\'
   case "$2" in
@@ -128,7 +127,8 @@ parse_inputs() {
   # NAME becomes object names, so it must be a lowercase RFC 1123 name;
   # NAMESPACE is a DNS label. Both are then safe everywhere they are
   # interpolated bare.
-  if ! [[ "$NAME" =~ ^[a-z0-9]([-a-z0-9.]{0,61}[a-z0-9])?$ ]]; then
+  if [ "${#NAME}" -gt 63 ] \
+     || ! [[ "$NAME" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]]; then
     echo "error: NAME='$NAME' must be a lowercase RFC 1123 name of at most 63 chars" >&2; exit 2
   fi
   if ! [[ "$NAMESPACE" =~ ^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$ ]]; then
@@ -164,6 +164,12 @@ parse_inputs() {
   fi
   [[ "$OUTBOUND_PORTS_EXCLUDE" =~ ^([0-9]+(,[0-9]+)*)?$ ]] \
     || { echo "error: OUTBOUND_PORTS_EXCLUDE='$OUTBOUND_PORTS_EXCLUDE' is not a comma-separated port list" >&2; exit 2; }
+  local port
+  for port in ${OUTBOUND_PORTS_EXCLUDE//,/ }; do
+    if [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      echo "error: OUTBOUND_PORTS_EXCLUDE has '$port', which is not a port (1-65535)" >&2; exit 2
+    fi
+  done
 }
 
 build_proxy_env() {
@@ -206,7 +212,7 @@ build_app_patch() {
         - name: ${APP_CONTAINER}"
     if [ -n "$APP_IMAGE" ]; then
       app_patch="${app_patch}
-          image: ${APP_IMAGE}"
+          image: \"${APP_IMAGE}\""
     fi
     app_patch="${app_patch}
           env:
@@ -225,7 +231,7 @@ sidecar_container() {  # the envoy-proxy container (8-space list-item indent)
         # inbound listener accepting: without it a Service endpoint goes
         # Ready before the sidecar can take the redirected connection.
         - name: envoy-proxy
-          image: ${SIDECAR_IMAGE}
+          image: "${SIDECAR_IMAGE}"
           imagePullPolicy: IfNotPresent
           args: ["--config", "/etc/authbridge/config.yaml"]
           securityContext:
@@ -247,8 +253,8 @@ sidecar_container() {  # the envoy-proxy container (8-space list-item indent)
             requests: { cpu: 50m, memory: 64Mi }
             limits: { cpu: 500m, memory: 512Mi }
           volumeMounts:
-            - { name: envoy-config,       mountPath: /etc/envoy }
-            - { name: authbridge-runtime, mountPath: /etc/authbridge }
+            - { name: envoy-config,       mountPath: /etc/envoy,      readOnly: true }
+            - { name: authbridge-runtime, mountPath: /etc/authbridge, readOnly: true }
 EOF
 }
 
@@ -258,7 +264,7 @@ proxy_init_container() {  # the iptables init container
         # nothing else: everything is dropped first, then exactly those two
         # are added back.
         - name: proxy-init
-          image: ${PROXY_INIT_IMAGE}
+          image: "${PROXY_INIT_IMAGE}"
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: false

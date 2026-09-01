@@ -18,9 +18,11 @@
 #
 # The target must NOT already carry a platform-injected AuthBridge sidecar
 # (a Deployment enrolled through an AgentRuntime CR / `<prefix>/inject:
-# enabled` has one): the patch would add a second sidecar on the same ports.
-# Nor may the app itself listen on 9090, 15123 or 15124 — the sidecar binds
-# those in the shared pod network namespace. Both are checked below.
+# enabled` has one): the operator's sidecar is also a container named
+# `envoy-proxy`, so a strategic merge would silently MERGE into it — image,
+# args, securityContext, volumes re-pointed at this ConfigMap — not sit beside
+# it. Nor may the app itself listen on 9090, 15123 or 15124 — the sidecar
+# binds those in the shared pod network namespace. Both are checked below.
 #
 # NOTE: natively-instrumented apps need no shim — in-process context already
 # propagates. Apps that are NOT instrumented still need the shim for correct
@@ -61,7 +63,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
+DEPLOY="${DEPLOY:?usage: DEPLOY=<deployment> [NAMESPACE=team1] [SELF_ID=<id>] [APP_CONTAINER=<name> [APP_IMAGE=<ref>]] [OUTBOUND_PORTS_EXCLUDE=ports] sidecar-patch.sh}"
 NAMESPACE="${NAMESPACE:-team1}"
 SELF_ID="${SELF_ID:-$DEPLOY}"
 
@@ -72,17 +74,18 @@ kubectl get cm -n "$NAMESPACE" envoy-config >/dev/null || {
 }
 # Refuse a target whose pod already binds a port the sidecar needs: either an
 # injected AuthBridge sidecar is present (15123/15124/9090 all taken — the
-# patch would add a SECOND one and the pod would crash-loop with nothing
-# pointing back here), or the app itself listens on one of them. Detected by
-# declared container ports rather than a container name, which the operator
-# owns. An app port that is not declared cannot be seen from here.
+# patch would merge INTO that `envoy-proxy` container and re-point it at this
+# ConfigMap, silently taking it away from the operator), or the app itself
+# listens on one of them. Detected by declared container ports rather than a
+# container name, which the operator owns. An app port that is not declared
+# cannot be seen from here.
 declared_ports="$(kubectl get deploy -n "$NAMESPACE" "$DEPLOY" \
   -o jsonpath='{range .spec.template.spec.containers[*].ports[*]}{.containerPort}{" "}{end}')"
 for p in 15124 15123 9090; do
   case " $declared_ports " in
     *" $p "*)
       echo "error: $DEPLOY already declares containerPort $p, which the lineage sidecar binds" >&2
-      echo "  (an operator-injected sidecar, or the app itself on that port) — refusing to add a second binder" >&2
+      echo "  (an operator-injected sidecar, or the app itself on that port) — refusing to patch over it" >&2
       exit 1 ;;
   esac
 done
@@ -120,7 +123,8 @@ gen() {  # $1 = EMIT mode; forwards the shared knobs to the one generator
 }
 
 gen cm | kubectl apply -f -
-kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$(gen patch)"
+patch="$(gen patch)"  # its own assignment, so a generator failure stops the script
+kubectl patch deploy "$DEPLOY" -n "$NAMESPACE" --type strategic --patch "$patch"
 
 kubectl rollout status -n "$NAMESPACE" "deploy/$DEPLOY" --timeout=180s
 echo ">> lineage sidecar attached to deploy/$DEPLOY (self_id=$SELF_ID, ns=$NAMESPACE)"

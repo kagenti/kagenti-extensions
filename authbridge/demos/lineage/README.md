@@ -172,9 +172,10 @@ Two honest limits:
 
 - **The target must not already carry an AuthBridge sidecar.** A workload the
   platform enrolled (an `AgentRuntime` CR / `<prefix>/inject: enabled`) has an
-  injected one; the patch would add a second sidecar on the same ports, so the
-  script refuses. For enrolled workloads, see the namespace-ConfigMap route
-  below.
+  injected one, also named `envoy-proxy` — a strategic merge would silently
+  merge into it and re-point it at this ConfigMap, so the script refuses (it
+  detects the sidecar's ports). For enrolled workloads, see the
+  namespace-ConfigMap route below.
 - **A patch is not durable.** The owner still owns the Deployment. Any
   platform-side rewrite — an operator reconcile, a chart upgrade, a UI
   redeploy — silently drops the sidecar. There is no error; lineage just
@@ -466,8 +467,6 @@ as a pure proxy that emits nothing — a clean A/B baseline.
 
 - **The sidecar sees plaintext HTTP only.** An HTTPS destination is TLS
   passthrough — no hop is recorded for it.
-- **No producer-side payload size cap.** With `capture_io: true` a large message
-  is attached whole.
 - **Trace-context propagation is the app's job** — the shim does it for the
   in-envelope stack, and nothing else can do it from outside the process.
 - **The patch path is not durable** and a workload whose image *and* env you
