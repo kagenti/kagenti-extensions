@@ -482,3 +482,45 @@ func TestHelpOverlayScrollDoesNotDisturbDetailPane(t *testing.T) {
 		t.Fatal("the help viewport should have scrolled instead")
 	}
 }
+
+// `?` is a legitimate filter character — session IDs and hosts can
+// contain one — so the filter input must receive it rather than having it
+// stolen to open the help overlay.
+func TestHelpOverlayDoesNotStealFilterInput(t *testing.T) {
+	mm := helpModelAt(t, paneSessions, 100, 40)
+	// Close the overlay opened by the helper; we want the filter path.
+	u, _ := mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = u.(*model)
+
+	// Enter filter mode, then type a value containing `?`.
+	u, _ = mm.Update(keyRune('/'))
+	mm = u.(*model)
+	if !mm.filtering {
+		t.Fatal("setup: `/` should enter filter mode")
+	}
+	for _, r := range "ab?c" {
+		u, _ = mm.Update(keyRune(r))
+		mm = u.(*model)
+	}
+	if mm.helpVisible {
+		t.Fatal("`?` while filtering should not open the help overlay")
+	}
+	if got := mm.filterInput.Value(); got != "ab?c" {
+		t.Fatalf("filter input should have received the `?`, got %q", got)
+	}
+	if mm.filter != "ab?c" {
+		t.Fatalf("live filter should be %q, got %q", "ab?c", mm.filter)
+	}
+
+	// Committing the filter releases the keyboard, so `?` works again.
+	u, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mm = u.(*model)
+	if mm.filtering {
+		t.Fatal("setup: Enter should commit the filter")
+	}
+	u, _ = mm.Update(keyRune('?'))
+	mm = u.(*model)
+	if !mm.helpVisible {
+		t.Fatal("`?` should open the overlay once the filter input is unfocused")
+	}
+}

@@ -115,9 +115,11 @@ Layered on top of all of them:
   every other pane follow. While it's up it owns the keyboard — `?`,
   `Esc`, or `q` closes it (`q` closes the overlay rather than quitting
   abctl). This is the discoverable home for keys the single-line footer
-  has no room for, `P` among them. The one exception is while a pipeline
-  edit is in flight: that overlay is already modal and owns `y`/`N`, so
-  `?` is inert until the edit finishes.
+  has no room for, `P` among them. Two exceptions: while a pipeline edit
+  is in flight that overlay is already modal and owns `y`/`N`, and while
+  the filter input is focused `?` is a character you're typing (session
+  IDs and hosts can contain one). In both cases `?` is inert until the
+  keyboard is released.
 
   The body scrolls, so the full reference is reachable on a short
   terminal: `↑↓`/`jk` by line, `b`/`f` or PgUp/PgDn by page, `u`/`d` by
@@ -130,7 +132,7 @@ Layered on top of all of them:
 
 | Key | Context | Action |
 |---|---|---|
-| `?` | any | open the key-help overlay (`?`/`Esc`/`q` closes) |
+| `?` | any (not while filtering or mid-edit) | open the key-help overlay (`?`/`Esc`/`q` closes) |
 | `↑ ↓` / `k j`, `b`/`f`, `u`/`d`, `g`/`G` | key help | scroll the overlay |
 | `↑ ↓` / `k j` | picker, list | navigate rows |
 | `Enter` | namespaces | open the namespace |

@@ -23,8 +23,10 @@ func catalogPlugins(c *apiclient.PluginCatalog) []apiclient.PluginCatalogEntry {
 	return c.Plugins
 }
 
-// handleKey processes every key press. The filter-input overlay takes
-// precedence; otherwise keys are dispatched based on the active pane.
+// handleKey processes every key press. Modal overlays claim it first, in
+// order: the key-help overlay, then the picker panes, then an in-flight
+// pipeline edit, then the filter input. Only if none of those own the
+// keyboard is the key dispatched based on the active pane.
 func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	// The help overlay is modal: while it's up, it owns the keyboard so a
 	// stray key can't navigate the pane hidden underneath. Checked before
@@ -53,10 +55,13 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.helpVp, cmd = m.helpVp.Update(msg)
 		return cmd
 	}
-	// `?` opens the overlay from any pane — except while a pipeline edit is
-	// in flight. That overlay is already modal and owns y/N/r/Esc; layering
-	// help on top of it would swallow the apply confirmation.
-	if msg.String() == "?" && m.editState.phase == editPhaseDone {
+	// `?` opens the overlay from any pane, with two exceptions. While a
+	// pipeline edit is in flight that overlay is already modal and owns
+	// y/N/r/Esc, so help would swallow the apply confirmation. While the
+	// filter input is focused `?` is a character the user is typing — a
+	// session ID or host can contain one — and stealing it would make
+	// those values unfilterable.
+	if msg.String() == "?" && m.editState.phase == editPhaseDone && !m.filtering {
 		m.helpVisible = true
 		m.syncHelpViewport(true)
 		return nil
