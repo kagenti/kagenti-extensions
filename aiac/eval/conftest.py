@@ -15,9 +15,10 @@ what was actually being checked. The report is scoped to these three markers (no
 collected while this conftest happens to be loaded"), so running the whole repo's test suite from
 a parent directory does not pull unrelated tests into this suite's report.
 
-Filename: ``reports/report_<DD_MM_HH_MM>.md``, timestamped in Asia/Jerusalem local time, e.g.
-``report_04_08_16_37.md`` for 04 Aug at 16:37 local time. Regenerated (not appended) per run — old
-reports are left on disk for history but are gitignored, same as ``rego_out/``.
+Filename: ``reports/report_<DD_MM_HH_MM_SS>.md``, timestamped in UTC (override via
+``EVAL_REPORT_TZ``, e.g. ``Asia/Jerusalem``), e.g. ``report_04_08_16_37_22.md`` for 04 Aug at
+16:37:22 UTC. Regenerated (not appended) per run — old reports are left on disk for history but
+are gitignored, same as ``rego_out/``.
 
 ``test_inbound``/``test_outbound`` (the per-cell tests sweeping every scenario x agent x
 subject[/scope] combination) additionally ``record_property`` a concrete per-cell description plus
@@ -28,6 +29,7 @@ crash-message fallback used by every other test in this suite (see ``_render_ent
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -37,7 +39,7 @@ from dotenv import load_dotenv
 
 HERE = Path(__file__).resolve().parent
 REPORTS_DIR = HERE / "reports"
-JERUSALEM = ZoneInfo("Asia/Jerusalem")
+REPORT_TZ = ZoneInfo(os.environ.get("EVAL_REPORT_TZ", "UTC"))
 MARKERS = {"eval_extended", "eval_consistency", "eval_robustness"}
 
 # Auto-load test/integration/.env so LLM_BASE_URL/KEYCLOAK_URL/etc. are set without having to
@@ -152,7 +154,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     for cat in buckets:
         buckets[cat].sort(key=lambda pair: pair[0])
 
-    now = datetime.now(JERUSALEM)
+    now = datetime.now(REPORT_TZ)
     total = len(_reports)
     lines = [
         "# policy-eval-scenarios test report",
@@ -174,7 +176,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             _render_entry(lines, nodeid, report, cat)
 
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    suffix = now.strftime("%d_%m_%H_%M")
+    suffix = now.strftime("%d_%m_%H_%M_%S")
     report_path = REPORTS_DIR / f"report_{suffix}.md"
     report_path.write_text("\n".join(lines))
     print(f"\npolicy-eval-scenarios report written to {report_path}")

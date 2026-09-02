@@ -58,6 +58,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -89,9 +90,12 @@ from test.integration.launcher import (  # noqa: E402
 )
 
 # --- Resolve config + set env BEFORE importing aiac (the libraries read env at import time) ---
-os.environ.setdefault("AIAC_PDP_CONFIG_URL", "http://127.0.0.1:7071")
-os.environ.setdefault("AIAC_POLICY_STORE_URL", "http://127.0.0.1:7074")
-os.environ.setdefault("AIAC_PDP_POLICY_URL", "http://127.0.0.1:7072")
+DEFAULT_IDP_PORT = 7071
+DEFAULT_OPA_PORT = 7072
+DEFAULT_STORE_PORT = 7074
+os.environ.setdefault("AIAC_PDP_CONFIG_URL", f"http://127.0.0.1:{DEFAULT_IDP_PORT}")
+os.environ.setdefault("AIAC_POLICY_STORE_URL", f"http://127.0.0.1:{DEFAULT_STORE_PORT}")
+os.environ.setdefault("AIAC_PDP_POLICY_URL", f"http://127.0.0.1:{DEFAULT_OPA_PORT}")
 os.environ.setdefault("KEYCLOAK_ADMIN_REALM", "master")  # inherited by the IdP subprocess
 
 from keycloak import KeycloakAdmin  # noqa: E402
@@ -240,12 +244,15 @@ def _read_back(config: Configuration) -> tuple[dict[str, Role], dict[str, Scope]
     return roles, scopes
 
 
-def _invoke_scope_graph(roles: list[Role], scope: Scope) -> tuple[list[PolicyRule], str]:
-    """Same state shape ``build_scope_rules`` builds internally, invoked directly so the final
-    state's ``reasoning`` string (discarded by the wrapper) comes back too."""
+def _invoke_graph(graph: Any, **entity: object) -> tuple[list[PolicyRule], str]:
+    """Same state shape ``build_scope_rules``/``build_role_rules`` build internally, invoked
+    directly so the final state's ``reasoning`` string (discarded by the wrapper) comes back too.
+
+    ``entity`` carries the one field that differs between the two graphs: ``roles``+``scope`` for
+    ``SCOPE_GRAPH``, ``role``+``scopes`` for ``ROLE_GRAPH``.
+    """
     state = {
-        "roles": roles,
-        "scope": scope,
+        **entity,
         "policy_text": "",
         "selected_names": [],
         "reasoning": "",
@@ -254,25 +261,7 @@ def _invoke_scope_graph(roles: list[Role], scope: Scope) -> tuple[list[PolicyRul
         "retry_count": 0,
         "rules": [],
     }
-    out = SCOPE_GRAPH.invoke(state)
-    return out["rules"], out["reasoning"]
-
-
-def _invoke_role_graph(role: Role, scopes: list[Scope]) -> tuple[list[PolicyRule], str]:
-    """Same state shape ``build_role_rules`` builds internally, invoked directly so the final
-    state's ``reasoning`` string (discarded by the wrapper) comes back too."""
-    state = {
-        "role": role,
-        "scopes": scopes,
-        "policy_text": "",
-        "selected_names": [],
-        "reasoning": "",
-        "approved": False,
-        "audit_feedback": None,
-        "retry_count": 0,
-        "rules": [],
-    }
-    out = ROLE_GRAPH.invoke(state)
+    out = graph.invoke(state)
     return out["rules"], out["reasoning"]
 
 
@@ -311,15 +300,15 @@ def orchestrate_prb(
     reasoning_by_scope: dict[str, str] = {}
     reasoning_by_agent_role: dict[str, str] = {}
     for agent_scope in inbound_scopes:  # (a) user role -> agent inbound scope
-        scope_rules, reasoning = _invoke_scope_graph(user_roles, agent_scope)
+        scope_rules, reasoning = _invoke_graph(SCOPE_GRAPH, roles=user_roles, scope=agent_scope)
         rules += scope_rules
         reasoning_by_scope[agent_scope.name] = reasoning
     for target_scope in target_scopes:  # (b) user role -> tool/agent-target scope
-        scope_rules, reasoning = _invoke_scope_graph(user_roles, target_scope)
+        scope_rules, reasoning = _invoke_graph(SCOPE_GRAPH, roles=user_roles, scope=target_scope)
         rules += scope_rules
         reasoning_by_scope[target_scope.name] = reasoning
     for agent_role in agent_roles:  # (c) agent role -> all tool/agent-target scopes
-        role_rules, reasoning = _invoke_role_graph(agent_role, target_scopes)
+        role_rules, reasoning = _invoke_graph(ROLE_GRAPH, role=agent_role, scopes=target_scopes)
         rules += role_rules
         reasoning_by_agent_role[agent_role.name] = reasoning
     return rules, reasoning_by_scope, reasoning_by_agent_role
@@ -541,9 +530,9 @@ def pipeline() -> dict[str, dict]:
 
     admin = _connect_admin()
 
-    idp_host, idp_port = _host_port(os.environ["AIAC_PDP_CONFIG_URL"], 7071)
-    store_host, store_port = _host_port(os.environ["AIAC_POLICY_STORE_URL"], 7074)
-    opa_host, opa_port = _host_port(os.environ["AIAC_PDP_POLICY_URL"], 7072)
+    idp_host, idp_port = _host_port(os.environ["AIAC_PDP_CONFIG_URL"], DEFAULT_IDP_PORT)
+    store_host, store_port = _host_port(os.environ["AIAC_POLICY_STORE_URL"], DEFAULT_STORE_PORT)
+    opa_host, opa_port = _host_port(os.environ["AIAC_PDP_POLICY_URL"], DEFAULT_OPA_PORT)
 
     results: dict[str, dict] = {}
     for name, scenario in SCENARIOS.items():
@@ -552,9 +541,9 @@ def pipeline() -> dict[str, dict]:
             provision_keycloak_admin(admin, scenario.REALM_DEFAULT, scenario)
 
             rego_dir = HERE / "rego_out" / "policy_pipeline_eval" / name
-            rego_dir.mkdir(parents=True, exist_ok=True)
-            for stale in rego_dir.glob("*.rego"):
-                stale.unlink()
+            if rego_dir.exists():
+                shutil.rmtree(rego_dir)
+            rego_dir.mkdir(parents=True)
             db_path = Path(tempfile.mkdtemp(prefix=f"aiac-store-eval-{name}-")) / "policy_model.db"
             scenario_dir = Path(scenario.__file__).resolve().parent
             os.environ["AIAC_POLICY_FILE"] = str(scenario_dir / scenario.POLICY_FILE)
@@ -630,6 +619,10 @@ def _require_scenario(pipeline: dict[str, dict], scenario_name: str) -> dict:
 
 def _scenario_ids() -> list[str]:
     return list(SCENARIOS)
+
+
+def _scenario_agent_cases() -> list[tuple[str, str]]:
+    return [(name, agent_id) for name, scenario in SCENARIOS.items() for agent_id in scenario.AGENTS]
 
 
 def _inbound_cases() -> list[tuple[str, str, str]]:
@@ -742,11 +735,10 @@ def test_outbound(
     assert allowed == expected
 
 
-@pytest.mark.parametrize("scenario_name", _scenario_ids())
-def test_outbound_unknown_target_denied(pipeline: dict[str, dict], scenario_name: str) -> None:
+@pytest.mark.parametrize("scenario_name,agent_id", _scenario_agent_cases())
+def test_outbound_unknown_target_denied(pipeline: dict[str, dict], scenario_name: str, agent_id: str) -> None:
     """An otherwise-allowed call to an unknown target is denied (target not in target_scopes)."""
     scenario = SCENARIOS[scenario_name]
-    agent_id = next(iter(scenario.AGENTS))
     rego = _rego_path(_require_scenario(pipeline, scenario_name)["rego_dir"], agent_id, "outbound")
     if not rego.is_file():
         pytest.skip(f"{agent_id} produced no outbound rego in scenario {scenario_name}")
@@ -759,11 +751,10 @@ def test_outbound_unknown_target_denied(pipeline: dict[str, dict], scenario_name
     assert allowed is False
 
 
-@pytest.mark.parametrize("scenario_name", _scenario_ids())
-def test_outbound_soft_match_not_overbroad(pipeline: dict[str, dict], scenario_name: str) -> None:
+@pytest.mark.parametrize("scenario_name,agent_id", _scenario_agent_cases())
+def test_outbound_soft_match_not_overbroad(pipeline: dict[str, dict], scenario_name: str, agent_id: str) -> None:
     """A function name whose tokens match no scope is denied — guards against soft-match over-match."""
     scenario = SCENARIOS[scenario_name]
-    agent_id = next(iter(scenario.AGENTS))
     rego = _rego_path(_require_scenario(pipeline, scenario_name)["rego_dir"], agent_id, "outbound")
     if not rego.is_file():
         pytest.skip(f"{agent_id} produced no outbound rego in scenario {scenario_name}")

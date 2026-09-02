@@ -45,6 +45,8 @@ from eval.test_policy_pipeline_eval import (  # noqa: E402
 from test.integration.launcher import require_env  # noqa: E402
 
 N = int(os.environ.get("PRB_CONSISTENCY_REPEATS", "5"))
+if N < 2:
+    raise ValueError("PRB_CONSISTENCY_REPEATS must be at least 2")
 
 
 @pytest.mark.parametrize("scenario_name", sorted(SCENARIOS))
