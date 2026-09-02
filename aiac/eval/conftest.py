@@ -63,18 +63,18 @@ def pytest_collection_modifyitems(session: pytest.Session, config: pytest.Config
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    if report.when == "teardown":
+    if report.when == "teardown" and report.outcome == "passed":
         return
     if not (MARKERS & set(report.keywords)):
         return
-    # A later phase (call) supersedes an earlier one (setup) for the same nodeid; a setup
-    # failure/skip has no call phase to supersede it.
+    # A later phase (call) supersedes an earlier one (setup) for the same nodeid; a setup or
+    # teardown failure has no later phase to supersede it.
     _reports[report.nodeid] = report
 
 
 def _categorize(report: pytest.TestReport) -> str:
     wasxfail = getattr(report, "wasxfail", None) is not None
-    if report.when == "setup" and report.outcome == "failed":
+    if report.when in ("setup", "teardown") and report.outcome == "failed":
         return "error"
     if report.outcome == "passed":
         return "xpassed" if wasxfail else "passed"
