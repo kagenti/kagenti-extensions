@@ -105,7 +105,7 @@ note_capture_only() {
   echo "NOTE: the sidecar records every hop; whether $DEPLOY's outbound hops attribute to" >&2
   echo "      their inbound depends on the app propagating traceparent itself (its own" >&2
   echo "      instrumentation, or the baked shim + APP_CONTAINER=<name>). Verify pairing" >&2
-  echo "      under concurrency before relying on it (README.md, 'The envelope')." >&2
+  echo "      under concurrency before relying on it (DESIGN.md, 'The envelope')." >&2
 }
 
 gen() {  # $1 = EMIT mode; the other knobs reach the generator through the environment
