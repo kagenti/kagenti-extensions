@@ -74,10 +74,13 @@ class AuditVerdict(BaseModel):
     contradictions: list[Contradiction] = []
 
 
-class PolicyRulesBuilderError(RuntimeError): ...
+class PolicyRulesBuilderBaseError(Exception): ...
 
+class PolicyRulesBuilderError(PolicyRulesBuilderBaseError): ...
 
-class PolicyContradictionError(Exception):
+class LLMAccessError(PolicyRulesBuilderBaseError): ...
+
+class PolicyContradictionError(PolicyRulesBuilderBaseError):
     """Raised when the policy GENUINELY both grants and prohibits the same (focal, candidate) pair
     (a direct conflict or a coarse-scope granularity mismatch). Carries the focal entity and ALL
     genuine contradictions in a single raise; the PRB fails closed (withholds the focal entity's
