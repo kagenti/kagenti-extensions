@@ -40,7 +40,7 @@
 #                   port such as Postgres/SMTP — never LLM/tool/S3 ports).
 #
 # Requires in the namespace: the platform's `envoy-config` ConfigMap; the
-# sidecar + proxy-init images resolvable from the cluster (README "Prerequisites").
+# sidecar + proxy-init images resolvable from the cluster (README "Prerequisites and configuration").
 #
 # Structure: read_inputs → preconditions (read-only; each returns or exits) →
 # note_capture_only → apply (the only cluster writes). gen() is the one bridge

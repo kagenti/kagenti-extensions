@@ -2,7 +2,7 @@
 
 Every HTTP exchange a workload takes part in crosses its pod's network
 boundary. A sidecar at that boundary sees all of it — who called whom, over
-which protocol, with what outcome, and with the parsers on, what was said.
+which protocol, with what outcome, and with `capture_io` on, what was said.
 Attach the AuthBridge sidecar to a Deployment that is **already running**,
 switch on the `lineage-telemetry` plugin, and each exchange becomes **two
 OTLP spans**, request and response, sent to any OTLP consumer. The application
@@ -45,7 +45,7 @@ pair is joined by `lineage.exchange.id` (the request span's own id):
 | `lineage.outcome`, `lineage.denied_by` | how the exchange ended |
 | `lineage.principal.sub`, `lineage.principal.client` | the caller's identity when a validated token carried one (the generated pipeline runs no `jwt-validation`, so not in this demo) |
 | `lineage.parent.source` | `tracestate` — parented on the previous sidecar's stamp; `wire` — on whatever `traceparent` the wire carried, possibly nothing |
-| `input.value` / `output.value` | with `capture_io: true`: the parsed A2A message, MCP arguments or LLM prompt, capped at 4096 bytes |
+| `input.value` / `output.value` | with `capture_io: true`: the parsed A2A message, MCP arguments or LLM prompt, cut at `max_payload_bytes` (4096) with a visible marker |
 
 A well-propagated trace has exactly one `wire`, at the entry. Every other
 `wire` marks a pod that did not forward the header, and the subtree beneath it
@@ -171,6 +171,7 @@ The generated ConfigMap's plugin entry:
     otel_endpoint: "otel-collector.rossoctl-system.svc.cluster.local:4317"   # host:port; https:// prefix turns on TLS
     capture_io: true      # off by default in the plugin; on here so the example shows content — PII lives in these
     self_id: "<deploy>"   # falls back to self_id_file (the operator-mounted credential)
+    # max_payload_bytes: 4096 — the plugin's default cap on a captured value; bypass_paths / bypass_hosts as below
 ```
 
 `bypass_paths` / `bypass_hosts` keep infrastructure noise out (agent-card

@@ -215,8 +215,8 @@ kubectl logs -n rossoctl-system deploy/otel-collector | grep lineage.exchange.id
 ```
 
 That is enough to prove the plugin works. For a store, add an exporter and a
-pipeline to the collector's ConfigMap (a data-governance receiver, Phoenix
-with `--set components.phoenix.enabled=true`, Jaeger, your own), or point
+pipeline to the collector's ConfigMap (Phoenix with
+`--set components.phoenix.enabled=true`, Jaeger, any OTLP store of your own), or point
 `OTEL_ENDPOINT` straight at a sink of your own. Nothing in this demo depends
 on which you choose.
 
