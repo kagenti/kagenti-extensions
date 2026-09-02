@@ -26,6 +26,42 @@ func catalogPlugins(c *apiclient.PluginCatalog) []apiclient.PluginCatalogEntry {
 // handleKey processes every key press. The filter-input overlay takes
 // precedence; otherwise keys are dispatched based on the active pane.
 func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// The help overlay is modal: while it's up, it owns the keyboard so a
+	// stray key can't navigate the pane hidden underneath. Checked before
+	// every other handler, including the picker and edit overlays, so `?`
+	// is genuinely available everywhere.
+	if m.helpVisible {
+		switch msg.String() {
+		case "?", "esc", "q", "ctrl+c":
+			// `q`/ctrl+c close the overlay rather than quitting abctl:
+			// dismissing a help panel is the overwhelmingly likely intent,
+			// and the overlay itself advertises how to quit.
+			m.helpVisible = false
+			return nil
+		case "g":
+			m.helpVp.GotoTop()
+			return nil
+		case "G":
+			m.helpVp.GotoBottom()
+			return nil
+		}
+		// Everything else goes to the viewport so the reference scrolls:
+		// ↑↓/jk, pgup/pgdn, and the half-page keys the viewport binds by
+		// default. Keys it doesn't recognize are harmlessly ignored, which
+		// preserves the overlay's modality.
+		var cmd tea.Cmd
+		m.helpVp, cmd = m.helpVp.Update(msg)
+		return cmd
+	}
+	// `?` opens the overlay from any pane — except while a pipeline edit is
+	// in flight. That overlay is already modal and owns y/N/r/Esc; layering
+	// help on top of it would swallow the apply confirmation.
+	if msg.String() == "?" && m.editState.phase == editPhaseDone {
+		m.helpVisible = true
+		m.syncHelpViewport(true)
+		return nil
+	}
+
 	// Picker panes handle their own keys before session-view logic.
 	if m.pane == paneNamespaces {
 		switch msg.String() {
@@ -36,6 +72,18 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.rebuildPodsTable()
 			}
 			return nil
+		case "l":
+			// Skip the cluster entirely and talk to whatever session API
+			// is already listening locally — an existing port-forward, an
+			// in-mesh abctl, or a tunnel from a kubeconfig that can't list
+			// pods. Probes before switching panes so a dead endpoint stays
+			// an error in the picker rather than an empty session view.
+			if m.loading {
+				return nil
+			}
+			m.pickerErr = ""
+			m.loading = true
+			return connectLocalCmd(m.ctx, localEndpoint)
 		case "r":
 			if m.loading {
 				return nil
@@ -447,20 +495,20 @@ func (m *model) helpView() string {
 	}
 	switch m.pane {
 	case paneNamespaces:
-		return "[↑↓/jk] nav  [↵] open  [r] reload  [q] quit"
+		return "[↑↓/jk] nav  [↵] open  [l] localhost:9094  [r] reload  [?] keys  [q] quit"
 	case panePods:
-		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [q] quit"
+		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [esc] pods  [p] pause  [q] quit"
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [q] quit"
+		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
 			skipHint = "[s] show all"
 		}
-		base := "[↑↓] nav  [b/f] page  [↵] detail  [esc] back  [/] filter  " + skipHint + "  [p] pause  [q] quit"
+		base := "[↑↓] nav  [b/f] page  [↵] detail  [esc] back  [/] filter  " + skipHint + "  [p] pause  [?] keys  [q] quit"
 		// Surface the hidden-message count so a filtered timeline doesn't
 		// look like data loss. Only annotate when hiding is on AND at
 		// least one message was hidden.
@@ -470,13 +518,13 @@ func (m *model) helpView() string {
 		}
 		return base
 	case paneDetail:
-		return "[↑↓] scroll  [y] yank  [esc] back  [q] quit"
+		return "[↑↓] scroll  [y] yank  [esc] back  [?] keys  [q] quit"
 	case panePipeline:
 		var base string
 		if m.parentCtx != nil {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods  [q] quit"
+			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods  [?] keys  [q] quit"
 		} else {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [q] quit"
+			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [?] keys  [q] quit"
 		}
 		// Surface a count of plugins with unmet dependencies so a single
 		// "✗" in the DEPS column doesn't get lost in a long list.
@@ -486,14 +534,14 @@ func (m *model) helpView() string {
 		}
 		return base
 	case panePluginDetail:
-		return "[↑↓] scroll  [esc] back  [q] quit"
+		return "[↑↓] scroll  [esc] back  [?] keys  [q] quit"
 	case paneCatalog:
 		if m.catalog == nil {
-			return "loading catalog…  [esc] back  [q] quit"
+			return "loading catalog…  [esc] back  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [q] quit"
+		return "[↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [?] keys  [q] quit"
 	}
-	return "[q] quit"
+	return "[?] keys  [q] quit"
 }
 
 // layout recomputes component sizes to fit the current terminal. Called on
