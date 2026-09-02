@@ -34,6 +34,23 @@ binaries with shared auth logic in `authlib/`:
 Each binary is hardcoded to its deployment shape; mode is no longer selected
 at runtime. The YAML `mode:` field must match the binary or boot fails.
 
+### Release binaries
+
+`v*` tag pushes trigger `.github/workflows/release-binaries.yaml`, which
+cross-compiles `authbridge-proxy` and `abctl` for linux/darwin ×
+amd64/arm64 and attaches tarballs to the GitHub Release. `authbridge-proxy`
+ships in variants that mirror the container images:
+
+| Variant | Tarball name shape | Matches |
+|---|---|---|
+| unqualified (default plugins) | `authbridge-proxy_<ver>_<os>_<arch>.tar.gz` | `authbridge` image |
+| `-lite` (jwt-validation + token-exchange only) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
+| `-sessionbudget` (default + opt-in session-budget) | `authbridge-proxy-sessionbudget_<ver>_<os>_<arch>.tar.gz` | no image today |
+
+One variant per opt-in plugin — never enumerate combos. To add one,
+append to the `proxy_variants` array in the workflow. `authbridge-cpex`
+stays image-only (needs cgo).
+
 See [`authlib/README.md`](authlib/README.md) for the library reference.
 
 ## What AuthBridge Does
