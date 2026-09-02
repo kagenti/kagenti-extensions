@@ -94,23 +94,34 @@ spec:
             seccompProfile:
               type: RuntimeDefault
           env:
-            # LLM configuration - OpenAI-compatible endpoint (litellm proxy)
+            # LLM configuration - Ollama (local LLM)
+            # Matches upstream .env.ollama from agent-examples repo
             - name: TASK_MODEL_ID
-              value: "Azure/gpt-5-mini-2025-08-07"
+              value: "ollama/ibm/granite4:latest"
+            # Ollama API base URL. Required by litellm (used by crewai >=1.10).
+            # For Docker Desktop / Kind: http://host.docker.internal:11434
+            # For in-cluster Ollama:     http://ollama.ollama.svc:11434
             - name: LLM_API_BASE
-              value: "https://ete-litellm.ai-models.vpc-int.res.ibm.com/v1"
+              value: "http://host.docker.internal:11434"
+            - name: OLLAMA_API_BASE
+              value: "http://host.docker.internal:11434"
             - name: LLM_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: openai-secret
-                  key: apikey
-            - name: OPENAI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: openai-secret
-                  key: apikey
+              value: "ollama"
             - name: MODEL_TEMPERATURE
               value: "0"
+            # For OpenAI (uncomment and set your key):
+            # - name: TASK_MODEL_ID
+            #   value: "gpt-4.1-nano"
+            # - name: LLM_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openai-secret
+            #       key: apikey
+            # - name: OPENAI_API_KEY
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: openai-secret
+            #       key: apikey
 
             # Agent service settings
             # PORT tells the agent where to listen for A2A traffic.
@@ -195,7 +206,6 @@ metadata:
   namespace: team1
 spec:
   type: agent
-  mtlsMode: disabled
   targetRef:
     apiVersion: apps/v1
     kind: Deployment

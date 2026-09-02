@@ -130,7 +130,6 @@ metadata:
   namespace: team1
 spec:
   type: tool
-  mtlsMode: disabled
   targetRef:
     apiVersion: apps/v1
     kind: Deployment
