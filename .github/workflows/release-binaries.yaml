@@ -48,18 +48,45 @@ jobs:
           fi
           echo "Building version ${VERSION}"
           mkdir -p dist
-          for bin in abctl authbridge-proxy; do
-            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-              os="${target%/*}"
-              arch="${target#*/}"
-              echo "==> ${bin} ${os}/${arch}"
-              ( cd "authbridge/cmd/${bin}" && \
-                GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
-                go build -trimpath \
-                  -ldflags "-s -w -X main.version=${VERSION}" \
-                  -o "${GITHUB_WORKSPACE}/dist/${bin}" . )
-              tar -C dist -czf "dist/${bin}_${VERSION}_${os}_${arch}.tar.gz" "${bin}"
-              rm -f "dist/${bin}"
+
+          # authbridge-proxy variants: "<suffix>:<build-tags>". Empty
+          # suffix is the default plugin set. One variant per opt-in
+          # plugin (or one combined "full") — never enumerate combos.
+          declare -a proxy_variants=(
+            ":"
+            "lite:exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker"
+            "sessionbudget:include_plugin_sessionbudget"
+          )
+
+          build_proxy() {
+            local variant="$1" tags="$2" os="$3" arch="$4"
+            local suffix=""; [ -n "${variant}" ] && suffix="-${variant}"
+            local archive="dist/authbridge-proxy${suffix}_${VERSION}_${os}_${arch}.tar.gz"
+            echo "==> authbridge-proxy${suffix} ${os}/${arch}"
+            ( cd authbridge/cmd/authbridge-proxy && \
+              GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+              go build -trimpath \
+                -tags "${tags}" \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "${GITHUB_WORKSPACE}/dist/authbridge-proxy" . )
+            tar -C dist -czf "${archive}" authbridge-proxy
+            rm -f dist/authbridge-proxy
+          }
+
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+
+            echo "==> abctl ${os}/${arch}"
+            ( cd authbridge/cmd/abctl && \
+              GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+              go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "${GITHUB_WORKSPACE}/dist/abctl" . )
+            tar -C dist -czf "dist/abctl_${VERSION}_${os}_${arch}.tar.gz" abctl
+            rm -f dist/abctl
+
+            for entry in "${proxy_variants[@]}"; do
+              build_proxy "${entry%%:*}" "${entry#*:}" "${os}" "${arch}"
             done
           done
           ( cd dist && sha256sum ./*.tar.gz > checksums.txt )
@@ -73,6 +100,8 @@ jobs:
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
           notes="Prebuilt \`abctl\` and \`authbridge-proxy\` binaries for linux and macOS (amd64/arm64).
+
+          \`authbridge-proxy\` ships in variants matching the container images: unqualified (default plugin set, matches the \`authbridge\` image), \`-lite\` (auth-only, matches \`authbridge-lite\`), plus one variant per opt-in plugin currently offered for try-out (today: \`-sessionbudget\`). Variants track opt-in plugins one-for-one; arbitrary combinations are not published.
 
           Verify downloads with \`sha256sum -c checksums.txt\`. On macOS, clear the Gatekeeper quarantine after extracting: \`xattr -dr com.apple.quarantine ./abctl\`."
           if gh release view "${TAG}" >/dev/null 2>&1; then
