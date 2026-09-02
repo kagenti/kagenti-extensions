@@ -24,13 +24,13 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 |------|-------------|--------------------|-----------|------------------|
 | [`a2a-parser`](#a2a-parser) | Parses A2A messages into `pctx.Extensions.A2A` for downstream plugins. | Beta | Inbound | No |
 | [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Coming Soon | Outbound | No |
-| [`cpex`](#cpex) | APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step. | Coming Soon | Outbound | No |
+| [`cpex`](#cpex) | APL DSL + named [CPEX](https://github.com/contextforge-org/cpex) plugins (Cedar, PII, audit, …) over a single chain step. | Coming Soon | Outbound | No |
 | [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Alpha | Outbound | No |
 | [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Alpha | Outbound | No |
 | [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Ready | Inbound | YES |
 | [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Alpha | Inbound | No |
 | [`mcp-parser`](#mcp-parser) | Parses MCP tool calls/results into `pctx.Extensions.MCP`. | Beta | Outbound | No |
-| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Alpha | Both | No |
+| [`opa`](#opa) | [OPA](https://www.openpolicyagent.org/docs) policy enforcement for inbound and outbound requests. | Alpha | Both | No |
 | [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Alpha | Outbound | No |
 | [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Alpha | Outbound | No |
 | [`session-budget`](#session-budget) | Enforces per-session token, call, and duration budgets via Redis. | Alpha | Outbound | No |
@@ -63,12 +63,14 @@ engine pulls a large transitive dependency set.
 
 ## `cpex`
 
-Bridges AuthBridge hooks to the CPEX framework: an APL DSL plus named
+Bridges AuthBridge hooks to the [CPEX](https://github.com/contextforge-org/cpex)
+framework (a policy enforcement runtime for AI agents): an APL DSL plus named
 CPEX policy plugins (Cedar, PII, audit, …). Requires the separate
 `authbridge-cpex` binary (`-tags cpex`, `CGO_ENABLED=1`, links a pinned
-`libcpex_ffi.a`).
+`libcpex_ffi.a`). Full details in [cpex-plugin.md](./cpex-plugin.md);
+see also the plugin's [README](../authlib/plugins/cpex/README.md).
 
-- `hooks.on_request` / `hooks.on_response` (`[]string`) — CPEX hook names to fire on each phase, in order.
+- `hooks.on_request` / `hooks.on_response` (`[]string`) — [CPEX hook names](https://contextforge-org.github.io/cpex/docs/0.1.x/hook-types/) to fire on each phase, in order (AuthBridge classifies traffic onto the `cmf.*` hooks — see [Hook chains](./cpex-plugin.md#hook-chains)).
 - `config` (string) — inline CPEX runtime YAML (`plugins:`/`global:`/`plugin_settings:`); mutually exclusive with `config_file`.
 - `config_file` (string) — path to a file with the CPEX runtime YAML; mutually exclusive with `config`.
 - `fail_open` (bool) — allow traffic through if CPEX itself errors/panics. A CPEX policy *deny* is always honored regardless. Default `false`.
@@ -78,7 +80,17 @@ CPEX policy plugins (Cedar, PII, audit, …). Requires the separate
 ## `ibac`
 
 LLM-judge intent-based access control: judges outbound tool calls
-against recorded inbound user intent.
+against recorded inbound user intent. Full details, including the
+prompt-injection threat model, in [ibac-plugin.md](./ibac-plugin.md).
+
+The "LLM-judge service" is any OpenAI-compatible chat-completions
+endpoint (a local Ollama/vLLM, or a hosted provider) — AuthBridge ships
+no judge of its own. The plugin POSTs the recorded user intent plus the
+proposed action to `{judge_endpoint}/v1/chat/completions` and parses an
+allow/deny verdict from the reply — see
+[Request Flow](./ibac-plugin.md#request-flow). For guidance on which
+model to point it at, see
+[Choosing a Judge Model](./ibac-plugin.md#choosing-a-judge-model).
 
 - `judge_endpoint` (string) — base URL of the LLM-judge service (`{endpoint}/v1/chat/completions`).
 - `judge_model` (string) — model name passed to the judge.
@@ -118,9 +130,16 @@ Validates inbound JWTs: signature via JWKS, issuer, and audience.
 ## `litellm-budget-track`
 
 Tracks the `x-litellm-response-cost` response header and enforces a
-daily spend budget.
+daily spend budget. Full details in
+[litellm-budgettrack-plugin.md](./litellm-budgettrack-plugin.md).
 
-- `spend_file` (string) — path to the JSON spend ledger file; required.
+**Provider-specific:** `x-litellm-response-cost` is emitted only by
+[LiteLLM](https://docs.litellm.ai/), so this plugin works only when
+LiteLLM is the inference provider in front of the model. Against a
+provider that doesn't set the header (raw OpenAI, Ollama, vLLM, …), no
+cost is ever accumulated and the budget never trips.
+
+- `spend_file` (string) — path to the JSON spend ledger file; required. The ledger is a small JSON file the plugin creates and rewrites, holding the current UTC date plus the cumulative spend and call count for that day (it resets automatically at midnight UTC) — see [Ledger Format](./litellm-budgettrack-plugin.md#ledger-format).
 - `max_budget` (float64) — daily budget in USD; required, must be > 0.
 
 ## `mcp-parser`
@@ -128,13 +147,30 @@ daily spend budget.
 Parses MCP tool calls/results into `pctx.Extensions.MCP` for downstream
 policy plugins.
 
+This plugin makes no decisions of its own — it exists to feed others. The
+plugins that consume `pctx.Extensions.MCP` are:
+
+| Consumer | How it uses the MCP extension |
+|---|---|
+| [`ibac`](#ibac) | Reads the tool name and arguments to judge the call against user intent. Declares `mcp-parser` in `RequiresAny`. |
+| [`sparc`](#sparc) | Extracts the tool name/arguments to reflect on, and returns clarifications as MCP results. Declares `mcp-parser` in `RequiresAny`; required in `enforcement: mcp` mode. |
+| [`cpex`](#cpex) | Converts the parsed call/result into a CMF message for the `cmf.tool_pre_invoke` / `cmf.tool_post_invoke` hooks. Declares `mcp-parser` in `RequiresAny`. |
+| [`opa`](#opa) | Exposes the parsed call as `input.mcp` for policy (add `mcp.params` to `include` for arguments). |
+
+Place `mcp-parser` **before** these plugins on the outbound chain;
+without it they see no MCP data and pass the traffic through
+unclassified.
+
 - `paths` (`[]string`) — URL path globs treated as MCP endpoints (for body-less transport detection: SSE GET, session-terminate DELETE). Default `["/mcp"]`.
 
 ## `opa`
 
-Evaluates OPA policy bundles against inbound and outbound requests.
+Evaluates [OPA](https://www.openpolicyagent.org/docs) (Open Policy Agent)
+policy bundles against inbound and outbound requests, using an embedded
+OPA engine and four fixed decision paths. Full details in the plugin's
+[README](../authlib/plugins/opa/README.md).
 
-- `bundle_url` (string) — base URL of the Rossoctl Bundle Server; required.
+- `bundle_url` (string) — base URL of the Rossoctl Bundle Server, the in-cluster service that serves per-agent [OPA policy bundles](https://www.openpolicyagent.org/docs/management-bundles) keyed by SPIFFE ID (see [how it works](../authlib/plugins/opa/README.md#how-it-works)); required.
 - `agent_id_file` (string) — path to the agent's client-ID file. Default `/shared/client-id.txt`.
 - `agent_id` (string) — inline agent ID; overrides `agent_id_file` when set.
 - `polling_min_delay` / `polling_max_delay` (int) — bundle polling interval bounds in seconds. Defaults 10 / 120.
@@ -142,8 +178,13 @@ Evaluates OPA policy bundles against inbound and outbound requests.
 
 ## `sparc`
 
-Pre-tool reflection: sends proposed tool calls to a SPARC reflection
-service and enforces the configured policy on the result.
+Pre-tool reflection: sends proposed tool calls to a
+[SPARC reflection service](../sparc-service/README.md) — a companion
+HTTP service wrapping the `SPARCReflectionComponent` from the
+[agent-lifecycle-toolkit](https://pypi.org/project/agent-lifecycle-toolkit/)
+(ALTK) package — and enforces the configured policy on the result. It
+must be deployed once per cluster before enabling this plugin. Full
+details in [sparc-plugin.md](./sparc-plugin.md).
 
 - `reflector_endpoint` (string) — base URL of the SPARC reflection service (`{endpoint}/reflect`); required.
 - `reflector_bearer` (string) — optional bearer token.
@@ -171,7 +212,7 @@ outbound requests, so the workload never holds the real secret.
 
 ## `session-budget`
 
-Enforces per-session token, call-count, and duration budgets via Redis. Opt-in at build time (`-tags include_plugin_sessionbudget`).
+Enforces per-session token, call-count, and duration budgets via Redis. Opt-in at build time (`-tags include_plugin_sessionbudget`). Full details in [session-budget-plugin.md](./session-budget-plugin.md).
 
 - `redis_url` (string) — Redis/Valkey connection URL; required.
 - `max_tokens` (int64) — cumulative token ceiling per session. `0` = no limit.
@@ -194,7 +235,10 @@ for details.
 ## `token-broker`
 
 Exchanges incoming tokens against a configured IdP through an external
-token broker service, per host-based routing rules.
+token broker service, per host-based routing rules. An alternative to
+[`token-exchange`](#token-exchange), not a complement — both replace the
+outbound `Authorization` header, so use one or the other on a given
+chain. Full details in [token-broker-plugin.md](./token-broker-plugin.md).
 
 - `broker_url` (string) — base URL of the token broker service; required.
 - `default_policy` (string) — behavior when no route matches: `passthrough` (default) or `broker`.
@@ -208,7 +252,9 @@ token broker service, per host-based routing rules.
 ## `token-exchange`
 
 RFC 8693 outbound token exchange per route. Supports Keycloak, Entra
-ID, Okta, and any RFC 8693-compliant IdP.
+ID, Okta, and any RFC 8693-compliant IdP. For the `IdPProvider`
+interface each IdP implements, see
+[idp-plugin-contract.md](./idp-plugin-contract.md).
 
 - `token_url` (string) — OAuth token endpoint; required unless derived from `provider` + `provider_url`(+`provider_realm`), or the deprecated `keycloak_url`/`keycloak_realm`.
 - `provider` (string) — IdP selector for endpoint derivation and client auth: `keycloak`, `generic`.
