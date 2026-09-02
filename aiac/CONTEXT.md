@@ -30,6 +30,23 @@ The property that grants on a given scope come from exactly one place — the
 scope-focal pass. Door B adds only prohibitions and never grants.
 _Avoid_: owner, source of truth.
 
+**Scope-exclusivity**:
+Exclusive/restrictive language centred on a **scope** ("Only developers may read
+source") — it closes that scope to a grantee role set. Owned by the
+**scope-focal pass** (the subject gate): it grants the named roles and denies the
+complement of candidate roles. Distinct from **role-exclusivity**.
+_Avoid_: treating it as a Door B (role-focal) deny trigger.
+
+**Role-exclusivity**:
+Exclusive/restrictive language centred on a user **role** ("Testers may access
+**only** issues") — it closes that role to a scope set. Owned by **Door B** (the
+user-role-focal pass): it denies the complement of candidate scopes. Conflating
+it with **scope-exclusivity** — treating a scope-exclusive statement about a
+*different* role as grounds for a Door B deny on the focal role — is the category
+error #2511 corrects: that complement belongs to the scope-focal pass, so an
+absent Door B prohibition is correct, not a defect.
+_Avoid_: role pass exclusivity, subject exclusivity.
+
 **Contradiction**:
 An *intra-pass* grant∩deny: one focal's own proposed rule set both grants and
 prohibits the same candidate. Detected by the LLM auditor within a single pass,

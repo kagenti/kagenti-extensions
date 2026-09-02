@@ -241,3 +241,41 @@ def test_door_b_exclusivity_complement_denies_only():
         ("source-read", DENY),
         ("source-write", DENY),
     }
+
+
+# --------------------------------------------------------------------------- #
+# Slice 7 — Door B must NOT raise a spurious 422 on SCOPE-exclusivity (#2511).   #
+# The policy is scope-exclusive about a DIFFERENT role ("Only developers may     #
+# read and modify source"); the focal role (rossoctl-admin) is a non-grantee    #
+# user role the policy never names, and is GRANTED nothing here. The real bug    #
+# #2511 fixes is the AUDITOR rejecting the proposer's proposal to exhaustion     #
+# (PolicyRulesBuilderError → 422) on the theory that a focal deny is "missing" — #
+# it is not: that source deny is the SUBJECT gate's job (the scope-focal pass),  #
+# never Door B's. What this slice PINS is therefore the negative property, not   #
+# an exact set: the call must NOT raise, must emit NO ALLOW (Door B is           #
+# deny-only), and any deny it does emit must stay within the exclusive scopes    #
+# ({source-read, source-write}) — never leaking onto `issues`, a scope the focal #
+# role has no relationship to. A duplicate DENY on the source scopes is harmless #
+# here (rossoctl-admin is granted nothing, so nothing collides); the 422 is the  #
+# only defect. Contrast slice 6, which pins the genuine role-exclusivity deny.   #
+# --------------------------------------------------------------------------- #
+def test_door_b_no_overreach_on_scope_exclusivity():
+    admin = _role("r-adm", "rossoctl-admin", "A realm administrator, not a developer.")
+    issues = _scope("s-iss", "issues", "Access the issue tracker.")
+    source_read = _scope("s-sr", "source-read", "Read source code from the repository.")
+    source_write = _scope("s-sw", "source-write", "Write and modify source code in the repository.")
+
+    # Scope-exclusive about `developers`, not about the focal role — bare prose, no enumerated
+    # exclusions, no default-effect scaffolding (the point of the #2504 minimization).
+    policy = "Only developers may read and modify source."
+
+    # Must not raise: a PolicyRulesBuilderError (→ 422) from auditing the proposal to exhaustion is
+    # exactly the #2511 defect and would fail the call outright.
+    rules = _role_denies(policy, admin, [issues, source_read, source_write])
+
+    effects = _scope_effects(rules)
+    # No ALLOW — Door B is a DENY-only pass; an ALLOW would be a real defect.
+    assert all(effect is DENY for _, effect in effects), effects
+    # Any deny stays within the exclusive scopes; `issues` (unrelated to the focal role) is never
+    # denied. A duplicate source deny is a harmless echo of the scope-focal pass, not a conflict.
+    assert {name for name, _ in effects} <= {"source-read", "source-write"}, effects
