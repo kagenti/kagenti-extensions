@@ -52,9 +52,13 @@ jobs:
           # authbridge-proxy variants: "<suffix>:<build-tags>". Empty
           # suffix is the default plugin set. One variant per opt-in
           # plugin (or one combined "full") — never enumerate combos.
+          lite_tags="exclude_plugin_a2aparser,exclude_plugin_ibac"
+          lite_tags="${lite_tags},exclude_plugin_inferenceparser"
+          lite_tags="${lite_tags},exclude_plugin_mcpparser,exclude_plugin_opa"
+          lite_tags="${lite_tags},exclude_plugin_sparc,exclude_plugin_tokenbroker"
           declare -a proxy_variants=(
             ":"
-            "lite:exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker"
+            "lite:${lite_tags}"
             "sessionbudget:include_plugin_sessionbudget"
           )
 
@@ -99,11 +103,21 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          notes="Prebuilt \`abctl\` and \`authbridge-proxy\` binaries for linux and macOS (amd64/arm64).
-
-          \`authbridge-proxy\` ships in variants matching the container images: unqualified (default plugin set, matches the \`authbridge\` image), \`-lite\` (auth-only, matches \`authbridge-lite\`), plus one variant per opt-in plugin currently offered for try-out (today: \`-sessionbudget\`). Variants track opt-in plugins one-for-one; arbitrary combinations are not published.
-
-          Verify downloads with \`sha256sum -c checksums.txt\`. On macOS, clear the Gatekeeper quarantine after extracting: \`xattr -dr com.apple.quarantine ./abctl\`."
+          # Build release notes as printf lines so no single string exceeds
+          # yamllint's 150-char cap. Single-quoted %s formats keep backticks
+          # literal (no shell expansion).
+          notes=""
+          add() { notes="${notes}${1}"$'\n'; }
+          add 'Prebuilt `abctl` and `authbridge-proxy` binaries for linux and macOS (amd64/arm64).'
+          add ''
+          add '`authbridge-proxy` ships in variants matching the container images:'
+          add 'unqualified (default plugin set, matches the `authbridge` image),'
+          add '`-lite` (auth-only, matches `authbridge-lite`), plus one variant per'
+          add 'opt-in plugin currently offered for try-out (today: `-sessionbudget`).'
+          add 'Variants track opt-in plugins one-for-one; arbitrary combinations are not published.'
+          add ''
+          add 'Verify downloads with `sha256sum -c checksums.txt`. On macOS, clear the'
+          add 'Gatekeeper quarantine after extracting: `xattr -dr com.apple.quarantine ./abctl`.'
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
           else
