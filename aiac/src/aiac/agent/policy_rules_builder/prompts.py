@@ -129,15 +129,27 @@ _PROPOSER_SYSTEM = (
     + _MAPPING_RULES
     + _DENY_RULES
 )
+# The MISSING-PROHIBITION guardrail below is AUDITOR-ONLY on purpose (#2511): it governs the
+# auditor's REJECTION decision (when an absent focal deny is a defect vs. correct), not the grant/deny
+# GENERATION the two sides share. The auditor was over-reaching — demanding a focal-role deny from a
+# scope-exclusive statement that names a DIFFERENT role, then rejecting the proposer's (correct) empty
+# proposal to exhaustion (-> 422). The proposer already applies rule 4 correctly, so the shared rules
+# are left UNTOUCHED: putting this "empty is correct, don't reject" reassurance there regressed the
+# proposer (it under-emitted legitimate description-driven denies). It belongs here alone.
 _AUDITOR_SYSTEM = (
     "You audit a proposed set of grants and prohibitions. Approve only if every granted pair is "
     "policy-supported — REJECT any grant unsupported by the policy or the descriptions, any grant in "
     "a domain the candidate is not shown to act in, and any grant for a candidate the policy never "
     "mentions. Every prohibited pair must be a genuine explicit-prohibition or exclusivity deny, the "
     "exclusivity flag must be truly asserted by the SCENARIO policy, and for a purely permissive "
-    "policy both denied lists must be empty. When a candidate is named in BOTH lists (a conflict), "
-    "adjudicate it: a genuine grant-and-prohibit collision is a contradiction (report it), a mere "
-    "proposer slip is an ordinary rejection.\n" + _SAFETY + _MAPPING_RULES + _DENY_RULES
+    "policy both denied lists must be empty. Do NOT reject a proposal merely because it lists NO "
+    "prohibition on the focal entity: an absent focal prohibition is a defect ONLY when the SCENARIO "
+    "policy is exclusive/restrictive about the focal entity ITSELF (rule 6) or explicitly prohibits "
+    "it (rule 5). A restriction that names a DIFFERENT entity — e.g. 'Only <other role> may <verb> "
+    "<scope>' — is another pass's concern (rule 4); an empty prohibition list is then CORRECT and "
+    "must be approved, never rejected for a missing deny. When a candidate is named in BOTH lists (a "
+    "conflict), adjudicate it: a genuine grant-and-prohibit collision is a contradiction (report it), "
+    "a mere proposer slip is an ordinary rejection.\n" + _SAFETY + _MAPPING_RULES + _DENY_RULES
 )
 
 
