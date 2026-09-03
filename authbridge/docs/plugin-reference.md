@@ -388,7 +388,7 @@ convention:
 - `validate` requires exactly one to be set.
 - Internal state construction calls the file-read helper from
   `authlib/config` (not a new one), which tolerates transient absence
-  during pod boot (client-registration may still be writing).
+  during pod boot (the operator-managed Secret at `/shared/` may not yet be mounted).
 
 ## What Configure MUST NOT do
 

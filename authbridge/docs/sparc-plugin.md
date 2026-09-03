@@ -95,7 +95,7 @@ pipeline:
           enforcement: "mcp"             # mcp | inference
           track: "fast_track"            # fast_track|slow_track|syntax|spec_free|transformations_only
           on_reject_action: "reflect"    # observe | reflect | deny
-          deny_score_threshold: 0        # 0 disables; e.g. 2.0 → deny rejects scoring <= 2
+          deny_score_threshold: 0        # 0 disables; e.g. 0.4 → deny rejects scoring <= 0.4
           fail_policy: "open"            # open=allow+log on SPARC error; closed=block
           timeout_ms: 30000
           skip_tools: ["list_*"]         # tool-name globs NOT reflected on (e.g. read-only tools)
