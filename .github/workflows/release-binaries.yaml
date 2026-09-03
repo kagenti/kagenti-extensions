@@ -52,10 +52,9 @@ jobs:
           # authbridge-proxy variants: "<suffix>:<build-tags>". Empty
           # suffix is the default plugin set. One variant per opt-in
           # plugin (or one combined "full") — never enumerate combos.
-          lite_tags="exclude_plugin_a2aparser,exclude_plugin_ibac"
-          lite_tags="${lite_tags},exclude_plugin_inferenceparser"
-          lite_tags="${lite_tags},exclude_plugin_mcpparser,exclude_plugin_opa"
-          lite_tags="${lite_tags},exclude_plugin_sparc,exclude_plugin_tokenbroker"
+          # Lite tags are derived from plugin source; see
+          # authbridge/scripts/lite-tags.
+          lite_tags=$(go -C authbridge/scripts/lite-tags run .)
           declare -a proxy_variants=(
             ":"
             "lite:${lite_tags}"
@@ -112,7 +111,7 @@ jobs:
           add ''
           add '`authbridge-proxy` ships in variants matching the container images:'
           add 'unqualified (default plugin set, matches the `authbridge` image),'
-          add '`-lite` (auth-only, matches `authbridge-lite`), plus one variant per'
+          add '`-lite` (trimmed plugin set, matches `authbridge-lite`), plus one variant per'
           add 'opt-in plugin currently offered for try-out (today: `-sessionbudget`).'
           add 'Variants track opt-in plugins one-for-one; arbitrary combinations are not published.'
           add ''

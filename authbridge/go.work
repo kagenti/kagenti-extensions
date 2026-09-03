@@ -7,5 +7,6 @@ use (
 	./cmd/authbridge-envoy
 	./cmd/authbridge-praxis
 	./cmd/authbridge-proxy
+	./scripts/lite-tags
 	./storage/redis
 )

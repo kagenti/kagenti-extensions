@@ -47,16 +47,14 @@ jobs:
             dockerfile: cmd/authbridge-proxy/Dockerfile
 
           # AuthBridge proxy-sidecar LITE image — the SAME authbridge-proxy
-          # binary + Dockerfile, built with exclude_plugin_* tags so only
-          # jwt-validation + token-exchange compile in (drops the OPA SDK
-          # and the parsers, roughly halving the binary). A build variant,
-          # not a separate binary. Same listener layout as the full proxy
-          # image; not yet referenced by the operator's default config.
+          # binary + Dockerfile, built with a trimmed plugin set (roughly
+          # halving the binary). A build variant, not a separate binary.
+          # GO_BUILD_TAGS is derived at step time from
+          # authbridge/scripts/lite-tags rather than declared here, so
+          # adding a plugin doesn't require editing this file.
           - name: authbridge-lite
             context: ./authbridge
             dockerfile: cmd/authbridge-proxy/Dockerfile
-            build_args: |
-              GO_BUILD_TAGS=exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker,exclude_plugin_toolprune
 
           # AuthBridge proxy-sidecar CPEX image — authbridge-proxy built
           # with -tags cpex (links libcpex_ffi.a from a pinned CPEX
@@ -78,6 +76,15 @@ jobs:
       # 1. Checkout code
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # 1b. Set up Go — needed by the buildargs step for authbridge-lite,
+      # which derives GO_BUILD_TAGS from plugin source at build time.
+      # Cheap to install for every matrix row (~1s of cache pull); no-op
+      # for rows that don't need it.
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/scripts/lite-tags/go.mod
 
       # 2. Set up QEMU for multi-arch builds
       - name: Set up QEMU
@@ -121,26 +128,41 @@ jobs:
             # Add 'latest' tag for version tags, workflow_dispatch, and pushes to main
             type=raw,value=latest,enable=${{ (github.ref_type == 'tag' && startsWith(github.ref_name, 'v')) || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' }}
 
-      # 6b. Resolve build-args. authbridge-cpex needs CPEX_FFI_VERSION
-      # (the release tag) and CPEX_FFI_ABI (the FFI ABI integer the
-      # linked lib must report) — both read from the files next to its
-      # Dockerfile and asserted against the tarball at build time. Other
-      # images leave this empty (an undeclared build-arg is ignored).
+      # 6b. Resolve per-image build-args.
+      #   authbridge-cpex: CPEX_FFI_VERSION (release tag) and CPEX_FFI_ABI
+      #     (integer the linked lib must report), read from the files
+      #     next to its Dockerfile and asserted at build time.
+      #   authbridge-lite: GO_BUILD_TAGS, derived from plugin source
+      #     (authbridge/scripts/lite-tags) so the list stays in sync
+      #     without hand-maintenance.
+      #   Other images leave args empty (an undeclared build-arg is
+      #   ignored).
       - name: Resolve build args
         id: buildargs
         run: |
-          if [[ "${{ matrix.image_config.name }}" == "authbridge-cpex" ]]; then
-            VERSION="$(tr -d '[:space:]' < authbridge/cmd/authbridge-cpex/CPEX_FFI_VERSION)"
-            ABI="$(tr -d '[:space:]' < authbridge/cmd/authbridge-cpex/CPEX_FFI_ABI)"
-            {
-              echo "args<<EOF"
-              echo "CPEX_FFI_VERSION=${VERSION}"
-              echo "CPEX_FFI_ABI=${ABI}"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-          else
-            echo "args=" >> "$GITHUB_OUTPUT"
-          fi
+          case "${{ matrix.image_config.name }}" in
+            authbridge-cpex)
+              VERSION="$(tr -d '[:space:]' < authbridge/cmd/authbridge-cpex/CPEX_FFI_VERSION)"
+              ABI="$(tr -d '[:space:]' < authbridge/cmd/authbridge-cpex/CPEX_FFI_ABI)"
+              {
+                echo "args<<EOF"
+                echo "CPEX_FFI_VERSION=${VERSION}"
+                echo "CPEX_FFI_ABI=${ABI}"
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+              ;;
+            authbridge-lite)
+              TAGS=$(go -C authbridge/scripts/lite-tags run .)
+              {
+                echo "args<<EOF"
+                echo "GO_BUILD_TAGS=${TAGS}"
+                echo "EOF"
+              } >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "args=" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
 
       # 7. Build and push image
       - name: Build and push ${{ matrix.image_config.name }}
@@ -148,13 +170,10 @@ jobs:
         with:
           context: ${{ matrix.image_config.context }}
           file: ${{ matrix.image_config.context }}/${{ matrix.image_config.dockerfile }}
-          # Merge both build-arg sources into a single key: static per-image
-          # args from the matrix (e.g. authbridge-lite GO_BUILD_TAGS) plus the
-          # dynamically resolved args (authbridge-cpex CPEX_FFI_*). A duplicate
-          # `build-args:` key is invalid YAML and fails the whole workflow; only
-          # one image sets each source, so concatenating them is safe.
+          # Dynamically-resolved args from step 6b: authbridge-cpex
+          # (CPEX_FFI_*) and authbridge-lite (GO_BUILD_TAGS from
+          # scripts/lite-tags). Other images resolve to empty.
           build-args: |
-            ${{ matrix.image_config.build_args }}
             ${{ steps.buildargs.outputs.args }}
           push: true
           platforms: linux/amd64,linux/arm64

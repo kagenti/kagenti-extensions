@@ -75,6 +75,7 @@ inbound mechanism, and the preset fills only that one's address.
   iptables init container.
 - **Size-constrained, no protocol-aware events needed**: use the
   `authbridge-lite` image — the `authbridge-proxy` binary built with
-  `exclude_plugin_*` tags (auth-only). Same listener layout, but without
-  parsers/OPA — abctl will only see denial events and basic auth-level
-  invocations, not full A2A/MCP/Inference protocol context.
+  `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed
+  plugin set). Same listener layout, but abctl will only see denial
+  events and basic auth-level invocations for the plugins the trimmed
+  set drops.

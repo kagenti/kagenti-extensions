@@ -45,7 +45,7 @@ ships in variants that mirror the container images:
 | Variant | Tarball name shape | Matches |
 |---|---|---|
 | unqualified (default plugins) | `authbridge-proxy_<ver>_<os>_<arch>.tar.gz` | `authbridge` image |
-| `-lite` (drops the OPA SDK and the protocol parsers) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
+| `-lite` (trimmed plugin set — see `authbridge/scripts/lite-tags`) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
 | `-sessionbudget` (default + opt-in session-budget) | `authbridge-proxy-sessionbudget_<ver>_<os>_<arch>.tar.gz` | no image today |
 
 One variant per opt-in plugin currently offered for try-out (today:
@@ -411,9 +411,11 @@ make load-image                     # Uses KIND_CLUSTER_NAME env var (default: r
 cd ..
 podman build -f cmd/authbridge-proxy/Dockerfile -t authbridge:latest .       # proxy-sidecar (default)
 podman build -f cmd/authbridge-envoy/Dockerfile -t authbridge-envoy:latest . # envoy-sidecar
-# authbridge-lite: the proxy Dockerfile built with exclude_plugin_* tags (auth-only)
+# authbridge-lite: the proxy Dockerfile built with a trimmed plugin
+# set derived from plugin source by scripts/lite-tags.
+LITE_TAGS=$(go -C scripts/lite-tags run .)
 podman build -f cmd/authbridge-proxy/Dockerfile \
-  --build-arg GO_BUILD_TAGS="exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker,exclude_plugin_toolprune" \
+  --build-arg GO_BUILD_TAGS="${LITE_TAGS}" \
   -t authbridge-lite:latest .
 kind load docker-image authbridge:latest       --name rossoctl
 kind load docker-image authbridge-envoy:latest --name rossoctl
