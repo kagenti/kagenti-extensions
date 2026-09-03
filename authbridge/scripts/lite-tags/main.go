@@ -5,6 +5,11 @@
 //
 // New default-on plugins are excluded from lite automatically. To keep one
 // in lite, add its build-tag suffix to liteKeep.
+//
+// Usage:
+//
+//	go -C authbridge/scripts/lite-tags run .           # default path, CWD-independent
+//	go -C authbridge/scripts/lite-tags run . <dir>     # override the plugins dir
 package main
 
 import (
@@ -26,15 +31,20 @@ var liteKeep = map[string]bool{
 	"staticinject":        true,
 }
 
-// Path is relative to this script's module dir. Run via
-// `go run ./authbridge/scripts/lite-tags` (authbridge/ with go.work) or
-// `cd authbridge/scripts/lite-tags && go run .`.
-const pluginsDir = "../../cmd/authbridge-proxy"
+// defaultPluginsDir is relative to this script's module directory, so
+// `go -C authbridge/scripts/lite-tags run .` finds it regardless of the
+// caller's CWD. Callers with an unusual layout can pass a plugins path
+// as the first argument.
+const defaultPluginsDir = "../../cmd/authbridge-proxy"
 
 var buildTagPattern = regexp.MustCompile(`^//go:build !exclude_plugin_(\S+)$`)
 
 func main() {
-	tags, err := discover(pluginsDir)
+	dir := defaultPluginsDir
+	if len(os.Args) > 1 {
+		dir = os.Args[1]
+	}
+	tags, err := discover(dir)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)

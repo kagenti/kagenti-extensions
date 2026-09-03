@@ -28,9 +28,9 @@ binaries with shared auth logic in `authlib/`:
   version lives in `cmd/authbridge-cpex/CPEX_FFI_VERSION`. The other
   binaries are pure-Go (CGO_ENABLED=0) and do not import the cpex package.
 - `authbridge-lite` (**image, not a separate binary**) — `cmd/authbridge-proxy`
-  built with `exclude_plugin_*` tags so only jwt-validation + token-exchange
-  compile in (OPA + parsers dropped). For size-optimized deployments that
-  don't need protocol-aware session events.
+  built with `exclude_plugin_*` tags for a trimmed plugin set (see
+  `authbridge/scripts/lite-tags` for the definition). For size-optimized
+  deployments that don't need protocol-aware session events.
 
 Each binary is hardcoded to its deployment shape; mode is no longer selected
 at runtime. The YAML `mode:` field must match the binary or boot fails.

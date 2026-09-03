@@ -307,7 +307,7 @@ cd authbridge && LITE_TAGS=$(go -C scripts/lite-tags run .) && podman build -f c
 
 ## Gotchas and Known Issues
 
-1. **One Go module:** The repo has a single Go module at `authbridge/proxy-init/go.mod` (Go 1.25).
+1. **Multiple Go modules:** The repo has several Go modules under `authbridge/` — `authlib/`, each `cmd/*/`, `storage/redis/`, `scripts/lite-tags/`, and the `demos/*/` self-contained ones — linked by `authbridge/go.work`. Local commands from a specific module directory should typically set `GOWORK=off` (as CI does) so the module resolves its own `replace` directives instead of pulling in workspace siblings.
 
 2. **Avoid committing venvs:** Virtual environment directories (e.g. `authbridge/proxy-init/quickstart/venv/`) should be gitignored (the repo's `.gitignore` has a `venv` pattern). Do not create and commit new virtual environments under version control.
 
