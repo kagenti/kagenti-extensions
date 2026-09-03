@@ -103,9 +103,9 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          # Build release notes as printf lines so no single string exceeds
-          # yamllint's 150-char cap. Single-quoted %s formats keep backticks
-          # literal (no shell expansion).
+          # Build release notes one line at a time so no single string
+          # exceeds yamllint's 150-char cap. Single-quoted arguments keep
+          # backticks literal (no shell expansion).
           notes=""
           add() { notes="${notes}${1}"$'\n'; }
           add 'Prebuilt `abctl` and `authbridge-proxy` binaries for linux and macOS (amd64/arm64).'

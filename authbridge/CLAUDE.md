@@ -44,12 +44,13 @@ ships in variants that mirror the container images:
 | Variant | Tarball name shape | Matches |
 |---|---|---|
 | unqualified (default plugins) | `authbridge-proxy_<ver>_<os>_<arch>.tar.gz` | `authbridge` image |
-| `-lite` (jwt-validation + token-exchange only) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
+| `-lite` (drops the OPA SDK and the protocol parsers) | `authbridge-proxy-lite_<ver>_<os>_<arch>.tar.gz` | `authbridge-lite` image |
 | `-sessionbudget` (default + opt-in session-budget) | `authbridge-proxy-sessionbudget_<ver>_<os>_<arch>.tar.gz` | no image today |
 
-One variant per opt-in plugin — never enumerate combos. To add one,
-append to the `proxy_variants` array in the workflow. `authbridge-cpex`
-stays image-only (needs cgo).
+One variant per opt-in plugin currently offered for try-out (today:
+`-sessionbudget`) — never enumerate combos. To add one, append to the
+`proxy_variants` array in the workflow. `authbridge-cpex` stays image-only
+(needs cgo); `context-guru` is opt-in but not yet offered as a variant.
 
 See [`authlib/README.md`](authlib/README.md) for the library reference.
 
