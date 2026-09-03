@@ -101,10 +101,10 @@ jobs:
         run: go build -v ./...
 
       # The authbridge-lite image is this same authbridge-proxy binary built
-      # with exclude_plugin_* tags (only jwt-validation + token-exchange).
+      # with the trimmed plugin set derived by authbridge/scripts/lite-tags.
       # Build AND test that tag set on every PR — build.yaml only exercises
       # it on tag/main pushes, and this guards against lite-only regressions.
-      - name: Build + test lite variant (exclude_plugin_* tags)
+      - name: Build + test lite variant
         if: matrix.binary == 'authbridge-proxy'
         run: |
           TAGS=$(go -C ../../scripts/lite-tags run .)

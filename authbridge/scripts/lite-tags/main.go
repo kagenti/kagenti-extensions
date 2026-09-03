@@ -6,10 +6,9 @@
 // New default-on plugins are excluded from lite automatically. To keep one
 // in lite, add its build-tag suffix to liteKeep.
 //
-// Usage:
-//
-//	go -C authbridge/scripts/lite-tags run .           # default path, CWD-independent
-//	go -C authbridge/scripts/lite-tags run . <dir>     # override the plugins dir
+// Usage: every call site uses `go -C <path>/scripts/lite-tags run .`, which
+// chdirs to this module before exec so the default plugins path resolves
+// correctly. Callers can pass an override path as the first argument.
 package main
 
 import (
@@ -31,13 +30,18 @@ var liteKeep = map[string]bool{
 	"staticinject":        true,
 }
 
-// defaultPluginsDir is relative to this script's module directory, so
-// `go -C authbridge/scripts/lite-tags run .` finds it regardless of the
-// caller's CWD. Callers with an unusual layout can pass a plugins path
-// as the first argument.
+// defaultPluginsDir is resolved relative to the process working directory
+// (filepath.Glob and os.ReadFile know nothing about module layout). It
+// works because every call site uses `go -C <this-module> run .`, which
+// chdirs before exec.
 const defaultPluginsDir = "../../cmd/authbridge-proxy"
 
-var buildTagPattern = regexp.MustCompile(`^//go:build !exclude_plugin_(\S+)$`)
+// buildTagPattern matches `!exclude_plugin_<name>` inside a //go:build
+// directive. The pattern does NOT anchor to end-of-line so compound
+// directives like `//go:build !exclude_plugin_opa && !nocgo` still yield
+// the exclude tag — otherwise the plugin would silently stay in the lite
+// build.
+var buildTagPattern = regexp.MustCompile(`^//go:build\s+!exclude_plugin_(\w+)`)
 
 func main() {
 	dir := defaultPluginsDir
@@ -63,6 +67,11 @@ func discover(dir string) ([]string, error) {
 
 	var tags []string
 	for _, path := range matches {
+		// Skip test files: `plugins_*_test.go` matches the same glob but
+		// isn't a plugin build directive.
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
 		name, err := extractExcludeSuffix(path)
 		if err != nil {
 			return nil, err
@@ -71,6 +80,11 @@ func discover(dir string) ([]string, error) {
 			continue
 		}
 		tags = append(tags, "exclude_plugin_"+name)
+	}
+	// Fail closed if no tags were derived: an empty CSV would produce
+	// `go build -tags ""` and silently ship a full binary as "lite".
+	if len(tags) == 0 {
+		return nil, fmt.Errorf("no exclude tags derived from %s: every default-on plugin is in liteKeep, or the build-tag convention changed", dir)
 	}
 	sort.Strings(tags)
 	return tags, nil
