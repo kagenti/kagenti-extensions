@@ -68,10 +68,13 @@ func NewReader(r io.Reader, maxSize int) *Reader {
 	}
 }
 
-// DefaultMaxFrameSize bounds a single SSE event's data payload at
-// 1 MiB — same as the buffered-path cap so the streaming path
-// preserves the per-message memory ceiling without bounding the
-// total stream length.
+// DefaultMaxFrameSize bounds a single SSE event's data payload at 1 MiB when
+// NewReader is given a non-positive maxSize. It is a defensive fallback only:
+// every caller in this repo passes an explicit cap, and those caps no longer
+// agree with each other or with this value — the forward proxy passes 10MB and
+// the reverse proxy 1MB, each from its own listener's maxBodySize. So this
+// constant no longer describes the per-message ceiling any real stream runs
+// under; read the calling listener's maxBodySize for that.
 const DefaultMaxFrameSize = 1 << 20
 
 // ReadFrame reads from the underlying reader until a complete SSE

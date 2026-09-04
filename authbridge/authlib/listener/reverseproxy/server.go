@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/bodyread"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/tlssniff"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/transparentproxy"
@@ -27,6 +28,18 @@ import (
 	authtls "github.com/rossoctl/cortex/authbridge/authlib/tls"
 )
 
+// maxBodySize bounds a buffered request or response body, and the per-frame cap
+// on the SSE reader.
+//
+// Left at Envoy's default per_stream_buffer_limit_bytes while the forward proxy
+// runs at 10MB: the bodies that forced that raise were outbound agent-to-LLM
+// requests, which do not traverse this listener in the deployments observed so
+// far. The same growth applies in principle on the inbound path — an agent
+// receiving a large request, or an in-cluster LLM route through a sidecar — so
+// raise this to match if an oversized-body rejection is ever observed here.
+// The two are deliberately independent: the inbound and outbound size profiles
+// differ, and a shared constant would tie one listener's ceiling to the other's
+// traffic. See the forward proxy's maxBodySize for the measurement behind 10MB.
 const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
 
 type pctxKey struct{}
@@ -336,8 +349,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			slog.Warn("reverse-proxy: request body too large or unreadable", "host", r.Host, "error", err)
-			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			bodyread.LogError("reverse-proxy", r, len(body), maxBodySize, err)
+			status, msg := bodyread.Rejection(err)
+			http.Error(w, msg, status)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))

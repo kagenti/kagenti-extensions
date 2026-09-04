@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/bodyread"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/internal/sseframe"
 	"github.com/rossoctl/cortex/authbridge/authlib/listener/skiphost"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -30,7 +31,26 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
 )
 
-const maxBodySize = 1 << 20 // 1MB — matches Envoy's default per_stream_buffer_limit_bytes
+// maxBodySize is TWO ceilings, not one: the buffered request/response body cap,
+// and the per-frame cap passed to sseframe.NewReader on both streaming paths
+// (see handleStreamingResponse and streamFallbackBuffered). Raising it moves
+// both, so worst-case resident bytes for one in-flight request are roughly
+// 2x this value — a body buffer plus a frame scratch buffer — and the practical
+// ceiling for a listener is that times the number of concurrent requests.
+//
+// An earlier value of 1 << 20 (1MB) matched Envoy's default
+// per_stream_buffer_limit_bytes, but proved too small for LLM traffic: a
+// Claude Code session against the Anthropic endpoint produced a 5,250,133-byte
+// request, since an agent resends the whole conversation plus its full tool
+// manifest on every turn. A body over the cap is rejected before the pipeline
+// runs, so the limit also decides whether telemetry is recorded at all.
+//
+// The frame cap is the more generous half of the raise: a single SSE event is
+// far smaller than a full request body, so 10MB per frame is well above
+// anything observed. Splitting the two into separate constants would let the
+// frame cap stay tight, and is worth doing if per-request memory ever matters
+// more than the simplicity of one number.
+const maxBodySize = 10 << 20 // 10 MB
 
 // streamReadIdleTimeout caps how long the proxy waits for the next
 // byte off a streaming response body. The time.Duration is applied
@@ -276,8 +296,9 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodySize)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
-			slog.Warn("forward-proxy: request body too large or unreadable", "host", r.Host, "error", err)
-			http.Error(w, `{"error":"request body too large"}`, http.StatusRequestEntityTooLarge)
+			bodyread.LogError("forward-proxy", r, len(body), maxBodySize, err)
+			status, msg := bodyread.Rejection(err)
+			http.Error(w, msg, status)
 			return
 		}
 		r.Body = io.NopCloser(bytes.NewReader(body))
@@ -393,6 +414,34 @@ func (s *Server) serveOutbound(w http.ResponseWriter, r *http.Request, isBridge 
 	r.Header.Del("Trailer")
 	r.Header.Del("Transfer-Encoding")
 	r.Header.Del("Upgrade")
+
+	// Strip the client's Accept-Encoding so Go's transport negotiates content
+	// coding on its own behalf.
+	//
+	// net/http auto-decompresses a gzip response ONLY when the transport added
+	// Accept-Encoding itself. Forwarding the caller's header suppresses that:
+	// resp.Body then yields raw compressed bytes. Every body-reading plugin
+	// sees binary — the SSE re-framer finds no "data:" lines and reports a
+	// clean EOF on its first ReadFrame, so a gzipped text/event-stream relayed
+	// zero frames downstream and finalized aggregating plugins on empty state.
+	// The symptom is silent in both directions: the client sees a stream that
+	// opens and dies, and token telemetry reads as absent rather than wrong.
+	//
+	// This proxy re-frames and inspects bodies, so it cannot be encoding-blind.
+	// Taking ownership of the negotiation means the transport hands us
+	// plaintext and strips Content-Encoding from resp.Header, keeping the
+	// bytes we relay consistent with the headers we forward.
+	//
+	// Gated on a plugin actually inspecting the response body, mirroring the
+	// reverse proxy (see listener/reverseproxy: same reasoning, same
+	// condition). When nothing reads the body this listener is a pure
+	// pass-through, so leaving the client's header intact avoids forcing an
+	// upstream→client decompression that buys nothing — which matters for a
+	// remote backend or a large non-streamed body, and is harmless either way
+	// on a loopback sidecar hop.
+	if !skipped && (s.OutboundPipeline.NeedsResponseBody() || s.OutboundPipeline.HasStreamingResponders()) {
+		r.Header.Del("Accept-Encoding")
+	}
 
 	// Clear RequestURI — set by the server but must be empty for client requests
 	r.RequestURI = ""
