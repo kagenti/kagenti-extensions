@@ -88,6 +88,7 @@ Options:
   --claude-code    after starting, offer to configure Claude Code to use it, so
                    it runs as plain `claude` with no environment variables
   --local          the default, spelled out
+  --yes, -y        do not prompt; answer yes to configuring Claude Code
   --ref=REF        take THIS SCRIPT from a git ref instead of the newest release
                    (e.g. --ref=main for unreleased changes, --ref=v0.7.0-alpha.4
                    to pin). Binaries come from the same release unless
@@ -108,10 +109,12 @@ USAGE
 # --- mode selection ---
 MODE=local
 WIRE_CLAUDE_CODE=""
+ASSUME_YES=""
 for arg in "$@"; do
 	case "$arg" in
 		--install-only) MODE=install-only ;;
 		--claude-code) WIRE_CLAUDE_CODE=1 ;;
+		--yes | -y) ASSUME_YES=1 ;;
 		--ref=*) AUTHBRIDGE_REF="${arg#*=}" ;;
 		# --local is the default; accepted so writing it out explicitly works, and
 		# so it mirrors the proxy flag of the same name.
@@ -120,7 +123,7 @@ for arg in "$@"; do
 			usage
 			exit 0
 			;;
-		*) die "unknown option: $arg (try --claude-code, --install-only, --local, --ref=REF, or no argument)" ;;
+		*) die "unknown option: $arg (try --claude-code, --install-only, --local, --ref=REF, --yes, or no argument)" ;;
 	esac
 done
 # Env form kept working; the flag wins if both are given.
@@ -427,6 +430,31 @@ fi
 # that means Claude Code silently stops working — most reliably right after a
 # reboot. Handing it to the OS supervisor removes that whole class of problem, and
 # removes any reason for anyone to reach for kill or pkill.
+# This script now starts the proxy ONLY through `abctl service`, so an abctl that
+# predates that command cannot be driven by it. Say which mismatch it is, rather
+# than letting `unknown subcommand "service"` surface as a bare non-zero exit after
+# the binaries are already installed.
+if ! "${BIN_DIR}/abctl" service status >/dev/null 2>&1 &&
+	"${BIN_DIR}/abctl" service 2>&1 | grep -q "unknown subcommand"; then
+	# Only offer the matching-release URL when $version really is a tag: under
+	# AUTHBRIDGE_SKIP_DOWNLOAD it reads "already installed", which would otherwise
+	# be spliced into a nonsense URL.
+	case "${version}" in
+		v*)
+			die "the ${version} abctl has no 'service' command, which this installer needs
+  in order to start Cortex. Either use the installer that shipped with it:
+    curl -fsSL https://raw.githubusercontent.com/${REPO}/${version}/authbridge/install.sh | sh
+  or install newer binaries with this script:
+    AUTHBRIDGE_VERSION=<newer tag>"
+			;;
+		*)
+			die "the abctl in ${BIN_DIR} has no 'service' command, which this installer
+  needs in order to start Cortex. Install a newer one — drop
+  AUTHBRIDGE_SKIP_DOWNLOAD, or point AUTHBRIDGE_VERSION at a release that has it."
+			;;
+	esac
+fi
+
 info ""
 info "Setting Cortex up as a ${SUPERVISOR_NAME} so it restarts on failure and"
 info "comes back at login..."
@@ -467,7 +495,11 @@ fi
 if [ -n "${WIRE_CLAUDE_CODE:-}" ]; then
 	info ""
 	set +e
-	"${BIN_DIR}/abctl" claude-code enable
+	if [ -n "${ASSUME_YES}" ]; then
+		"${BIN_DIR}/abctl" claude-code enable --yes
+	else
+		"${BIN_DIR}/abctl" claude-code enable
+	fi
 	cc_status=$?
 	set -e
 	case "${cc_status}" in

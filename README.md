@@ -15,40 +15,34 @@ It ships as a single binary; the identity and access layer is **AuthBridge**, an
 See what Claude Code sends: model calls, tool calls, and agent-to-agent traffic,
 decrypted and parsed live. No Kubernetes. macOS or Linux, amd64 or arm64.
 
-1. **Install, and point Claude Code at it** (asks first, changes nothing else):
+```sh
+curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install.sh \
+  | sh -s -- --claude-code
+```
 
-   ```sh
-   curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install.sh \
-     | sh -s -- --claude-code
-   ```
+That is the install. It asks before changing your Claude Code settings, then runs
+Cortex as a background service that restarts itself and comes back at login.
 
-   The URL is on `main`, but the script re-runs the copy from the newest
-   **release** when one carries it, so a `curl | sh` normally does not execute
-   unreleased changes. Add `--ref=main` to opt into main, or `--ref=vX.Y.Z` to pin.
+Now open two terminals:
 
-2. **Open the viewer** in another terminal:
+```sh
+abctl      # the viewer
+claude     # Claude Code, as usual — no environment variables needed
+```
 
-   ```sh
-   abctl
-   ```
+Claude Code's calls stream into `abctl`. Cortex only reads them; nothing is rewritten.
 
-3. **Run Claude Code:**
-
-   ```sh
-   claude
-   ```
-
-Its calls stream into `abctl`. Cortex only reads them — nothing is rewritten.
-
-Stop it with `pkill -f authbridge-proxy`. Undo step 1 with
-`abctl claude-code disable`.
-
-**Cut token cost too:** Cortex can strip the tool definitions your agent never
-calls, worth **4–20% of the prompt per turn, median 6%** —
+**Cut token cost too** — strip the tool definitions your agent never calls, worth
+4–20% of the prompt per turn, median 6%:
 **[one more command](./authbridge/docs/laptop-token-savings.md)**.
 
-Any agent works, not just Claude Code — point it at the proxy on
-`localhost:47600` and trust `~/.cortex/ca/ca.crt`.
+**Turning it off** — `abctl service stop` pauses it, `abctl claude-code disable`
+unwires Claude Code, and
+**[removing it](./authbridge/docs/laptop-uninstall.md)** is four lines.
+
+Any agent works, not just Claude Code — point it at `localhost:47600` and trust
+`~/.cortex/ca/ca.crt`. The URL is on `main`, but the script re-runs the copy from the
+newest **release**, so `curl | sh` does not run unreleased code — `--ref` overrides.
 
 ## Running on Kubernetes
 
