@@ -358,6 +358,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
 			fmt.Fprintf(stdout, "\nRunning under %s and healthy. Claude Code will keep working across\n"+
 				"crashes and logins.\n", supervisorName())
+			reportCrashRecovery(stdout)
 			return 0
 		}
 		fmt.Fprintf(stderr, "\nabctl: installed, but nothing answered %s within %s.\n"+
@@ -366,15 +367,25 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "\nRunning under %s.\n", supervisorName())
-	if runtime.GOOS == "darwin" {
-		// launchd does not restart these agents — see the comment in the plist and in
-		// cmd/authbridge-proxy/supervise.go — so the proxy runs under --supervise and
-		// crash recovery belongs to that supervisor, not to KeepAlive.
-		fmt.Fprintln(stdout, "  Crash recovery is handled by a supervisor process, because launchd")
-		fmt.Fprintln(stdout, "  does not restart user agents added mid-session. Check it with:")
-		fmt.Fprintln(stdout, "    kill -9 $(pgrep -f 'authbridge-proxy --config')  # back within ~2s")
-	}
+	reportCrashRecovery(stdout)
 	return 0
+}
+
+// reportCrashRecovery names how crashes are handled, and how to check it.
+//
+// It has to be on BOTH success paths. It was originally only on the one taken when
+// there is no health endpoint to probe — so the note explaining the feature appeared
+// exactly when the install could verify least, and not on the normal healthy install.
+func reportCrashRecovery(stdout io.Writer) {
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	// launchd does not restart these agents — see renderUnitFor and
+	// cmd/authbridge-proxy/supervise.go — so crash recovery belongs to the supervisor,
+	// not to KeepAlive.
+	fmt.Fprintln(stdout, "\n  Crash recovery is handled by a supervisor process, because launchd does")
+	fmt.Fprintln(stdout, "  not restart user agents added mid-session. Check it with:")
+	fmt.Fprintln(stdout, "    kill -9 $(pgrep -f 'authbridge-proxy --config')   # back within ~2s")
 }
 
 func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,25 @@ func TestServiceInstall_RefusesABrokenConfig(t *testing.T) {
 	}
 	if _, serr := os.Stat(p.unitFile); serr == nil {
 		t.Error("a unit was written for a config that cannot load")
+	}
+}
+
+// TestReportCrashRecovery_OnDarwin: the note must appear on the healthy install path,
+// not only on the one where there is nothing to probe. It was originally the latter,
+// so a normal install never mentioned the feature or how to verify it.
+func TestReportCrashRecovery_OnDarwin(t *testing.T) {
+	var out bytes.Buffer
+	reportCrashRecovery(&out)
+	got := out.String()
+	if runtime.GOOS != "darwin" {
+		if got != "" {
+			t.Errorf("non-darwin should stay silent, got: %s", got)
+		}
+		return
+	}
+	for _, want := range []string{"supervisor process", "kill -9", "~2s"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("note is missing %q:\n%s", want, got)
+		}
 	}
 }
