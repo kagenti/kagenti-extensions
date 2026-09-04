@@ -21,7 +21,12 @@ curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/ins
 ```
 
 That is the install. It asks before changing your Claude Code settings, then runs
-Cortex as a background service that restarts itself and comes back at login.
+Cortex as a background service that comes back at login and restarts itself if it
+crashes.
+
+> **macOS note:** launchd defers agents added mid-session, so automatic
+> restart-after-crash may not take effect until your next login. Starting at login
+> works from now on. `abctl service start` restarts it by hand in the meantime.
 
 Now open two terminals:
 
