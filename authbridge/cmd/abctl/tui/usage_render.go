@@ -154,9 +154,14 @@ func barCell(v, peak int64, row int) string {
 	}
 }
 
+// renderAxis draws the baseline. The corner glyph sits in the LAST gutter column
+// so the dashes after it start at axisLabel — the column the bars start at.
+// Writing axisLabel-2 spaces then "0 ┼" placed the corner AT axisLabel and
+// shifted every tick one column right of the bar it underlines.
 func renderAxis(n int) string {
 	var sb strings.Builder
-	sb.WriteString(strings.Repeat(" ", axisLabel-2))
+	// Right-align "0" in the gutter, leaving the final cell for the corner.
+	sb.WriteString(strings.Repeat(" ", axisLabel-3))
 	sb.WriteString("0 ┼")
 	for i := 0; i < n; i++ {
 		sb.WriteString(strings.Repeat("─", barWidth))

@@ -189,3 +189,98 @@ func TestHumanizeCount_NeverExceedsWidth(t *testing.T) {
 		}
 	}
 }
+
+// runeIndexAny returns the RUNE index of the first rune from set, or -1.
+// Byte offsets are useless here: the block glyphs and box-drawing characters are
+// multi-byte, so strings.IndexAny would report a position no terminal column
+// corresponds to.
+func runeIndexAny(s, set string) int {
+	for i, r := range []rune(s) {
+		if strings.ContainsRune(set, r) {
+			return i
+		}
+	}
+	return -1
+}
+
+// The axis must underline the bars, not sit one column off. Previously
+// renderAxis wrote axisLabel-2 spaces then "0 ┼" — a 7-column prefix against the
+// 6-column gutter every other row uses — so every tick landed one column right
+// of the bar above it.
+//
+// The existing tests could not catch this: they assert substrings and line
+// lengths, neither of which changes when a whole row shifts sideways. This
+// asserts the column positions that actually make the chart readable.
+func TestRenderBars_AxisAlignsWithBars(t *testing.T) {
+	lines := renderBars(mkBuckets([]int64{50000, 40000, 30000}), metricTokens, 80)
+
+	// Find the first bar glyph column from a plot row, and the axis row.
+	barCol := -1
+	for _, l := range lines {
+		if c := runeIndexAny(l, "▁▂▃▄▅▆▇█"); c >= 0 {
+			barCol = c
+			break
+		}
+	}
+	if barCol < 0 {
+		t.Fatal("no bar glyphs rendered")
+	}
+
+	axis := ""
+	for _, l := range lines {
+		if strings.ContainsRune(l, '┼') {
+			axis = l
+			break
+		}
+	}
+	if axis == "" {
+		t.Fatal("no axis row rendered")
+	}
+
+	// The corner sits in the last gutter column, so the dashes after it begin at
+	// the same column the bars do.
+	cornerCol := runeIndexAny(axis, "┼")
+	if cornerCol != barCol-1 {
+		t.Errorf("axis corner at column %d, bars start at %d — dashes begin at %d, "+
+			"so ticks are offset from the bars they underline",
+			cornerCol, barCol, cornerCol+1)
+	}
+
+	// And the first dash must be exactly under the first bar.
+	dashCol := runeIndexAny(axis, "─")
+	if dashCol != barCol {
+		t.Errorf("first axis dash at column %d, first bar at column %d", dashCol, barCol)
+	}
+}
+
+// Every tick must fall on a bar boundary: barStride columns apart, starting at
+// the first bar's column.
+func TestRenderBars_TicksFallOnBarBoundaries(t *testing.T) {
+	const n = 5
+	vals := make([]int64, n)
+	for i := range vals {
+		vals[i] = int64(1000 * (i + 1))
+	}
+	lines := renderBars(mkBuckets(vals), metricTokens, 80)
+
+	var axis []rune
+	for _, l := range lines {
+		if strings.ContainsRune(l, '┼') {
+			axis = []rune(l)
+			break
+		}
+	}
+	if axis == nil {
+		t.Fatal("no axis row")
+	}
+	for i, r := range axis {
+		if r != '┴' {
+			continue
+		}
+		// A tick closes bar k, so it sits at axisLabel + k*barStride + barWidth.
+		off := i - axisLabel - barWidth
+		if off < 0 || off%barStride != 0 {
+			t.Errorf("tick at column %d is not on a bar boundary", i)
+		}
+	}
+}

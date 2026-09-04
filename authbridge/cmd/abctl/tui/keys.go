@@ -271,6 +271,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			} else {
 				m.pane = panePipeline
 			}
+			// Returning INTO Usage has to restart its polling chain. The tick
+			// that was in flight when the catalog opened was dropped by the
+			// `m.pane != paneUsage` guard, so without this nothing reschedules
+			// and the 20s auto-refresh is silently dead until the user backs all
+			// the way out and re-enters with `u` — `r` refetches once but starts
+			// no chain.
+			if m.pane == paneUsage {
+				return m.resumeUsagePolling()
+			}
 		case paneUsage:
 			// Return to whichever pane opened it, from usageState's own field —
 			// model.previousPane is shared with the catalog overlay and gets

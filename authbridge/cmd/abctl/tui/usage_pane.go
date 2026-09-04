@@ -141,8 +141,18 @@ func (m *model) openUsage(session string) tea.Cmd {
 	m.usage.returnPane = m.pane
 	m.pane = paneUsage
 	m.usage.session = session
-	// New generation: any tick still in flight from a previous visit becomes
-	// stale and will not reschedule itself.
+	// Shares resumeUsagePolling so the two entry points cannot drift on how a
+	// chain is started or how the previous one is invalidated.
+	return m.resumeUsagePolling()
+}
+
+// resumeUsagePolling restarts the poll chain when the pane regains focus without
+// going through openUsage — returning from the catalog overlay, for instance.
+//
+// It bumps tickGen so any tick still in flight from the previous chain is stale,
+// then starts exactly one new chain. Refetching immediately as well means the
+// chart is current on arrival rather than showing data up to 20s old.
+func (m *model) resumeUsagePolling() tea.Cmd {
 	m.usage.tickGen++
 	return tea.Batch(m.beginFetch(), usageTick(m.usage.tickGen))
 }

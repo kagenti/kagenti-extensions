@@ -300,8 +300,6 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeli
 	return out
 }
 
-// View returns a read-only snapshot of the session's events.
-// Returns nil if the session doesn't exist or is expired.
 // AddRecorder registers a Recorder. Call before the store serves traffic; it is
 // not safe to call concurrently with Append.
 func (s *Store) AddRecorder(r Recorder) {
@@ -310,6 +308,8 @@ func (s *Store) AddRecorder(r Recorder) {
 	}
 }
 
+// View returns a read-only snapshot of the session's events.
+// Returns nil if the session doesn't exist or is expired.
 func (s *Store) View(sessionID string) *pipeline.SessionView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

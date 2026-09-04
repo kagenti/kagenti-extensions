@@ -1,6 +1,8 @@
 package tui
 
 import (
+	tea "github.com/charmbracelet/bubbletea"
+
 	"testing"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
@@ -159,5 +161,47 @@ func TestUsageState_CyclesWrap(t *testing.T) {
 	}
 	if len(seen) != 3 {
 		t.Errorf("metric cycle covered %d of 3 metrics", len(seen))
+	}
+}
+
+// Returning into Usage from the catalog overlay must restart the poll chain.
+// The tick in flight when the catalog opened was dropped by the focus guard, so
+// without an explicit restart the 20s auto-refresh is silently dead: the chart
+// freezes and only `r` (a one-shot refetch) or backing all the way out and
+// re-entering with `u` brings it back.
+func TestUsage_CatalogRoundTripRestartsPolling(t *testing.T) {
+	m := &model{pane: paneEvents, selectedSess: "s1", previousPane: paneNone}
+	m.openUsage("s1")
+	genBefore := m.usage.tickGen
+
+	// P opens the catalog from Usage; previousPane records where to return.
+	m.previousPane = paneUsage
+	m.pane = paneCatalog
+
+	// A tick from the pre-catalog chain arrives while the catalog has focus and
+	// is dropped — this is what leaves nothing scheduled.
+	if _, cmd := m.Update(usageTickMsg{gen: genBefore}); cmd != nil {
+		t.Error("a tick was rescheduled while the catalog had focus")
+	}
+
+	// esc out of the catalog, back into Usage.
+	cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyEsc})
+	if m.pane != paneUsage {
+		t.Fatalf("pane = %v after esc from catalog, want paneUsage", m.pane)
+	}
+	if cmd == nil {
+		t.Fatal("returning into Usage scheduled no work — the poll chain is dead")
+	}
+	if m.usage.tickGen == genBefore {
+		t.Error("tickGen unchanged: the stale chain was not invalidated")
+	}
+
+	// The new chain must be the one that polls, and the old generation must stay
+	// dead so only one chain is alive.
+	if _, c := m.Update(usageTickMsg{gen: m.usage.tickGen}); c == nil {
+		t.Error("the restarted chain does not reschedule")
+	}
+	if _, c := m.Update(usageTickMsg{gen: genBefore}); c != nil {
+		t.Error("the pre-catalog chain is still alive — two chains would double the poll rate")
 	}
 }
