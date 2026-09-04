@@ -369,8 +369,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 
 	if p.healthURL != "" {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
-			fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName())
-			reportCrashRecovery(stdout)
+			reportInstallSuccess(true, stdout)
 			return 0
 		}
 		fmt.Fprintf(stderr, "\nabctl: installed, but nothing answered %s within %s.\n"+
@@ -378,24 +377,34 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 			"  abctl service status shows the current state.\n", p.healthURL, serviceReadyTimeout, p.logFile)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName())
-	reportCrashRecovery(stdout)
+	reportInstallSuccess(false, stdout)
 	return 0
 }
 
-// reportCrashRecovery names how crashes are handled, and how to check it.
+// crashRecoveryNote explains why there are two authbridge-proxy processes on macOS.
 //
-// It has to be on BOTH success paths. It was originally only on the one taken when
-// there is no health endpoint to probe — so the note explaining the feature appeared
-// exactly when the install could verify least, and not on the normal healthy install.
-func reportCrashRecovery(stdout io.Writer) {
-	if runtime.GOOS != "darwin" {
-		return
+// launchd does not restart these agents — see renderUnitFor and
+// cmd/authbridge-proxy/supervise.go — so crash recovery belongs to the supervisor, not
+// to KeepAlive. A package-level const so its content can be asserted on any platform,
+// not only when the test happens to run on darwin.
+const crashRecoveryNote = "A supervisor process handles crashes (launchd will not restart these agents)."
+
+// reportInstallSuccess prints the outcome of an install that worked.
+//
+// ONE function for both outcomes, deliberately. This was previously two call sites
+// that each had to remember to print the crash-recovery note, and one of them did not
+// — so the note appeared only when the install could verify least, never on a normal
+// healthy install. A test could have caught that; not being able to express it is
+// better. There is now no "which path prints what" to get wrong.
+func reportInstallSuccess(healthy bool, stdout io.Writer) {
+	if healthy {
+		fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName())
+	} else {
+		fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName())
 	}
-	// launchd does not restart these agents — see renderUnitFor and
-	// cmd/authbridge-proxy/supervise.go — so crash recovery belongs to the supervisor,
-	// not to KeepAlive.
-	fmt.Fprintln(stdout, "A supervisor process handles crashes (launchd will not restart these agents).")
+	if runtime.GOOS == "darwin" {
+		fmt.Fprintln(stdout, crashRecoveryNote)
+	}
 }
 
 func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {

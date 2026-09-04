@@ -375,10 +375,16 @@ done
 lines=$(wc -l < "${tmp}/checksums.filtered" | tr -d '[:space:]')
 [ "${lines}" = "2" ] \
 	|| die "expected 2 checksum entries, got ${lines} — refusing to install"
-# Output suppressed: sha_check prints an "OK" line per archive, which is two lines
-# saying what one line already implies. A failure still speaks — die reports it, and
-# the exit status is what matters.
-( cd "$tmp" && sha_check checksums.filtered >/dev/null 2>&1 ) || die "checksum verification failed"
+# Quiet on success, loud on failure. The per-archive "OK" lines are two lines saying
+# what one line implies — but sending them to /dev/null took the FAILED lines (stdout)
+# and shasum's "computed checksum did NOT match" warning (stderr) with them, so a
+# corrupt download or a tampered release would surface as a bare "checksum verification
+# failed" naming neither archive. That is the one step whose whole job is not to fail
+# open; it should not also fail silently.
+if ! ( cd "$tmp" && sha_check checksums.filtered >"${tmp}/sha.out" 2>&1 ); then
+	cat "${tmp}/sha.out" >&2
+	die "checksum verification failed — do NOT use these binaries"
+fi
 
 # --- extract + install ---
 mkdir -p "$BIN_DIR"
@@ -460,10 +466,16 @@ fi
 # doing the starting, nothing else creates the file, and `abctl service install`
 # refuses to run without it.
 if [ ! -f "${CORTEX_DIR}/config.yaml" ]; then
+	# Executed by explicit path, and REPORTED by the same explicit path. proxy_cmd is
+	# the display form — a bare "authbridge-proxy" when BIN_DIR is on PATH — so naming
+	# it here would hand back a command that resolves through PATH, which is not
+	# necessarily the binary that just failed. That distinction is the whole point of
+	# pinning the path: an older authbridge-proxy earlier on PATH is exactly how the
+	# service came up dead in end-to-end testing.
 	if ! "${BIN_DIR}/authbridge-proxy" --local --write-config; then
 		die "could not write ${CORTEX_DIR}/config.yaml.
   Run this to see why:
-    \"${proxy_cmd}\" --local --write-config"
+    \"${BIN_DIR}/authbridge-proxy\" --local --write-config"
 	fi
 fi
 
@@ -520,10 +532,10 @@ if [ -n "${WIRE_CLAUDE_CODE:-}" ]; then
 			# The service is already installed above — it is how the proxy runs now,
 			# not an option — so there is nothing to offer here.
 			info ""
-			info "  ${abctl_cmd}                         watch traffic"
-			info "  ${abctl_cmd} tools scan              cut token cost (prunes unused tools)"
-			info "  ${abctl_cmd} service stop            stop Cortex"
-			info "  ${abctl_cmd} claude-code disable     undo"
+			info "  \"${abctl_cmd}\"                         watch traffic"
+			info "  \"${abctl_cmd}\" tools scan              propose unused tools to prune"
+			info "  \"${abctl_cmd}\" service stop            stop Cortex"
+			info "  \"${abctl_cmd}\" claude-code disable     undo"
 			info ""
 			exit 0
 			;;
