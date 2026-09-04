@@ -168,24 +168,24 @@ Now the UI flow (order matches the actual import form top-to-bottom):
    > `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml`)
    > and skip this expander. Same content, list-shaped `routes.yaml`.
 
-8. **Service Port** `8080` · **Target Port** `8000`.
-9. Under **Environment Variables**, click **Import from File/URL** → **From
-   URL**, paste one of the beginner agent's env files, and click
-   **Fetch & Parse**:
-   - OpenAI: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.openai`
-   - Ollama: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.ollama`
+8. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
+   **Bypass AuthBridge on these outbound ports** to `11434`. OpenAI uses HTTPS
+   and needs no exclusion.
+9. **Service Port** `8080` · **Target Port** `8000`.
+10. Under **Environment Variables**, click **Import from File/URL** → **From
+    URL**, paste one of the beginner agent's env files, and click
+    **Fetch & Parse**:
+    - OpenAI: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.openai`
+    - Ollama: `https://raw.githubusercontent.com/rossoctl/examples/refs/heads/main/a2a/weather_service/.env.ollama`
 
-   The OpenAI variant adds `LLM_API_KEY` and `OPENAI_API_KEY` as **Secret**
-   entries pointing at `openai-secret`.
+    The OpenAI variant adds `LLM_API_KEY` and `OPENAI_API_KEY` as **Secret**
+    entries pointing at `openai-secret`.
 
-   After import, **edit `MCP_URL`** in the variable list to point at the
-   advanced tool service:
-   ```text
-   MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
-   ```
-10. **(Ollama only)** Expand **AuthBridge Advanced Configuration** and set
-    **Bypass AuthBridge on these outbound ports** to `11434`. OpenAI uses HTTPS
-    and needs no exclusion.
+    After import, **edit `MCP_URL`** in the variable list to point at the
+    advanced tool service:
+    ```text
+    MCP_URL=http://weather-tool-advanced-mcp:8000/mcp
+    ```
 11. Click **Build & Deploy Agent**.
 
 After the agent pod is **Ready**, re-run the Keycloak script so the agent's
