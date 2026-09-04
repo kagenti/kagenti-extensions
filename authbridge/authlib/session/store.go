@@ -27,7 +27,11 @@ type entry struct {
 	UpdatedAt time.Time
 }
 
-const maxSessionIDLen = 256
+// MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
+// are truncated on Append. Exported so callers that validate an id before
+// reaching the store — the session API's query parameters, for one — bound it at
+// the same length instead of duplicating the number.
+const MaxSessionIDLen = 256
 
 // Recorder receives every event the store appends, for side-channel
 // aggregation. Declared here as a narrow interface rather than importing the
@@ -177,8 +181,8 @@ func (s *Store) backgroundCleanup() {
 // doesn't exist. Updates activeID to this session. Evicts the oldest event
 // if the session exceeds maxEvents.
 func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
-	if len(sessionID) > maxSessionIDLen {
-		sessionID = sessionID[:maxSessionIDLen]
+	if len(sessionID) > MaxSessionIDLen {
+		sessionID = sessionID[:MaxSessionIDLen]
 	}
 
 	s.mu.Lock()
@@ -413,11 +417,11 @@ func (s *Store) Rekey(oldID, newID string) {
 	if oldID == newID || oldID == "" || newID == "" {
 		return
 	}
-	if len(newID) > maxSessionIDLen {
+	if len(newID) > MaxSessionIDLen {
 		// Two long IDs sharing a prefix would collide on the same truncated key,
 		// silently turning the second Rekey into a no-op. Log so that's diagnosable.
-		slog.Warn("session: newID truncated for rekey", "origLen", len(newID), "maxLen", maxSessionIDLen)
-		newID = newID[:maxSessionIDLen]
+		slog.Warn("session: newID truncated for rekey", "origLen", len(newID), "maxLen", MaxSessionIDLen)
+		newID = newID[:MaxSessionIDLen]
 	}
 
 	s.mu.Lock()

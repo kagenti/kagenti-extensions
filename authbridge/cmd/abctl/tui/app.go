@@ -618,9 +618,12 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case usageLoadedMsg:
-		// Discard a reply for a scope the user has since left, so a slow response
-		// cannot repaint the chart under the wrong heading.
-		if msg.session != m.usage.session {
+		// Discard anything but the newest request's reply. Two rapid `w` presses
+		// leave two requests in flight; without this an out-of-order response
+		// repaints a stale window under the current heading. Comparing an id
+		// rather than the view fields means a future option cannot silently
+		// escape the check.
+		if msg.req != m.usage.reqSeq {
 			return m, nil
 		}
 		m.usage.loading = false

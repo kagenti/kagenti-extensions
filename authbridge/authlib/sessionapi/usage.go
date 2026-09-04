@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/session"
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
@@ -86,7 +87,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sessionID := r.URL.Query().Get("session")
-	if len(sessionID) > maxUsageSessionIDLen {
+	if len(sessionID) > session.MaxSessionIDLen {
 		writeUsageError(w, errSessionIDTooLong)
 		return
 	}
@@ -98,10 +99,6 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("sessionapi: usage encode failed", "error", err)
 	}
 }
-
-// maxUsageSessionIDLen mirrors the store's own session-ID cap so a long query
-// string cannot be echoed back in an error message.
-const maxUsageSessionIDLen = 256
 
 type usageError struct{ msg string }
 

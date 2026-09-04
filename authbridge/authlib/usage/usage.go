@@ -145,7 +145,14 @@ func WithPricer(p Pricer) Option { return func(a *Aggregator) { a.pricer = p } }
 // WithClock overrides time.Now, for deterministic tests.
 func WithClock(now func() time.Time) Option { return func(a *Aggregator) { a.now = now } }
 
-// WithMaxSessions bounds the number of per-session rings retained.
+// WithMaxSessions bounds the number of per-session rings retained. Each ring is
+// NumBuckets buckets, so this is the knob that bounds worst-case memory.
+//
+// n == 0 means track NO per-session rings: /v1/usage?session=... returns zeroed
+// buckets, while the all-sessions aggregate keeps counting everything. That is
+// the reading the name implies, and the safe one if this is ever wired to
+// operator config — a 0 in a ConfigMap should not silently mean "unlimited".
+// Pass a negative n to leave the default in place.
 func WithMaxSessions(n int) Option {
 	return func(a *Aggregator) {
 		if n >= 0 {
@@ -198,9 +205,10 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 		a.foldInto(ring, t, e)
 		return
 	}
-	// Cap reached: the event still counts toward the all-sessions total above,
-	// it just gets no per-session breakdown.
-	if a.maxSess > 0 && len(a.sessions) >= a.maxSess {
+	// Cap reached: the event still counts toward the all-sessions total above, it
+	// just gets no per-session breakdown. maxSess == 0 means no per-session rings
+	// at all, so every session takes this path — see WithMaxSessions.
+	if len(a.sessions) >= a.maxSess {
 		return
 	}
 	ring := make([]bucket, NumBuckets)

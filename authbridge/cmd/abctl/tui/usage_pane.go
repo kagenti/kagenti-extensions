@@ -29,11 +29,17 @@ var errUsageUnsupported = errors.New("usage endpoint not available")
 // usageLoadedMsg carries a fetched snapshot back to Update.
 type usageLoadedMsg struct {
 	snap *usage.Snapshot
-	// session the request was made for, so a reply that arrives after the user
-	// switched scope can be discarded rather than rendered under the wrong
-	// heading.
-	session string
-	err     error
+	// req is the monotonic id of the request this answers. Update discards any
+	// reply whose id is not the newest one issued.
+	//
+	// A single id rather than a tuple of (session, window, resolution): comparing
+	// fields means every future view option has to be added to the comparison or
+	// it silently stops being covered, and two rapid presses of `w` produce two
+	// in-flight requests that agree on session but differ on window — so an
+	// out-of-order reply could repaint a stale window under the current heading.
+	// An id cannot be partially right.
+	req uint64
+	err error
 }
 
 // usageTickMsg fires the periodic refetch.
@@ -48,6 +54,26 @@ type usageState struct {
 	err       error
 	loading   bool
 	lastFetch time.Time
+
+	// reqSeq is the id of the most recently ISSUED request. Any reply carrying a
+	// smaller id is stale and dropped.
+	reqSeq uint64
+}
+
+// beginFetch invalidates what is on screen and returns the command for a fresh
+// request. Every view-option change goes through it.
+//
+// Clearing snap matters as much as bumping the sequence: leaving the old
+// snapshot in place means renderUsage keeps drawing the previous scope's or
+// window's bars under the NEW heading until the reply lands — the same
+// wrong-heading failure the discard guard prevents, arriving from the other
+// direction.
+func (m *model) beginFetch() tea.Cmd {
+	m.usage.reqSeq++
+	m.usage.snap = nil
+	m.usage.err = nil
+	m.usage.loading = true
+	return m.fetchUsage()
 }
 
 func (u *usageState) window() (window, resolution time.Duration) {
@@ -74,11 +100,12 @@ func (m *model) fetchUsage() tea.Cmd {
 	client := m.client
 	window, resolution := m.usage.window()
 	session := m.usage.session
+	req := m.usage.reqSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		snap, err := client.GetUsage(ctx, window, resolution, session, usage.GroupNone)
-		return usageLoadedMsg{snap: snap, session: session, err: err}
+		return usageLoadedMsg{snap: snap, req: req, err: err}
 	}
 }
 
@@ -96,8 +123,7 @@ func (m *model) openUsage(session string) tea.Cmd {
 	m.previousPane = m.pane
 	m.pane = paneUsage
 	m.usage.session = session
-	m.usage.loading = true
-	return tea.Batch(m.fetchUsage(), usageTick())
+	return tea.Batch(m.beginFetch(), usageTick())
 }
 
 // renderUsage draws the pane.

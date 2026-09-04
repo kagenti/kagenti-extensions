@@ -76,11 +76,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		case "w":
 			m.usage.cycleWindow()
-			m.usage.loading = true
-			return m.fetchUsage()
+			return m.beginFetch()
 		case "r":
-			m.usage.loading = true
-			return m.fetchUsage()
+			return m.beginFetch()
 		case "s":
 			// Toggle scope between this session and all sessions. Only offered
 			// when a session is selected; otherwise there is nothing to toggle to.
@@ -89,8 +87,7 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			} else if m.selectedSess != "" {
 				m.usage.session = m.selectedSess
 			}
-			m.usage.loading = true
-			return m.fetchUsage()
+			return m.beginFetch()
 		}
 	}
 

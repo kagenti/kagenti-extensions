@@ -300,6 +300,25 @@ func TestRecord_NilInvocationsDoesNotPanic(t *testing.T) {
 	}
 }
 
+// WithMaxSessions(0) means track NO per-session rings — the reading the name
+// implies. It previously fell through a `> 0` guard and disabled the cap
+// entirely, so a 0 from config would have meant "unlimited".
+func TestWithMaxSessions_ZeroTracksNoSessions(t *testing.T) {
+	now := time.Date(2026, 9, 4, 23, 30, 30, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)), WithMaxSessions(0))
+
+	a.Record("s1", respEvent(now, 200, time.Second, "m", 100))
+
+	// The all-sessions aggregate still counts everything.
+	if got := a.Snapshot(time.Minute, BucketWidth, "", GroupNone).Totals.Tokens; got != 100 {
+		t.Errorf("all-sessions tokens = %d, want 100", got)
+	}
+	// But no per-session breakdown exists.
+	if got := a.Snapshot(time.Minute, BucketWidth, "s1", GroupNone).Totals.Tokens; got != 0 {
+		t.Errorf("per-session tokens = %d, want 0 with maxSessions=0", got)
+	}
+}
+
 func TestParseWindow(t *testing.T) {
 	if d, err := ParseWindow(""); err != nil || d != 10*time.Minute {
 		t.Errorf("default = %v, %v; want 10m, nil", d, err)
