@@ -207,6 +207,8 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		_ = os.Remove(p.pidFile)
 	}
 
+	tightenLog(p.logFile, stderr)
+
 	if err := os.MkdirAll(filepath.Dir(p.unitFile), 0o755); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
@@ -319,5 +321,20 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		}
 		fmt.Fprintf(stdout, "%sed.\n", strings.ToUpper(action[:1])+action[1:])
 		return 0
+	}
+}
+
+// tightenLog makes the proxy log owner-only before the supervisor opens it.
+//
+// The supervisor creates it with its own umask — 0644 in practice — and it records
+// every host the proxy talks to. Creating it first means the supervisor appends to a
+// file that is already tight; the chmod also catches one an earlier install left
+// loose. Best-effort throughout: a log mode is not worth failing an install over.
+func tightenLog(path string, stderr io.Writer) {
+	if f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		_ = f.Close()
+	}
+	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
+		fmt.Fprintf(stderr, "abctl: could not tighten %s (%v); continuing\n", path, err)
 	}
 }

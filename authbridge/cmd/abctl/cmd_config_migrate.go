@@ -23,12 +23,27 @@ type pinnedListener struct {
 	key     string
 	value   string
 	comment string
+	// isFlag marks a boolean key, checked against the parsed config differently
+	// from an address.
+	isFlag bool
 	// unpinnedDefault is what the preset fills in when the key is absent, and
 	// what makes the omission worth fixing rather than tidy.
 	unpinnedDefault string
 }
 
 var listenerPins = []pinnedListener{
+	{
+		// The durable half of this migration. The two address pins below fix the two
+		// listeners that were known to be wildcard; this covers every other listener
+		// in the config, and any added later, without a further migration.
+		key:   "bind_loopback_only",
+		value: "true",
+		comment: "Added by abctl: bind every listener to 127.0.0.1, including any not named\n" +
+			"here. Without it a listener falls back to a preset default that binds every\n" +
+			"interface — on a laptop, the Wi-Fi.",
+		isFlag:          true,
+		unpinnedDefault: "wildcard binds for anything unpinned",
+	},
 	{
 		key:             "health_addr",
 		value:           "127.0.0.1:47604",
@@ -60,6 +75,10 @@ func migrateConfig(path string, stdout io.Writer) (changed bool, err error) {
 	missing := make([]pinnedListener, 0, len(listenerPins))
 	for _, pin := range listenerPins {
 		switch pin.key {
+		case "bind_loopback_only":
+			if !cfg.Listener.BindLoopbackOnly {
+				missing = append(missing, pin)
+			}
 		case "health_addr":
 			if cfg.Listener.HealthAddr == "" {
 				missing = append(missing, pin)
@@ -103,6 +122,10 @@ func migrateConfig(path string, stdout io.Writer) (changed bool, err error) {
 
 	fmt.Fprintf(stdout, "Updated %s (previous kept as %s):\n", path, bak)
 	for _, pin := range missing {
+		if pin.isFlag {
+			fmt.Fprintf(stdout, "  + %s: %s   (was: %s)\n", pin.key, pin.value, pin.unpinnedDefault)
+			continue
+		}
 		fmt.Fprintf(stdout, "  + %s: %s   (was defaulting to %s — every interface)\n",
 			pin.key, pin.value, pin.unpinnedDefault)
 	}

@@ -92,6 +92,10 @@ func TestMigrateConfig_AddsThePins(t *testing.T) {
 	if after.Listener.TransparentProxyAddr != "127.0.0.1:47603" {
 		t.Errorf("transparent_proxy_addr = %q", after.Listener.TransparentProxyAddr)
 	}
+	// The durable half: covers listeners this migration does not name.
+	if !after.Listener.BindLoopbackOnly {
+		t.Error("bind_loopback_only was not added; a future listener would bind wide")
+	}
 	// Untouched: everything the user had.
 	if after.Listener.ForwardProxyAddr != before.Listener.ForwardProxyAddr {
 		t.Error("forward_proxy_addr changed")
@@ -210,4 +214,57 @@ func readFile(t *testing.T, p string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// TestMigrateConfig_FlagAloneIsEnoughToBeUpToDate: someone who set the flag by hand
+// should not be nagged, and must not have it duplicated.
+func TestMigrateConfig_FlagAlreadySet(t *testing.T) {
+	body := strings.Replace(oldStyleConfig,
+		"  roles: [forward]",
+		"  roles: [forward]\n  bind_loopback_only: true", 1)
+	p := writeCfg(t, body)
+	var out bytes.Buffer
+	if _, err := migrateConfig(p, &out); err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(readFile(t, p), "bind_loopback_only"); n != 1 {
+		t.Errorf("bind_loopback_only appears %d times, want 1", n)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Listener.BindLoopbackOnly {
+		t.Error("the operator's flag was lost")
+	}
+}
+
+// TestMigratedConfigActuallyBindsLoopback is the end of the chain: the migration is
+// only worth anything if the running proxy binds loopback afterwards. Asserts
+// against the real Load+ApplyPreset sequence the binaries use.
+func TestMigratedConfigActuallyBindsLoopback(t *testing.T) {
+	p := writeCfg(t, oldStyleConfig)
+	var out bytes.Buffer
+	if _, err := migrateConfig(p, &out); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ApplyPreset(cfg)
+	for name, addr := range map[string]string{
+		"forward":     cfg.Listener.ForwardProxyAddr,
+		"session":     cfg.Listener.SessionAPIAddr,
+		"health":      cfg.Listener.HealthAddr,
+		"transparent": cfg.Listener.TransparentProxyAddr,
+		"stats":       cfg.Stats.StatsAddress,
+	} {
+		if addr == "" {
+			continue
+		}
+		if !strings.HasPrefix(addr, "127.0.0.1:") {
+			t.Errorf("%s binds %q after migration — still exposed", name, addr)
+		}
+	}
 }
