@@ -1,7 +1,9 @@
 package usage
 
 import (
+	"fmt"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,10 +110,43 @@ func TestSnapshot_ZeroDurationExcludedFromMean(t *testing.T) {
 	if b.Requests != 2 {
 		t.Errorf("requests = %d, want 2 (both count as traffic)", b.Requests)
 	}
-	// Mean divides by Requests, so an unmeasured event still halves it. Document
-	// the actual behavior rather than assert an aspiration.
-	if b.LatMeanMs != 1000 {
-		t.Errorf("mean = %v, want 1000 (2000ms over 2 requests)", b.LatMeanMs)
+	// The mean is over MEASURED requests only. Dividing by Requests would report
+	// 1000ms for a single 2000ms response, understating latency in proportion to
+	// how many responses arrived unmeasured.
+	if b.LatMeanMs != 2000 {
+		t.Errorf("mean = %v, want 2000 (one measured 2000ms response)", b.LatMeanMs)
+	}
+	if b.LatSamples != 1 {
+		t.Errorf("latSamples = %d, want 1 — only one response carried a duration", b.LatSamples)
+	}
+}
+
+// The same dilution must not reappear when buckets are folded: a wider bucket's
+// mean has to weight each source bucket by its measured-sample count, not by its
+// request count.
+func TestFold_LatencyExcludesUnmeasuredRequests(t *testing.T) {
+	now := time.Date(2026, 9, 4, 23, 2, 30, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	// Minute A: one measured 2000ms response plus 9 unmeasured ones.
+	minA := now.Add(-time.Minute)
+	a.Record("s1", respEvent(minA, 200, 2000*time.Millisecond, "m", 0))
+	for i := 0; i < 9; i++ {
+		a.Record("s1", respEvent(minA, 200, 0, "m", 0))
+	}
+	// Minute B: one measured 4000ms response.
+	a.Record("s1", respEvent(now, 200, 4000*time.Millisecond, "m", 0))
+
+	folded := a.Snapshot(2*time.Minute, 2*time.Minute, "", GroupNone).Buckets[0]
+	if folded.Requests != 11 {
+		t.Fatalf("requests = %d, want 11", folded.Requests)
+	}
+	// Two measured samples: (2000 + 4000) / 2 = 3000.
+	if folded.LatMeanMs != 3000 {
+		t.Errorf("folded mean = %v, want 3000 (two measured samples)", folded.LatMeanMs)
+	}
+	if folded.LatSamples != 2 {
+		t.Errorf("folded latSamples = %d, want 2", folded.LatSamples)
 	}
 }
 
@@ -245,21 +280,54 @@ func TestSnapshot_UnknownSessionIsZeroedNotError(t *testing.T) {
 	}
 }
 
-// Beyond the session cap, traffic still counts toward the all-sessions total —
-// only the per-session breakdown is dropped. Silently losing it from both would
-// make the aggregate disagree with reality.
-func TestRecord_SessionCapKeepsAllSessionsTotal(t *testing.T) {
-	now := time.Date(2026, 9, 4, 23, 30, 30, 0, time.UTC)
-	a := New(WithClock(fixedClock(now)), WithMaxSessions(2))
+// At the cap, the NEWEST session must be answerable and the coldest ring
+// reclaimed. Refusing new sessions instead would leave /v1/sessions listing a
+// live session while /v1/usage?session=<id> returned zeros — indistinguishable
+// from "that session did nothing" — and would stay that way for the life of the
+// process, since the store expires sessions without telling the aggregator.
+func TestRecord_SessionCapReclaimsColdestRing(t *testing.T) {
+	base := time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC)
+	now := base
+	a := New(WithClock(func() time.Time { return now }), WithMaxSessions(2))
 
-	for _, id := range []string{"s1", "s2", "s3"} {
-		a.Record(id, respEvent(now, 200, time.Second, "m", 100))
+	// s1 at 23:00, s2 at 23:01 — both tracked, s1 is now the coldest.
+	a.Record("s1", respEvent(base, 200, time.Second, "m", 100))
+	a.Record("s2", respEvent(base.Add(time.Minute), 200, time.Second, "m", 100))
+
+	// s3 arrives: the cap is reached, so s1's ring is reclaimed.
+	now = base.Add(2 * time.Minute)
+	a.Record("s3", respEvent(now, 200, time.Second, "m", 100))
+
+	if got := a.Snapshot(10*time.Minute, BucketWidth, "s3", GroupNone).Totals.Requests; got != 1 {
+		t.Errorf("newest session s3 must be answerable, got %d requests", got)
 	}
-	if got := a.Snapshot(time.Minute, BucketWidth, "", GroupNone).Totals.Requests; got != 3 {
+	if got := a.Snapshot(10*time.Minute, BucketWidth, "s1", GroupNone).Totals.Requests; got != 0 {
+		t.Errorf("coldest session s1 should have been reclaimed, got %d requests", got)
+	}
+	if got := a.Snapshot(10*time.Minute, BucketWidth, "s2", GroupNone).Totals.Requests; got != 1 {
+		t.Errorf("s2 was warmer than s1 and should survive, got %d requests", got)
+	}
+	// Every event still counts in the all-sessions aggregate regardless.
+	if got := a.Snapshot(10*time.Minute, BucketWidth, "", GroupNone).Totals.Requests; got != 3 {
 		t.Errorf("all-sessions requests = %d, want 3", got)
 	}
-	if got := a.Snapshot(time.Minute, BucketWidth, "s3", GroupNone).Totals.Requests; got != 0 {
-		t.Errorf("s3 was past the cap, want no per-session data, got %d", got)
+}
+
+// Memory must stay bounded no matter how many distinct session ids arrive.
+func TestRecord_SessionRingsStayBounded(t *testing.T) {
+	base := time.Date(2026, 9, 4, 23, 0, 0, 0, time.UTC)
+	now := base
+	a := New(WithClock(func() time.Time { return now }), WithMaxSessions(4))
+
+	for i := 0; i < 200; i++ {
+		now = base.Add(time.Duration(i) * time.Second)
+		a.Record(fmt.Sprintf("session-%d", i), respEvent(now, 200, time.Second, "m", 1))
+	}
+	a.mu.RLock()
+	n := len(a.sessions)
+	a.mu.RUnlock()
+	if n > 4 {
+		t.Errorf("retained %d rings, cap is 4", n)
 	}
 }
 
@@ -367,4 +435,53 @@ func keys(m map[string]Counts) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// The model name is request-controlled, so label cardinality is set off-host. A
+// caller varying it every request must not be able to grow a bucket's map
+// without bound — that is memory growth driven from outside the process, on the
+// synchronous session-append path.
+func TestRecord_LabelCardinalityIsCapped(t *testing.T) {
+	now := time.Date(2026, 9, 4, 23, 30, 30, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	const attempts = maxLabelsPerBucket * 4
+	for i := 0; i < attempts; i++ {
+		a.Record("s1", respEvent(now, 200, time.Second, fmt.Sprintf("model-%d", i), 10))
+	}
+
+	b := a.Snapshot(time.Minute, BucketWidth, "", GroupMethod).Buckets[0]
+	if len(b.Series) > maxLabelsPerBucket {
+		t.Errorf("byMethod holds %d labels, want at most %d", len(b.Series), maxLabelsPerBucket)
+	}
+	if _, ok := b.Series[overflowLabel]; !ok {
+		t.Errorf("excess labels should fold into %q; got keys %v", overflowLabel, keys(b.Series))
+	}
+	// Totals must survive the capping: the point is to bound keys, not lose data.
+	if b.Requests != attempts {
+		t.Errorf("requests = %d, want %d — capping must not drop traffic", b.Requests, attempts)
+	}
+	var seriesTotal int64
+	for _, c := range b.Series {
+		seriesTotal += c.Requests
+	}
+	if seriesTotal != attempts {
+		t.Errorf("series sums to %d, want %d — segments must still sum to the bucket", seriesTotal, attempts)
+	}
+}
+
+// A pathologically long model name must not be retained whole.
+func TestRecord_LabelLengthIsCapped(t *testing.T) {
+	now := time.Date(2026, 9, 4, 23, 30, 30, 0, time.UTC)
+	a := New(WithClock(fixedClock(now)))
+
+	huge := strings.Repeat("m", 100_000)
+	a.Record("s1", respEvent(now, 200, time.Second, huge, 10))
+
+	b := a.Snapshot(time.Minute, BucketWidth, "", GroupMethod).Buckets[0]
+	for k := range b.Series {
+		if len(k) > maxLabelLen {
+			t.Errorf("retained a %d-byte label, cap is %d", len(k), maxLabelLen)
+		}
+	}
 }

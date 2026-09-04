@@ -75,6 +75,12 @@ type Bucket struct {
 	Counts                // totals across every label
 	LatMeanMs   float64   `json:"latMeanMs,omitempty"`
 	LatStdDevMs float64   `json:"latStdDevMs,omitempty"`
+	// LatSamples is how many requests in this bucket carried a duration, which
+	// is not always Requests: an unmeasured response counts as traffic but not
+	// as a latency sample. Folding needs it to weight each bucket by its real
+	// sample count, and a client showing a window-wide mean needs it for the
+	// same reason.
+	LatSamples int64 `json:"latSamples,omitempty"`
 	// Series is the requested grouping, keyed by model / status / plugin name.
 	// Nil when group=none.
 	Series map[string]Counts `json:"series,omitempty"`
@@ -89,6 +95,10 @@ type bucket struct {
 	Counts
 	latSum   float64 // milliseconds
 	latSumSq float64 // milliseconds squared, for stddev
+	// latN counts only the requests that actually carried a duration. Dividing
+	// latSum by Requests instead reports a mean diluted by every unmeasured
+	// response: one 2s response plus one unmeasured one reported 1s, not 2s.
+	latN     int64
 	byMethod map[string]Counts
 	byStatus map[string]Counts
 	byPlugin map[string]Counts
@@ -130,10 +140,25 @@ type Pricer func(model string, tokens int64) int64
 type Aggregator struct {
 	mu       sync.RWMutex
 	all      []bucket
-	sessions map[string][]bucket
+	sessions map[string]*sessionRing
 	maxSess  int
 	pricer   Pricer
 	now      func() time.Time
+}
+
+// sessionRing is one session's buckets plus the last time it was written.
+//
+// lastSeen exists because the store evicts and expires sessions without telling
+// the aggregator. Without reclamation, a pod that churns through session ids
+// fills the map to the cap and then refuses every new session forever:
+// /v1/sessions would list a live session while /v1/usage?session=<id> returned
+// zeroed buckets, which looks exactly like "this session did nothing". Matching
+// the store's own cap only delays that. Reusing the coldest ring instead bounds
+// memory AND keeps the newest sessions answerable, which is what an operator is
+// looking at.
+type sessionRing struct {
+	buckets  []bucket
+	lastSeen time.Time
 }
 
 // Option configures an Aggregator.
@@ -165,7 +190,7 @@ func WithMaxSessions(n int) Option {
 func New(opts ...Option) *Aggregator {
 	a := &Aggregator{
 		all:      make([]bucket, NumBuckets),
-		sessions: make(map[string][]bucket),
+		sessions: make(map[string]*sessionRing),
 		maxSess:  defaultMaxSessions,
 		now:      time.Now,
 	}
@@ -202,18 +227,44 @@ func (a *Aggregator) Record(sessionID string, e *pipeline.SessionEvent) {
 	a.foldInto(a.all, t, e)
 
 	if ring, ok := a.sessions[sessionID]; ok {
-		a.foldInto(ring, t, e)
+		ring.lastSeen = at
+		a.foldInto(ring.buckets, t, e)
 		return
 	}
-	// Cap reached: the event still counts toward the all-sessions total above, it
-	// just gets no per-session breakdown. maxSess == 0 means no per-session rings
-	// at all, so every session takes this path — see WithMaxSessions.
+	// maxSess == 0 means no per-session rings at all — see WithMaxSessions. The
+	// event still counts toward the all-sessions total above.
+	if a.maxSess == 0 {
+		return
+	}
+	// At the cap, reclaim the least-recently-written ring rather than refuse the
+	// new session. The store expires and evicts sessions without notifying us, so
+	// the coldest ring is very likely one the store has already dropped; refusing
+	// instead would make every session after the first maxSess unanswerable for
+	// the life of the process.
 	if len(a.sessions) >= a.maxSess {
-		return
+		a.evictColdestLocked()
 	}
-	ring := make([]bucket, NumBuckets)
+	ring := &sessionRing{buckets: make([]bucket, NumBuckets), lastSeen: at}
 	a.sessions[sessionID] = ring
-	a.foldInto(ring, t, e)
+	a.foldInto(ring.buckets, t, e)
+}
+
+// evictColdestLocked drops the ring with the oldest lastSeen. Caller holds mu.
+//
+// Linear scan rather than a heap: maxSess is a few dozen, this runs only when the
+// map is full and a genuinely new session arrives, and a heap would need
+// maintaining on every write instead.
+func (a *Aggregator) evictColdestLocked() {
+	var coldestID string
+	var coldest time.Time
+	for id, r := range a.sessions {
+		if coldestID == "" || r.lastSeen.Before(coldest) {
+			coldestID, coldest = id, r.lastSeen
+		}
+	}
+	if coldestID != "" {
+		delete(a.sessions, coldestID)
+	}
 }
 
 func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEvent) {
@@ -243,10 +294,11 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	if ms := float64(e.Duration.Milliseconds()); ms > 0 {
 		b.latSum += ms
 		b.latSumSq += ms * ms
+		b.latN++
 	}
 
 	if model != "" {
-		addLabel(&b.byMethod, model, one)
+		addLabel(&b.byMethod, truncateLabel(model), one)
 	}
 	if e.StatusCode > 0 {
 		addLabel(&b.byStatus, strconv.Itoa(e.StatusCode), one)
@@ -275,9 +327,48 @@ func (a *Aggregator) foldInto(ring []bucket, t time.Time, e *pipeline.SessionEve
 	}
 }
 
+// maxLabelsPerBucket caps distinct keys in one bucket's grouping map.
+//
+// The model name comes off the request body, so its cardinality is set by
+// whatever the client sends, not by anything this process controls. Unbounded, a
+// caller varying the model string every request would add a retained map entry
+// and a retained string per request, in a ring that only frees a slot when it is
+// reused a full lap later — 6h at one minute. That is memory growth driven from
+// off-host, on the synchronous session-append path.
+//
+// 64 is well above any real deployment: a pod talks to a handful of models, a
+// few status codes and its own plugin list. Past the cap, further keys fold into
+// overflowLabel so the totals stay correct and the excess is visible rather than
+// silently dropped.
+const maxLabelsPerBucket = 64
+
+// overflowLabel collects everything past maxLabelsPerBucket. Named rather than
+// dropped so a chart's segments still sum to the bucket total, and so an
+// operator can see that cardinality was capped instead of wondering why a model
+// is missing.
+const overflowLabel = "(other)"
+
+// maxLabelLen bounds one retained label. The model name is request-controlled, so
+// without this a caller could park a megabyte of string in a bucket that lives
+// for a full ring lap. Long enough for any real model id, including provider
+// prefixes and dated suffixes.
+const maxLabelLen = 96
+
+func truncateLabel(s string) string {
+	if len(s) <= maxLabelLen {
+		return s
+	}
+	return s[:maxLabelLen]
+}
+
 func addLabel(m *map[string]Counts, key string, c Counts) {
 	if *m == nil {
 		*m = make(map[string]Counts, 4)
+	}
+	// Reserve the last slot for overflowLabel: switching to it only once the map
+	// is already full would make the overflow key itself the (cap+1)th entry.
+	if _, ok := (*m)[key]; !ok && len(*m) >= maxLabelsPerBucket-1 {
+		key = overflowLabel
 	}
 	cur := (*m)[key]
 	cur.add(c)

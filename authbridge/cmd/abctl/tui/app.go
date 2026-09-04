@@ -416,6 +416,10 @@ func (m *model) backToPodsPane() {
 	m.usage.snap = nil
 	m.usage.err = nil
 	m.usage.lastFetch = time.Time{}
+	// Invalidate anything in flight against the old pod: its reply must not land
+	// as if it described the new one.
+	m.usage.reqSeq++
+	m.usage.tickGen++
 	m.eventCt = 0
 	m.lastCt = 0
 	m.rate = 0
@@ -641,12 +645,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case usageTickMsg:
-		// Only keep polling while the pane is focused: a ticker left running
-		// behind another pane would fetch forever for nothing.
-		if m.pane != paneUsage {
+		// Stop when the pane loses focus, and drop ticks from a previous visit:
+		// a quick exit and re-entry would otherwise leave two chains alive, each
+		// rescheduling its own successor.
+		if m.pane != paneUsage || msg.gen != m.usage.tickGen {
 			return m, nil
 		}
-		return m, tea.Batch(m.fetchUsage(), usageTick())
+		return m, tea.Batch(m.fetchUsage(), usageTick(m.usage.tickGen))
 
 	case refreshTickMsg:
 		// In picker mode, skip the fetch — m.client may be nil after a

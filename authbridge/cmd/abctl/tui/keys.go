@@ -272,14 +272,17 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.pane = panePipeline
 			}
 		case paneUsage:
-			// Return to whichever pane opened it — events (session-scoped) or
-			// sessions (all-sessions). Falls back to sessions if unrecorded.
-			if m.previousPane != paneNone {
-				m.pane = m.previousPane
-				m.previousPane = paneNone
+			// Return to whichever pane opened it, from usageState's own field —
+			// model.previousPane is shared with the catalog overlay and gets
+			// clobbered when the catalog is opened from here.
+			if m.usage.returnPane != paneNone {
+				m.pane = m.usage.returnPane
+				m.usage.returnPane = paneNone
 			} else {
 				m.pane = paneSessions
 			}
+			// End the polling chain on the way out.
+			m.usage.tickGen++
 		case paneDetail:
 			m.pane = paneEvents
 		case paneEvents:

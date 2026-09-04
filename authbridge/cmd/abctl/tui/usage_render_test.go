@@ -138,8 +138,8 @@ func TestRenderUsageSummary_LatencyIsRequestWeighted(t *testing.T) {
 	snap := &usage.Snapshot{
 		Totals: usage.Counts{Requests: 100},
 		Buckets: []usage.Bucket{
-			{Counts: usage.Counts{Requests: 99}, LatMeanMs: 1000},
-			{Counts: usage.Counts{Requests: 1}, LatMeanMs: 5000},
+			{Counts: usage.Counts{Requests: 99}, LatMeanMs: 1000, LatSamples: 99},
+			{Counts: usage.Counts{Requests: 1}, LatMeanMs: 5000, LatSamples: 1},
 		},
 	}
 	got := renderUsageSummary(snap)
@@ -159,12 +159,33 @@ func TestHumanizeCount(t *testing.T) {
 	}{
 		{0, "0"}, {999, "999"}, {1200, "1.2k"}, {9999, "10.0k"},
 		{18900, "18k"}, {48200, "48k"}, {1_500_000, "1.5M"},
+		{999_999_999, "999M"},
+		{1_000_000_000, "1.0G"}, // was "1000.0M" — 7 chars, broke the layout
+		{50_000_000_000, "50G"},
+		{1_500_000_000_000, "1.5T"},
+		{999_000_000_000_000, "999T"},
 	} {
 		if got := humanizeCount(tc.in); got != tc.want {
 			t.Errorf("humanizeCount(%d) = %q, want %q", tc.in, got, tc.want)
 		}
-		if got := len(humanizeCount(tc.in)); got > 5 {
-			t.Errorf("humanizeCount(%d) is %d chars, too wide for the gutter", tc.in, got)
+	}
+}
+
+// The width promise is what renderBars lays out against, so it must hold for
+// every magnitude an int64 can reach — not just the ones a table happens to list.
+func TestHumanizeCount_NeverExceedsWidth(t *testing.T) {
+	vals := []int64{0, -1, 9223372036854775807}
+	for _, base := range []int64{1, 7, 999} {
+		for mag := int64(1); mag <= 1_000_000_000_000_000_000; mag *= 10 {
+			if base <= (1<<62)/mag {
+				vals = append(vals, base*mag)
+			}
+		}
+	}
+	for _, v := range vals {
+		if got := humanizeCount(v); len(got) > maxCountLabelLen {
+			t.Errorf("humanizeCount(%d) = %q (%d chars), cap is %d",
+				v, got, len(got), maxCountLabelLen)
 		}
 	}
 }

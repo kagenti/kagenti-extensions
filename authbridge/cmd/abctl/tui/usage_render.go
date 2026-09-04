@@ -221,20 +221,44 @@ func renderValues(buckets []usage.Bucket, m usageMetric) string {
 	return strings.TrimRight(string(row), " ")
 }
 
-// humanizeCount renders a count in at most 5 characters so it fits the axis
-// gutter and the value row.
+// maxCountLabelLen is the width humanizeCount promises. renderBars lays out the
+// axis gutter and value row against it, so exceeding it pushes lines past the
+// terminal width and wraps the chart.
+const maxCountLabelLen = 5
+
+// humanizeCount renders a count in at most maxCountLabelLen characters.
+//
+// Every magnitude has to be covered, not just the plausible ones: the previous
+// version fell through to "%.1fM" above a million, so a billion tokens rendered
+// as "1000.0M" — seven characters — and a large enough total silently broke the
+// layout. Token counts over a 6h window are exactly the figure that grows without
+// anyone revisiting this function.
 func humanizeCount(v int64) string {
 	switch {
 	case v < 0:
 		return "0"
 	case v < 1000:
-		return fmt.Sprintf("%d", v)
+		return fmt.Sprintf("%d", v) // 0..999
 	case v < 10_000:
-		return fmt.Sprintf("%.1fk", float64(v)/1000)
+		return fmt.Sprintf("%.1fk", float64(v)/1000) // 1.0k..9.9k
 	case v < 1_000_000:
-		return fmt.Sprintf("%dk", v/1000)
+		return fmt.Sprintf("%dk", v/1000) // 10k..999k
+	case v < 10_000_000:
+		return fmt.Sprintf("%.1fM", float64(v)/1e6) // 1.0M..9.9M
+	case v < 1_000_000_000:
+		return fmt.Sprintf("%dM", v/1e6) // 10M..999M
+	case v < 10_000_000_000:
+		return fmt.Sprintf("%.1fG", float64(v)/1e9) // 1.0G..9.9G
+	case v < 1_000_000_000_000:
+		return fmt.Sprintf("%dG", v/1e9) // 10G..999G
+	case v < 10_000_000_000_000:
+		return fmt.Sprintf("%.1fT", float64(v)/1e12) // 1.0T..9.9T
+	case v < 1_000_000_000_000_000:
+		return fmt.Sprintf("%dT", v/1e12) // 10T..999T
 	default:
-		return fmt.Sprintf("%.1fM", float64(v)/1_000_000)
+		// Past 999T an int64 has about four decades left; clamp rather than
+		// widen, since a chart is unreadable long before this.
+		return ">999T"
 	}
 }
 
@@ -256,9 +280,12 @@ func renderUsageSummary(snap *usage.Snapshot) string {
 	var latSum float64
 	var latN int64
 	for _, b := range snap.Buckets {
-		if b.LatMeanMs > 0 {
-			latSum += b.LatMeanMs * float64(b.Requests)
-			latN += b.Requests
+		// Weight by LatSamples (requests that carried a duration), not Requests:
+		// an unmeasured response is traffic but not a latency sample, and using
+		// Requests understates the mean in proportion to how many there were.
+		if b.LatMeanMs > 0 && b.LatSamples > 0 {
+			latSum += b.LatMeanMs * float64(b.LatSamples)
+			latN += b.LatSamples
 		}
 	}
 	if latN > 0 {

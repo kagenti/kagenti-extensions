@@ -332,7 +332,11 @@ func main() {
 		// No Pricer is passed, so cost fields stay absent and the response
 		// reports priced:false — see the TODO on usage.Pricer for where real
 		// rates would come from.
-		usageAgg = usage.New()
+		// Same session cap as the store, so the two agree on how many sessions
+		// are worth remembering. The aggregator reclaims its coldest ring at the
+		// cap rather than refusing new sessions, which matters because the store
+		// evicts and expires sessions without telling it.
+		usageAgg = usage.New(usage.WithMaxSessions(maxSessions))
 		sessions.AddRecorder(usageAgg)
 
 		slog.Info("session tracking enabled", "ttl", ttl, "maxEvents", maxEvents, "maxSessions", maxSessions)

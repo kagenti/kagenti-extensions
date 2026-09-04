@@ -2,7 +2,6 @@ package tui
 
 import (
 	"testing"
-	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -66,9 +65,81 @@ func TestUsage_BeginFetchClearsStaleData(t *testing.T) {
 // The poll must stop doing work once the pane loses focus.
 func TestUsage_TickIgnoredOffPane(t *testing.T) {
 	m := &model{pane: paneEvents}
-	_, cmd := m.Update(usageTickMsg(time.Now()))
+	m.usage.tickGen = 1
+	_, cmd := m.Update(usageTickMsg{gen: 1})
 	if cmd != nil {
 		t.Error("tick scheduled more work while the pane was not focused")
+	}
+}
+
+// A tick left over from an earlier visit must not reschedule itself. Without a
+// generation check, a quick exit and re-entry leaves two chains alive — each
+// rescheduling its own successor — and the request rate doubles for the life of
+// the session.
+func TestUsage_StaleTickChainDoesNotReschedule(t *testing.T) {
+	m := &model{pane: paneUsage}
+	m.usage.tickGen = 2 // second visit
+
+	if _, cmd := m.Update(usageTickMsg{gen: 1}); cmd != nil {
+		t.Error("tick from the first visit rescheduled itself, doubling the poll rate")
+	}
+	// The current generation still polls. m.client is nil so fetchUsage yields no
+	// command, but the tick half of the batch must still be scheduled.
+	if _, cmd := m.Update(usageTickMsg{gen: 2}); cmd == nil {
+		t.Error("current-generation tick did not reschedule")
+	}
+}
+
+// esc must return to the pane Usage was opened from, even after the catalog
+// overlay has been opened on top. model.previousPane is shared with the catalog,
+// so relying on it sent esc to Sessions instead of Events.
+func TestUsage_ReturnPaneSurvivesCatalogOverlay(t *testing.T) {
+	m := &model{pane: paneEvents, selectedSess: "s1", previousPane: paneNone}
+	m.openUsage("s1")
+	if m.usage.returnPane != paneEvents {
+		t.Fatalf("returnPane = %v, want paneEvents", m.usage.returnPane)
+	}
+
+	// Simulate opening the catalog from Usage and escaping back out of it: the
+	// catalog uses previousPane and clears it on the way out.
+	m.previousPane = paneUsage
+	m.pane = paneCatalog
+	m.previousPane = paneNone
+	m.pane = paneUsage
+
+	// Usage's own esc must still know where it came from.
+	if m.usage.returnPane != paneEvents {
+		t.Errorf("returnPane = %v after a catalog round trip, want paneEvents", m.usage.returnPane)
+	}
+}
+
+// Switching pods must invalidate in-flight work: a reply describing the old pod
+// must not land as if it described the new one, and the old polling chain must
+// stop. backToPodsPane needs a fully wired model (contexts, port-forward), so
+// this asserts the reset a stale reply would have to get past — that a bumped
+// sequence makes the previous request's reply undeliverable.
+func TestUsage_PodSwitchInvalidatesInFlight(t *testing.T) {
+	m := &model{pane: paneUsage}
+	m.usage.reqSeq = 5
+	m.usage.tickGen = 3
+	m.usage.snap = &usage.Snapshot{Totals: usage.Counts{Tokens: 42}}
+
+	// The reset backToPodsPane performs on the usage fields.
+	m.usage.snap = nil
+	m.usage.err = nil
+	m.usage.reqSeq++
+	m.usage.tickGen++
+
+	// A reply issued against the old pod must now be rejected.
+	u, _ := m.Update(usageLoadedMsg{req: 5, snap: &usage.Snapshot{
+		Totals: usage.Counts{Tokens: 999},
+	}})
+	if got := u.(*model); got.usage.snap != nil {
+		t.Errorf("a reply from the previous pod was applied: %+v", got.usage.snap.Totals)
+	}
+	// And the old polling chain must not reschedule.
+	if _, cmd := m.Update(usageTickMsg{gen: 3}); cmd != nil {
+		t.Error("the previous pod's polling chain is still alive")
 	}
 }
 

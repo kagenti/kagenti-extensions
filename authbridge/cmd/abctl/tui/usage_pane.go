@@ -42,8 +42,11 @@ type usageLoadedMsg struct {
 	err error
 }
 
-// usageTickMsg fires the periodic refetch.
-type usageTickMsg time.Time
+// usageTickMsg fires the periodic refetch. gen ties it to the polling chain that
+// scheduled it, so ticks from a previous visit to the pane are ignored.
+type usageTickMsg struct {
+	gen uint64
+}
 
 // usageState is the pane's view state: which metric, window and scope.
 type usageState struct {
@@ -58,6 +61,19 @@ type usageState struct {
 	// reqSeq is the id of the most recently ISSUED request. Any reply carrying a
 	// smaller id is stale and dropped.
 	reqSeq uint64
+
+	// returnPane is where esc goes back to, kept here rather than in
+	// model.previousPane because that field is shared with the catalog overlay:
+	// opening the catalog from Usage overwrites it with paneUsage and the
+	// catalog's own esc then clears it, so esc from Usage landed on Sessions
+	// instead of the Events pane it was opened from.
+	returnPane paneID
+
+	// tickGen identifies the current polling chain. openUsage bumps it, and a
+	// tick from an earlier visit is dropped — otherwise a quick exit and
+	// re-entry leaves two chains alive, each rescheduling the other's successor
+	// and doubling the request rate for the life of the session.
+	tickGen uint64
 }
 
 // beginFetch invalidates what is on screen and returns the command for a fresh
@@ -109,9 +125,11 @@ func (m *model) fetchUsage() tea.Cmd {
 	}
 }
 
-// usageTick schedules the next poll.
-func usageTick() tea.Cmd {
-	return tea.Tick(usagePollInterval, func(t time.Time) tea.Msg { return usageTickMsg(t) })
+// usageTick schedules the next poll for the given generation.
+func usageTick(gen uint64) tea.Cmd {
+	return tea.Tick(usagePollInterval, func(time.Time) tea.Msg {
+		return usageTickMsg{gen: gen}
+	})
 }
 
 // openUsage enters the pane, remembering where to return to.
@@ -120,10 +138,13 @@ func usageTick() tea.Cmd {
 // matches the timeline the operator was just reading; the sessions pane passes ""
 // for an all-sessions view.
 func (m *model) openUsage(session string) tea.Cmd {
-	m.previousPane = m.pane
+	m.usage.returnPane = m.pane
 	m.pane = paneUsage
 	m.usage.session = session
-	return tea.Batch(m.beginFetch(), usageTick())
+	// New generation: any tick still in flight from a previous visit becomes
+	// stale and will not reschedule itself.
+	m.usage.tickGen++
+	return tea.Batch(m.beginFetch(), usageTick(m.usage.tickGen))
 }
 
 // renderUsage draws the pane.

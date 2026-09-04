@@ -145,14 +145,17 @@ func fold(src []Bucket, width time.Duration) []Bucket {
 
 		for _, b := range src[i:end] {
 			acc.Counts.add(b.Counts)
-			if b.LatMeanMs > 0 && b.Requests > 0 {
-				n := float64(b.Requests)
+			// Weighted by LatSamples, not Requests: the source mean was computed
+			// over measured requests only, so reconstituting with Requests would
+			// re-introduce the dilution latStats exists to avoid.
+			if b.LatMeanMs > 0 && b.LatSamples > 0 {
+				n := float64(b.LatSamples)
 				sum := b.LatMeanMs * n
 				// variance = sumSq/n - mean^2  =>  sumSq = n*(variance + mean^2)
 				sumSq := n * (b.LatStdDevMs*b.LatStdDevMs + b.LatMeanMs*b.LatMeanMs)
 				latSum += sum
 				latSumSq += sumSq
-				latN += b.Requests
+				latN += b.LatSamples
 			}
 			for k, v := range b.Series {
 				cur := series[k]
@@ -162,6 +165,7 @@ func fold(src []Bucket, width time.Duration) []Bucket {
 		}
 
 		if latN > 0 {
+			acc.LatSamples = latN
 			n := float64(latN)
 			acc.LatMeanMs = latSum / n
 			if variance := latSumSq/n - acc.LatMeanMs*acc.LatMeanMs; variance > 0 {
@@ -207,7 +211,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 		if !ok {
 			ring = nil // fall through: emits zeroed buckets at the right times
 		} else {
-			ring = r
+			ring = r.buckets
 		}
 	}
 
@@ -228,6 +232,7 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 			if src := &ring[slot(t)]; src.start.Equal(t) {
 				b.Counts = src.Counts
 				b.LatMeanMs, b.LatStdDevMs = src.latStats()
+				b.LatSamples = src.latN
 				b.Series = src.series(group)
 			}
 		}
@@ -245,10 +250,13 @@ func (a *Aggregator) Snapshot(window, resolution time.Duration, sessionID string
 // sums. Guarded against a small negative variance, which float cancellation can
 // produce when every sample is identical.
 func (b *bucket) latStats() (mean, stddev float64) {
-	if b.Requests == 0 || b.latSum == 0 {
+	if b.latN == 0 || b.latSum == 0 {
 		return 0, 0
 	}
-	n := float64(b.Requests)
+	// Divide by the number of MEASURED requests, not all of them. A response with
+	// a zero duration is unmeasured, not instant, and counting it in the divisor
+	// understates the mean in proportion to how many such responses there were.
+	n := float64(b.latN)
 	mean = b.latSum / n
 	variance := b.latSumSq/n - mean*mean
 	if variance <= 0 {
