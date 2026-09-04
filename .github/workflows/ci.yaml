@@ -173,3 +173,47 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v -x --ignore=tests/e2e
+
+  # `go mod tidy -diff` on every authbridge module. GOWORK=off so
+  # replace directives resolve as they do in build.yaml and
+  # release-binaries.yaml.
+  go-tidy-check:
+    name: Verify module graph is tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/authlib/go.mod
+
+      - name: Run go mod tidy -diff in every module
+        run: |
+          set -euo pipefail
+          # Percent-encode %, CR, LF for use in workflow commands
+          # (both metadata and message halves — CR/LF in the message
+          # would end the command and let the next line be interpreted
+          # as a new one).
+          esc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a' -e '$!N' -e 's/\n/%0A/g' -e 'ta'; }
+          fail=0
+          found=0
+          while IFS= read -r -d '' go_mod; do
+            found=$((found + 1))
+            mod=$(dirname "$go_mod")
+            mod_esc=$(esc "$mod")
+            go_mod_esc=$(esc "$go_mod")
+            echo "::group::${mod_esc}"
+            if ! (cd "$mod" && go mod tidy -diff); then
+              echo "::error file=${go_mod_esc}::go mod tidy would change ${go_mod_esc}; run 'go mod tidy' in ${mod_esc} and commit"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done < <(find authbridge -name go.mod -print0 | sort -z)
+          if [ "$found" -eq 0 ]; then
+            echo "::error::no go.mod found under authbridge/"
+            exit 1
+          fi
+          exit $fail
