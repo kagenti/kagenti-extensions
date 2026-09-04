@@ -174,9 +174,9 @@ jobs:
       - name: Run tests
         run: pytest tests/ -v -x --ignore=tests/e2e
 
-  # Fails when any authbridge module's go.mod/go.sum would change under
-  # `go mod tidy` (GOWORK=off, so replace directives resolve as they do
-  # in build.yaml and release-binaries.yaml).
+  # `go mod tidy -diff` on every authbridge module. GOWORK=off so
+  # replace directives resolve as they do in build.yaml and
+  # release-binaries.yaml.
   go-tidy-check:
     name: Verify module graph is tidy
     runs-on: ubuntu-latest
@@ -193,12 +193,17 @@ jobs:
       - name: Run go mod tidy -diff in every module
         run: |
           set -euo pipefail
+          # Percent-encode %, CR, LF before inserting a path into a
+          # ::group:: or ::error workflow command.
+          esc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a' -e '$!N' -e 's/\n/%0A/g' -e 'ta'; }
           fail=0
           while IFS= read -r -d '' go_mod; do
             mod=$(dirname "$go_mod")
-            echo "::group::$mod"
+            mod_esc=$(esc "$mod")
+            go_mod_esc=$(esc "$go_mod")
+            echo "::group::${mod_esc}"
             if ! (cd "$mod" && go mod tidy -diff); then
-              echo "::error file=${go_mod}::go mod tidy would change ${go_mod}; run 'go mod tidy' in ${mod} and commit"
+              echo "::error file=${go_mod_esc}::go mod tidy would change ${go_mod_esc}; run 'go mod tidy' in ${mod_esc} and commit"
               fail=1
             fi
             echo "::endgroup::"
