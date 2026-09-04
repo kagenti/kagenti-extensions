@@ -33,9 +33,23 @@ func supervisorName() string {
 //
 // Two choices are load-bearing on both platforms:
 //
-//   - Restart on FAILURE only. launchd's KeepAlive=true respawns even after a
-//     clean exit, which makes a deliberate stop impossible; SuccessfulExit=false
-//     restarts a crash and honours a stop.
+//   - launchd gets unconditional KeepAlive; systemd gets Restart=on-failure.
+//     KeepAlive=true is the simpler guarantee for the requirement that matters —
+//     come back after a crash — and it costs nothing, because the way to stop this
+//     deliberately is `service uninstall`, which boots the job out rather than
+//     leaning on a KeepAlive condition. Apple's {SuccessfulExit:false} form is
+//     documented in terms of EXIT STATUS, which makes its behaviour on death by
+//     signal ambiguous; there is no reason to depend on resolving that.
+//
+//     systemd needs no such trade: on-failure covers signal death, and a
+//     `systemctl stop` is distinguishable from a crash, so a stop stays stopped.
+//
+//     NOT verified end to end: restart-after-crash could not be observed from the
+//     session this was developed in. launchd logged "pending spawn, domain in
+//     on-demand-only mode", i.e. it queued the respawn rather than running it —
+//     a property of a headless context, not of this plist. Worth one manual
+//     `kill -9` from a real GUI login before trusting it.
+//
 //   - A throttle. A config error is fatal at startup, so without one a bad edit
 //     becomes a tight respawn loop.
 func renderUnit(p servicePaths) string { return renderUnitFor(runtime.GOOS, p) }
@@ -61,7 +75,7 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>EnvironmentVariables</key>
   <dict><key>HOME</key><string>` + p.home + `</string></dict>
   <key>RunAtLoad</key><true/>
-  <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
+  <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
   <key>StandardOutPath</key><string>` + p.logFile + `</string>
   <key>StandardErrorPath</key><string>` + p.logFile + `</string>
@@ -106,6 +120,16 @@ func loadService(p servicePaths) error {
 		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, p.unitFile).CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("launchctl bootstrap failed: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		// bootstrap REGISTERS the job; it does not reliably start it. Observed on a
+		// real install: the agent loaded, `state = not running`, nothing served, and
+		// Claude Code was broken until an explicit kickstart — RunAtLoad
+		// notwithstanding. launchd's log said "pending spawn, domain in
+		// on-demand-only mode", so whether a given session spawns at bootstrap
+		// depends on the domain's state. Start it deliberately instead of depending
+		// on that.
+		if out, err := exec.Command("launchctl", "kickstart", "-p", "gui/"+uid+"/"+launchdLabel).CombinedOutput(); err != nil {
+			return fmt.Errorf("launchctl kickstart failed: %v: %s", err, strings.TrimSpace(string(out)))
 		}
 		return nil
 	}

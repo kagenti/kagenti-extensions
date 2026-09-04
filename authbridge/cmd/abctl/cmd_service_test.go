@@ -36,15 +36,18 @@ func servicePathsFixture(t *testing.T) servicePaths {
 func TestRenderUnit_BothPlatforms(t *testing.T) {
 	p := servicePathsFixture(t)
 
-	t.Run("darwin restarts on failure only", func(t *testing.T) {
-		// KeepAlive=true respawns even after a clean exit, so `launchctl stop` could
-		// never stick.
+	t.Run("darwin restarts after a crash", func(t *testing.T) {
+		// Unconditional KeepAlive on purpose: it is the simpler guarantee for the
+		// requirement that matters — come back after a crash — and costs nothing,
+		// because stopping deliberately is what `service uninstall` is for.
+		// {SuccessfulExit:false} is documented in terms of exit STATUS, which leaves
+		// its behaviour on death by signal ambiguous.
 		u := renderUnitFor("darwin", p)
-		if !strings.Contains(u, "<key>SuccessfulExit</key>") {
-			t.Error("KeepAlive is not scoped to failures")
+		if !strings.Contains(u, "<key>KeepAlive</key><true/>") {
+			t.Error("KeepAlive is not unconditional; a kill -9 would not be restarted")
 		}
-		if strings.Contains(u, "<key>KeepAlive</key><true/>") {
-			t.Error("unconditional KeepAlive")
+		if strings.Contains(u, "SuccessfulExit") {
+			t.Error("KeepAlive is conditioned on exit status, which signal death does not satisfy")
 		}
 		if !strings.Contains(u, "ThrottleInterval") {
 			t.Error("no ThrottleInterval; a bad config would respawn tightly")
