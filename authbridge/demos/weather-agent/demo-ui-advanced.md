@@ -14,19 +14,20 @@ turned on.
 | `authproxy-routes` | Not used | One outbound route, set in the UI |
 | Resource names | `weather-service`, `weather-tool` | `weather-service-advanced`, `weather-tool-advanced` |
 
-The advanced names live alongside the beginner names so both demos can run in
-the same namespace.
+The `-advanced` names live alongside the beginner names, so both demos can run
+in the same namespace. **Use them exactly** — the Keycloak script registers
+SPIFFE / audience scopes for the `-advanced` ServiceAccounts, so a wrong name
+breaks `MCP_URL`, the outbound route, and token-exchange audiences.
 
 ## Prerequisites
 
 - Beginner [demo-ui.md prerequisites](demo-ui.md#prerequisites) (Rossoctl UI
   reachable, an LLM provider).
 - In **`team1`**: installer-provided `authbridge-config`,
-  `authbridge-runtime-config`, `spiffe-helper-config`, `envoy-config`. No
-  extra Secrets or ConfigMaps are required up front. **No `keycloak-admin-secret`
-  is required in `team1` or `rossoctl-system`.** On the current operator (v0.7.0)
-  client registration uses the operator's own SPIFFE workload identity, not an
-  admin username/password Secret; a `NotFound` in **either** namespace is expected.
+  `authbridge-runtime-config`, `spiffe-helper-config`, `envoy-config`. No extra
+  Secrets or ConfigMaps up front — in particular **no `keycloak-admin-secret`**
+  in `team1` *or* `rossoctl-system` (v0.7.0 registers clients via the operator's
+  own SPIFFE identity, so a `NotFound` in either namespace is expected).
 - Python 3.10+ for the Keycloak setup script (Step 1).
 - For OpenAI: a `team1` Secret named `openai-secret` (created in Step 3).
 
@@ -51,39 +52,30 @@ python demos/weather-agent/setup_keycloak_weather_advanced.py \
   -n team1 --wait-tool-client
 ```
 
-> **Do not `kubectl port-forward` Keycloak on port 8080.** On a `localtest.me`
-> ingress setup, `keycloak.localtest.me:8080` is already reachable directly, and a
-> port-forward binding local `:8080` hijacks all `:8080` traffic — including the
-> Rossoctl UI at `rossoctl-ui.localtest.me:8080`, which will then redirect into the
-> Keycloak admin console. If you truly need a forward, use a different local port
-> and set `KEYCLOAK_URL` to match.
+> **Do not `kubectl port-forward` Keycloak on `:8080`.** `keycloak.localtest.me:8080`
+> is already reachable directly; a forward on local `:8080` hijacks the Rossoctl UI
+> (`rossoctl-ui.localtest.me:8080`) into the Keycloak admin console. If you must
+> forward, use another local port and set `KEYCLOAK_URL` to match.
 
-> **Timing:** `--wait-tool-client` blocks for ~5 minutes waiting for the tool's
-> SPIFFE client to register, then times out. Rather than race that window, the
-> simplest order is to **deploy the tool (Step 2) first**, then run this script —
-> it finds the tool client immediately. If it does time out, just re-run it after
-> the tool is up (the scopes/clients it created persist; the script is idempotent).
+> **Timing:** `--wait-tool-client` blocks ~5 min for the tool's SPIFFE client, then
+> times out. Simplest: **deploy the tool (Step 2) first**, then run this — it finds
+> the client immediately. On timeout, just re-run after the tool is up (idempotent).
 
 **Re-run the same command (without `--wait-tool-client`) after Step 3** so the
-agent client picks up the optional exchange scope. The script:
+agent client picks up the optional exchange scope.
 
-- Adds realm default scope `agent-team1-weather-service-advanced-aud` (puts the
-  agent SPIFFE in `aud` for UI / `alice` tokens).
-- Adds optional scope `weather-tool-exchange-aud` (puts the tool SPIFFE in
-  `aud` during token exchange).
-- Enables token exchange on both Keycloak clients.
-- Creates demo user `alice` (used by the optional CLI verify in Step 5).
+The script (idempotent) adds the default scope `agent-team1-weather-service-advanced-aud`
+(agent SPIFFE in `aud` for UI / `alice` tokens) and the optional scope
+`weather-tool-exchange-aud` (tool SPIFFE in `aud` during exchange), enables token
+exchange on both clients, and creates demo user `alice` (for the Step 5 CLI verify).
 
 ---
 
 ## Step 2: Import the Weather Tool via Rossoctl UI
 
-> ⚠️ **Use the `-advanced` names exactly.** **Tool Name** must be
-> `weather-tool-advanced` (not `weather-tool`). The Keycloak script in
-> Step 1 registered SPIFFE / audience scopes for the `-advanced`
-> ServiceAccount; if you import as `weather-tool`, the Service ends up as
-> `weather-tool-mcp` instead of `weather-tool-advanced-mcp` and the
-> `MCP_URL` + outbound route in Step 3 won't resolve.
+> ⚠️ **Tool Name** must be `weather-tool-advanced` exactly (see [naming](#how-this-differs-from-the-standard-demo)).
+> Import as `weather-tool` and the Service becomes `weather-tool-mcp`, so the
+> Step 3 `MCP_URL` + outbound route won't resolve.
 
 1. Open [Import Tool](http://rossoctl-ui.localtest.me:8080/tools/import).
 2. **Namespace**: `team1` · **Tool Name**: `weather-tool-advanced` (exact).
@@ -102,35 +94,26 @@ Wait for the tool pod to be **Ready**. Once it registers in Keycloak, the
 
 ```bash
 kubectl get pods -n team1 -l app.kubernetes.io/name=weather-tool-advanced
-# Expect 2/2 (mcp + authbridge-proxy) in proxy-sidecar mode.
-# No separate spiffe-helper container: the authbridge-proxy sidecar sources its
-# SPIRE credentials in-process (the spiffe.Provider mirrors the SVID to disk),
-# so the count is 2/2 rather than 3/3.
+# Expect 2/2 (mcp + authbridge-proxy). No separate spiffe-helper container —
+# authbridge-proxy sources its SPIRE credentials in-process — so it's 2/2, not 3/3.
 ```
 
 ---
 
 ## Step 3: Import the Weather Agent via Rossoctl UI
 
-(If you're using OpenAI, create the secret first — replace `<YOUR_OPENAI_API_KEY>`
-with your real key; the shell variable expansion shown is intentional and works
-only if you've already `export`ed it.)
+If you're using OpenAI, create the secret first (replace `<YOUR_OPENAI_API_KEY>`
+with your real key — an empty secret makes the agent fail with `Error: No LLM API
+key configured.`, see [Troubleshooting](#troubleshooting)):
 
 ```bash
 kubectl create secret generic openai-secret -n team1 \
   --from-literal=apikey="<YOUR_OPENAI_API_KEY>"
 ```
 
-> The UI agent import references `openai-secret` for both `LLM_API_KEY` and
-> `OPENAI_API_KEY`. If the secret is empty (e.g. `$OPENAI_API_KEY` wasn't
-> exported), the agent fails with `Error: No LLM API key configured.` — see
-> [Troubleshooting](#troubleshooting).
-
-> ⚠️ **Use the `-advanced` name exactly.** **Agent Name** must be
-> `weather-service-advanced` (not `weather-service`). The Keycloak script
-> in Step 1 registered SPIFFE / audience scopes for the `-advanced`
-> ServiceAccount; the wrong name lands you with mismatched audiences and
-> a 401/503 from token exchange.
+> ⚠️ **Agent Name** must be `weather-service-advanced` exactly (see
+> [naming](#how-this-differs-from-the-standard-demo)); a wrong name gives
+> mismatched audiences and a 401/503 from token exchange.
 
 Now the UI flow (order matches the actual import form top-to-bottom):
 
@@ -199,28 +182,23 @@ python demos/weather-agent/setup_keycloak_weather_advanced.py -n team1
 
 ## Step 4: Chat via Rossoctl UI
 
-> **Expected catalog quirk.** The **Agent Catalog** shows **two** entries:
-> `weather-service-advanced` *and* `weather-tool-advanced`. The **Tool
-> Catalog** is empty. This is by design — the tool's AgentRuntime CR
-> uses `type: agent` so the operator applies `rossoctl.io/type=agent`
-> and AuthBridge gets injected (the `injectTools` feature gate is off
-> by default; see the [kubectl appendix](#operator-gotchas)). Pick
+> **Expected catalog quirk.** The **Agent Catalog** shows **two** entries
+> (`weather-service-advanced` *and* `weather-tool-advanced`) and the **Tool
+> Catalog** is empty — by design, because the tool's AgentRuntime uses
+> `type: agent` (see [Operator gotchas](#operator-gotchas)). Pick
 > `weather-service-advanced` for chat.
 
 1. **Agent Catalog** → namespace `team1` → `weather-service-advanced` →
    **View Details**. The agent card should render (proves the agent is up and
    `/.well-known/*` is bypassed).
 2. In the **Chat** panel, ask: *"What is the weather in New York?"*
-3. The response should be live weather. Behind the scenes:
-   - UI's JWT (audience `agent-...-advanced-aud`) hits the agent's AuthBridge
-     ingress.
-   - AuthBridge on the agent matches the outbound route, exchanges for a token
-     with `aud = weather-tool-advanced` SPIFFE.
-   - AuthBridge on the tool validates that JWT before MCP sees it.
+3. The response should be live weather. Behind the scenes: the UI's JWT hits the
+   agent's AuthBridge ingress → the agent matches the outbound route and exchanges
+   for a token with `aud = weather-tool-advanced` SPIFFE → the tool's AuthBridge
+   validates that JWT before MCP sees it.
 
-If chat returns `Connection error` or `No LLM API key configured`, see
-[Troubleshooting](#troubleshooting) — those are LLM-side failures, not
-AuthBridge failures.
+`Connection error` or `No LLM API key configured` are LLM-side failures, not
+AuthBridge — see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -247,30 +225,19 @@ is the usual choice — the bare command re-applies the manifests, which the
 idempotent; if the run aborts with `verify pod produced no MCP_HTTP_CODE line`,
 just re-run it (see [Troubleshooting](#troubleshooting)).
 
-What it does:
+What it does: password-grants `alice`, token-exchanges to the tool SPIFFE audience
+(scope `openid weather-tool-exchange-aud`), then `POST /mcp` **with** the exchanged
+token → expects **2xx** (JWT accepted, `initialize` completes) and **without** an
+`Authorization` header → expects **401** (AuthBridge rejects before MCP). It sends
+`Accept: application/json, text/event-stream` so streamable HTTP doesn't return 406.
 
-1. Password-grants `alice` against the `weather-advanced-e2e` Keycloak client.
-2. Token-exchanges to the tool SPIFFE audience with scope
-   `openid weather-tool-exchange-aud`.
-3. `POST /mcp` with the exchanged token → expects **2xx** (JWT accepted, MCP
-   `initialize` handshake completes). Sends
-   `Accept: application/json, text/event-stream` so streamable HTTP doesn't
-   return 406.
-4. Repeats `POST /mcp` **without** an `Authorization` header → expects **401**
-   (AuthBridge rejects before MCP runs).
+> **It does NOT call the LLM** — so it can pass while UI chat still returns
+> `Connection error` (see Troubleshooting).
 
-> **`deploy_and_verify_advanced.sh` does NOT call the LLM.** It can succeed
-> while UI chat still returns `Connection error` — see Troubleshooting.
-
-Useful env knobs:
-
-| Variable | Purpose |
-|----------|---------|
-| `NAMESPACE` | Default `team1` |
-| `SKIP_DEPLOY=1` | Verify only, skip the apply step (resources must exist — the default after Steps 2–3) |
-| `KC_INTERNAL` | Keycloak base URL inside the cluster (default `keycloak-service.keycloak.svc:8080`) |
-| `KC_USER_CLIENT_ID` | Public client for password grant (default `weather-advanced-e2e`) |
-| `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Admin REST credentials |
+Env knobs: `SKIP_DEPLOY=1` (verify only — the default after Steps 2–3) and
+`NAMESPACE` (default `team1`) are the common ones. Advanced overrides —
+`KC_INTERNAL`, `KC_USER_CLIENT_ID`, `KEYCLOAK_ADMIN_USERNAME` /
+`KEYCLOAK_ADMIN_PASSWORD` — are documented in the script header.
 
 ---
 
@@ -287,21 +254,19 @@ Useful env knobs:
 | `invalid_scope` / `503` from agent | Optional exchange scope not on agent client | Re-run `setup_keycloak_weather_advanced.py -n team1` **after** the agent is running. |
 | Token exchange denied | Tool client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers. |
 | Tool pod CrashLoopBackOff (`mcp` container) | The `weather_tool` image runs as UID 1001; a `securityContext` overriding the user breaks `uv run` | Use the manifests in `k8s/` as-is (they set `runAsUser/Group/fsGroup: 1001`). On OpenShift, see the [upstream Dockerfile](https://github.com/rossoctl/examples/blob/main/mcp/weather_tool/Dockerfile). |
-| Tool ingress logs missing `[Inbound]` | Combined sidecar uses different log text | Grep for `Token validated` instead, or increase log window. |
+| Tool ingress logs missing `[Inbound]` | The `authbridge-proxy` sidecar uses different log text | Grep for `Token validated` instead, or widen the log window. |
 | Deleted the agent or tool, but the Deployment + Service reappear within seconds | The Rossoctl backend's reconciliation service finalizes "orphaned" Shipwright builds by re-creating workloads | Also delete the Shipwright `Build` and `BuildRun` (see the [Cleanup](#cleanup) snippet). |
 | Chat returns `Cannot connect to MCP weather service at http://weather-tool-advanced-mcp:8000/mcp` | UI import used the standard names (`weather-tool` / `weather-service`) instead of `-advanced`, so the actual Service is `weather-tool-mcp` and `MCP_URL` doesn't resolve | Re-import using the exact `-advanced` names. The Keycloak script from Step 1 also expects those names. |
 
-Tool ingress and agent outbound logs (container name varies by AuthBridge mode
-— `authbridge-proxy` for proxy-sidecar default, `envoy-proxy` for envoy-sidecar):
-
-The tool is a **Deployment**, so `deploy/...` works for it. The agent is a
-**Sandbox** (bare pod, no Deployment) — resolve its pod name via label selector:
+AuthBridge logs (sidecar is `authbridge-proxy` in the default mode, `envoy-proxy`
+in envoy-sidecar). The tool is a **Deployment** (`deploy/...` works); the agent is
+a **Sandbox**, so resolve its pod name first:
 
 ```bash
-# Tool ingress (Deployment):
+# Tool ingress:
 kubectl logs deploy/weather-tool-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Inbound|Token validated"
 
-# Agent outbound (Sandbox — resolve the pod name first):
+# Agent outbound (Sandbox):
 AGENT_POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service-advanced \
   -o jsonpath='{.items[0].metadata.name}')
 kubectl logs "$AGENT_POD" -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
@@ -383,9 +348,9 @@ kubectl patch deploy weather-service-advanced -n team1 --type=json -p='[
 ]'
 ```
 
-(The `LLM_API_KEY-` clears the literal `"ollama"` value from the manifest;
-the `patch` re-adds it as a secret reference. Without the clear, both
-definitions exist and the secret wins, but it's noisy in `kubectl describe`.)
+(The `LLM_API_KEY-` clears the manifest's literal `"ollama"` value before the
+`patch` re-adds it as a secret reference — otherwise both exist, and while the
+secret wins it's noisy in `kubectl describe`.)
 
 ### Operator gotchas
 
