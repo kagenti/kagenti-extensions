@@ -90,9 +90,14 @@ func TestReportCrashRecovery_OnDarwin(t *testing.T) {
 		}
 		return
 	}
-	for _, want := range []string{"supervisor process", "kill -9", "~2s"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("note is missing %q:\n%s", want, got)
-		}
+	// One line: it must name the supervisor, because two authbridge-proxy processes
+	// with no explanation is the first thing people ask about. The kill -9
+	// verification lives in docs/laptop-service.md instead — install output is not
+	// where a tutorial belongs.
+	if !strings.Contains(got, "supervisor") {
+		t.Errorf("note does not mention the supervisor:\n%s", got)
+	}
+	if n := strings.Count(strings.TrimSpace(got), "\n"); n != 0 {
+		t.Errorf("note is %d lines; keep it to one:\n%s", n+1, got)
 	}
 }

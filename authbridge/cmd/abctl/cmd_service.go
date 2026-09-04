@@ -243,10 +243,16 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	fmt.Fprintf(stdout, "This will install a %s that runs:\n  %s --config %s\n\n",
-		supervisorName(), p.binary, p.configFile)
-	fmt.Fprintf(stdout, "It restarts on failure and starts at login, so Claude Code keeps working\n"+
-		"after a crash or a reboot. Unit file: %s\n\n", p.unitFile)
+	// Only when there is actually a decision to make. With --yes this text explained a
+	// choice nobody was being offered, and it said "restarts on failure and starts at
+	// login" a second time right after the caller had already said it — three sentences
+	// of the installer's output for one fact.
+	if !yes {
+		fmt.Fprintf(stdout, "This will install a %s that runs:\n  %s --config %s\n\n",
+			supervisorName(), p.binary, p.configFile)
+		fmt.Fprintf(stdout, "It restarts on failure and starts at login, so Claude Code keeps working\n"+
+			"after a crash or a reboot. Unit file: %s\n\n", p.unitFile)
+	}
 
 	// Adopt rather than collide. Two copies cannot share the ports, and the
 	// supervised one would lose the race and crash-loop while the hand-started one
@@ -256,7 +262,9 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "A Cortex you started by hand is running (pid %d). It will be stopped\n"+
 			"so the supervised one can take the ports.\n\n", adopt)
 	}
-	fmt.Fprintf(stdout, "Undo with: abctl service uninstall\n\n")
+	if !yes {
+		fmt.Fprintf(stdout, "Undo with: abctl service uninstall\n\n")
+	}
 	if !yes && !confirm(stdout) {
 		fmt.Fprintln(stdout, "Not changed.")
 		return exitDeclined
@@ -319,7 +327,12 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "abctl: writing %s: %v\n", p.unitFile, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
+	// The path is not printed on the happy path: it is one more line of output on an
+	// install that already says what happened, and `abctl service status` reports it
+	// whenever someone actually needs it.
+	if !yes {
+		fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
+	}
 
 	if err := loadService(p); errors.Is(err, errLingerUnavailable) {
 		// The unit IS loaded, so this is a caveat rather than a failure: keep going,
@@ -356,8 +369,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 
 	if p.healthURL != "" {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
-			fmt.Fprintf(stdout, "\nRunning under %s and healthy. Claude Code will keep working across\n"+
-				"crashes and logins.\n", supervisorName())
+			fmt.Fprintf(stdout, "Running as a %s, healthy.\n", supervisorName())
 			reportCrashRecovery(stdout)
 			return 0
 		}
@@ -366,7 +378,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 			"  abctl service status shows the current state.\n", p.healthURL, serviceReadyTimeout, p.logFile)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nRunning under %s.\n", supervisorName())
+	fmt.Fprintf(stdout, "Running as a %s.\n", supervisorName())
 	reportCrashRecovery(stdout)
 	return 0
 }
@@ -383,9 +395,7 @@ func reportCrashRecovery(stdout io.Writer) {
 	// launchd does not restart these agents — see renderUnitFor and
 	// cmd/authbridge-proxy/supervise.go — so crash recovery belongs to the supervisor,
 	// not to KeepAlive.
-	fmt.Fprintln(stdout, "\n  Crash recovery is handled by a supervisor process, because launchd does")
-	fmt.Fprintln(stdout, "  not restart user agents added mid-session. Check it with:")
-	fmt.Fprintln(stdout, "    kill -9 $(pgrep -f 'authbridge-proxy --config')   # back within ~2s")
+	fmt.Fprintln(stdout, "A supervisor process handles crashes (launchd will not restart these agents).")
 }
 
 func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {

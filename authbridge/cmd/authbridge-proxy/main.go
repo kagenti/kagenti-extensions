@@ -204,7 +204,10 @@ func main() {
 		// for `abctl service install` to load. Exiting here keeps one source of truth
 		// for the built-in config instead of teaching abctl to write it too.
 		if *writeConfigOnly {
-			slog.Info("wrote the built-in config; not starting", "config", p, "ca_dir", absCA)
+			// Silent on success. This runs from install.sh, which reports progress
+			// itself; a structured INFO line with timestamps and key=value pairs in the
+			// middle of that output reads like something went wrong. Failures still
+			// surface — writeBuiltinConfig's error is fatal above.
 			return
 		}
 		slog.Info("local mode — using the built-in config; edit it to hot-reload",
