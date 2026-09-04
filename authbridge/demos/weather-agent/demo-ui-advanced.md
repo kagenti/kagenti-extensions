@@ -231,9 +231,21 @@ end-to-end **without an LLM**. It's the right tool to confirm token exchange
 and ingress validation when you want to isolate AuthBridge from agent-side
 issues.
 
+Pick the invocation based on the current cluster state:
+
 ```bash
+# You got here via Steps 2–3 (tool + agent already deployed): verify only.
+SKIP_DEPLOY=1 ./authbridge/demos/weather-agent/deploy_and_verify_advanced.sh
+
+# Starting from scratch / CLI-only (nothing deployed yet): deploy, then verify.
 ./authbridge/demos/weather-agent/deploy_and_verify_advanced.sh
 ```
+
+Most readers reach this step **after** deploying via the UI, so `SKIP_DEPLOY=1`
+is the usual choice — the bare command re-applies the manifests, which the
+[kubectl-only appendix](#appendix-kubectl-only-path) path uses. Both are
+idempotent; if the run aborts with `verify pod produced no MCP_HTTP_CODE line`,
+just re-run it (see [Troubleshooting](#troubleshooting)).
 
 What it does:
 
@@ -255,7 +267,7 @@ Useful env knobs:
 | Variable | Purpose |
 |----------|---------|
 | `NAMESPACE` | Default `team1` |
-| `SKIP_DEPLOY=1` | Verify only, skip the apply step (resources must exist) |
+| `SKIP_DEPLOY=1` | Verify only, skip the apply step (resources must exist — the default after Steps 2–3) |
 | `KC_INTERNAL` | Keycloak base URL inside the cluster (default `keycloak-service.keycloak.svc:8080`) |
 | `KC_USER_CLIENT_ID` | Public client for password grant (default `weather-advanced-e2e`) |
 | `KEYCLOAK_ADMIN_USERNAME` / `KEYCLOAK_ADMIN_PASSWORD` | Admin REST credentials |
