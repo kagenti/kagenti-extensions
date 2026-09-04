@@ -124,16 +124,10 @@ Now the UI flow (order matches the actual import form top-to-bottom):
    - Git Branch or Tag: `main`
    - Select Agent: `Weather Service Agent`
    - Source Subfolder: `a2a/weather_service`
-4. **Protocol**: `A2A` · **Workload Type**: leave the default `Sandbox`.
-
-   > ⚠️ **Do not select `Deployment` for the agent.** Choosing `Deployment`
-   > currently fails: the source build succeeds but the workload create is
-   > rejected by the `agent-label-protection` admission policy (the
-   > `rossoctl.io/type` label may only be set by the operator via an
-   > AgentRuntime CR), so **no agent pod and no AgentRuntime are created**.
-   > The `Sandbox` default goes through the operator and works. The agent
-   > then runs as a bare pod owned by a `Sandbox` CR — verify/exec commands
-   > below use label selectors rather than `deploy/...`.
+4. **Protocol**: `A2A` · **Workload Type**: leave the default `Sandbox`. The
+   agent then runs as a bare pod owned by a `Sandbox` CR (not a Deployment), so
+   the verify/exec commands below resolve it via label selector rather than
+   `deploy/...`.
 5. **Secure with AuthBridge**: ✅ (default).
 6. **Enable SPIRE identity (JWT-SVID via spiffe-helper)**: ✅ (default).
 7. Expand **Outbound OIDC token exchange rules** and add one route — this is
