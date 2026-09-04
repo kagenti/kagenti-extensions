@@ -273,10 +273,14 @@ kubectl logs "$AGENT_POD" -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|
 Delete via the Rossoctl UI (Tool Catalog / Agent Catalog), or via CLI.
 
 **Delete the `AgentRuntime` CRs — they are the parent resource.** The agent runs
-as a `Sandbox` and the tool as a `Deployment`, both owned by an AgentRuntime. If
-you delete the child workload (Sandbox/Deployment) but leave the AgentRuntime, the
-operator enters a reconcile error loop (`Failed to resolve targetRef ... not
-found`) every ~30s. Deleting the AgentRuntime cascades to its children:
+as a `Sandbox` and the tool as a `Deployment`, both owned by an AgentRuntime.
+Deleting the AgentRuntime cascades to its children, so always delete the parent:
+
+> On the operator this demo targets (v0.7.0), deleting the child workload
+> (Sandbox/Deployment) while leaving the AgentRuntime puts the operator in a
+> reconcile error loop (`Failed to resolve targetRef ... not found`) every ~30s.
+> [operator#529](https://github.com/rossoctl/operator/pull/529) will make that
+> case degrade gracefully; until it ships, delete the parent AgentRuntime.
 
 ```bash
 kubectl delete agentruntime -n team1 \
