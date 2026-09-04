@@ -29,6 +29,17 @@ type entry struct {
 
 const maxSessionIDLen = 256
 
+// Recorder receives every event the store appends, for side-channel
+// aggregation. Declared here as a narrow interface rather than importing the
+// usage package so the dependency points one way: usage knows about events,
+// the store knows nothing about usage.
+//
+// Implementations are called while the store holds its write lock, so they must
+// not block or call back into the store.
+type Recorder interface {
+	Record(sessionID string, e *pipeline.SessionEvent)
+}
+
 // Store is an in-memory, per-pod session store. It is safe for concurrent use.
 type Store struct {
 	mu          sync.RWMutex
@@ -42,6 +53,10 @@ type Store struct {
 
 	// subscribers is the fan-out list for Subscribe(). Protected by mu.
 	subscribers []*subscriber
+
+	// recorders are notified of every appended event. Registered at setup via
+	// AddRecorder, before the store serves traffic.
+	recorders []Recorder
 }
 
 // subscriberChanBuf caps each subscriber's channel depth. 64 absorbs short
@@ -192,6 +207,14 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 	logAppended(sessionID, &event)
 	s.publishLocked(event)
 
+	// Side-channel aggregation (e.g. /v1/usage). Runs under the write lock, so
+	// a Recorder must be cheap and must not re-enter the store. Unlike
+	// subscribers this cannot drop: a dropped event silently skews a cumulative
+	// counter, where a dropped stream frame only costs one client one row.
+	for _, r := range s.recorders {
+		r.Record(sessionID, &event)
+	}
+
 	if s.maxEvents > 0 && len(sess.Events) > s.maxEvents {
 		sess.Events = trimEventsPinIntent(sess.Events, s.maxEvents)
 	}
@@ -275,6 +298,14 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeli
 
 // View returns a read-only snapshot of the session's events.
 // Returns nil if the session doesn't exist or is expired.
+// AddRecorder registers a Recorder. Call before the store serves traffic; it is
+// not safe to call concurrently with Append.
+func (s *Store) AddRecorder(r Recorder) {
+	if r != nil {
+		s.recorders = append(s.recorders, r)
+	}
+}
+
 func (s *Store) View(sessionID string) *pipeline.SessionView {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -522,4 +553,3 @@ func logAppended(sessionID string, e *pipeline.SessionEvent) {
 	}
 	slog.Debug("session: event appended", attrs...)
 }
-

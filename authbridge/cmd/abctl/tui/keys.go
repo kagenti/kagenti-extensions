@@ -67,6 +67,48 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 
+	// The Usage pane owns the keyboard while it is up, except for esc/q which
+	// the shared handling above already routed.
+	if m.pane == paneUsage && !m.filtering {
+		switch msg.String() {
+		case "t":
+			m.usage.cycleMetric()
+			return nil
+		case "w":
+			m.usage.cycleWindow()
+			m.usage.loading = true
+			return m.fetchUsage()
+		case "r":
+			m.usage.loading = true
+			return m.fetchUsage()
+		case "s":
+			// Toggle scope between this session and all sessions. Only offered
+			// when a session is selected; otherwise there is nothing to toggle to.
+			if m.usage.session != "" {
+				m.usage.session = ""
+			} else if m.selectedSess != "" {
+				m.usage.session = m.selectedSess
+			}
+			m.usage.loading = true
+			return m.fetchUsage()
+		}
+	}
+
+	// `u` opens the Usage pane. Scope depends on where it was pressed: from the
+	// events timeline it charts the session being read, from the session picker
+	// it charts everything. Suppressed while filtering, where `u` is a character
+	// the user is typing — the same reasoning as the `?` overlay above.
+	if msg.String() == "u" && !m.filtering && m.editState.phase == editPhaseDone {
+		switch m.pane {
+		case paneEvents, paneDetail:
+			if m.selectedSess != "" {
+				return m.openUsage(m.selectedSess)
+			}
+		case paneSessions:
+			return m.openUsage("")
+		}
+	}
+
 	// Picker panes handle their own keys before session-view logic.
 	if m.pane == paneNamespaces {
 		switch msg.String() {
@@ -231,6 +273,15 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.previousPane = paneNone
 			} else {
 				m.pane = panePipeline
+			}
+		case paneUsage:
+			// Return to whichever pane opened it — events (session-scoped) or
+			// sessions (all-sessions). Falls back to sessions if unrecorded.
+			if m.previousPane != paneNone {
+				m.pane = m.previousPane
+				m.previousPane = paneNone
+			} else {
+				m.pane = paneSessions
 			}
 		case paneDetail:
 			m.pane = paneEvents

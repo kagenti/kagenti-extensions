@@ -20,6 +20,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/redact"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // defaultHeartbeatInterval is how often the SSE stream sends a keep-alive
@@ -38,6 +39,10 @@ type Server struct {
 	inbound   *pipeline.Holder
 	outbound  *pipeline.Holder
 	heartbeat time.Duration
+	// usage aggregates events into time buckets for /v1/usage. nil disables
+	// the endpoint (returns 404) — see handleUsage for why that is a 404 and
+	// not an empty snapshot.
+	usage *usage.Aggregator
 	// catalog returns the registered-plugin metadata for /v1/plugins.
 	// nil disables the endpoint (returns 404). The binary wires this to
 	// plugins.Catalog; tests inject a stub provider.
@@ -100,6 +105,12 @@ func WithPipelines(inbound, outbound *pipeline.Holder) Option {
 	}
 }
 
+// WithUsage attaches a usage aggregator so the server exposes GET /v1/usage.
+// Without it that endpoint 404s.
+func WithUsage(a *usage.Aggregator) Option {
+	return func(s *Server) { s.usage = a }
+}
+
 // WithCatalog attaches a CatalogProvider so the server exposes the
 // registered-plugin catalog at GET /v1/plugins. Without this option the
 // endpoint returns 404 — useful in tests, harmless in production
@@ -125,6 +136,7 @@ func New(addr string, store *session.Store, opts ...Option) *Server {
 	mux.HandleFunc("GET /v1/events", s.handleStream)
 	mux.HandleFunc("GET /v1/pipeline", s.handlePipeline)
 	mux.HandleFunc("GET /v1/plugins", s.handlePluginCatalog)
+	mux.HandleFunc("GET /v1/usage", s.handleUsage)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	s.server = &http.Server{

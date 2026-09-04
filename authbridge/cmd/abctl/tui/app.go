@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,6 +38,7 @@ const (
 	panePipeline
 	panePluginDetail
 	paneCatalog
+	paneUsage
 )
 
 // paneNone is the explicit "no previous pane recorded" sentinel for
@@ -218,7 +220,9 @@ type model struct {
 	connState connStateInfo
 
 	// UI state.
-	pane         paneID
+	pane paneID
+	// usage is the Usage pane's view state (metric, window, scope, snapshot).
+	usage        usageState
 	selectedSess string
 	filter       string
 	filtering    bool
@@ -401,6 +405,11 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// A different pod is a different aggregator: keep the view options the
+	// operator chose, drop the data they described.
+	m.usage.snap = nil
+	m.usage.err = nil
+	m.usage.lastFetch = time.Time{}
 	m.eventCt = 0
 	m.lastCt = 0
 	m.rate = 0
@@ -601,6 +610,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildEventsTable()
 		}
 		return m, nil
+
+	case usageLoadedMsg:
+		// Discard a reply for a scope the user has since left, so a slow response
+		// cannot repaint the chart under the wrong heading.
+		if msg.session != m.usage.session {
+			return m, nil
+		}
+		m.usage.loading = false
+		if msg.err != nil {
+			if errors.Is(msg.err, apiclient.ErrNotFound) {
+				m.usage.err = errUsageUnsupported
+			} else {
+				m.usage.err = msg.err
+			}
+			return m, nil
+		}
+		m.usage.err = nil
+		m.usage.snap = msg.snap
+		m.usage.lastFetch = time.Now()
+		return m, nil
+
+	case usageTickMsg:
+		// Only keep polling while the pane is focused: a ticker left running
+		// behind another pane would fetch forever for nothing.
+		if m.pane != paneUsage {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchUsage(), usageTick())
 
 	case refreshTickMsg:
 		// In picker mode, skip the fetch — m.client may be nil after a
@@ -1118,6 +1155,13 @@ func (m *model) paneView() string {
 		}
 		title = fmt.Sprintf("abctl · pipeline · %s", name)
 		body = m.detailVp.View()
+	case paneUsage:
+		scope := "all"
+		if m.usage.session != "" {
+			scope = m.usage.session
+		}
+		title = fmt.Sprintf("abctl · %s · usage · %s", m.endpoint, scope)
+		body = m.renderUsage(m.width, m.bodyHeight)
 	case paneCatalog:
 		title = fmt.Sprintf("abctl · %s · catalog", m.endpoint)
 		if m.catalog == nil {
