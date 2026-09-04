@@ -29,8 +29,12 @@ const (
 	systemdUnit  = "cortex.service"
 	// maxLogBytes bounds one generation of proxy.log; rotateLog keeps one previous
 	// file, so the pair tops out near twice this.
-	maxLogBytes  = 8 << 20
-	serviceUsage = `abctl service — keep Cortex running across crashes and logins
+	maxLogBytes = 8 << 20
+	// serviceBootoutTimeout bounds the wait for a previous job to leave the domain.
+	// Longer than the supervisor's own teardown: it SIGTERMs the proxy, allows its 15s
+	// graceful shutdown, then insists at 20s.
+	serviceBootoutTimeout = 30 * time.Second
+	serviceUsage          = `abctl service — keep Cortex running across crashes and logins
 
 Usage:
   abctl service install   [--yes] [--config PATH]

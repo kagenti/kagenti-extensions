@@ -156,9 +156,36 @@ func loadService(p servicePaths) error {
 		// bootout first so a reinstall replaces cleanly; ignore its error, the
 		// service may not be loaded at all.
 		_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+launchdLabel).Run() //nolint:errcheck
-		out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, p.unitFile).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("launchctl bootstrap failed: %v: %s", err, strings.TrimSpace(string(out)))
+
+		// WAIT for it to actually leave the domain. `launchctl bootout` returns before
+		// teardown finishes, and bootstrapping into a domain that still holds the label
+		// fails with "Bootstrap failed: 5: Input/output error" — which is what a real
+		// upgrade produced: the running service could not be replaced, the install
+		// rolled back, and Cortex was left stopped.
+		//
+		// Our teardown is slow on purpose: bootout SIGTERMs the supervisor, which
+		// forwards to the proxy and waits out its 15s graceful shutdown before
+		// insisting. A trivial job dies fast enough to hide this, which is why every
+		// test that started from nothing or ran uninstall first passed.
+		if !waitBootedOut("gui/"+uid+"/"+launchdLabel, serviceBootoutTimeout) {
+			return fmt.Errorf("the previous %s is still shutting down after %s; "+
+				"run `abctl service status`, then try again", supervisorName(), serviceBootoutTimeout)
+		}
+
+		// Retried on EIO: the wait above closes the window, and this closes the race
+		// inside it. Bootstrap is idempotent from our side — the label is not in the
+		// domain, or we would not be here.
+		var out []byte
+		var err error
+		for attempt := 1; ; attempt++ {
+			out, err = exec.Command("launchctl", "bootstrap", "gui/"+uid, p.unitFile).CombinedOutput()
+			if err == nil {
+				break
+			}
+			if attempt >= 3 || !strings.Contains(string(out), "Input/output error") {
+				return fmt.Errorf("launchctl bootstrap failed: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
 		}
 		// bootstrap REGISTERS the job; it does not reliably start it. Observed on a
 		// real install: the agent loaded, `state = not running`, nothing served, and
@@ -524,4 +551,22 @@ func unitWriterVersion(unitFile string) string {
 		return strings.TrimSpace(rest[:end])
 	}
 	return ""
+}
+
+// waitBootedOut polls until the label is gone from its domain.
+//
+// `launchctl bootout` is asynchronous: it returns while teardown is still in progress,
+// and a bootstrap issued in that window fails with EIO. Polling `launchctl print` is
+// the only signal available — a non-zero exit means the label is no longer there.
+func waitBootedOut(target string, d time.Duration) bool {
+	deadline := time.Now().Add(d)
+	for {
+		if err := exec.Command("launchctl", "print", target).Run(); err != nil {
+			return true // no longer in the domain
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
