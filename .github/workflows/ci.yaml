@@ -173,3 +173,34 @@ jobs:
 
       - name: Run tests
         run: pytest tests/ -v -x --ignore=tests/e2e
+
+  # Fails when any authbridge module's go.mod/go.sum would change under
+  # `go mod tidy` (GOWORK=off, so replace directives resolve as they do
+  # in build.yaml and release-binaries.yaml).
+  go-tidy-check:
+    name: Verify module graph is tidy
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      GOWORK: "off"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: authbridge/authlib/go.mod
+
+      - name: Run go mod tidy -diff in every module
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r -d '' go_mod; do
+            mod=$(dirname "$go_mod")
+            echo "::group::$mod"
+            if ! (cd "$mod" && go mod tidy -diff); then
+              echo "::error file=${go_mod}::go mod tidy would change ${go_mod}; run 'go mod tidy' in ${mod} and commit"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done < <(find authbridge -name go.mod -not -path '*/demos/*' -print0 | sort -z)
+          exit $fail
