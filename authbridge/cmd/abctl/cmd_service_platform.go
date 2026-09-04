@@ -94,6 +94,7 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
+  <key>AbctlVersion</key><string>` + xmlStr(version) + `</string>
   <key>StandardOutPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>StandardErrorPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>ProcessType</key><string>Background</string>
@@ -112,6 +113,7 @@ func renderUnitFor(goos string, p servicePaths) string {
 	return `[Unit]
 Description=Cortex local proxy (authbridge-proxy)
 Documentation=https://github.com/rossoctl/cortex
+X-AbctlVersion=` + version + `
 StartLimitIntervalSec=300
 StartLimitBurst=5
 
@@ -131,6 +133,10 @@ WantedBy=default.target
 func loadService(p servicePaths) error {
 	if runtime.GOOS == "darwin" {
 		uid := strconv.Itoa(os.Getuid())
+		// Clear any disable left by `service stop`: a disabled label cannot be
+		// bootstrapped, so without this a stop would make every later start and
+		// install fail for a reason nothing on screen explains.
+		_ = exec.Command("launchctl", "enable", "gui/"+uid+"/"+launchdLabel).Run() //nolint:errcheck
 		// bootout first so a reinstall replaces cleanly; ignore its error, the
 		// service may not be loaded at all.
 		_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+launchdLabel).Run() //nolint:errcheck
@@ -313,15 +319,25 @@ func controlService(action string, p servicePaths) error {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
 		switch action {
 		case "stop":
-			// `launchctl stop` is undone by KeepAlive. bootout removes the job from
-			// the domain, which is the only stop that sticks; start re-bootstraps.
+			// Two steps, because either alone is not a stop.
+			//
+			// `launchctl stop` is undone by KeepAlive within seconds. bootout removes
+			// the job from the running domain — but the plist stays in
+			// ~/Library/LaunchAgents, which launchd bootstraps again at next login, and
+			// RunAtLoad then starts Cortex right back up. A "stop" that quietly undoes
+			// itself when you log in is worse than no stop command, so pair it with
+			// launchctl disable, which persists in the per-user disabled database.
 			out, err := exec.Command("launchctl", "bootout", target).CombinedOutput()
 			if err != nil && !strings.Contains(string(out), "No such process") {
 				return fmt.Errorf("launchctl bootout: %v: %s", err, strings.TrimSpace(string(out)))
 			}
+			if out, derr := exec.Command("launchctl", "disable", target).CombinedOutput(); derr != nil {
+				return fmt.Errorf("launchctl disable (stop would not survive a login): %v: %s",
+					derr, strings.TrimSpace(string(out)))
+			}
 			return nil
 		case "start":
-			return loadService(p)
+			return loadService(p) // loadService clears the disable
 		default: // restart
 			_ = exec.Command("launchctl", "bootout", target).Run() //nolint:errcheck
 			return loadService(p)
@@ -330,8 +346,18 @@ func controlService(action string, p servicePaths) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf("systemctl not found; this system has no systemd")
 	}
-	if out, err := exec.Command("systemctl", "--user", action, systemdUnit).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl --user %s %s: %v: %s", action, systemdUnit, err, strings.TrimSpace(string(out)))
+	// `systemctl --user stop` leaves the unit ENABLED, so it comes back at the next
+	// boot exactly as launchd's plist does. Use the persistent forms for stop/start so
+	// both platforms mean the same thing by those words; restart stays transient.
+	args := []string{"--user", action, systemdUnit}
+	switch action {
+	case "stop":
+		args = []string{"--user", "disable", "--now", systemdUnit}
+	case "start":
+		args = []string{"--user", "enable", "--now", systemdUnit}
+	}
+	if out, err := exec.Command("systemctl", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -364,4 +390,91 @@ func supervisorRunning(p servicePaths) (bool, string) {
 		return false, "systemctl is-active gave no answer"
 	}
 	return st == "active", "is-active = " + st
+}
+
+// establishedConns counts live TCP connections to addr's port, best-effort.
+//
+// Stopping the proxy cannot be made graceful from this side: HTTPS_PROXY is baked
+// into each Claude Code process's environment at startup, so a running session has
+// no way to fall back to a direct connection and `claude-code disable` cannot reach
+// it. The stop therefore breaks every in-flight session, and the failure surfaces as
+// a bare CURLE_COULDNT_CONNECT that looks like a Cortex bug. Naming the number of
+// attached clients first turns that into a five-second diagnosis.
+//
+// Returns -1 when it cannot tell (no lsof), so the caller can stay silent rather
+// than claim zero.
+func establishedConns(addr string) int {
+	if addr == "" {
+		return -1
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return -1
+	}
+	if _, err := exec.LookPath("lsof"); err != nil {
+		return -1
+	}
+	out, err := exec.Command("lsof", "-nP", "-iTCP:"+port, "-sTCP:ESTABLISHED").Output()
+	if err != nil {
+		// lsof exits 1 with no output when nothing matches, which is a real zero.
+		if len(out) == 0 {
+			return 0
+		}
+		return -1
+	}
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if line == "" || strings.HasPrefix(line, "COMMAND") {
+			continue
+		}
+		n++
+	}
+	return n
+}
+
+// rotateLog keeps one previous generation once the log passes maxBytes.
+//
+// One unrotated file on a permanently-on service is a slow leak on its own — the
+// proxy logs a line per inference request and response — and a fatal config error
+// turns it into a fast one: unconditional KeepAlive with ThrottleInterval 10 means
+// roughly six restarts a minute, each writing its startup banner. Rotating at
+// start-of-run bounds exactly that case, because every one of those restarts passes
+// through here.
+func rotateLog(path string, maxBytes int64) {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Size() <= maxBytes {
+		return
+	}
+	// Rename, not truncate: the supervisor opens the path per spawn, so the next
+	// start gets a fresh file while anything still holding the old inode keeps
+	// writing there harmlessly.
+	_ = os.Rename(path, path+".1") //nolint:errcheck
+}
+
+// unitWriterVersion reports which abctl wrote the installed unit, or "" if it
+// carries no stamp (written before stamping existed).
+//
+// The unit outlives the tool that manages it. A newer build can write a plist while
+// an older abctl stays on PATH, and that older one answers `service status` with
+// "unknown subcommand" — so the launchd artifact is live and unmanageable, with no
+// hint anywhere that the two disagree. Observed on a real machine.
+func unitWriterVersion(unitFile string) string {
+	b, err := os.ReadFile(unitFile) //nolint:gosec // path we wrote
+	if err != nil {
+		return ""
+	}
+	body := string(b)
+	for _, marker := range []string{"<key>AbctlVersion</key><string>", "X-AbctlVersion="} {
+		i := strings.Index(body, marker)
+		if i < 0 {
+			continue
+		}
+		rest := body[i+len(marker):]
+		end := strings.IndexAny(rest, "<\n")
+		if end < 0 {
+			continue
+		}
+		return strings.TrimSpace(rest[:end])
+	}
+	return ""
 }

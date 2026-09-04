@@ -12,8 +12,17 @@ Two different things, so pick the one you want:
 abctl service stop      # start / restart when you want it back
 ```
 
+The stop persists — Cortex stays down across logouts and reboots until you start it
+again.
+
 Claude Code fails while Cortex is stopped, because its settings still point at the
 proxy. Either start Cortex again or unwire Claude Code (below).
+
+**A Claude Code session that is already running cannot recover on its own.**
+`HTTPS_PROXY` is fixed in its environment when it starts, so it has no way to fall
+back to a direct connection, and `claude-code disable` cannot reach it. Restart any
+session that starts failing to connect. `service stop` tells you how many
+connections it cut, for exactly this reason.
 
 Use `abctl service stop`, not `kill` or `pkill` — the supervisor restarts the
 process within seconds, which looks like it refusing to die.

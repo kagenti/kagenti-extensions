@@ -24,6 +24,9 @@ import (
 const (
 	launchdLabel = "io.rossoctl.cortex"
 	systemdUnit  = "cortex.service"
+	// maxLogBytes bounds one generation of proxy.log; rotateLog keeps one previous
+	// file, so the pair tops out near twice this.
+	maxLogBytes  = 8 << 20
 	serviceUsage = `abctl service — keep Cortex running across crashes and logins
 
 Usage:
@@ -64,7 +67,10 @@ type servicePaths struct {
 	logFile    string
 	pidFile    string
 	healthURL  string
-	home       string // set explicitly: a supervisor's environment is minimal
+	// forwardAddr is the proxy port clients point at, used only to count attached
+	// sessions before a stop.
+	forwardAddr string
+	home        string // set explicitly: a supervisor's environment is minimal
 }
 
 func runService(args []string, stdout, stderr io.Writer) int {
@@ -157,6 +163,10 @@ func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
 	}
 
 	p.healthURL = resolveHealthURL(cortexCfg)
+	if cfg, cerr := config.Load(cortexCfg); cerr == nil {
+		config.ApplyPreset(cfg)
+		p.forwardAddr = cfg.Listener.ForwardProxyAddr
+	}
 	return p, nil
 }
 
@@ -234,6 +244,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		_ = os.Remove(p.pidFile)
 	}
 
+	rotateLog(p.logFile, maxLogBytes)
 	tightenLog(p.logFile, stderr)
 
 	if err := os.MkdirAll(filepath.Dir(p.unitFile), 0o755); err != nil {
@@ -324,6 +335,16 @@ func serviceStatus(p servicePaths, stdout io.Writer) int {
 		return 0
 	}
 	fmt.Fprintf(stdout, "installed: %s\n", p.unitFile)
+	// Skew is worth naming before anything else: if the unit was written by a
+	// different abctl, the rest of this output describes a job this binary may not be
+	// able to manage.
+	if w := unitWriterVersion(p.unitFile); w != "" && w != version {
+		fmt.Fprintf(stdout, "WARNING: this unit was written by abctl %s; you are running %s.\n"+
+			"  The unit also pins a fixed authbridge-proxy path, which that abctl chose.\n"+
+			"  Reinstall with this build to bring them back in step:  abctl service install\n",
+			w, version)
+	}
+
 	if p.healthURL == "" {
 		return 0
 	}
@@ -350,14 +371,29 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 			"  abctl service install\n", p.unitFile)
 		return 1
 	}
+	// Counted BEFORE the stop, while the connections still exist.
+	n := -1
+	if action == "stop" {
+		n = establishedConns(p.forwardAddr)
+	}
+	if action == "start" || action == "restart" {
+		rotateLog(p.logFile, maxLogBytes)
+	}
 	if err := controlService(action, p); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
 	switch action {
 	case "stop":
-		fmt.Fprintln(stdout, "Stopped. Claude Code will fail until it is running again:")
+		fmt.Fprintln(stdout, "Stopped, and it will stay stopped across logins.")
 		fmt.Fprintln(stdout, "  abctl service start")
+		if n > 0 {
+			fmt.Fprintf(stdout, "\n  %d connection(s) were attached to %s and have just been cut.\n",
+				n, p.forwardAddr)
+			fmt.Fprintln(stdout, "  A running Claude Code cannot fall back to a direct connection —")
+			fmt.Fprintln(stdout, "  HTTPS_PROXY is fixed in its environment at startup — so restart any")
+			fmt.Fprintln(stdout, "  session that now fails to connect.")
+		}
 		return 0
 	default:
 		if p.healthURL != "" && !waitHealthy(p.healthURL, serviceReadyTimeout) {
