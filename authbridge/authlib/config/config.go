@@ -437,6 +437,25 @@ type ListenerConfig struct {
 	// loopback on another port; leaving it empty keeps the preset default.
 	HealthAddr string `yaml:"health_addr" json:"health_addr"`
 
+	// BindLoopbackOnly rewrites EVERY listener address in this config (and the
+	// stats address) to 127.0.0.1, keeping each port. Off by default, which
+	// preserves Kubernetes behaviour exactly.
+	//
+	// Why a flag and not the default: in a pod, a wildcard bind is correct and
+	// necessary — the network namespace is the boundary, and kubelet probes health
+	// from outside the container's loopback, so forcing 127.0.0.1 there would fail
+	// every liveness probe. On a laptop there is no namespace, and the same default
+	// publishes the listener on Wi-Fi.
+	//
+	// Why a flag and not a per-listener pin: pinning each address protects only the
+	// listeners someone remembered to name. A config written before a pin existed
+	// never receives it (writeBuiltinConfig never overwrites, so hand edits
+	// survive), and a listener added later starts wide with nothing to catch it.
+	// This was not hypothetical: a laptop config predating the health and
+	// transparent pins was serving *:9091 and *:8082 on every interface. One rule
+	// covers listeners that do not exist yet.
+	BindLoopbackOnly bool `yaml:"bind_loopback_only" json:"bind_loopback_only"`
+
 	// SkipHosts lists outbound destination host patterns whose traffic
 	// bypasses the plugin pipeline AND session recording entirely. The
 	// listener forwards matched requests as a transparent proxy without

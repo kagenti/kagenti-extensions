@@ -35,10 +35,32 @@ func main() {
 			os.Exit(runTools(os.Args[2:], os.Stdout, os.Stderr))
 		case "claude-code":
 			os.Exit(runClaudeCode(os.Args[2:], os.Stdout, os.Stderr))
+		case "service":
+			os.Exit(runService(os.Args[2:], os.Stdout, os.Stderr))
 		default:
-			fmt.Fprintf(os.Stderr, "abctl: unknown subcommand %q (known: tools, claude-code)\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "abctl: unknown subcommand %q (known: tools, claude-code, service)\n", os.Args[1])
 			os.Exit(2)
 		}
+	}
+
+	// Without this, `abctl --help` printed only -endpoint and -version, so the
+	// subcommands were invisible to anyone who asked the tool what it could do — the
+	// service commands most of all, since those are what you need when Cortex is down.
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), `abctl — inspect and run Cortex
+
+Usage:
+  abctl                      open the traffic viewer (TUI)
+  abctl service <action>     run Cortex as a service: install, uninstall,
+                             status, stop, start, restart
+  abctl claude-code <action> point Claude Code at Cortex: enable, disable, status
+  abctl tools <action>       tool-definition costs: scan
+
+Run a subcommand with no action, or with --help, for its own usage.
+
+Flags:
+`)
+		flag.PrintDefaults()
 	}
 
 	endpoint := flag.String("endpoint", "",
@@ -81,7 +103,7 @@ func main() {
 			// someone who has never wanted a cluster.
 			if local != "" && !dialable(local) {
 				msg = "abctl: nothing is listening on " + local + " (from ~/.cortex/config.yaml).\n" +
-					"  Start it:  authbridge-proxy --config ~/.cortex/config.yaml &\n" +
+					"  Start it:  abctl service start   (or: abctl service install)\n" +
 					"  Or pass --endpoint http://... , or install kubectl to browse a cluster."
 			}
 			fmt.Fprintln(os.Stderr, msg)

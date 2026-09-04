@@ -79,6 +79,11 @@ func builtinConfigYAML(caDir string) string {
 mode: proxy-sidecar
 listener:
   roles: [forward]
+  # Every listener binds 127.0.0.1, including any this file does not name. The
+  # explicit ports below pick a non-colliding range; this line is what makes an
+  # unnamed or newly added listener safe on a laptop, where a wildcard bind means
+  # the Wi-Fi.
+  bind_loopback_only: true
   forward_proxy_addr: 127.0.0.1:47600
   session_api_addr: 127.0.0.1:47601
   # Without this the preset defaults health to ":9091" — every interface, and a
@@ -150,6 +155,18 @@ func writeBuiltinConfig(cortexDir, caDir string) (string, error) {
 	if err := os.Chmod(cortexDir, 0o700); err != nil {
 		return "", err
 	}
+	// Same reasoning one level down. tlsbridge creates caDir 0700, but MkdirAll does
+	// not tighten an existing directory, so a caDir left at 0755 by an earlier build
+	// stays 0755 while holding the CA's private key. The key file itself is 0600, so
+	// this is defence in depth rather than the only guard — but it should not be the
+	// parent's mode alone standing between a MITM CA key and every process on the
+	// machine. Only when it already exists: letting tlsbridge create it keeps the
+	// Kubernetes case (a mounted ca_dir, deliberately left alone) untouched.
+	if fi, err := os.Stat(caDir); err == nil && fi.IsDir() {
+		if err := os.Chmod(caDir, 0o700); err != nil {
+			return "", err
+		}
+	}
 	path := filepath.Join(cortexDir, localConfigName)
 	if _, err := os.Stat(path); err == nil {
 		slog.Info("local mode — keeping the existing config (edits and any prune list are preserved)",
@@ -158,7 +175,10 @@ func writeBuiltinConfig(cortexDir, caDir string) (string, error) {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(builtinConfigYAML(caDir)), 0o644); err != nil {
+	// 0600, not 0644: it names the CA's location and the whole listener layout, and
+	// abctl's migration already rewrites it 0600 — a fresh install should not be the
+	// looser of the two.
+	if err := os.WriteFile(path, []byte(builtinConfigYAML(caDir)), 0o600); err != nil {
 		return "", err
 	}
 	return path, nil

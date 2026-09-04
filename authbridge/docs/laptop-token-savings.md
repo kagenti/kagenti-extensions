@@ -126,4 +126,10 @@ client-side settings (`--allowedTools`, disabling unused MCP servers).
   transcript history for it to reason from yet.
 - **The proxy won't start** — read `~/.cortex/proxy.log`; a port conflict is logged
   at `ERROR`. Every listener is pinned to loopback on 47600–47604, so a clash
-  usually means Cortex is already running (`pkill -f authbridge-proxy`).
+  usually means Cortex is already running (`abctl service status`).
+
+## Turning it off
+
+Empty the `remove:` list to stop pruning but keep watching traffic. To start, stop
+or remove Cortex itself, see
+**[running Cortex](./laptop-service.md)**.
