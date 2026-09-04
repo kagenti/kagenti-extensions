@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
+	"gopkg.in/yaml.v3"
 )
 
 // A config written by an older build keeps its own shape forever:
@@ -25,11 +26,6 @@ type pinnedListener struct {
 	comment string
 	// isFlag marks a boolean key, reported differently from an address.
 	isFlag bool
-	// absent reports whether this pin is missing from a parsed config. It lives on
-	// the pin, not in a switch elsewhere, because a switch is a second list that has
-	// to stay in sync with this one — and a pin added without its case would compile,
-	// run, and silently migrate nothing.
-	absent func(*config.Config) bool
 	// unpinnedDefault is what the preset fills in when the key is absent, and
 	// what makes the omission worth fixing rather than tidy.
 	unpinnedDefault string
@@ -47,14 +43,12 @@ var listenerPins = []pinnedListener{
 			"interface — on a laptop, the Wi-Fi.",
 		isFlag:          true,
 		unpinnedDefault: "wildcard binds for anything unpinned",
-		absent:          func(c *config.Config) bool { return !c.Listener.BindLoopbackOnly },
 	},
 	{
 		key:             "health_addr",
 		value:           "127.0.0.1:47604",
 		comment:         "Added by abctl: unpinned, the preset binds health on :9091 — every interface.",
 		unpinnedDefault: ":9091",
-		absent:          func(c *config.Config) bool { return c.Listener.HealthAddr == "" },
 	},
 	{
 		key:   "transparent_proxy_addr",
@@ -62,7 +56,6 @@ var listenerPins = []pinnedListener{
 		comment: "Added by abctl: unpinned, the preset binds :8082 on every interface. --local skips\n" +
 			"this listener but --config does not, and the service runs with --config.",
 		unpinnedDefault: ":8082",
-		absent:          func(c *config.Config) bool { return c.Listener.TransparentProxyAddr == "" },
 	},
 }
 
@@ -75,16 +68,24 @@ func migrateConfig(path string, stdout io.Writer) (changed bool, err error) {
 	}
 	// Decide what is missing from the PARSED config, not from a text search: a key
 	// could appear in a comment, and a commented-out key is still absent.
-	cfg, err := config.Load(path)
-	if err != nil {
+	// Parsed only to establish the config is valid before editing it; the keys
+	// themselves come from listenerKeys below.
+	if _, err := config.Load(path); err != nil {
 		return false, fmt.Errorf("%s does not parse (%w); not touching it", path, err)
+	}
+	// Presence is decided against the DOCUMENT, not the parsed value. An explicit
+	// `health_addr: ""` or `bind_loopback_only: false` is present but parses as the
+	// zero value, so a value-based check appended a second copy of the key — and
+	// config.Load then rejected the duplicate, failing the migration on a config that
+	// was perfectly valid. Reading the keys also removes the need for a per-pin
+	// predicate, so there is no second list to keep in sync.
+	present, perr := listenerKeys(raw)
+	if perr != nil {
+		return false, perr
 	}
 	missing := make([]pinnedListener, 0, len(listenerPins))
 	for _, pin := range listenerPins {
-		if pin.absent == nil {
-			return false, fmt.Errorf("pin %q has no absent predicate; this is a bug", pin.key)
-		}
-		if pin.absent(cfg) {
+		if _, ok := present[pin.key]; !ok {
 			missing = append(missing, pin)
 		}
 	}
@@ -171,7 +172,16 @@ func insertListenerKeys(src string, pins []pinnedListener) (string, error) {
 		}
 	}
 	if childIndent < 0 {
-		// An empty listener block: indent one level in from the parent.
+		// No child lines at all. If the block is flow-style (`listener: {}` or
+		// `listener: {roles: [forward]}`) then appending block-style children beneath it
+		// is invalid YAML. That fails closed — the validation before the rename catches
+		// it and the original survives — but the user would see a bare parse error
+		// instead of being told the shape is unsupported.
+		if rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(lines[listenerAt]), "listener:")); rest != "" {
+			return "", fmt.Errorf("listener: is written in flow style (%s); "+
+				"rewrite it as an indented block, or add the keys by hand", rest)
+		}
+		// A genuinely empty block: indent one level in from the parent.
 		childIndent = parentIndent + 2
 	}
 	// Insert after the last non-blank line of the block so trailing blank lines
@@ -195,4 +205,28 @@ func insertListenerKeys(src string, pins []pinnedListener) (string, error) {
 	out = append(out, add...)
 	out = append(out, lines[insertAt:]...)
 	return strings.Join(out, "\n"), nil
+}
+
+// listenerKeys returns the keys explicitly written under `listener:`.
+//
+// Generic YAML rather than the typed config, because the typed struct cannot
+// distinguish "absent" from "present and set to the zero value".
+func listenerKeys(raw []byte) (map[string]struct{}, error) {
+	var doc map[string]any
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("reading the config's keys: %w", err)
+	}
+	out := map[string]struct{}{}
+	l, ok := doc["listener"]
+	if !ok {
+		return out, nil
+	}
+	m, ok := l.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("listener: is not a mapping; not editing this config")
+	}
+	for k := range m {
+		out[k] = struct{}{}
+	}
+	return out, nil
 }

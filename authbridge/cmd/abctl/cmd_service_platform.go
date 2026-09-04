@@ -2,7 +2,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -178,12 +180,21 @@ func loadService(p servicePaths) error {
 	// Cortex.
 	uid := strconv.Itoa(os.Getuid())
 	if !lingerEnabled(uid) {
-		if err := exec.Command("loginctl", "enable-linger", uid).Run(); err == nil {
-			_ = os.WriteFile(lingerMarker(p), []byte("enabled by abctl\n"), 0o600) //nolint:errcheck
+		if err := exec.Command("loginctl", "enable-linger", uid).Run(); err != nil {
+			// Not fatal — the unit is loaded and serving — but it does mean the service
+			// stops at logout, so it must not be reported as surviving one. polkit
+			// refuses this on some systems.
+			return errLingerUnavailable
 		}
+		_ = os.WriteFile(lingerMarker(p), []byte("enabled by abctl\n"), 0o600) //nolint:errcheck
 	}
 	return nil
 }
+
+// errLingerUnavailable means the unit loaded but will not outlive a logout.
+var errLingerUnavailable = errors.New(
+	"loaded, but `loginctl enable-linger` failed: the service will stop when you log out. " +
+		"Ask an administrator to run: loginctl enable-linger $USER")
 
 // lingerMarker records that we enabled lingering, so uninstall undoes only that.
 func lingerMarker(p servicePaths) string {
@@ -414,10 +425,16 @@ func establishedConns(addr string) int {
 	if _, err := exec.LookPath("lsof"); err != nil {
 		return -1
 	}
-	out, err := exec.Command("lsof", "-nP", "-iTCP:"+port, "-sTCP:ESTABLISHED").Output()
+	cmd := exec.Command("lsof", "-nP", "-iTCP:"+port, "-sTCP:ESTABLISHED")
+	var errBuf bytes.Buffer
+	cmd.Stderr = &errBuf
+	out, err := cmd.Output()
 	if err != nil {
-		// lsof exits 1 with no output when nothing matches, which is a real zero.
-		if len(out) == 0 {
+		// lsof exits 1 both when nothing matches and on real failures (permission,
+		// for one). Only the silent case is a true zero; anything that complained on
+		// stderr is unknown, because reporting "0 attached" when we could not look
+		// would be a confident wrong answer.
+		if len(out) == 0 && errBuf.Len() == 0 {
 			return 0
 		}
 		return -1

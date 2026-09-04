@@ -1,12 +1,15 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -70,7 +73,10 @@ type servicePaths struct {
 	// forwardAddr is the proxy port clients point at, used only to count attached
 	// sessions before a stop.
 	forwardAddr string
-	home        string // set explicitly: a supervisor's environment is minimal
+	// configErr is why the config would not load, if it would not. Carried rather
+	// than returned so uninstall and status still work on a broken config.
+	configErr error
+	home      string // set explicitly: a supervisor's environment is minimal
 }
 
 func runService(args []string, stdout, stderr io.Writer) int {
@@ -142,9 +148,11 @@ func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
 	if abs, aerr := filepath.Abs(bin); aerr == nil {
 		bin = abs
 	}
-	if _, serr := os.Stat(bin); serr != nil {
-		return p, fmt.Errorf("authbridge-proxy not found at %s; install it first", bin)
-	}
+	// Deliberately NOT an error here. resolveServicePaths runs for every action, and
+	// uninstall/status are exactly what you reach for when the binary is gone or
+	// renamed — refusing them at that point leaves a loaded unit with no way to
+	// remove or diagnose it. serviceInstall validates the binary itself, since it is
+	// the only action that needs one.
 	p.binary = bin
 
 	switch unitOverride {
@@ -163,7 +171,13 @@ func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
 	}
 
 	p.healthURL = resolveHealthURL(cortexCfg)
-	if cfg, cerr := config.Load(cortexCfg); cerr == nil {
+	// Kept, not discarded: install must refuse a config that cannot load, or it
+	// writes the unit, gets an empty healthURL, skips the probe and calls a proxy
+	// that cannot start "running". uninstall and status stay usable regardless,
+	// which is the whole point of not returning it as an error here.
+	if cfg, cerr := config.Load(cortexCfg); cerr != nil {
+		p.configErr = cerr
+	} else {
 		config.ApplyPreset(cfg)
 		p.forwardAddr = cfg.Listener.ForwardProxyAddr
 	}
@@ -221,12 +235,35 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		return exitDeclined
 	}
 
+	if _, serr := os.Stat(p.binary); serr != nil {
+		fmt.Fprintf(stderr, "abctl: authbridge-proxy not found at %s; install it first\n", p.binary)
+		return 1
+	}
+	if p.configErr != nil {
+		fmt.Fprintf(stderr, "abctl: %s will not load, so a supervised proxy could not start:\n  %v\n"+
+			"  Fix it (or delete it and run: authbridge-proxy --local --write-config), then re-run.\n",
+			p.configFile, p.configErr)
+		return 1
+	}
+
 	// Taking ownership of how the proxy runs is the natural moment to bring an
 	// older config up to date: the service starts it with --config, which honours
 	// listeners that --local skipped, so an unpinned transparent_proxy_addr would
 	// start binding every interface precisely now.
 	if changed, mErr := migrateConfig(p.configFile, stdout); mErr != nil {
-		fmt.Fprintf(stderr, "abctl: could not update %s (%v); continuing with it as-is\n",
+		// Refuse only if continuing would actually expose something. A migration that
+		// fails on a config already bound to loopback costs nothing to skip; one that
+		// fails on a config with wildcard listeners would supervise a proxy publishing
+		// on every interface, which is not a thing to do quietly.
+		if exposed := wildcardListeners(p.configFile); len(exposed) > 0 {
+			fmt.Fprintf(stderr, "abctl: could not update %s (%v),\n"+
+				"  and as it stands it binds %s on every interface.\n"+
+				"  Refusing to supervise that. Add `bind_loopback_only: true` under listener:,\n"+
+				"  or delete the file and run: authbridge-proxy --local --write-config\n",
+				p.configFile, mErr, strings.Join(exposed, ", "))
+			return 1
+		}
+		fmt.Fprintf(stderr, "abctl: could not update %s (%v); it already binds loopback only, continuing\n",
 			p.configFile, mErr)
 	} else if changed {
 		// The paths were resolved from the pre-migration config, so anything the
@@ -257,7 +294,11 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
 
-	if err := loadService(p); err != nil {
+	if err := loadService(p); errors.Is(err, errLingerUnavailable) {
+		// The unit IS loaded, so this is a caveat rather than a failure: keep going,
+		// but never claim it survives a logout.
+		fmt.Fprintf(stderr, "abctl: %v\n", err)
+	} else if err != nil {
 		// Leaving the unit behind would make serviceInstalled() true for something
 		// that never loaded, so `service status` would report it installed and
 		// `service stop` would act on a job the supervisor does not have.
@@ -415,6 +456,17 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		}
 		return 0
 	default:
+		// Same gate install uses: an unadopted proxy holding the ports answers the
+		// probe while OUR job crash-loops on the bind, so health alone would report a
+		// restart that did not happen.
+		if running, why := supervisorRunning(p); !running {
+			fmt.Fprintf(stderr, "abctl: %sed, but the supervisor does not report it running (%s).\n"+
+				"  Check for a Cortex started by hand holding the ports: pgrep -fl authbridge-prox\n", action, why)
+			for _, line := range lastLines(p.logFile, 5) {
+				fmt.Fprintf(stderr, "    %s\n", line)
+			}
+			return 1
+		}
 		if p.healthURL != "" && !waitHealthy(p.healthURL, serviceReadyTimeout) {
 			fmt.Fprintf(stderr, "abctl: %sed, but nothing answered %s. Last log lines:\n", action, p.healthURL)
 			for _, line := range lastLines(p.logFile, 5) {
@@ -440,4 +492,43 @@ func tightenLog(path string, stderr io.Writer) {
 	if err := os.Chmod(path, 0o600); err != nil && !os.IsNotExist(err) {
 		fmt.Fprintf(stderr, "abctl: could not tighten %s (%v); continuing\n", path, err)
 	}
+}
+
+// wildcardListeners names the listener addresses that are not bound to loopback,
+// so a refusal can say what is actually exposed.
+func wildcardListeners(cortexCfg string) []string {
+	cfg, err := config.Load(cortexCfg)
+	if err != nil {
+		return nil // unreadable: the caller's own error already covers it
+	}
+	config.ApplyPreset(cfg)
+	var out []string
+	for name, addr := range map[string]string{
+		"forward_proxy_addr":     cfg.Listener.ForwardProxyAddr,
+		"session_api_addr":       cfg.Listener.SessionAPIAddr,
+		"health_addr":            cfg.Listener.HealthAddr,
+		"transparent_proxy_addr": cfg.Listener.TransparentProxyAddr,
+		"stats address":          cfg.Stats.StatsAddress,
+	} {
+		if addr == "" {
+			continue
+		}
+		if host, _, serr := net.SplitHostPort(addr); serr == nil && !isLoopbackHost(host) {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isLoopbackHost treats an empty host as a wildcard, which is exactly what ":9091"
+// means.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return host == "localhost"
 }
