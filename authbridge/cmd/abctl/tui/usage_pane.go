@@ -139,6 +139,9 @@ func (m *model) renderUsage(width, height int) string {
 		}
 	}
 
-	b.WriteString("\n  [t] metric  [w] window  [r] refresh  [esc] back\n")
+	// No key hints here: helpView renders the footer for every pane, and a
+	// second copy inside the body would drift from it the first time a binding
+	// changed. The pane's keys live in helpView and in paneKeys (the [?]
+	// overlay), which the coverage test holds to the real pane list.
 	return b.String()
 }

@@ -559,15 +559,15 @@ func (m *model) helpView() string {
 		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [?] keys  [q] quit"
+		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [p] pause  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
 			skipHint = "[s] show all"
 		}
-		base := "[↑↓] nav  [b/f] page  [↵] detail  [esc] back  [/] filter  " + skipHint + "  [p] pause  [?] keys  [q] quit"
+		base := "[↑↓] nav  [b/f] page  [↵] detail  [u] usage  [esc] back  [/] filter  " + skipHint + "  [p] pause  [?] keys  [q] quit"
 		// Surface the hidden-message count so a filtered timeline doesn't
 		// look like data loss. Only annotate when hiding is on AND at
 		// least one message was hidden.
@@ -577,7 +577,7 @@ func (m *model) helpView() string {
 		}
 		return base
 	case paneDetail:
-		return "[↑↓] scroll  [y] yank  [esc] back  [?] keys  [q] quit"
+		return "[↑↓] scroll  [y] yank  [u] usage  [esc] back  [?] keys  [q] quit"
 	case panePipeline:
 		var base string
 		if m.parentCtx != nil {
@@ -594,6 +594,17 @@ func (m *model) helpView() string {
 		return base
 	case panePluginDetail:
 		return "[↑↓] scroll  [esc] back  [?] keys  [q] quit"
+	case paneUsage:
+		// [s] only appears when there is a session to scope to, so the footer
+		// never advertises a key that would do nothing.
+		scopeHint := ""
+		if m.usage.session != "" {
+			scopeHint = "  [s] all sessions"
+		} else if m.selectedSess != "" {
+			scopeHint = "  [s] this session"
+		}
+		return "[t] metric  [w] window" + scopeHint +
+			"  [r] refresh  [esc] back  [?] keys  [q] quit"
 	case paneCatalog:
 		if m.catalog == nil {
 			return "loading catalog…  [esc] back  [?] keys  [q] quit"
