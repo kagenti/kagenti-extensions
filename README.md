@@ -1,62 +1,58 @@
 # Cortex
 
-Cortex delivers easy-to-use platform services to agentic workloads. It runs in a workload's request path — a sidecar in Kubernetes, or a standalone binary anywhere else — and provides:
+**See what your coding agent actually sends — and pay less for it.**
 
-- **Identity & access** — a verifiable identity for each workload, authentication and authorization of its calls, and the right credentials for each downstream service.
-- **Guardrails** — block agent actions that stray from the user's intent or aren't grounded in the conversation.
-- **Observability** — decrypt and parse a workload's model, tool, and agent-to-agent traffic into a live view.
-- **Egress control** — govern which external services a workload can reach.
-- **Optimizations** — trim the model context a workload sends and cap its spend, to cut latency and cost.
+Cortex sits in your agent's request path, decrypts its traffic, and shows you the model
+calls, tool calls and agent-to-agent messages as they happen. It can also strip the
+tool definitions your agent never calls, which is 4–20% of the prompt on every turn.
 
-It ships as a single binary; the identity and access layer is **AuthBridge**, and the code lives under [`authbridge/`](./authbridge/).
+One binary, no Kubernetes. macOS or Linux, amd64 or arm64.
 
-## Quick start — Claude Code on your laptop
-
-See what Claude Code sends: model calls, tool calls, and agent-to-agent traffic,
-decrypted and parsed live. No Kubernetes. macOS or Linux, amd64 or arm64.
+## Quick start
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/rossoctl/cortex/main/authbridge/install.sh \
   | sh -s -- --claude-code
 ```
 
-That is the install. It asks before changing your Claude Code settings, then runs
-Cortex as a background service that comes back at login and restarts itself if it
-crashes.
+It asks before changing your Claude Code settings, then runs Cortex as a background
+service that survives crashes and logins.
 
-> **macOS note:** launchd will not restart a user agent added mid-session, so on
-> macOS the proxy runs under a small supervisor process that does. Verify with
-> `kill -9 $(pgrep -f 'authbridge-proxy --config')` — it comes back within ~2s.
-
-Now open two terminals:
+Then open two terminals:
 
 ```sh
 abctl      # the viewer
-claude     # Claude Code, as usual — no environment variables needed
+claude     # as usual — no environment variables to set
 ```
 
-Claude Code's calls stream into `abctl`. Cortex only reads them; nothing is rewritten.
+Your agent's calls stream into `abctl`. Cortex only reads them; nothing is rewritten.
 
-**Cut token cost too** — strip the tool definitions your agent never calls, worth
-4–20% of the prompt per turn, median 6%:
-**[one more command](./authbridge/docs/laptop-token-savings.md)**.
+- **[Cut token cost](./authbridge/docs/laptop-token-savings.md)** — one more command
+- **[Start, stop, remove](./authbridge/docs/laptop-service.md)** — `abctl service status | start | stop`
+- **[Run it in Kubernetes](./authbridge/docs/kubernetes.md)** — sidecars, Keycloak, SPIFFE/SPIRE
 
-**Starting, stopping, removing** — `abctl service status | start | stop`, and
-`abctl claude-code disable` to unwire Claude Code:
-**[the full lifecycle](./authbridge/docs/laptop-service.md)**.
+**Any agent works**, not only Claude Code: point it at `localhost:47600` and trust
+`~/.cortex/ca/ca.crt`.
 
-Any agent works, not just Claude Code — point it at `localhost:47600` and trust
-`~/.cortex/ca/ca.crt`. The URL is on `main`, but the script re-runs the copy from the
-newest **release**, so `curl | sh` does not run unreleased code — `--ref` overrides.
+The install URL is on `main`, but the script re-runs the copy from the newest
+**release**, so `curl | sh` does not execute unreleased code. `--ref` overrides that.
 
-## Running on Kubernetes
+## What else Cortex does
 
-In a cluster, Cortex sidecars are injected automatically by the [operator](https://github.com/rossoctl/operator), with Keycloak + SPIFFE/SPIRE for identity and token exchange. Start with the end-to-end **[Weather Agent walkthrough](./authbridge/demos/weather-agent/demo-ui.md)** (or the [`abctl` version](./authbridge/demos/weather-agent/demo-with-abctl.md)); see the [demos index](./authbridge/demos/README.md) and the [architecture reference](./authbridge/README.md) for all modes and details.
+Traffic visibility is the part you can use in a minute. The same binary provides the
+platform services agentic workloads need in production, as a sidecar or standalone:
 
-## Related repositories
+- **Identity & access** — a verifiable identity per workload, and the right credentials
+  for each downstream call, so an agent never holds a tool's secret. This layer is
+  **AuthBridge**.
+- **Guardrails** — block agent actions that stray from the user's intent or aren't
+  grounded in the conversation.
+- **Egress control** — govern which external services a workload can reach.
+- **Cost controls** — trim the context a workload sends, and cap its spend.
 
-- [rossoctl](https://github.com/rossoctl/rossoctl) — core platform
-- [operator](https://github.com/rossoctl/operator) — sidecar injection + admission webhook
+Everything is a plugin in one pipeline; the [plugin catalog](./authbridge/docs/plugin-catalog.md)
+lists what ships, and the [architecture reference](./authbridge/README.md) explains how
+a request flows through it. Code lives under [`authbridge/`](./authbridge/).
 
 ## License
 
