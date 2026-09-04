@@ -1,19 +1,58 @@
-# Turning Cortex off, and removing it
+# Running Cortex: start, stop, and remove it
 
-Two different things, so pick the one you want:
-
-- **Pause it** — stop Cortex, keep everything installed.
-- **Unwire Claude Code** — leave Cortex running, stop routing Claude Code through it.
-- **Remove it** — take it all off the machine.
-
-## Pause it
+Cortex runs as a service, so there is nothing to launch by hand and nothing to keep
+in a terminal. Everything below is `abctl service`; run it with no action to see the
+list.
 
 ```sh
-abctl service stop      # start / restart when you want it back
+abctl service status      # is it running, and is it answering?
+abctl service start       # start it
+abctl service stop        # stop it, and keep it stopped
+abctl service restart     # stop and start
+abctl service install     # set it up in the first place (the installer does this)
+abctl service uninstall   # stop it and remove the service
 ```
 
-The stop persists — Cortex stays down across logouts and reboots until you start it
-again.
+**Never use `kill` or `pkill`.** The proxy is supervised: killing it gets it restarted
+within a couple of seconds, which looks like a process refusing to die. `abctl service
+stop` is the stop that works.
+
+## Is it working?
+
+```sh
+abctl service status
+```
+
+`installed:` names the unit file, `healthy:` names the endpoint that answered. If it
+says `NOT answering`, the proxy is loaded but not serving — check `~/.cortex/proxy.log`.
+
+To see traffic rather than status, run `abctl` with no arguments.
+
+## Start and stop
+
+```sh
+abctl service start
+abctl service stop
+```
+
+A stop persists: Cortex stays down across logouts and reboots until you start it
+again. That is deliberate — a stop that quietly undoes itself at your next login is
+worse than none.
+
+`stop` also reports how many connections it cut, because a Claude Code session that is
+already running cannot recover on its own: `HTTPS_PROXY` is fixed in its environment
+when it starts, so it has no way to fall back to a direct connection. Restart any
+session that begins failing to connect.
+
+## Three ways to turn it off
+
+They are different, so pick deliberately:
+
+### Pause it
+
+```sh
+abctl service stop
+```
 
 Claude Code fails while Cortex is stopped, because its settings still point at the
 proxy. Either start Cortex again or unwire Claude Code (below).
@@ -27,7 +66,7 @@ connections it cut, for exactly this reason.
 Use `abctl service stop`, not `kill` or `pkill` — the supervisor restarts the
 process within seconds, which looks like it refusing to die.
 
-## Unwire Claude Code
+### Unwire Claude Code
 
 ```sh
 abctl claude-code disable
@@ -41,7 +80,7 @@ again. Restart `claude` to pick it up.
 Cortex keeps running; nothing sends traffic to it. `abctl claude-code enable` puts it
 back.
 
-## Remove it
+### Remove it
 
 ```sh
 abctl claude-code disable     # 1. unwire Claude Code
@@ -53,7 +92,7 @@ rm -f ~/.local/bin/abctl ~/.local/bin/authbridge-proxy
 Order matters for the first two: `claude-code disable` needs to read the config that
 step 3 deletes.
 
-### Check nothing is left
+#### Check nothing is left
 
 ```sh
 abctl claude-code status                    # should say "not enabled"
@@ -65,7 +104,7 @@ The CA that step 3 removes was only ever trusted through `NODE_EXTRA_CA_CERTS` i
 `~/.claude/settings.json` — Cortex never adds it to the system or login keychain, so
 there is nothing to clean up there.
 
-### If `abctl` is already gone
+#### If `abctl` is already gone
 
 The service can be removed by hand:
 

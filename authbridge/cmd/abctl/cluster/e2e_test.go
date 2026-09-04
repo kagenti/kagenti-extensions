@@ -13,7 +13,7 @@ import (
 // TestE2ESmoke runs against the active kubectl context. Set up by
 // running the IBAC demo (make demo-ibac) before invoking:
 //
-//   go test -tags=e2e ./cluster/ -run TestE2ESmoke -v
+//	go test -tags=e2e ./cluster/ -run TestE2ESmoke -v
 //
 // The test fails clearly if no AuthBridge agent is found.
 func TestE2ESmoke(t *testing.T) {

@@ -17,12 +17,12 @@ import (
 // another, numbers/booleans/null each distinct so the eye can scan a dense
 // payload quickly.
 var (
-	styleJSONKey     = lipgloss.NewStyle().Foreground(colorAccent)
-	styleJSONString  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#047857", Dark: "#6EE7B7"})
-	styleJSONNumber  = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"})
-	styleJSONBool    = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#FCA5A5"})
-	styleJSONNull    = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
-	styleJSONPunct   = lipgloss.NewStyle().Foreground(colorMuted)
+	styleJSONKey    = lipgloss.NewStyle().Foreground(colorAccent)
+	styleJSONString = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#047857", Dark: "#6EE7B7"})
+	styleJSONNumber = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"})
+	styleJSONBool   = lipgloss.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#B91C1C", Dark: "#FCA5A5"})
+	styleJSONNull   = lipgloss.NewStyle().Foreground(colorMuted).Italic(true)
+	styleJSONPunct  = lipgloss.NewStyle().Foreground(colorMuted)
 )
 
 // ColorizeJSON takes a Go value (typically something decoded from json) and

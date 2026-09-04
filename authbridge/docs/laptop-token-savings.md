@@ -130,6 +130,6 @@ client-side settings (`--allowedTools`, disabling unused MCP servers).
 
 ## Turning it off
 
-Empty the `remove:` list to stop pruning but keep watching traffic. To stop or
-remove Cortex entirely, see
-**[turning Cortex off, and removing it](./laptop-uninstall.md)**.
+Empty the `remove:` list to stop pruning but keep watching traffic. To start, stop
+or remove Cortex itself, see
+**[running Cortex](./laptop-service.md)**.

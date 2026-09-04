@@ -43,6 +43,26 @@ func main() {
 		}
 	}
 
+	// Without this, `abctl --help` printed only -endpoint and -version, so the
+	// subcommands were invisible to anyone who asked the tool what it could do — the
+	// service commands most of all, since those are what you need when Cortex is down.
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), `abctl — inspect and run Cortex
+
+Usage:
+  abctl                      open the traffic viewer (TUI)
+  abctl service <action>     run Cortex as a service: install, uninstall,
+                             status, stop, start, restart
+  abctl claude-code <action> point Claude Code at Cortex: enable, disable, status
+  abctl tools <action>       tool-definition costs: scan
+
+Run a subcommand with no action, or with --help, for its own usage.
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
+
 	endpoint := flag.String("endpoint", "",
 		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker.")
 	showVersion := flag.Bool("version", false, "print version and exit")

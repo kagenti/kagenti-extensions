@@ -41,9 +41,9 @@ Claude Code's calls stream into `abctl`. Cortex only reads them; nothing is rewr
 4–20% of the prompt per turn, median 6%:
 **[one more command](./authbridge/docs/laptop-token-savings.md)**.
 
-**Turning it off** — `abctl service stop` pauses it, `abctl claude-code disable`
-unwires Claude Code, and
-**[removing it](./authbridge/docs/laptop-uninstall.md)** is four lines.
+**Starting, stopping, removing** — `abctl service status | start | stop`, and
+`abctl claude-code disable` to unwire Claude Code:
+**[the full lifecycle](./authbridge/docs/laptop-service.md)**.
 
 Any agent works, not just Claude Code — point it at `localhost:47600` and trust
 `~/.cortex/ca/ca.crt`. The URL is on `main`, but the script re-runs the copy from the

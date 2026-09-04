@@ -85,6 +85,13 @@ func runService(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	action := args[0]
+	// `abctl service --help` used to fail with "unknown service action", which sends
+	// someone looking for the command list to the one place that refuses to print it.
+	switch action {
+	case "-h", "--help", "help":
+		fmt.Fprint(stdout, serviceUsage)
+		return 0
+	}
 
 	fs := newFlagSet("service "+action, stderr)
 	yes := fs.Bool("yes", false, "do not prompt for confirmation")
