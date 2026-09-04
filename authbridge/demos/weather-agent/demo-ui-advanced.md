@@ -103,8 +103,9 @@ Wait for the tool pod to be **Ready**. Once it registers in Keycloak, the
 ```bash
 kubectl get pods -n team1 -l app.kubernetes.io/name=weather-tool-advanced
 # Expect 2/2 (mcp + authbridge-proxy) in proxy-sidecar mode.
-# spiffe-helper is bundled inside the combined AuthBridge image, not a separate
-# container, so the count is 2/2 rather than 3/3.
+# No separate spiffe-helper container: the authbridge-proxy sidecar sources its
+# SPIRE credentials in-process (the spiffe.Provider mirrors the SVID to disk),
+# so the count is 2/2 rather than 3/3.
 ```
 
 ---
@@ -266,10 +267,11 @@ Useful env knobs:
 | Symptom | Likely cause | Fix |
 |---------|--------------|-----|
 | UI returns `Error: LLM execution failed: Connection error.` | Agent can't reach its LLM. Ollama not running, or **Bypass AuthBridge on these outbound ports** not set to `11434`. `deploy_and_verify_advanced.sh` doesn't catch this — it never calls the LLM. | Start Ollama (`ollama serve` + `ollama pull llama3.2:3b-instruct-fp16`), or re-import with the OpenAI `.env` URL. |
-| UI returns `Error: No LLM API key configured. Set the LLM_API_KEY environment variable.` | `openai-secret` is empty (often because `$OPENAI_API_KEY` wasn't exported when you ran `kubectl create secret`), or the agent wasn't restarted after fixing it. | Recreate with the literal value, then verify `kubectl get secret openai-secret -n team1 -o jsonpath='{.data.apikey}' \| base64 -d \| wc -c` is non-zero, then `kubectl rollout restart deploy/weather-service-advanced -n team1`. |
+| UI returns `Error: No LLM API key configured. Set the LLM_API_KEY environment variable.` | `openai-secret` is empty (often because `$OPENAI_API_KEY` wasn't exported when you ran `kubectl create secret`), or the agent wasn't restarted after fixing it. | Recreate with the literal value, then verify `kubectl get secret openai-secret -n team1 -o jsonpath='{.data.apikey}' \| base64 -d \| wc -c` is non-zero. The agent runs as a **Sandbox** (bare pod, no Deployment), so `kubectl rollout restart deploy/...` fails; restart by deleting the pod — the `Sandbox` CR recreates it: `kubectl delete pod -n team1 -l app.kubernetes.io/name=weather-service-advanced`. |
 | UI: **Outbound Routing Rules** expander missing | Rossoctl backend pre-dates [rossoctl#1194](https://github.com/rossoctl/rossoctl/pull/1194) | `kubectl apply -f authbridge/demos/weather-agent/k8s/configmaps-advanced.yaml` and skip the UI step. |
 | UI: agent card not available | AuthBridge failed to load `authproxy-routes` (invalid YAML shape) | See the same section in the [GitHub Issue UI demo](../github-issue/demo-ui.md#agent-card-not-available-in-the-ui). |
 | `401` on tool MCP from CLI verify | Wrong `target_audience` or scope mapper | `target_audience` must equal the tool SPIFFE; scope `weather-tool-exchange-aud` must map that audience. Re-run `setup_keycloak_weather_advanced.py`. |
+| CLI verify aborts with `ERROR: verify pod produced no MCP_HTTP_CODE line` | Transient: the ephemeral `netshoot` verify pod was torn down (`--rm`) before it printed a result — a slow first-run pod start, not an auth failure. Its stderr is lost, so the message looks alarming. | Just re-run the script — it's idempotent. To see the pod's own diagnostics on a genuine failure, capture stderr too: `SKIP_DEPLOY=1 ./...deploy_and_verify_advanced.sh 2>&1 \| tee /tmp/v.log`. |
 | `invalid_scope` / `503` from agent | Optional exchange scope not on agent client | Re-run `setup_keycloak_weather_advanced.py -n team1` **after** the agent is running. |
 | Token exchange denied | Tool client missing `standard.token.exchange.enabled` | Re-run setup with `--wait-tool-client` after the tool pod registers. |
 | Tool pod CrashLoopBackOff (`mcp` container) | The `weather_tool` image runs as UID 1001; a `securityContext` overriding the user breaks `uv run` | Use the manifests in `k8s/` as-is (they set `runAsUser/Group/fsGroup: 1001`). On OpenShift, see the [upstream Dockerfile](https://github.com/rossoctl/examples/blob/main/mcp/weather_tool/Dockerfile). |
@@ -280,9 +282,17 @@ Useful env knobs:
 Tool ingress and agent outbound logs (container name varies by AuthBridge mode
 — `authbridge-proxy` for proxy-sidecar default, `envoy-proxy` for envoy-sidecar):
 
+The tool is a **Deployment**, so `deploy/...` works for it. The agent is a
+**Sandbox** (bare pod, no Deployment) — resolve its pod name via label selector:
+
 ```bash
+# Tool ingress (Deployment):
 kubectl logs deploy/weather-tool-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Inbound|Token validated"
-kubectl logs deploy/weather-service-advanced -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
+
+# Agent outbound (Sandbox — resolve the pod name first):
+AGENT_POD=$(kubectl get pod -n team1 -l app.kubernetes.io/name=weather-service-advanced \
+  -o jsonpath='{.items[0].metadata.name}')
+kubectl logs "$AGENT_POD" -n team1 -c authbridge-proxy 2>&1 | grep -E "Resolver|exchange|Injecting token"
 ```
 
 ---
