@@ -193,7 +193,10 @@ jobs:
       - name: Run go mod tidy -diff in every module
         run: |
           set -euo pipefail
-          # Percent-encode %, CR, LF for use in workflow-command metadata.
+          # Percent-encode %, CR, LF for use in workflow commands
+          # (both metadata and message halves — CR/LF in the message
+          # would end the command and let the next line be interpreted
+          # as a new one).
           esc() { printf '%s' "$1" | sed -e 's/%/%25/g' -e 's/\r/%0D/g' -e ':a' -e '$!N' -e 's/\n/%0A/g' -e 'ta'; }
           fail=0
           found=0
@@ -204,7 +207,7 @@ jobs:
             go_mod_esc=$(esc "$go_mod")
             echo "::group::${mod_esc}"
             if ! (cd "$mod" && go mod tidy -diff); then
-              echo "::error file=${go_mod_esc}::go mod tidy would change ${go_mod}; run 'go mod tidy' in ${mod} and commit"
+              echo "::error file=${go_mod_esc}::go mod tidy would change ${go_mod_esc}; run 'go mod tidy' in ${mod_esc} and commit"
               fail=1
             fi
             echo "::endgroup::"
