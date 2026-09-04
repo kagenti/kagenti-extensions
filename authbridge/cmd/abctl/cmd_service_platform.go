@@ -76,6 +76,19 @@ func shQuote(v string) string {
 	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
 }
 
+// renderUnitFor builds the unit for goos.
+//
+// The macOS plist runs the proxy under --supervise. launchd will not restart these
+// agents itself: in a gui/<uid> domain an agent bootstrapped mid-session gets
+// "pending spawn, domain in on-demand-only mode", and neither KeepAlive nor
+// StartInterval nor RunAtLoad fires (measured on macOS 26.5.2, active Aqua session,
+// approved in Login Items, via both bootstrap and legacy load -w). Only kickstart
+// starts it. So launchd starts a supervisor and the supervisor restarts the proxy.
+// KeepAlive stays in the plist for the cases launchd does honour, such as a
+// login-time load; it is no longer what crash recovery depends on.
+//
+// The systemd unit deliberately does NOT use --supervise: Restart=on-failure works
+// there and counts restarts against StartLimit, which a nested supervisor would hide.
 func renderUnitFor(goos string, p servicePaths) string {
 	if goos == "darwin" {
 		// HOME is set explicitly: the config interpolates ${HOME} at load, and an
@@ -88,6 +101,7 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>ProgramArguments</key>
   <array>
     <string>` + xmlStr(p.binary) + `</string>
+    <string>--supervise</string>
     <string>--config</string>
     <string>` + xmlStr(p.configFile) + `</string>
   </array>

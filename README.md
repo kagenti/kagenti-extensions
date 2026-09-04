@@ -24,9 +24,9 @@ That is the install. It asks before changing your Claude Code settings, then run
 Cortex as a background service that comes back at login and restarts itself if it
 crashes.
 
-> **macOS note:** launchd defers agents added mid-session, so automatic
-> restart-after-crash may not take effect until your next login. Starting at login
-> works from now on. `abctl service start` restarts it by hand in the meantime.
+> **macOS note:** launchd will not restart a user agent added mid-session, so on
+> macOS the proxy runs under a small supervisor process that does. Verify with
+> `kill -9 $(pgrep -f 'authbridge-proxy --config')` — it comes back within ~2s.
 
 Now open two terminals:
 

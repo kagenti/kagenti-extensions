@@ -340,23 +340,12 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "\nRunning under %s.\n", supervisorName())
 	if runtime.GOOS == "darwin" {
-		// Measured on macOS 26.5.2: an agent bootstrapped into an already-running
-		// login domain is deferred — launchd logs "pending spawn, domain in
-		// on-demand-only mode" and honours neither RunAtLoad nor KeepAlive, while an
-		// explicit kickstart works. Reproduced with a throwaway agent from a real GUI
-		// terminal, with and without ProcessType, via modern bootstrap and legacy
-		// load -w, with the executable approved in Login Items. The 454 agents loaded
-		// at login on that machine all run normally, so the distinguishing factor is
-		// when the job entered the domain.
-		//
-		// Say so rather than let "restarts on failure" read as already true: a promise
-		// that silently does not hold until the next login is worse than a stated
-		// caveat.
-		fmt.Fprintln(stdout, "\n  Note (macOS): starting at login works from now on, but automatic")
-		fmt.Fprintln(stdout, "  restart-after-crash may not take effect until your next login —")
-		fmt.Fprintln(stdout, "  launchd defers agents added mid-session. To check afterwards:")
-		fmt.Fprintln(stdout, "    kill -9 $(pgrep -f 'authbridge-proxy --config')  # should come back in ~10s")
-		fmt.Fprintln(stdout, "  Until then, restart it yourself with: abctl service start")
+		// launchd does not restart these agents — see the comment in the plist and in
+		// cmd/authbridge-proxy/supervise.go — so the proxy runs under --supervise and
+		// crash recovery belongs to that supervisor, not to KeepAlive.
+		fmt.Fprintln(stdout, "  Crash recovery is handled by a supervisor process, because launchd")
+		fmt.Fprintln(stdout, "  does not restart user agents added mid-session. Check it with:")
+		fmt.Fprintln(stdout, "    kill -9 $(pgrep -f 'authbridge-proxy --config')  # back within ~2s")
 	}
 	return 0
 }

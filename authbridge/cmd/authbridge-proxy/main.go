@@ -129,11 +129,20 @@ func main() {
 	// listed as a deprecated alias rather than hidden: an empty usage string
 	// still prints the flag, just with a blank description that reads like a bug.
 	demoDeprecated := flag.Bool("demo", false, "deprecated alias for -local")
+	supervise := flag.Bool("supervise", false,
+		"restart the proxy if it exits (launchd cannot be relied on for this; see supervise.go)")
 	writeConfigOnly := flag.Bool("write-config", false,
 		"with -local: create the built-in config (and its directory) if absent, then exit")
 	caDir := flag.String("ca-dir", "",
 		"CA directory for --local (auto-generated); defaults to ~/"+cortexDirName+"/"+caDirName)
 	flag.Parse()
+	if *supervise {
+		// Before anything binds: this process starts a child that does the real work.
+		if err := runSupervisor("supervise"); err != nil {
+			log.Fatalf("supervise: %v", err)
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Println("authbridge-proxy", version)

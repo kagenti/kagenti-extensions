@@ -304,3 +304,28 @@ func TestRenderUnit_HostilePaths(t *testing.T) {
 		}
 	})
 }
+
+// TestSupervisionIsPlatformCorrect: launchd does not restart these agents, so the
+// plist must run the proxy under --supervise; systemd does, and nesting a supervisor
+// there would hide crashes from its StartLimit accounting.
+func TestSupervisionIsPlatformCorrect(t *testing.T) {
+	p := servicePaths{
+		binary: "/u/bin/authbridge-proxy", configFile: "/u/.cortex/config.yaml",
+		logFile: "/u/.cortex/proxy.log", home: "/u",
+	}
+	darwin := renderUnitFor("darwin", p)
+	if !strings.Contains(darwin, "<string>--supervise</string>") {
+		t.Error("the plist does not supervise; a crash would go unrecovered on macOS")
+	}
+	// The supervise flag must come before --config, as a flag not a config value.
+	if i, j := strings.Index(darwin, "--supervise"), strings.Index(darwin, "--config"); i < 0 || j < 0 || i > j {
+		t.Errorf("--supervise is not ordered before --config (%d vs %d)", i, j)
+	}
+	linux := renderUnitFor("linux", p)
+	if strings.Contains(linux, "--supervise") {
+		t.Error("systemd unit nests a supervisor; Restart=on-failure already does this")
+	}
+	if !strings.Contains(linux, "Restart=on-failure") {
+		t.Error("systemd unit lost its own restart policy")
+	}
+}
