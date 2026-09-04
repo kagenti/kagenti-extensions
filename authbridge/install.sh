@@ -455,6 +455,18 @@ if ! "${BIN_DIR}/abctl" service status >/dev/null 2>&1 &&
 	esac
 fi
 
+# Materialise the config before handing the proxy to the supervisor. This used to
+# happen as a side effect of starting `--local` in the background; with the service
+# doing the starting, nothing else creates the file, and `abctl service install`
+# refuses to run without it.
+if [ ! -f "${CORTEX_DIR}/config.yaml" ]; then
+	if ! "${BIN_DIR}/authbridge-proxy" --local --write-config; then
+		die "could not write ${CORTEX_DIR}/config.yaml.
+  Run this to see why:
+    \"${proxy_cmd}\" --local --write-config"
+	fi
+fi
+
 info ""
 info "Setting Cortex up as a ${SUPERVISOR_NAME} so it restarts on failure and"
 info "comes back at login..."

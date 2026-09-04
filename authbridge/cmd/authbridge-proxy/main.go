@@ -129,6 +129,8 @@ func main() {
 	// listed as a deprecated alias rather than hidden: an empty usage string
 	// still prints the flag, just with a blank description that reads like a bug.
 	demoDeprecated := flag.Bool("demo", false, "deprecated alias for -local")
+	writeConfigOnly := flag.Bool("write-config", false,
+		"with -local: create the built-in config (and its directory) if absent, then exit")
 	caDir := flag.String("ca-dir", "",
 		"CA directory for --local (auto-generated); defaults to ~/"+cortexDirName+"/"+caDirName)
 	flag.Parse()
@@ -186,10 +188,22 @@ func main() {
 			log.Fatalf("--local: %v", werr)
 		}
 		*configPath = p
+		// install.sh needs the config materialised without starting anything: it hands
+		// the proxy to the OS supervisor, which then starts it. Writing the config was
+		// previously a side effect of starting --local, so removing that start removed
+		// the only thing that ever created the file — a fresh install then had nothing
+		// for `abctl service install` to load. Exiting here keeps one source of truth
+		// for the built-in config instead of teaching abctl to write it too.
+		if *writeConfigOnly {
+			slog.Info("wrote the built-in config; not starting", "config", p, "ca_dir", absCA)
+			return
+		}
 		slog.Info("local mode — using the built-in config; edit it to hot-reload",
 			"config", p, "ca_dir", absCA)
 	} else if *caDir != "" {
 		log.Fatal("--ca-dir only applies with --local")
+	} else if *writeConfigOnly {
+		log.Fatal("--write-config only applies with --local")
 	}
 
 	if *configPath == "" {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/xml"
 	"flag"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -57,6 +59,21 @@ func renderUnit(p servicePaths) string { return renderUnitFor(runtime.GOOS, p) }
 // renderUnitFor takes the OS explicitly so both renderings are testable from
 // either platform. Without it the systemd unit would be written on a Mac and
 // never exercised until a Linux user hit it.
+// xmlStr renders a plist <string> with its content XML-escaped. $HOME and a
+// --config path are user-supplied: an "&" or "<" in either produces a plist that
+// launchctl bootstrap rejects as malformed.
+func xmlStr(v string) string {
+	var b strings.Builder
+	_ = xml.EscapeText(&b, []byte(v))
+	return b.String()
+}
+
+// shQuote single-quotes a systemd ExecStart argument. systemd splits ExecStart on
+// whitespace, so an unquoted path containing a space becomes two wrong arguments.
+func shQuote(v string) string {
+	return "'" + strings.ReplaceAll(v, "'", `'\''`) + "'"
+}
+
 func renderUnitFor(goos string, p servicePaths) string {
 	if goos == "darwin" {
 		// HOME is set explicitly: the config interpolates ${HOME} at load, and an
@@ -68,17 +85,17 @@ func renderUnitFor(goos string, p servicePaths) string {
   <key>Label</key><string>` + launchdLabel + `</string>
   <key>ProgramArguments</key>
   <array>
-    <string>` + p.binary + `</string>
+    <string>` + xmlStr(p.binary) + `</string>
     <string>--config</string>
-    <string>` + p.configFile + `</string>
+    <string>` + xmlStr(p.configFile) + `</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>HOME</key><string>` + p.home + `</string></dict>
+  <dict><key>HOME</key><string>` + xmlStr(p.home) + `</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>` + p.logFile + `</string>
-  <key>StandardErrorPath</key><string>` + p.logFile + `</string>
+  <key>StandardOutPath</key><string>` + xmlStr(p.logFile) + `</string>
+  <key>StandardErrorPath</key><string>` + xmlStr(p.logFile) + `</string>
   <key>ProcessType</key><string>Background</string>
 </dict>
 </plist>
@@ -100,7 +117,7 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-ExecStart=` + p.binary + ` --config ` + p.configFile + `
+ExecStart=` + shQuote(p.binary) + ` --config ` + shQuote(p.configFile) + `
 Restart=on-failure
 RestartSec=10
 StandardOutput=append:` + p.logFile + `
@@ -145,10 +162,36 @@ func loadService(p servicePaths) error {
 	}
 	// Without lingering, a user unit stops at logout — which defeats the point on a
 	// headless or SSH-only box. Best-effort: it needs polkit on some systems.
-	if u := os.Getenv("USER"); u != "" {
-		_ = exec.Command("loginctl", "enable-linger", u).Run() //nolint:errcheck
+	//
+	// uid, not $USER: a supervisor environment may not set USER at all, and the uid is
+	// already what every other call here uses. loginctl accepts either.
+	//
+	// Record it only when WE turn it on, so uninstall can undo exactly that. Linger is
+	// a per-user setting shared with every other user unit, so disabling it
+	// unconditionally on uninstall could stop services that have nothing to do with
+	// Cortex.
+	uid := strconv.Itoa(os.Getuid())
+	if !lingerEnabled(uid) {
+		if err := exec.Command("loginctl", "enable-linger", uid).Run(); err == nil {
+			_ = os.WriteFile(lingerMarker(p), []byte("enabled by abctl\n"), 0o600) //nolint:errcheck
+		}
 	}
 	return nil
+}
+
+// lingerMarker records that we enabled lingering, so uninstall undoes only that.
+func lingerMarker(p servicePaths) string {
+	return filepath.Join(filepath.Dir(p.configFile), "linger-enabled-by-abctl")
+}
+
+// lingerEnabled reports whether lingering is already on. A parse failure reads as
+// "already on", which errs toward leaving the user's setting alone.
+func lingerEnabled(uid string) bool {
+	out, err := exec.Command("loginctl", "show-user", uid, "--property=Linger").Output()
+	if err != nil {
+		return true
+	}
+	return !strings.Contains(strings.ToLower(string(out)), "linger=no")
 }
 
 func unloadService(p servicePaths) error {
@@ -161,6 +204,13 @@ func unloadService(p servicePaths) error {
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return nil // nothing could have been loaded
+	}
+	// Undo lingering only if we are the ones who enabled it.
+	if marker := lingerMarker(p); marker != "" {
+		if _, serr := os.Stat(marker); serr == nil {
+			_ = exec.Command("loginctl", "disable-linger", strconv.Itoa(os.Getuid())).Run() //nolint:errcheck
+			_ = os.Remove(marker)                                                           //nolint:errcheck
+		}
 	}
 	if out, err := exec.Command("systemctl", "--user", "disable", "--now", systemdUnit).CombinedOutput(); err != nil {
 		return fmt.Errorf("systemctl --user disable --now %s: %v: %s", systemdUnit, err, strings.TrimSpace(string(out)))
@@ -280,12 +330,38 @@ func controlService(action string, p servicePaths) error {
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return fmt.Errorf("systemctl not found; this system has no systemd")
 	}
-	verb := action
-	if action == "start" {
-		verb = "start"
-	}
-	if out, err := exec.Command("systemctl", "--user", verb, systemdUnit).CombinedOutput(); err != nil {
-		return fmt.Errorf("systemctl --user %s %s: %v: %s", verb, systemdUnit, err, strings.TrimSpace(string(out)))
+	if out, err := exec.Command("systemctl", "--user", action, systemdUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl --user %s %s: %v: %s", action, systemdUnit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+// supervisorRunning asks the supervisor whether OUR job is up, which health alone
+// cannot establish: an unadopted proxy keeps the ports, the supervised copy
+// crash-loops on the bind, and the probe succeeds against the survivor.
+func supervisorRunning(p servicePaths) (bool, string) {
+	if runtime.GOOS == "darwin" {
+		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
+		out, err := exec.Command("launchctl", "print", target).CombinedOutput()
+		if err != nil {
+			return false, "launchctl print: job not found"
+		}
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "state = ") {
+				st := strings.TrimPrefix(line, "state = ")
+				return st == "running", "state = " + st
+			}
+		}
+		return false, "launchctl print reported no state"
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return true, "" // no systemd to ask; do not block on a check we cannot make
+	}
+	out, err := exec.Command("systemctl", "--user", "is-active", systemdUnit).Output()
+	st := strings.TrimSpace(string(out))
+	if err != nil && st == "" {
+		return false, "systemctl is-active gave no answer"
+	}
+	return st == "active", "is-active = " + st
 }

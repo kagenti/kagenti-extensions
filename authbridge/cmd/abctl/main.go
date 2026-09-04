@@ -83,7 +83,7 @@ func main() {
 			// someone who has never wanted a cluster.
 			if local != "" && !dialable(local) {
 				msg = "abctl: nothing is listening on " + local + " (from ~/.cortex/config.yaml).\n" +
-					"  Start it:  authbridge-proxy --config ~/.cortex/config.yaml &\n" +
+					"  Start it:  abctl service start   (or: abctl service install)\n" +
 					"  Or pass --endpoint http://... , or install kubectl to browse a cluster."
 			}
 			fmt.Fprintln(os.Stderr, msg)

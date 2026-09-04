@@ -23,9 +23,13 @@ type pinnedListener struct {
 	key     string
 	value   string
 	comment string
-	// isFlag marks a boolean key, checked against the parsed config differently
-	// from an address.
+	// isFlag marks a boolean key, reported differently from an address.
 	isFlag bool
+	// absent reports whether this pin is missing from a parsed config. It lives on
+	// the pin, not in a switch elsewhere, because a switch is a second list that has
+	// to stay in sync with this one — and a pin added without its case would compile,
+	// run, and silently migrate nothing.
+	absent func(*config.Config) bool
 	// unpinnedDefault is what the preset fills in when the key is absent, and
 	// what makes the omission worth fixing rather than tidy.
 	unpinnedDefault string
@@ -43,19 +47,22 @@ var listenerPins = []pinnedListener{
 			"interface — on a laptop, the Wi-Fi.",
 		isFlag:          true,
 		unpinnedDefault: "wildcard binds for anything unpinned",
+		absent:          func(c *config.Config) bool { return !c.Listener.BindLoopbackOnly },
 	},
 	{
 		key:             "health_addr",
 		value:           "127.0.0.1:47604",
 		comment:         "Added by abctl: unpinned, the preset binds health on :9091 — every interface.",
 		unpinnedDefault: ":9091",
+		absent:          func(c *config.Config) bool { return c.Listener.HealthAddr == "" },
 	},
 	{
 		key:   "transparent_proxy_addr",
 		value: "127.0.0.1:47603",
 		comment: "Added by abctl: unpinned, the preset binds :8082 on every interface. --local skips\n" +
-			"    this listener but --config does not, and the service runs with --config.",
+			"this listener but --config does not, and the service runs with --config.",
 		unpinnedDefault: ":8082",
+		absent:          func(c *config.Config) bool { return c.Listener.TransparentProxyAddr == "" },
 	},
 }
 
@@ -74,19 +81,11 @@ func migrateConfig(path string, stdout io.Writer) (changed bool, err error) {
 	}
 	missing := make([]pinnedListener, 0, len(listenerPins))
 	for _, pin := range listenerPins {
-		switch pin.key {
-		case "bind_loopback_only":
-			if !cfg.Listener.BindLoopbackOnly {
-				missing = append(missing, pin)
-			}
-		case "health_addr":
-			if cfg.Listener.HealthAddr == "" {
-				missing = append(missing, pin)
-			}
-		case "transparent_proxy_addr":
-			if cfg.Listener.TransparentProxyAddr == "" {
-				missing = append(missing, pin)
-			}
+		if pin.absent == nil {
+			return false, fmt.Errorf("pin %q has no absent predicate; this is a bug", pin.key)
+		}
+		if pin.absent(cfg) {
+			missing = append(missing, pin)
 		}
 	}
 	if len(missing) == 0 {

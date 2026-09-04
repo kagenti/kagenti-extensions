@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/xml"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -96,8 +97,10 @@ func TestRenderUnit_BothPlatforms(t *testing.T) {
 		if n := strings.Count(u, "ExecStart="); n != 1 {
 			t.Errorf("ExecStart appears %d times, want 1", n)
 		}
-		if !strings.Contains(u, p.binary+" --config "+p.configFile) {
-			t.Errorf("ExecStart does not invoke absolute paths:\n%s", u)
+		// Quoted: systemd splits ExecStart on whitespace, so a $HOME with a space in
+		// it would otherwise become two wrong arguments.
+		if !strings.Contains(u, "'"+p.binary+"' --config '"+p.configFile+"'") {
+			t.Errorf("ExecStart does not invoke quoted absolute paths:\n%s", u)
 		}
 	})
 
@@ -240,4 +243,64 @@ func TestLastLines_SurfacesTheReason(t *testing.T) {
 	if msg := lastLines(filepath.Join(dir, "nope.log"), 3); len(msg) != 1 || !strings.Contains(msg[0], "no log") {
 		t.Errorf("missing log should say so, got %v", msg)
 	}
+}
+
+// TestRenderUnit_HostilePaths covers what a real $HOME can contain. Both renderings
+// interpolate user-supplied paths: an unescaped "&" makes the plist malformed XML
+// that launchctl bootstrap rejects, and an unquoted space splits systemd's ExecStart
+// into the wrong arguments.
+func TestRenderUnit_HostilePaths(t *testing.T) {
+	p := servicePaths{
+		binary:     "/Users/a & b/.local/bin/authbridge-proxy",
+		configFile: "/Users/a & b/.cortex/my config.yaml",
+		logFile:    "/Users/a & b/.cortex/proxy.log",
+		home:       "/Users/a & b",
+	}
+
+	t.Run("plist stays well-formed XML", func(t *testing.T) {
+		u := renderUnitFor("darwin", p)
+		if strings.Contains(u, "a & b") {
+			t.Error("raw & left in the plist; launchctl bootstrap would reject it")
+		}
+		if !strings.Contains(u, "a &amp; b") {
+			t.Errorf("& not escaped:\n%s", u)
+		}
+		var v any
+		if err := xml.Unmarshal([]byte(u), &v); err != nil {
+			t.Errorf("rendered plist is not well-formed XML: %v", err)
+		}
+	})
+
+	t.Run("systemd ExecStart keeps the path as one argument", func(t *testing.T) {
+		u := renderUnitFor("linux", p)
+		var execLine string
+		for _, l := range strings.Split(u, "\n") {
+			if strings.HasPrefix(l, "ExecStart=") {
+				execLine = l
+			}
+		}
+		if execLine == "" {
+			t.Fatal("no ExecStart line")
+		}
+		// Both paths must be quoted, or the spaces split them.
+		if !strings.Contains(execLine, "'"+p.binary+"'") {
+			t.Errorf("binary not quoted: %s", execLine)
+		}
+		if !strings.Contains(execLine, "'"+p.configFile+"'") {
+			t.Errorf("config path not quoted: %s", execLine)
+		}
+	})
+
+	t.Run("a single quote in the path cannot break out", func(t *testing.T) {
+		q := servicePaths{
+			binary:     "/home/o'brien/bin/authbridge-proxy",
+			configFile: "/home/o'brien/.cortex/config.yaml",
+			logFile:    "/home/o'brien/.cortex/proxy.log",
+			home:       "/home/o'brien",
+		}
+		u := renderUnitFor("linux", q)
+		if strings.Contains(u, "ExecStart='/home/o'brien") {
+			t.Errorf("quote not neutralised, ExecStart is breakable:\n%s", u)
+		}
+	})
 }

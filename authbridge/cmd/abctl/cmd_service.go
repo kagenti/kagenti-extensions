@@ -30,11 +30,16 @@ Usage:
   abctl service install   [--yes] [--config PATH]
   abctl service uninstall [--yes]
   abctl service status
+  abctl service stop | start | restart
 
 install hands the proxy to the OS supervisor — a launchd user agent on macOS, a
 systemd user unit on Linux — so it restarts on failure and comes back at login.
 Claude Code depends on the proxy being up once "abctl claude-code enable" has run,
 and nothing else keeps it up.
+
+stop/start/restart exist so there is never a reason to reach for launchctl,
+systemctl, kill or pkill: under a supervisor a plain kill is undone within seconds,
+which looks like the process refusing to die.
 
 If a proxy you started by hand is already running, install stops it first and
 supervises a fresh one: two copies cannot share the ports, and the supervised one
@@ -151,12 +156,26 @@ func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
 		p.unitFile = unitOverride
 	}
 
-	// The health endpoint is the only thing that proves it is serving rather than
-	// merely loaded, and it comes from the config so it cannot drift.
-	if cfg, cerr := config.Load(cortexCfg); cerr == nil && cfg.Listener.HealthAddr != "" {
-		p.healthURL = "http://" + dialableAddr(cfg.Listener.HealthAddr) + "/healthz"
-	}
+	p.healthURL = resolveHealthURL(cortexCfg)
 	return p, nil
+}
+
+// resolveHealthURL reads the health endpoint out of the config.
+//
+// ApplyPreset is applied because the binaries do: without it an unpinned
+// health_addr reads as empty, so a config that never received the health pin
+// produced no URL at all — and install then reported "Running under launchd" having
+// probed nothing, for exactly the older configs that most need checking.
+func resolveHealthURL(cortexCfg string) string {
+	cfg, err := config.Load(cortexCfg)
+	if err != nil {
+		return ""
+	}
+	config.ApplyPreset(cfg)
+	if cfg.Listener.HealthAddr == "" {
+		return ""
+	}
+	return "http://" + dialableAddr(cfg.Listener.HealthAddr) + "/healthz"
 }
 
 func serviceInstalled(p servicePaths) bool {
@@ -166,7 +185,10 @@ func serviceInstalled(p servicePaths) bool {
 
 func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	if _, err := os.Stat(p.configFile); err != nil {
-		fmt.Fprintf(stderr, "abctl: no config at %s — run the installer first\n", p.configFile)
+		// Not "run the installer first": the installer is what calls this, so that
+		// advice sent people in a circle. Name the command that creates the file.
+		fmt.Fprintf(stderr, "abctl: no config at %s. Create it with:\n"+
+			"  authbridge-proxy --local --write-config\n", p.configFile)
 		return 1
 	}
 
@@ -193,9 +215,14 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	// older config up to date: the service starts it with --config, which honours
 	// listeners that --local skipped, so an unpinned transparent_proxy_addr would
 	// start binding every interface precisely now.
-	if _, mErr := migrateConfig(p.configFile, stdout); mErr != nil {
+	if changed, mErr := migrateConfig(p.configFile, stdout); mErr != nil {
 		fmt.Fprintf(stderr, "abctl: could not update %s (%v); continuing with it as-is\n",
 			p.configFile, mErr)
+	} else if changed {
+		// The paths were resolved from the pre-migration config, so anything the
+		// migration added — health_addr above all — is not in them yet. Without this
+		// the probe below is skipped for precisely the configs that were just fixed.
+		p.healthURL = resolveHealthURL(p.configFile)
 	}
 
 	if adopt > 0 {
@@ -220,6 +247,12 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
 
 	if err := loadService(p); err != nil {
+		// Leaving the unit behind would make serviceInstalled() true for something
+		// that never loaded, so `service status` would report it installed and
+		// `service stop` would act on a job the supervisor does not have.
+		if rmErr := os.Remove(p.unitFile); rmErr != nil && !os.IsNotExist(rmErr) {
+			fmt.Fprintf(stderr, "abctl: also could not remove %s: %v\n", p.unitFile, rmErr)
+		}
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
@@ -227,6 +260,21 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	// "Loaded" is not "serving". A bad config is fatal at startup and a supervisor
 	// turns that into a restart loop, so probe the health endpoint before claiming
 	// success.
+	// Health alone is not proof: an unadopted proxy (started by hand, no pidfile)
+	// keeps the ports, the supervised copy loses the bind race and crash-loops, and
+	// the probe cheerfully succeeds against the survivor. Ask the supervisor whether
+	// OUR job is actually up before believing the probe.
+	if running, why := supervisorRunning(p); !running {
+		fmt.Fprintf(stderr, "abctl: the unit loaded but the supervisor does not report it running (%s).\n"+
+			"  Something else may hold the ports — check for a Cortex you started by hand:\n"+
+			"    pgrep -fl authbridge-prox\n"+
+			"  Last log lines:\n", why)
+		for _, line := range lastLines(p.logFile, 5) {
+			fmt.Fprintf(stderr, "    %s\n", line)
+		}
+		return 1
+	}
+
 	if p.healthURL != "" {
 		if waitHealthy(p.healthURL, serviceReadyTimeout) {
 			fmt.Fprintf(stdout, "\nRunning under %s and healthy. Claude Code will keep working across\n"+
