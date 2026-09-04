@@ -29,8 +29,12 @@ const (
 	systemdUnit  = "cortex.service"
 	// maxLogBytes bounds one generation of proxy.log; rotateLog keeps one previous
 	// file, so the pair tops out near twice this.
-	maxLogBytes  = 8 << 20
-	serviceUsage = `abctl service — keep Cortex running across crashes and logins
+	maxLogBytes = 8 << 20
+	// serviceBootoutTimeout bounds the wait for a previous job to leave the domain.
+	// Longer than the supervisor's own teardown: it SIGTERMs the proxy, allows its 15s
+	// graceful shutdown, then insists at 20s.
+	serviceBootoutTimeout = 30 * time.Second
+	serviceUsage          = `abctl service — keep Cortex running across crashes and logins
 
 Usage:
   abctl service install   [--yes] [--config PATH]
@@ -334,7 +338,7 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "Wrote %s\n", p.unitFile)
 	}
 
-	if err := loadService(p); errors.Is(err, errLingerUnavailable) {
+	if err := loadService(p, stdout); errors.Is(err, errLingerUnavailable) {
 		// The unit IS loaded, so this is a caveat rather than a failure: keep going,
 		// but never claim it survives a logout.
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -495,7 +499,7 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 		// umask — measured at 0644, which silently undid the 0600 this sets.
 		tightenLog(p.logFile, stderr)
 	}
-	if err := controlService(action, p); err != nil {
+	if err := controlService(action, p, stdout); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
