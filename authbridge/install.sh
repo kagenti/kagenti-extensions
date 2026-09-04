@@ -58,6 +58,10 @@ BIN_DIR="${HOME}/.local/bin"
 # Every file Cortex writes for this user lives here: config, CA, keys, logs,
 # pidfiles. One directory to inspect, back up, or delete.
 CORTEX_DIR="${HOME}/.cortex"
+case "$(uname -s)" in
+	Darwin) SUPERVISOR_NAME="launchd user agent" ;;
+	*) SUPERVISOR_NAME="systemd user unit" ;;
+esac
 
 info() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -281,67 +285,19 @@ case "$arch" in
 	*) die "unsupported architecture: $arch (supported: amd64, arm64)" ;;
 esac
 
-# stop_previous_cortex stops a Cortex a previous run of this script started, if
-# one is still holding the ports the next one needs.
-#
-# Re-running the installer while Cortex is already up is ordinary — following the
-# README and then the token-cost guide does exactly that. Both use the same
-# loopback ports, so without this the second command dies on a bind conflict.
-#
-# Deliberately narrow. It only kills a pid from OUR pidfile whose process name is
-# still authbridge-proxy — a pidfile can outlive its process and the number can
-# be recycled onto something unrelated. Anything else holding the port is left
-# alone and reported by the preflight below.
-stop_previous_cortex() {
-	pidfile="${CORTEX_DIR}/proxy.pid"
-	[ -f "$pidfile" ] || return 0
-	pid=$(cat "$pidfile" 2>/dev/null) || return 0
-	case "$pid" in
-		'' | *[!0-9]*) return 0 ;;
-	esac
-	if ! kill -0 "$pid" 2>/dev/null; then
-		rm -f "$pidfile"
-		return 0
-	fi
-	# Match a 15-character prefix, not the full name. Linux caps comm at
-	# TASK_COMM_LEN-1 = 15 and "authbridge-proxy" is 16, so it reports
-	# "authbridge-prox" and a *authbridge-proxy* glob never matches — which made
-	# this whole function a no-op on Linux while passing on macOS, where comm is
-	# not truncated. Still narrow: the pid came from a pidfile we wrote.
-	name=$(ps -p "$pid" -o comm= 2>/dev/null || true)
-	case "$name" in
-		*authbridge-prox*) ;;
-		*) return 0 ;; # pid recycled onto something else — never touch it
-	esac
-	info "Stopping the Cortex started earlier (pid ${pid}); the new one replaces it."
-	kill "$pid" 2>/dev/null || true
-	# 90 * 0.2s = 18s, deliberately longer than the proxy's own 15s shutdown
-	# deadline (cmd/authbridge-proxy/main.go). Waiting only 5s could remove the
-	# pidfile while a draining request still held the listener, and the next port
-	# preflight would then fail with the previous instance invisible.
-	i=0
-	while [ "$i" -lt 90 ] && kill -0 "$pid" 2>/dev/null; do
-		sleep 0.2
-		i=$((i + 1))
-	done
-	if kill -0 "$pid" 2>/dev/null; then
-		# Keep the pidfile: it is the only handle on a process that is still there.
-		die "Cortex (pid ${pid}) did not exit within 18s. Stop it and re-run: kill -9 ${pid}"
-	fi
-	rm -f "$pidfile"
-}
-
 # --- preflight: fail early (before downloading) if a listener port is taken ---
 if [ "$MODE" = "local" ]; then
-	# Unconditionally, not gated on port_in_use: that probe reports "free" when
-	# neither lsof nor nc exists (see above), so on a minimal container the stop
-	# would be skipped, the new proxy would hit a bind conflict anyway, and the
-	# user would be left with a dead install. The function is already a no-op
-	# when nothing of ours is running, so it needs no probe to justify it.
-	stop_previous_cortex
+	# A Cortex of ours holding these ports is fine — `abctl service install` adopts
+	# it, and keeping a second copy of that narrow "is this pid really ours" check
+	# here would only let the two drift. This probe is for a FOREIGN listener, and
+	# it runs before the download so the failure is early and cheap.
 	for p in "$DEMO_FORWARD_PORT" "$DEMO_SESSION_PORT" "$DEMO_STATS_PORT" "$DEMO_HEALTH_PORT"; do
 		if port_in_use "$p"; then
-			die "port ${p} is already in use. Is Cortex already running (see ${CORTEX_DIR}/proxy.pid)? Otherwise free the port, or change the ports in the config, then re-run."
+			if [ -f "${CORTEX_DIR}/config.yaml" ]; then
+				# Ours, most likely: let abctl adopt it rather than refusing here.
+				continue
+			fi
+			die "port ${p} is already in use by something else. Free it, or change the ports in ${CORTEX_DIR}/config.yaml, then re-run."
 		fi
 	done
 fi
@@ -464,49 +420,27 @@ if [ "$MODE" = "install-only" ]; then
 	exit 0
 fi
 
-# --- start in the background, then wait until it's actually listening ---
+# --- run it as a service, not a background process ---
+#
+# There is no "start it with nohup" path any more. A backgrounded process survives
+# neither a crash nor a logout, and once Claude Code's settings point at the proxy
+# that means Claude Code silently stops working — most reliably right after a
+# reboot. Handing it to the OS supervisor removes that whole class of problem, and
+# removes any reason for anyone to reach for kill or pkill.
 info ""
-info "Starting Cortex in the background..."
-# 0700 on the Cortex directory: a CA private key is written beneath it.
-mkdir -p "$CORTEX_DIR" && chmod 700 "$CORTEX_DIR"
-# Deliberately NOT creating $ca_dir here. MkdirAll never tightens an existing
-# directory, so pre-creating it at the shell's umask defeated tlsbridge's 0700 —
-# the proxy creates it correctly on first start.
-log="${CORTEX_DIR}/proxy.log"
-pidfile="${CORTEX_DIR}/proxy.pid"
-nohup "$proxy" --local </dev/null >"$log" 2>&1 &
-proxy_pid=$!
-echo "$proxy_pid" >"$pidfile"
-
-# Confirm readiness from real signals, not the "listening" log line — that line is
-# emitted just *before* the socket is bound, so a bind failure could look ready.
-# A bind failure exits within ms (the proxy Fatalf's), so watch for early exit;
-# and probe the forward port for a true post-bind signal.
-ready=0
-i=0
-while [ "$i" -lt 50 ]; do
-	if ! kill -0 "$proxy_pid" 2>/dev/null; then
-		warn "Cortex exited during startup — last log lines:"
-		tail -n 15 "$log" >&2 || true
-		die "Cortex failed to start (full log: ${log})"
-	fi
-	if port_in_use "$DEMO_FORWARD_PORT"; then
-		ready=1
-		break
-	fi
-	sleep 0.2
-	i=$((i + 1))
-done
-
-info ""
-if [ "$ready" -eq 1 ]; then
-	info "Cortex is running (pid ${proxy_pid}).   Logs: ${log}"
-else
-	# It didn't exit during the startup window (a bind failure would have killed
-	# it), but no probe tool confirmed the port — most likely up. Say so honestly.
-	info "Cortex started (pid ${proxy_pid}); couldn't confirm it's listening (install lsof or nc to verify). Logs: ${log}"
+info "Setting Cortex up as a ${SUPERVISOR_NAME} so it restarts on failure and"
+info "comes back at login..."
+set +e
+"${BIN_DIR}/abctl" service install --yes
+svc_status=$?
+set -e
+if [ "${svc_status}" != "0" ]; then
+	die "could not set up the service (exit ${svc_status}).
+  Cortex is NOT running. Inspect the unit it would install with:
+    \"${abctl_cmd}\" service install --print-unit
+  or run the proxy in the foreground to see what it says:
+    \"${proxy_cmd}\" --local"
 fi
-info ""
 
 # tool-prune is in the config but INERT: its remove list is empty, so it does
 # nothing until a name is added. That is deliberate for an install.
@@ -538,39 +472,13 @@ if [ -n "${WIRE_CLAUDE_CODE:-}" ]; then
 	set -e
 	case "${cc_status}" in
 		0)
-			# Claude Code now depends on this proxy being up, and nothing keeps it up:
-			# nohup survives neither a crash nor a logout. Offer supervision at the
-			# moment the dependency is created, not in a doc nobody rereads.
-			info ""
-			set +e
-			"${BIN_DIR}/abctl" service install
-			svc_status=$?
-			set -e
-			case "${svc_status}" in
-				0) ;; # supervised; it is already running under the supervisor
-				3)
-					info ""
-					info "  Not supervised. Cortex stops when it crashes or you log out, and"
-					info "  Claude Code stops with it. To set it up later:"
-					info "    \"${abctl_cmd}\" service install"
-					info ""
-					;;
-				*)
-					warn "could not install the service (exit ${svc_status}); Cortex is running"
-					warn "but will not come back after a crash or a logout."
-					;;
-			esac
+			# The service is already installed above — it is how the proxy runs now,
+			# not an option — so there is nothing to offer here.
 			info ""
 			info "  Run Claude Code:   claude"
 			info "  Watch traffic:     \"${abctl_cmd}\""
 			info "  Undo:              \"${abctl_cmd}\" claude-code disable"
-			if [ "${svc_status}" = "0" ]; then
-				# Under a supervisor, pkill gets the process restarted immediately —
-				# baffling unless the right command is the one printed.
-				info "  Stop Cortex:       \"${abctl_cmd}\" service uninstall"
-			else
-				info "  Stop Cortex:       pkill -f authbridge-proxy"
-			fi
+			info "  Stop Cortex:       \"${abctl_cmd}\" service stop"
 			info ""
 			exit 0
 			;;
@@ -596,7 +504,5 @@ info "    HTTPS_PROXY=http://localhost:${DEMO_FORWARD_PORT} \\"
 info "      NODE_EXTRA_CA_CERTS=${ca_dir}/ca.crt \\"
 info "      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 claude"
 info ""
-# pkill -f, not `kill $(cat pidfile)`: a stale pidfile can name a recycled pid,
-# and nothing else on the machine is called authbridge-proxy.
-info "  Stop it:         kill ${proxy_pid}   (or: pkill -f authbridge-proxy)"
+info "  Stop it:         \"${abctl_cmd}\" service stop      (start / restart / status too)"
 info ""

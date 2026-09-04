@@ -256,3 +256,36 @@ func dialableAddr(addr string) string {
 	}
 	return net.JoinHostPort(host, port)
 }
+
+// controlService maps stop/start/restart onto the platform's supervisor.
+func controlService(action string, p servicePaths) error {
+	if runtime.GOOS == "darwin" {
+		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
+		switch action {
+		case "stop":
+			// `launchctl stop` is undone by KeepAlive. bootout removes the job from
+			// the domain, which is the only stop that sticks; start re-bootstraps.
+			out, err := exec.Command("launchctl", "bootout", target).CombinedOutput()
+			if err != nil && !strings.Contains(string(out), "No such process") {
+				return fmt.Errorf("launchctl bootout: %v: %s", err, strings.TrimSpace(string(out)))
+			}
+			return nil
+		case "start":
+			return loadService(p)
+		default: // restart
+			_ = exec.Command("launchctl", "bootout", target).Run() //nolint:errcheck
+			return loadService(p)
+		}
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("systemctl not found; this system has no systemd")
+	}
+	verb := action
+	if action == "start" {
+		verb = "start"
+	}
+	if out, err := exec.Command("systemctl", "--user", verb, systemdUnit).CombinedOutput(); err != nil {
+		return fmt.Errorf("systemctl --user %s %s: %v: %s", verb, systemdUnit, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/config"
@@ -97,8 +98,11 @@ func runService(args []string, stdout, stderr io.Writer) int {
 		return serviceUninstall(p, *yes, stdout, stderr)
 	case "status":
 		return serviceStatus(p, stdout)
+	case "stop", "start", "restart":
+		return serviceControl(action, p, stdout, stderr)
 	default:
-		fmt.Fprintf(stderr, "abctl: unknown service action %q (install, uninstall, status)\n", action)
+		fmt.Fprintf(stderr, "abctl: unknown service action %q "+
+			"(install, uninstall, status, stop, start, restart)\n", action)
 		return 2
 	}
 }
@@ -183,6 +187,15 @@ func serviceInstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 	if !yes && !confirm(stdout) {
 		fmt.Fprintln(stdout, "Not changed.")
 		return exitDeclined
+	}
+
+	// Taking ownership of how the proxy runs is the natural moment to bring an
+	// older config up to date: the service starts it with --config, which honours
+	// listeners that --local skipped, so an unpinned transparent_proxy_addr would
+	// start binding every interface precisely now.
+	if _, mErr := migrateConfig(p.configFile, stdout); mErr != nil {
+		fmt.Fprintf(stderr, "abctl: could not update %s (%v); continuing with it as-is\n",
+			p.configFile, mErr)
 	}
 
 	if adopt > 0 {
@@ -276,4 +289,35 @@ func serviceStatus(p servicePaths, stdout io.Writer) int {
 		fmt.Fprintf(stdout, "    %s\n", line)
 	}
 	return 1
+}
+
+// serviceControl is the whole reason users never need launchctl or systemctl: a
+// plain kill against a supervised process is undone in seconds, which reads as the
+// process refusing to die.
+func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int {
+	if !serviceInstalled(p) {
+		fmt.Fprintf(stderr, "abctl: no service installed (%s). Install it with:\n"+
+			"  abctl service install\n", p.unitFile)
+		return 1
+	}
+	if err := controlService(action, p); err != nil {
+		fmt.Fprintf(stderr, "abctl: %v\n", err)
+		return 1
+	}
+	switch action {
+	case "stop":
+		fmt.Fprintln(stdout, "Stopped. Claude Code will fail until it is running again:")
+		fmt.Fprintln(stdout, "  abctl service start")
+		return 0
+	default:
+		if p.healthURL != "" && !waitHealthy(p.healthURL, serviceReadyTimeout) {
+			fmt.Fprintf(stderr, "abctl: %sed, but nothing answered %s. Last log lines:\n", action, p.healthURL)
+			for _, line := range lastLines(p.logFile, 5) {
+				fmt.Fprintf(stderr, "    %s\n", line)
+			}
+			return 1
+		}
+		fmt.Fprintf(stdout, "%sed.\n", strings.ToUpper(action[:1])+action[1:])
+		return 0
+	}
 }
