@@ -538,11 +538,39 @@ if [ -n "${WIRE_CLAUDE_CODE:-}" ]; then
 	set -e
 	case "${cc_status}" in
 		0)
+			# Claude Code now depends on this proxy being up, and nothing keeps it up:
+			# nohup survives neither a crash nor a logout. Offer supervision at the
+			# moment the dependency is created, not in a doc nobody rereads.
+			info ""
+			set +e
+			"${BIN_DIR}/abctl" service install
+			svc_status=$?
+			set -e
+			case "${svc_status}" in
+				0) ;; # supervised; it is already running under the supervisor
+				3)
+					info ""
+					info "  Not supervised. Cortex stops when it crashes or you log out, and"
+					info "  Claude Code stops with it. To set it up later:"
+					info "    \"${abctl_cmd}\" service install"
+					info ""
+					;;
+				*)
+					warn "could not install the service (exit ${svc_status}); Cortex is running"
+					warn "but will not come back after a crash or a logout."
+					;;
+			esac
 			info ""
 			info "  Run Claude Code:   claude"
 			info "  Watch traffic:     \"${abctl_cmd}\""
 			info "  Undo:              \"${abctl_cmd}\" claude-code disable"
-			info "  Stop Cortex:       pkill -f authbridge-proxy"
+			if [ "${svc_status}" = "0" ]; then
+				# Under a supervisor, pkill gets the process restarted immediately —
+				# baffling unless the right command is the one printed.
+				info "  Stop Cortex:       \"${abctl_cmd}\" service uninstall"
+			else
+				info "  Stop Cortex:       pkill -f authbridge-proxy"
+			fi
 			info ""
 			exit 0
 			;;

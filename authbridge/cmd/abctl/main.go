@@ -35,8 +35,10 @@ func main() {
 			os.Exit(runTools(os.Args[2:], os.Stdout, os.Stderr))
 		case "claude-code":
 			os.Exit(runClaudeCode(os.Args[2:], os.Stdout, os.Stderr))
+		case "service":
+			os.Exit(runService(os.Args[2:], os.Stdout, os.Stderr))
 		default:
-			fmt.Fprintf(os.Stderr, "abctl: unknown subcommand %q (known: tools, claude-code)\n", os.Args[1])
+			fmt.Fprintf(os.Stderr, "abctl: unknown subcommand %q (known: tools, claude-code, service)\n", os.Args[1])
 			os.Exit(2)
 		}
 	}
