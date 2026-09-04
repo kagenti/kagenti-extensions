@@ -68,6 +68,7 @@ var paneKeys = map[paneID]keyGroup{
 			{"↑↓ / jk", "navigate"},
 			{"↵ / → / l", "drill into session"},
 			{"tab", "switch to pipeline"},
+			{"u", "usage charts (all sessions)"},
 			{"/", "filter"},
 			{"esc", "back to pods picker"},
 		},
@@ -79,6 +80,7 @@ var paneKeys = map[paneID]keyGroup{
 			{"↵ / → / l", "event detail"},
 			{"/", "filter"},
 			{"s", "toggle passthru/skip rows"},
+			{"u", "usage charts (this session)"},
 			{"esc / ← / h", "back to sessions"},
 		},
 	},
@@ -87,6 +89,7 @@ var paneKeys = map[paneID]keyGroup{
 		bindings: []keyBinding{
 			{"↑↓", "scroll"},
 			{"y", "yank event JSON to /tmp"},
+			{"u", "usage charts (this session)"},
 			{"esc / ← / h", "back to events"},
 		},
 	},
@@ -107,6 +110,16 @@ var paneKeys = map[paneID]keyGroup{
 			{"esc / ← / h", "back"},
 		},
 	},
+	paneUsage: {
+		title: "USAGE (this pane)",
+		bindings: []keyBinding{
+			{"t", "cycle metric (tokens/requests/errors)"},
+			{"w", "cycle window (10m/1h/6h)"},
+			{"s", "toggle session / all sessions"},
+			{"r", "refresh now"},
+			{"esc", "back"},
+		},
+	},
 	paneCatalog: {
 		title: "PLUGIN CATALOG (this pane)",
 		bindings: []keyBinding{
@@ -122,7 +135,7 @@ var paneKeys = map[paneID]keyGroup{
 // the overlay is stable across openings (Go map iteration is random).
 var otherPaneOrder = []paneID{
 	paneNamespaces, panePods, paneSessions, paneEvents,
-	paneDetail, panePipeline, panePluginDetail, paneCatalog,
+	paneDetail, paneUsage, panePipeline, panePluginDetail, paneCatalog,
 }
 
 // helpKeyColWidth is the fixed width of the key column so descriptions

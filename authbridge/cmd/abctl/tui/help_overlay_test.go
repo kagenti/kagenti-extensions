@@ -238,6 +238,46 @@ func TestPaneKeysCoverAllPanes(t *testing.T) {
 		t.Errorf("paneKeys has %d entries, otherPaneOrder %d — keep them in sync",
 			len(paneKeys), len(otherPaneOrder))
 	}
+
+	// Both lists agreeing is not enough: a new pane absent from BOTH satisfies
+	// the checks above while being undocumented everywhere. paneUsage shipped
+	// exactly that way — reachable with `u`, named in no footer and no overlay.
+	// Enumerate against the real pane range so a new paneID has to be
+	// documented or fail here.
+	for p := paneNamespaces; p <= lastPaneID; p++ {
+		if _, ok := paneKeys[p]; !ok {
+			t.Errorf("pane %v has no paneKeys entry — it would be undiscoverable in the [?] overlay", p)
+		}
+	}
+}
+
+// Every pane must name its keys in the footer, and any pane reachable by a
+// binding from elsewhere must have that binding advertised where it is pressed.
+// A key nobody can discover is a key nobody uses.
+func TestFooterHintsMentionUsageKey(t *testing.T) {
+	m := &model{}
+	for _, tc := range []struct {
+		pane paneID
+		want string
+	}{
+		{paneSessions, "[u] usage"},
+		{paneEvents, "[u] usage"},
+		{paneDetail, "[u] usage"},
+	} {
+		m.pane = tc.pane
+		if got := m.helpView(); !strings.Contains(got, tc.want) {
+			t.Errorf("pane %v footer omits %q:\n  %s", tc.pane, tc.want, got)
+		}
+	}
+
+	// The usage pane's own footer must not fall through to the bare default.
+	m.pane = paneUsage
+	got := m.helpView()
+	for _, want := range []string{"[t] metric", "[w] window", "[r] refresh"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("usage footer omits %q:\n  %s", want, got)
+		}
+	}
 }
 
 // The overlay must stay inside the terminal, and must never push the

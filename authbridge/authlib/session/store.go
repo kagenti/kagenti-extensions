@@ -27,7 +27,22 @@ type entry struct {
 	UpdatedAt time.Time
 }
 
-const maxSessionIDLen = 256
+// MaxSessionIDLen is the longest session ID the store keeps intact; longer ids
+// are truncated on Append. Exported so callers that validate an id before
+// reaching the store — the session API's query parameters, for one — bound it at
+// the same length instead of duplicating the number.
+const MaxSessionIDLen = 256
+
+// Recorder receives every event the store appends, for side-channel
+// aggregation. Declared here as a narrow interface rather than importing the
+// usage package so the dependency points one way: usage knows about events,
+// the store knows nothing about usage.
+//
+// Implementations are called while the store holds its write lock, so they must
+// not block or call back into the store.
+type Recorder interface {
+	Record(sessionID string, e *pipeline.SessionEvent)
+}
 
 // Store is an in-memory, per-pod session store. It is safe for concurrent use.
 type Store struct {
@@ -42,6 +57,10 @@ type Store struct {
 
 	// subscribers is the fan-out list for Subscribe(). Protected by mu.
 	subscribers []*subscriber
+
+	// recorders are notified of every appended event. Registered at setup via
+	// AddRecorder, before the store serves traffic.
+	recorders []Recorder
 }
 
 // subscriberChanBuf caps each subscriber's channel depth. 64 absorbs short
@@ -162,8 +181,8 @@ func (s *Store) backgroundCleanup() {
 // doesn't exist. Updates activeID to this session. Evicts the oldest event
 // if the session exceeds maxEvents.
 func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
-	if len(sessionID) > maxSessionIDLen {
-		sessionID = sessionID[:maxSessionIDLen]
+	if len(sessionID) > MaxSessionIDLen {
+		sessionID = sessionID[:MaxSessionIDLen]
 	}
 
 	s.mu.Lock()
@@ -191,6 +210,14 @@ func (s *Store) Append(sessionID string, event pipeline.SessionEvent) {
 
 	logAppended(sessionID, &event)
 	s.publishLocked(event)
+
+	// Side-channel aggregation (e.g. /v1/usage). Runs under the write lock, so
+	// a Recorder must be cheap and must not re-enter the store. Unlike
+	// subscribers this cannot drop: a dropped event silently skews a cumulative
+	// counter, where a dropped stream frame only costs one client one row.
+	for _, r := range s.recorders {
+		r.Record(sessionID, &event)
+	}
 
 	if s.maxEvents > 0 && len(sess.Events) > s.maxEvents {
 		sess.Events = trimEventsPinIntent(sess.Events, s.maxEvents)
@@ -271,6 +298,14 @@ func trimEventsPinIntent(events []pipeline.SessionEvent, maxEvents int) []pipeli
 	tailStart := len(events) - (maxEvents - 1)
 	out = append(out, events[tailStart:]...)
 	return out
+}
+
+// AddRecorder registers a Recorder. Call before the store serves traffic; it is
+// not safe to call concurrently with Append.
+func (s *Store) AddRecorder(r Recorder) {
+	if r != nil {
+		s.recorders = append(s.recorders, r)
+	}
 }
 
 // View returns a read-only snapshot of the session's events.
@@ -382,11 +417,11 @@ func (s *Store) Rekey(oldID, newID string) {
 	if oldID == newID || oldID == "" || newID == "" {
 		return
 	}
-	if len(newID) > maxSessionIDLen {
+	if len(newID) > MaxSessionIDLen {
 		// Two long IDs sharing a prefix would collide on the same truncated key,
 		// silently turning the second Rekey into a no-op. Log so that's diagnosable.
-		slog.Warn("session: newID truncated for rekey", "origLen", len(newID), "maxLen", maxSessionIDLen)
-		newID = newID[:maxSessionIDLen]
+		slog.Warn("session: newID truncated for rekey", "origLen", len(newID), "maxLen", MaxSessionIDLen)
+		newID = newID[:MaxSessionIDLen]
 	}
 
 	s.mu.Lock()
@@ -522,4 +557,3 @@ func logAppended(sessionID string, e *pipeline.SessionEvent) {
 	}
 	slog.Debug("session: event appended", attrs...)
 }
-

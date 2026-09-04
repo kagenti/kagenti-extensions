@@ -42,6 +42,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 	authtls "github.com/rossoctl/cortex/authbridge/authlib/tls"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
@@ -301,6 +302,7 @@ func main() {
 	}
 
 	var sessions *session.Store
+	var usageAgg *usage.Aggregator
 	if cfg.Session.SessionEnabled() {
 		ttl := 30 * time.Minute
 		if cfg.Session.TTL != "" {
@@ -319,6 +321,24 @@ func main() {
 			maxSessions = cfg.Session.MaxSessions
 		}
 		sessions = session.New(ttl, maxEvents, maxSessions)
+
+		// Usage aggregation feeds GET /v1/usage. Registered as a store Recorder
+		// so it sees every appended event, and deliberately independent of the
+		// event store's own retention: session.max_events trims the per-session
+		// event list, but a bucket counter must keep counting after the events
+		// it counted have aged out, or a chart would appear to lose history an
+		// operator could still see a minute ago.
+		//
+		// No Pricer is passed, so cost fields stay absent and the response
+		// reports priced:false — see the TODO on usage.Pricer for where real
+		// rates would come from.
+		// Same session cap as the store, so the two agree on how many sessions
+		// are worth remembering. The aggregator reclaims its coldest ring at the
+		// cap rather than refusing new sessions, which matters because the store
+		// evicts and expires sessions without telling it.
+		usageAgg = usage.New(usage.WithMaxSessions(maxSessions))
+		sessions.AddRecorder(usageAgg)
+
 		slog.Info("session tracking enabled", "ttl", ttl, "maxEvents", maxEvents, "maxSessions", maxSessions)
 	} else {
 		slog.Info("session tracking disabled")
@@ -516,6 +536,7 @@ func main() {
 			sessions,
 			sessionapi.WithPipelines(inboundH, outboundH),
 			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
+			sessionapi.WithUsage(usageAgg),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",

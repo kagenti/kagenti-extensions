@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -37,7 +38,14 @@ const (
 	panePipeline
 	panePluginDetail
 	paneCatalog
+	paneUsage
 )
+
+// lastPaneID is the highest valid paneID. Kept adjacent to the iota block so
+// adding a pane means updating one line here, and TestPaneKeysCoverAllPanes then
+// fails until that pane is documented in paneKeys — which is how paneUsage
+// shipped reachable by `u` but named in no footer and no help overlay.
+const lastPaneID = paneUsage
 
 // paneNone is the explicit "no previous pane recorded" sentinel for
 // model.previousPane. Using paneNamespaces (the zero value) as a
@@ -218,7 +226,9 @@ type model struct {
 	connState connStateInfo
 
 	// UI state.
-	pane         paneID
+	pane paneID
+	// usage is the Usage pane's view state (metric, window, scope, snapshot).
+	usage        usageState
 	selectedSess string
 	filter       string
 	filtering    bool
@@ -401,6 +411,15 @@ func (m *model) backToPodsPane() {
 	m.streamCh = nil
 	m.sessions = nil
 	m.events = make(map[string][]pipeline.SessionEvent)
+	// A different pod is a different aggregator: keep the view options the
+	// operator chose, drop the data they described.
+	m.usage.snap = nil
+	m.usage.err = nil
+	m.usage.lastFetch = time.Time{}
+	// Invalidate anything in flight against the old pod: its reply must not land
+	// as if it described the new one.
+	m.usage.reqSeq++
+	m.usage.tickGen++
 	m.eventCt = 0
 	m.lastCt = 0
 	m.rate = 0
@@ -601,6 +620,38 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.rebuildEventsTable()
 		}
 		return m, nil
+
+	case usageLoadedMsg:
+		// Discard anything but the newest request's reply. Two rapid `w` presses
+		// leave two requests in flight; without this an out-of-order response
+		// repaints a stale window under the current heading. Comparing an id
+		// rather than the view fields means a future option cannot silently
+		// escape the check.
+		if msg.req != m.usage.reqSeq {
+			return m, nil
+		}
+		m.usage.loading = false
+		if msg.err != nil {
+			if errors.Is(msg.err, apiclient.ErrNotFound) {
+				m.usage.err = errUsageUnsupported
+			} else {
+				m.usage.err = msg.err
+			}
+			return m, nil
+		}
+		m.usage.err = nil
+		m.usage.snap = msg.snap
+		m.usage.lastFetch = time.Now()
+		return m, nil
+
+	case usageTickMsg:
+		// Stop when the pane loses focus, and drop ticks from a previous visit:
+		// a quick exit and re-entry would otherwise leave two chains alive, each
+		// rescheduling its own successor.
+		if m.pane != paneUsage || msg.gen != m.usage.tickGen {
+			return m, nil
+		}
+		return m, tea.Batch(m.fetchUsage(), usageTick(m.usage.tickGen))
 
 	case refreshTickMsg:
 		// In picker mode, skip the fetch — m.client may be nil after a
@@ -1118,6 +1169,13 @@ func (m *model) paneView() string {
 		}
 		title = fmt.Sprintf("abctl · pipeline · %s", name)
 		body = m.detailVp.View()
+	case paneUsage:
+		scope := "all"
+		if m.usage.session != "" {
+			scope = m.usage.session
+		}
+		title = fmt.Sprintf("abctl · %s · usage · %s", m.endpoint, scope)
+		body = m.renderUsage(m.width, m.bodyHeight)
 	case paneCatalog:
 		title = fmt.Sprintf("abctl · %s · catalog", m.endpoint)
 		if m.catalog == nil {
