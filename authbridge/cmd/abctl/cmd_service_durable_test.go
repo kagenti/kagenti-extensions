@@ -29,7 +29,11 @@ func TestStopIsDurable(t *testing.T) {
 	})
 
 	t.Run("and start clears that disable, or nothing could start again", func(t *testing.T) {
-		if !strings.Contains(body, `"launchctl", "enable", "gui/"+uid+"/"+launchdLabel`) {
+		// Matched loosely on purpose. The precise form was
+		// `"launchctl", "enable", "gui/"+uid+"/"+launchdLabel`, and a later refactor to a
+		// `target` variable broke this assertion while the behaviour was unchanged —
+		// which is the standing cost of reading source instead of driving the code.
+		if !strings.Contains(body, `"launchctl", "enable"`) {
 			t.Error("loadService does not enable; a stop would make every later start fail")
 		}
 	})

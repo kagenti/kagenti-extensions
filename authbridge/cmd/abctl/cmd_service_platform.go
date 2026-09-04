@@ -146,16 +146,21 @@ WantedBy=default.target
 `
 }
 
-func loadService(p servicePaths) error {
+func loadService(p servicePaths, progress io.Writer) error {
 	if runtime.GOOS == "darwin" {
 		uid := strconv.Itoa(os.Getuid())
+		target := "gui/" + uid + "/" + launchdLabel
 		// Clear any disable left by `service stop`: a disabled label cannot be
 		// bootstrapped, so without this a stop would make every later start and
 		// install fail for a reason nothing on screen explains.
-		_ = exec.Command("launchctl", "enable", "gui/"+uid+"/"+launchdLabel).Run() //nolint:errcheck
-		// bootout first so a reinstall replaces cleanly; ignore its error, the
-		// service may not be loaded at all.
-		_ = exec.Command("launchctl", "bootout", "gui/"+uid+"/"+launchdLabel).Run() //nolint:errcheck
+		_ = exec.Command("launchctl", "enable", target).Run() //nolint:errcheck
+
+		// bootout, keeping its output: a REFUSED bootout and a SLOW one both leave the
+		// label in the domain, and telling someone to "try again" is only right for the
+		// slow one. Its error alone is not enough to distinguish them — it also fails
+		// when nothing was loaded, which is the common case — so the output is kept and
+		// only consulted if the label is still there afterwards.
+		bootoutOut, bootoutErr := exec.Command("launchctl", "bootout", target).CombinedOutput()
 
 		// WAIT for it to actually leave the domain. `launchctl bootout` returns before
 		// teardown finishes, and bootstrapping into a domain that still holds the label
@@ -167,18 +172,21 @@ func loadService(p servicePaths) error {
 		// forwards to the proxy and waits out its 15s graceful shutdown before
 		// insisting. A trivial job dies fast enough to hide this, which is why every
 		// test that started from nothing or ran uninstall first passed.
-		if !waitBootedOut("gui/"+uid+"/"+launchdLabel, serviceBootoutTimeout) {
+		if !waitBootedOutf(target, serviceBootoutTimeout, progress) {
+			if bootoutErr != nil && !strings.Contains(string(bootoutOut), "No such process") {
+				return fmt.Errorf("could not remove the previous %s: %v: %s",
+					supervisorName(), bootoutErr, strings.TrimSpace(string(bootoutOut)))
+			}
 			return fmt.Errorf("the previous %s is still shutting down after %s; "+
 				"run `abctl service status`, then try again", supervisorName(), serviceBootoutTimeout)
 		}
 
-		// Retried on EIO: the wait above closes the window, and this closes the race
-		// inside it. Bootstrap is idempotent from our side — the label is not in the
-		// domain, or we would not be here.
-		var out []byte
-		var err error
+		// Retried on EIO, re-checking the domain each time. Without the re-check the
+		// claim that bootstrap is idempotent here would hold for the first attempt
+		// only: an attempt that registers the label and THEN fails leaves the next one
+		// returning "File exists" rather than EIO.
 		for attempt := 1; ; attempt++ {
-			out, err = exec.Command("launchctl", "bootstrap", "gui/"+uid, p.unitFile).CombinedOutput()
+			out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid, p.unitFile).CombinedOutput()
 			if err == nil {
 				break
 			}
@@ -186,6 +194,10 @@ func loadService(p servicePaths) error {
 				return fmt.Errorf("launchctl bootstrap failed: %v: %s", err, strings.TrimSpace(string(out)))
 			}
 			time.Sleep(time.Duration(attempt) * time.Second)
+			if !waitBootedOutf(target, serviceBootoutTimeout, progress) {
+				return fmt.Errorf("launchctl bootstrap failed and the label is still "+
+					"registered: %v: %s", err, strings.TrimSpace(string(out)))
+			}
 		}
 		// bootstrap REGISTERS the job; it does not reliably start it. Observed on a
 		// real install: the agent loaded, `state = not running`, nothing served, and
@@ -366,7 +378,7 @@ func dialableAddr(addr string) string {
 }
 
 // controlService maps stop/start/restart onto the platform's supervisor.
-func controlService(action string, p servicePaths) error {
+func controlService(action string, p servicePaths, progress io.Writer) error {
 	if runtime.GOOS == "darwin" {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
 		switch action {
@@ -389,10 +401,10 @@ func controlService(action string, p servicePaths) error {
 			}
 			return nil
 		case "start":
-			return loadService(p) // loadService clears the disable
+			return loadService(p, progress) // loadService clears the disable
 		default: // restart
 			_ = exec.Command("launchctl", "bootout", target).Run() //nolint:errcheck
-			return loadService(p)
+			return loadService(p, progress)
 		}
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
@@ -559,12 +571,43 @@ func unitWriterVersion(unitFile string) string {
 // and a bootstrap issued in that window fails with EIO. Polling `launchctl print` is
 // the only signal available — a non-zero exit means the label is no longer there.
 func waitBootedOut(target string, d time.Duration) bool {
-	deadline := time.Now().Add(d)
+	return waitBootedOutf(target, d, nil)
+}
+
+// waitBootedOutf is waitBootedOut with a progress line.
+//
+// Up to 30s of silence right after "Setting up the launchd user agent..." is
+// indistinguishable from a hang, and it lands on exactly the people who just hit the
+// EIO failure this wait exists to prevent. One line after the first second, so a fast
+// teardown — the common case — stays silent.
+func waitBootedOutf(target string, d time.Duration, progress io.Writer) bool {
+	return waitGone(d, progress, func() bool {
+		// A non-zero exit from `launchctl print` means the label is no longer there.
+		return exec.Command("launchctl", "print", target).Run() != nil
+	})
+}
+
+// waitGone polls gone() until it reports true, or d elapses.
+//
+// Split from waitBootedOutf so the progress behaviour is testable without launchd. The
+// first attempt at testing it could only skip — there is no way to hold a real launchd
+// label in a half-torn-down state on demand — and a test that skips is how the bug this
+// wait exists to prevent got shipped in the first place.
+func waitGone(d time.Duration, progress io.Writer, gone func() bool) bool {
+	announced := false
+	start := time.Now()
 	for {
-		if err := exec.Command("launchctl", "print", target).Run(); err != nil {
-			return true // no longer in the domain
+		if gone() {
+			if announced && progress != nil {
+				fmt.Fprintln(progress, "  ...stopped.")
+			}
+			return true
 		}
-		if time.Now().After(deadline) {
+		if !announced && progress != nil && time.Since(start) > time.Second {
+			fmt.Fprintf(progress, "  Waiting for the previous Cortex to stop (up to %s)...\n", d)
+			announced = true
+		}
+		if time.Since(start) > d {
 			return false
 		}
 		time.Sleep(250 * time.Millisecond)
