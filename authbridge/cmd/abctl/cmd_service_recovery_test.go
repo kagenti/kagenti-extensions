@@ -24,7 +24,7 @@ func TestResolveServicePaths_SurvivesAMissingBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := resolveServicePaths(cfg, "")
+	p, err := resolveServicePaths(cfg, "", "")
 	if err != nil {
 		t.Fatalf("resolveServicePaths failed with no binary present: %v\n"+
 			"uninstall and status must still work in that state", err)
@@ -55,7 +55,7 @@ func TestServiceInstall_RefusesABrokenConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p, err := resolveServicePaths(cfg, filepath.Join(home, "unit"))
+	p, err := resolveServicePaths(cfg, filepath.Join(home, "unit"), "")
 	if err != nil {
 		t.Fatal(err)
 	}

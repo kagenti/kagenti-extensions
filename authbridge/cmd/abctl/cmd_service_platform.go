@@ -393,18 +393,34 @@ func controlService(action string, p servicePaths) error {
 func supervisorRunning(p servicePaths) (bool, string) {
 	if runtime.GOOS == "darwin" {
 		target := "gui/" + strconv.Itoa(os.Getuid()) + "/" + launchdLabel
-		out, err := exec.Command("launchctl", "print", target).CombinedOutput()
-		if err != nil {
-			return false, "launchctl print: job not found"
-		}
-		for _, line := range strings.Split(string(out), "\n") {
-			line = strings.TrimSpace(line)
-			if strings.HasPrefix(line, "state = ") {
-				st := strings.TrimPrefix(line, "state = ")
-				return st == "running", "state = " + st
+		// Poll rather than sample once. Immediately after a kickstart the job passes
+		// through transient states — "xpcproxy" while launchd's exec helper is still
+		// in the middle of the exec — and reading one of those as a verdict failed an
+		// install whose service was merely still starting.
+		deadline := time.Now().Add(serviceReadyTimeout)
+		last := "no state reported"
+		for {
+			out, err := exec.Command("launchctl", "print", target).CombinedOutput()
+			if err != nil {
+				last = "launchctl print: job not found"
+			} else {
+				for _, line := range strings.Split(string(out), "\n") {
+					line = strings.TrimSpace(line)
+					if strings.HasPrefix(line, "state = ") {
+						st := strings.TrimPrefix(line, "state = ")
+						if st == "running" {
+							return true, "state = running"
+						}
+						last = "state = " + st
+						break
+					}
+				}
 			}
+			if time.Now().After(deadline) {
+				return false, last
+			}
+			time.Sleep(300 * time.Millisecond)
 		}
-		return false, "launchctl print reported no state"
 	}
 	if _, err := exec.LookPath("systemctl"); err != nil {
 		return true, "" // no systemd to ask; do not block on a check we cannot make

@@ -97,12 +97,13 @@ func runService(args []string, stdout, stderr io.Writer) int {
 	yes := fs.Bool("yes", false, "do not prompt for confirmation")
 	cortexCfg := fs.String("config", "", "Cortex config file")
 	unitOverride := fs.String("unit-file", "", "unit file path (testing)")
+	proxyPath := fs.String("proxy", "", "authbridge-proxy binary to supervise (default: the one installed beside abctl)")
 	printUnit := fs.Bool("print-unit", false, "print the unit file and exit, installing nothing")
 	if err := fs.Parse(args[1:]); err != nil {
 		return 2
 	}
 
-	p, err := resolveServicePaths(*cortexCfg, *unitOverride)
+	p, err := resolveServicePaths(*cortexCfg, *unitOverride, *proxyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
@@ -133,7 +134,7 @@ func runService(args []string, stdout, stderr io.Writer) int {
 
 // resolveServicePaths refuses early on an unsupported platform rather than
 // writing a unit file that will never be honoured.
-func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
+func resolveServicePaths(cortexCfg, unitOverride, proxyOverride string) (servicePaths, error) {
 	var p servicePaths
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -148,9 +149,28 @@ func resolveServicePaths(cortexCfg, unitOverride string) (servicePaths, error) {
 	p.pidFile = filepath.Join(filepath.Dir(cortexCfg), "proxy.pid")
 
 	// An absolute binary path: a supervisor has no shell PATH to search.
-	bin, err := exec.LookPath("authbridge-proxy")
-	if err != nil {
-		bin = filepath.Join(home, ".local", "bin", "authbridge-proxy")
+	//
+	// Resolution order matters. PATH first was wrong: an end-to-end run found the
+	// plist pointing at an OLDER authbridge-proxy that happened to sit earlier on
+	// PATH, which then rejected --supervise and exited, so the service never came up.
+	// abctl and the proxy are installed together, so the sibling of the running abctl
+	// is the one that matches it; PATH is only a fallback. An explicit --proxy wins
+	// over both, which is what install.sh passes so the service uses the binary it
+	// just installed.
+	bin := proxyOverride
+	if bin == "" {
+		if self, serr := os.Executable(); serr == nil {
+			if sib := filepath.Join(filepath.Dir(self), "authbridge-proxy"); fileExists(sib) {
+				bin = sib
+			}
+		}
+	}
+	if bin == "" {
+		if found, lerr := exec.LookPath("authbridge-proxy"); lerr == nil {
+			bin = found
+		} else {
+			bin = filepath.Join(home, ".local", "bin", "authbridge-proxy")
+		}
 	}
 	if abs, aerr := filepath.Abs(bin); aerr == nil {
 		bin = abs
@@ -378,7 +398,13 @@ func serviceUninstall(p servicePaths, yes bool, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "abctl: removing %s: %v\n", p.unitFile, err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nRemoved. Start it yourself with:\n  %s --config %s &\n", p.binary, p.configFile)
+	// Not "start it yourself with a backgrounded proxy": running unsupervised is no
+	// longer a mode this tool offers, and on macOS a hand-started proxy gets no crash
+	// recovery at all. Point back at the supported path.
+	fmt.Fprintf(stdout, "\nRemoved. Cortex is stopped; Claude Code will fail until it runs again.\n"+
+		"  Set it up again with:  abctl service install\n"+
+		"  Or unwire Claude Code: abctl claude-code disable\n"+
+		"  The config and CA are untouched in %s\n", filepath.Dir(p.configFile))
 	return 0
 }
 
@@ -434,6 +460,10 @@ func serviceControl(action string, p servicePaths, stdout, stderr io.Writer) int
 	}
 	if action == "start" || action == "restart" {
 		rotateLog(p.logFile, maxLogBytes)
+		// tightenLog must follow every rotation, not just the install. Rotation renames
+		// the old file away, so the supervisor creates a fresh one under its own
+		// umask — measured at 0644, which silently undid the 0600 this sets.
+		tightenLog(p.logFile, stderr)
 	}
 	if err := controlService(action, p); err != nil {
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
@@ -527,4 +557,9 @@ func isLoopbackHost(host string) bool {
 		return ip.IsLoopback()
 	}
 	return host == "localhost"
+}
+
+func fileExists(p string) bool {
+	fi, err := os.Stat(p)
+	return err == nil && !fi.IsDir()
 }

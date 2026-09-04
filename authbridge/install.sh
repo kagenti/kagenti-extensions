@@ -471,7 +471,11 @@ info ""
 info "Setting Cortex up as a ${SUPERVISOR_NAME} so it restarts on failure and"
 info "comes back at login..."
 set +e
-"${BIN_DIR}/abctl" service install --yes
+# --proxy: use the binary this script just installed, not whatever happens to be
+# earlier on PATH. An end-to-end run found the unit pointing at an older
+# authbridge-proxy from another directory, which rejected --supervise and exited, so
+# the service never came up.
+"${BIN_DIR}/abctl" service install --yes --proxy "${BIN_DIR}/authbridge-proxy"
 svc_status=$?
 set -e
 if [ "${svc_status}" != "0" ]; then
