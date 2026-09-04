@@ -271,12 +271,13 @@ func claudeCodeEnable2(settingsPath, cortexCfgPath, statePath string, yes bool, 
 		return 0
 	}
 
-	fmt.Fprintf(stdout, "This will add to the \"env\" block of %s:\n%s\n\n",
+	// Three short lines, not three paragraphs. This is a confirmation prompt, so it
+	// needs to say what changes and that the file is backed up; the rest (how to undo
+	// it, that `claude` needs no env vars afterwards) belongs in the closing summary,
+	// where it was also being printed.
+	fmt.Fprintf(stdout, "Adds to the \"env\" block of %s:\n%s\n",
 		settingsPath, strings.Join(changes, "\n"))
-	fmt.Fprintf(stdout, "Everything else in the file is left alone, and the current version is\n"+
-		"copied to %s.bak first. Afterwards, run Claude Code as plain `claude`.\n\n", settingsPath)
-	fmt.Fprintf(stdout, "While enabled, Claude Code needs Cortex running. Undo with:\n"+
-		"  abctl claude-code disable\n\n")
+	fmt.Fprintf(stdout, "Nothing else in the file changes; a copy is kept as %s.bak\n\n", settingsPath)
 	if !yes && !confirm(stdout) {
 		fmt.Fprintln(stdout, "Not changed.")
 		return exitDeclined
@@ -307,7 +308,7 @@ func claudeCodeEnable2(settingsPath, cortexCfgPath, statePath string, yes bool, 
 		fmt.Fprintf(stderr, "abctl: %v\n", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nEnabled. Run `claude` — no environment variables needed.\n")
+	fmt.Fprintln(stdout, "Enabled — run `claude` as usual.")
 	return 0
 }
 

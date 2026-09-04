@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,50 @@ func TestServiceInstall_RefusesABrokenConfig(t *testing.T) {
 	}
 	if _, serr := os.Stat(p.unitFile); serr == nil {
 		t.Error("a unit was written for a config that cannot load")
+	}
+}
+
+// TestReportInstallSuccess covers both outcomes through the single function that
+// prints them.
+//
+// The previous version of this test called the note helper directly, so it asserted
+// the helper's CONTENT and not its placement: deleting the call from the healthy
+// branch — the exact bug this fixes — left every package green. Verified by mutation.
+// The structural fix was to collapse the two call sites into one, so the divergence
+// cannot be expressed; this test then pins what that one path prints.
+func TestReportInstallSuccess(t *testing.T) {
+	for _, healthy := range []bool{true, false} {
+		var out bytes.Buffer
+		reportInstallSuccess(healthy, &out)
+		got := out.String()
+
+		if !strings.Contains(got, "Running as a") {
+			t.Errorf("healthy=%v: no outcome line:\n%s", healthy, got)
+		}
+		if healthy && !strings.Contains(got, "healthy") {
+			t.Errorf("healthy=true does not say so:\n%s", got)
+		}
+		if !healthy && strings.Contains(got, "healthy") {
+			t.Errorf("healthy=false claims healthy:\n%s", got)
+		}
+		// The note has to be on BOTH outcomes on darwin — that is the regression.
+		if runtime.GOOS == "darwin" && !strings.Contains(got, crashRecoveryNote) {
+			t.Errorf("healthy=%v is missing the crash-recovery note:\n%s", healthy, got)
+		}
+		if runtime.GOOS != "darwin" && strings.Contains(got, "supervisor") {
+			t.Errorf("non-darwin should not mention a supervisor:\n%s", got)
+		}
+	}
+}
+
+// TestCrashRecoveryNote checks the message itself, on every platform rather than only
+// on darwin: the const exists so these assertions are not skipped on CI.
+func TestCrashRecoveryNote(t *testing.T) {
+	if !strings.Contains(crashRecoveryNote, "supervisor") {
+		t.Error("note does not name the supervisor; two authbridge-proxy processes " +
+			"with no explanation is the first thing people ask about")
+	}
+	if strings.Contains(strings.TrimSpace(crashRecoveryNote), "\n") {
+		t.Errorf("note is more than one line; keep it short:\n%s", crashRecoveryNote)
 	}
 }

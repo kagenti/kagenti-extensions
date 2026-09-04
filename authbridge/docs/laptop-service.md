@@ -13,9 +13,22 @@ abctl service install     # set it up in the first place (the installer does thi
 abctl service uninstall   # stop it and remove the service
 ```
 
-**Never use `kill` or `pkill`.** The proxy is supervised: killing it gets it restarted
-within a couple of seconds, which looks like a process refusing to die. `abctl service
-stop` is the stop that works.
+**Never use `kill` or `pkill` to stop it.** The proxy is supervised, so killing it gets
+it restarted within a couple of seconds, which looks like a process refusing to die.
+`abctl service stop` is the stop that works.
+
+That restart is the point, though, and it is worth seeing once:
+
+```sh
+kill -9 $(pgrep -f 'authbridge-proxy --config')   # comes back within ~2s
+abctl service status                              # healthy again
+```
+
+On macOS you will see **two** `authbridge-proxy` processes: a supervisor (the one
+launchd starts, holding no ports) and the proxy itself. launchd does not restart user
+agents added mid-session — verified across `KeepAlive`, `StartInterval` and
+`RunAtLoad` — so the supervisor is what makes crash recovery work. On Linux there is
+one process; systemd handles it.
 
 ## Is it working?
 

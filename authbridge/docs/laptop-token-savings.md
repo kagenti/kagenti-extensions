@@ -5,7 +5,7 @@ tokens of JSON schema, billed each time. Cortex strips the definitions you never
 call.
 
 Needs the proxy from the
-[quick start](../../README.md#quick-start--claude-code-on-your-laptop) first. This
+[quick start](../../README.md#quick-start) first. This
 step is opt-in because it rewrites requests.
 
 ## Turn it on

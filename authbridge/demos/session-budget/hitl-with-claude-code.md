@@ -11,7 +11,7 @@ The [README quickstart][qs] `install.sh` binary isn't compiled
 with `include_plugin_sessionbudget`, so this doc builds
 `authbridge-proxy` from source with the tag on.
 
-[qs]: ../../../README.md#quick-start--claude-code-on-your-laptop
+[qs]: ../../../README.md#quick-start
 
 ## Prerequisites
 

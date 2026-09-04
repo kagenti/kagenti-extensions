@@ -328,7 +328,6 @@ if [ -z "$version" ]; then
 			;;
 	esac
 fi
-info "Release: $version"
 
 # --- download + verify ---
 tmp=$(mktemp -d)
@@ -338,12 +337,11 @@ base="https://github.com/${REPO}/releases/download/${version}"
 abctl_tgz="abctl_${version}_${os}_${arch}.tar.gz"
 proxy_tgz="authbridge-proxy_${version}_${os}_${arch}.tar.gz"
 
-info "Downloading binaries for ${os}/${arch}..."
+info "Downloading ${version} for ${os}/${arch}..."
 curl -fsSL "${base}/${abctl_tgz}" -o "${tmp}/${abctl_tgz}" || die "download failed: ${abctl_tgz}"
 curl -fsSL "${base}/${proxy_tgz}" -o "${tmp}/${proxy_tgz}" || die "download failed: ${proxy_tgz}"
 curl -fsSL "${base}/checksums.txt" -o "${tmp}/checksums.txt" || die "download failed: checksums.txt"
 
-info "Verifying checksums..."
 # One grep per archive, not an alternation. An alternation SUCCEEDS on a single
 # match, so a checksums.txt missing one entry — a truncated or partly-generated
 # release build — passed the guard, sha_check verified only the file that was
@@ -377,10 +375,18 @@ done
 lines=$(wc -l < "${tmp}/checksums.filtered" | tr -d '[:space:]')
 [ "${lines}" = "2" ] \
 	|| die "expected 2 checksum entries, got ${lines} — refusing to install"
-( cd "$tmp" && sha_check checksums.filtered ) || die "checksum verification failed"
+# Quiet on success, loud on failure. The per-archive "OK" lines are two lines saying
+# what one line implies — but sending them to /dev/null took the FAILED lines (stdout)
+# and shasum's "computed checksum did NOT match" warning (stderr) with them, so a
+# corrupt download or a tampered release would surface as a bare "checksum verification
+# failed" naming neither archive. That is the one step whose whole job is not to fail
+# open; it should not also fail silently.
+if ! ( cd "$tmp" && sha_check checksums.filtered >"${tmp}/sha.out" 2>&1 ); then
+	cat "${tmp}/sha.out" >&2
+	die "checksum verification failed — do NOT use these binaries"
+fi
 
 # --- extract + install ---
-info "Installing to ${BIN_DIR}..."
 mkdir -p "$BIN_DIR"
 tar -xzf "${tmp}/${abctl_tgz}" -C "$tmp"
 tar -xzf "${tmp}/${proxy_tgz}" -C "$tmp"
@@ -408,7 +414,7 @@ case ":${PATH}:" in
 esac
 
 info ""
-info "Installed abctl and authbridge-proxy (${version}) to ${BIN_DIR}"
+info "Installed abctl and authbridge-proxy to ${BIN_DIR}"
 case ":${PATH}:" in
 	*":${BIN_DIR}:"*) ;;
 	*)
@@ -460,16 +466,21 @@ fi
 # doing the starting, nothing else creates the file, and `abctl service install`
 # refuses to run without it.
 if [ ! -f "${CORTEX_DIR}/config.yaml" ]; then
+	# Executed by explicit path, and REPORTED by the same explicit path. proxy_cmd is
+	# the display form — a bare "authbridge-proxy" when BIN_DIR is on PATH — so naming
+	# it here would hand back a command that resolves through PATH, which is not
+	# necessarily the binary that just failed. That distinction is the whole point of
+	# pinning the path: an older authbridge-proxy earlier on PATH is exactly how the
+	# service came up dead in end-to-end testing.
 	if ! "${BIN_DIR}/authbridge-proxy" --local --write-config; then
 		die "could not write ${CORTEX_DIR}/config.yaml.
   Run this to see why:
-    \"${proxy_cmd}\" --local --write-config"
+    \"${BIN_DIR}/authbridge-proxy\" --local --write-config"
 	fi
 fi
 
 info ""
-info "Setting Cortex up as a ${SUPERVISOR_NAME} so it restarts on failure and"
-info "comes back at login..."
+info "Setting up the ${SUPERVISOR_NAME}..."
 set +e
 # --proxy: use the binary this script just installed, not whatever happens to be
 # earlier on PATH. An end-to-end run found the unit pointing at an older
@@ -495,14 +506,12 @@ fi
 # mutation with no upside. Opting in is one command, and it belongs to the person
 # who knows whether they want it.
 local_cfg="${CORTEX_DIR}/config.yaml"
-if [ -f "${local_cfg}" ]; then
-	info "  Skip the env vars below — configure Claude Code once, then just run \`claude\`:"
+# Only when we are NOT about to do it ourselves: with --claude-code this told the
+# reader to run the exact command that runs two lines later. The prune hint moved to
+# the closing summary, so the middle of the flow carries no side quests.
+if [ -f "${local_cfg}" ] && [ -z "${WIRE_CLAUDE_CODE}" ]; then
+	info "  Point Claude Code at Cortex, then just run \`claude\`:"
 	info "    ${abctl_cmd} claude-code enable"
-	info ""
-	info "  Using Claude Code? Cut its token cost by pruning tools you never call:"
-	info "    \"${abctl_cmd}\" tools scan --write \"${local_cfg}\""
-	info "    (proposes tools absent from your last 30 days of transcripts;"
-	info "     add --all to spare anything you have ever called; hot-reloaded)"
 	info ""
 fi
 # --claude-code: hand off to abctl, which owns the JSON merge (a shell-side edit
@@ -523,10 +532,10 @@ if [ -n "${WIRE_CLAUDE_CODE:-}" ]; then
 			# The service is already installed above — it is how the proxy runs now,
 			# not an option — so there is nothing to offer here.
 			info ""
-			info "  Run Claude Code:   claude"
-			info "  Watch traffic:     \"${abctl_cmd}\""
-			info "  Undo:              \"${abctl_cmd}\" claude-code disable"
-			info "  Stop Cortex:       \"${abctl_cmd}\" service stop"
+			info "  \"${abctl_cmd}\"                         watch traffic"
+			info "  \"${abctl_cmd}\" tools scan              propose unused tools to prune"
+			info "  \"${abctl_cmd}\" service stop            stop Cortex"
+			info "  \"${abctl_cmd}\" claude-code disable     undo"
 			info ""
 			exit 0
 			;;
