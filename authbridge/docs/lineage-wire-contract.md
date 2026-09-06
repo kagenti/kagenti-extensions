@@ -56,10 +56,13 @@ One HTTP exchange through the sidecar produces two OTLP spans.
   (`…-00`) does not suppress the spans — lineage is an audit record, and a caller-chosen flag is
   not an opt-out from being graphed. The forwarded `traceparent` keeps the caller's flags (§3.3: a
   valid one is never modified); only what this producer exports ignores them.
-- A lone request span means one of three things: the sidecar died mid-exchange; a panic while
-  emitting the response span was recovered by the pipeline (a WARN is logged); or the response span
+- A lone request span means one of four things: the sidecar died mid-exchange; a panic while
+  emitting the response span was recovered by the pipeline (a WARN is logged); the response span
   was emitted but lost — the two halves enter a batching exporter an exchange apart, so a response
-  can be lost after its request has flushed. The consumer renders it as in-flight, never as a wrong
+  can be lost after its request has flushed; or the exchange outlived a config hot-reload — old
+  pipelines stop a drain window (default 30 s) after the swap, and a response span emitted into
+  the old, already-shut-down provider is dropped, which is routine for SSE or LLM exchanges
+  longer than the window. The consumer renders it as in-flight, never as a wrong
   pairing. A response span whose `lineage.outcome` is absent derives with `error` NULL (honest
   unknown), never `false`.
 - **Scope of `denied`.** The lineage plugin runs after the gate plugins and the pipeline
@@ -305,7 +308,7 @@ mechanisms named as removed are not to be reintroduced.
   the shared bypass matcher (it was a prefix match): the `/health` default no longer swallows
   `/health-records/...`, and a pattern copied from a sibling plugin means the same thing here.
   Prose: the `lineage.protocol` precedence (`a2a` > `mcp` > `inference`), always the producer's
-  behaviour, is stated in §4.
+  behaviour, is stated in §4, and §2's lone-request-span causes gain config hot-reload.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only
