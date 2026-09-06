@@ -416,12 +416,21 @@ def delete_role_from_service(
     realm role. A still-mapped role cannot be deleted cleanly, so the ordering lives here (the
     #176 client issues a single DELETE and relies on the service to sequence the two admin calls).
     ``delete_realm_role`` takes the role *name*, so resolve the role by id before unmapping.
+
+    Shared-object safety (#178, defense in depth): even though the caller passes a
+    created-manifest, this boundary must not delete a realm role that another subject still
+    holds. After unmapping from THIS service account, re-check the role's membership — any
+    members left are OTHER subjects — and skip the delete when the role is still referenced,
+    leaving the shared object intact (only the unmap took effect).
     """
     try:
         sa_user = admin.get_client_service_account_user(service_id)
         role = admin.get_realm_role_by_id(role_id)
         admin.delete_realm_roles_of_user(sa_user["id"], [role])  # unmap first
-        admin.delete_realm_role(role["name"])  # then delete
+        # Guard: only delete the realm role if no OTHER subject still holds it. The unmap above
+        # already removed this service account, so any remaining members belong to other services.
+        if not admin.get_realm_role_members(role["name"]):
+            admin.delete_realm_role(role["name"])  # then delete
         return JSONResponse(status_code=200, content={})
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
@@ -488,10 +497,19 @@ def delete_scope_from_service(
     Unmap-then-delete: remove the scope from the client's default scopes FIRST, then delete the
     client scope. The ordering lives here (the #176 client issues a single DELETE and relies on
     the service to sequence the two admin calls).
+
+    Shared-object safety (#178, defense in depth): even though the caller passes a
+    created-manifest, this boundary must not delete a client scope another client still exposes.
+    After unmapping from THIS client, rebuild the scope->owners index — any owners left are OTHER
+    clients — and skip the delete when the scope is still referenced, leaving the shared object
+    intact (only the unmap took effect).
     """
     try:
         admin.delete_client_default_client_scope(service_id, scope_id)  # unmap first
-        admin.delete_client_scope(scope_id)  # then delete
+        # Guard: only delete the client scope if no OTHER client still exposes it as a default
+        # scope. The unmap above already removed this client, so any remaining owners are others.
+        if not _build_scope_owner_index(admin).get(scope_id):
+            admin.delete_client_scope(scope_id)  # then delete
         return JSONResponse(status_code=200, content={})
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})

@@ -998,6 +998,9 @@ class TestDeleteRoleFromService:
     def _wire(self, admin):
         admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
         admin.get_realm_role_by_id.return_value = {"id": "role-id", "name": "src-helper"}
+        # Solely-owned: after the unmap, no other subject holds the role, so the shared-object
+        # guard (#178) proceeds to delete — the behavior this test asserts.
+        admin.get_realm_role_members.return_value = []
 
     def test_unmaps_role_from_service_account_then_deletes_realm_role(self):
         # Unmap-then-delete order: the role mapping is removed from the service account FIRST,
@@ -1008,10 +1011,30 @@ class TestDeleteRoleFromService:
         self._wire(admin)
         resp = _make_client(admin).delete(f"/services/svc-uuid/roles/role-id?realm={REALM}")
         assert resp.status_code == 200
+        # Unmap first, then the shared-object membership re-check (#178), then the delete since
+        # no other subject holds the role.
         admin.assert_has_calls([
             call.delete_realm_roles_of_user("sa-user-id", [{"id": "role-id", "name": "src-helper"}]),
+            call.get_realm_role_members("src-helper"),
             call.delete_realm_role("src-helper"),
         ])
+
+    def test_shared_role_still_referenced_is_not_deleted(self):
+        # Shared-object safety (#178): after unmapping the role from THIS service account, the
+        # realm role is still held by ANOTHER subject (another agent's service account). The
+        # shared role must be left intact — only the unmap happened, delete is NOT issued.
+        admin = MagicMock()
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.get_realm_role_by_id.return_value = {"id": "role-id", "name": "shared-helper"}
+        admin.get_realm_role_members.return_value = [
+            {"id": "other-sa", "username": "service-account-other-agent"},
+        ]
+        resp = _make_client(admin).delete(f"/services/svc-uuid/roles/role-id?realm={REALM}")
+        assert resp.status_code == 200
+        admin.delete_realm_roles_of_user.assert_called_once_with(
+            "sa-user-id", [{"id": "role-id", "name": "shared-helper"}]
+        )
+        admin.delete_realm_role.assert_not_called()
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
@@ -1038,12 +1061,30 @@ class TestDeleteScopeFromService:
         from unittest.mock import call
 
         admin = MagicMock()
+        # Solely-owned: after the unmap, no client exposes the scope, so the shared-object guard
+        # (#178) proceeds to delete — the behavior this test asserts.
+        admin.get_clients.return_value = []
         resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
         assert resp.status_code == 200
+        # Unmap first, then the shared-object owner rescan (#178, via get_clients), then the
+        # delete since no other client exposes the scope.
         admin.assert_has_calls([
             call.delete_client_default_client_scope("svc-uuid", "scope-id"),
+            call.get_clients(),
             call.delete_client_scope("scope-id"),
         ])
+
+    def test_shared_scope_still_referenced_is_not_deleted(self):
+        # Shared-object safety (#178): after unmapping the scope from THIS client, another client
+        # still exposes it as a default scope. The shared client scope must be left intact —
+        # only the unmap happened, delete is NOT issued.
+        admin = MagicMock()
+        admin.get_clients.return_value = [{"id": "other-svc"}]
+        admin.get_client_default_client_scopes.return_value = [{"id": "scope-id", "name": "shared"}]
+        resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
+        assert resp.status_code == 200
+        admin.delete_client_default_client_scope.assert_called_once_with("svc-uuid", "scope-id")
+        admin.delete_client_scope.assert_not_called()
 
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
