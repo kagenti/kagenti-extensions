@@ -173,7 +173,7 @@ handles `openinference.span.kind`.
 | `lineage.direction` | both | `inbound` \| `outbound` | |
 | `lineage.self.id` | both | `weather-service` | this workload's identity, from `self_id` or `self_id_file`, **reduced to its last non-empty `/`-segment**: a SPIFFE ID `spiffe://td/ns/team1/sa/agent` emits `agent`, and two identities that differ only above that segment emit the same value — the consumer keys entity identity on it (§7). The producer refuses to start without an identity |
 | `lineage.peer.host` | both, when present | `weather-tool-mcp.team1.svc:8000` | the Host/authority header. Outbound: the service being called. Inbound: the address this workload was reached on |
-| `lineage.protocol` | both | `a2a` \| `mcp` \| `inference` \| `http` | which parser matched; `http` = none |
+| `lineage.protocol` | both | `a2a` \| `mcp` \| `inference` \| `http` | which parser matched, at fixed precedence `a2a` > `mcp` > `inference`; `http` = none. The precedence is load-bearing: the parsers are not mutually exclusive — `mcp-parser` attaches to any JSON-RPC body, including every a2a exchange — so an a2a hop is labeled `a2a`, never `mcp`. The payload reduction (§5) is keyed by this label, reading the same protocol's parser |
 | `lineage.parent.source` | request | `tracestate` \| `wire` \| `none` | which precedence in §3.2 chose the parent. An audit fact; the consumer derives nothing from it |
 | `http.method` | request, when the listener supplies it | `POST` | all listeners do |
 | `url.path` | request, when present | `/mcp` | query-free: anything from `?` on is stripped before emission (per OTel semconv; the query can carry secrets and is never captured) |
@@ -304,6 +304,8 @@ mechanisms named as removed are not to be reintroduced.
   exported zero spans for the whole chain. And `bypass_paths` becomes a `path.Match` glob list via
   the shared bypass matcher (it was a prefix match): the `/health` default no longer swallows
   `/health-records/...`, and a pattern copied from a sibling plugin means the same thing here.
+  Prose: the `lineage.protocol` precedence (`a2a` > `mcp` > `inference`), always the producer's
+  behaviour, is stated in §4.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only
