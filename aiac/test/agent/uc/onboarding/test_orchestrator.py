@@ -217,6 +217,33 @@ class TestRollbackOnBuildFailure:
         assert names.index("set_service_enabled") > names.index("unset_service_type")
 
 
+class TestRollbackLogInjectionSanitized:
+    def test_crlf_in_service_id_and_names_cannot_forge_log_lines(self, caplog):
+        # service_id reaches the Orchestrator from the request / NATS trigger (user-controlled).
+        # A crafted id or entity name carrying CR/LF must not inject or forge extra log lines
+        # (CodeQL py/log-injection): each rollback record stays a single physical line.
+        evil_id = "svc-1\r\nINFO forged: attacker-controlled entry"
+        role = Role(id="r1", name="role\r\ninjected", composite=False)
+        scope = Scope(id="s1", name="scope\ninjected")
+        service = object()
+        config = _config_returning(service)
+        graph = _graph(created_roles=[role], created_scopes=[scope])
+
+        with (
+            caplog.at_level("INFO", logger=orchestrator.logger.name),
+            patch.object(orchestrator, "build_provision_graph", return_value=graph),
+            patch.object(orchestrator, "ServicePolicyBuilder") as spb,
+            patch.object(orchestrator, "_config", return_value=config),
+        ):
+            spb.build.side_effect = LLMAccessError("boom")
+            with pytest.raises(LLMAccessError):
+                orchestrator.onboard_service(evil_id)
+
+        for record in caplog.records:
+            assert "\n" not in record.getMessage()
+            assert "\r" not in record.getMessage()
+
+
 class TestRollbackDeletesOnlyCreated:
     def test_reused_by_name_entities_are_never_torn_down(self):
         # Provision's created-manifest lists ONLY what it created this run. A role/scope it

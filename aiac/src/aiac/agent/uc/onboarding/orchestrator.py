@@ -55,6 +55,13 @@ def _config() -> Configuration:
     return Configuration.for_default_realm()
 
 
+def _loggable(value: object) -> str:
+    """Neutralize a value for single-line logging: coerce to ``str`` and drop CR/LF so a
+    user-controlled ``service_id`` or entity name cannot forge or inject extra log lines
+    (mitigates CodeQL ``py/log-injection``)."""
+    return str(value).replace("\r", "").replace("\n", "")
+
+
 def _rollback(config: Configuration, service_id: str, created_roles, created_scopes) -> None:
     """Compensating rollback (UC1-only): tear down exactly what Provision created on this run,
     unset the client type, then disable the client as a failed-service marker.
@@ -66,16 +73,17 @@ def _rollback(config: Configuration, service_id: str, created_roles, created_sco
     so an interrupted rollback never leaves a disabled-but-still-provisioned client. Actions are
     logged at INFO."""
     service = config.get_service(service_id)
+    safe_id = _loggable(service_id)
     for role in created_roles:
         config.delete_service_role(service, role)
-        logger.info("UC1 rollback: deleted role %r (service %s)", getattr(role, "name", role), service_id)
+        logger.info("UC1 rollback: deleted role %r (service %s)", _loggable(getattr(role, "name", role)), safe_id)
     for scope in created_scopes:
         config.delete_service_scope(service, scope)
-        logger.info("UC1 rollback: deleted scope %r (service %s)", getattr(scope, "name", scope), service_id)
+        logger.info("UC1 rollback: deleted scope %r (service %s)", _loggable(getattr(scope, "name", scope)), safe_id)
     config.unset_service_type(service)
-    logger.info("UC1 rollback: unset client type (service %s)", service_id)
+    logger.info("UC1 rollback: unset client type (service %s)", safe_id)
     config.set_service_enabled(service, False)
-    logger.info("UC1 rollback: disabled client — failed-service marker (service %s)", service_id)
+    logger.info("UC1 rollback: disabled client — failed-service marker (service %s)", safe_id)
 
 
 def onboard_service(
