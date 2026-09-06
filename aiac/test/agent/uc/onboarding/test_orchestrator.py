@@ -14,6 +14,7 @@ created-manifest), unsets the client type, disables the client (failed-service m
 and re-raises. On success it re-enables the client (idempotent).
 """
 
+import threading
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -357,3 +358,82 @@ class TestRetryableReRunRollsBackIdempotently:
         config.delete_service_role.assert_called_once_with(service, r2)
         config.delete_service_scope.assert_called_once_with(service, s2)
         config.set_service_enabled.assert_called_once_with(service, False)
+
+
+class TestPerServiceSerialization:
+    """Issue 180: the full provision → build → rollback lifecycle is serialized per
+    service_id so overlapping same-service runs (POST + NATS) cannot corrupt the
+    created-manifest or roll back a shared entity, while different service_ids stay
+    concurrent. All waits are bounded so a regression fails fast rather than hangs."""
+
+    def test_same_service_id_calls_serialize(self):
+        # Two threads onboard the SAME service_id. The mocked builder records how many
+        # threads are inside `build` at once; the lock must keep that at 1.
+        concurrency = {"cur": 0, "max": 0}
+        counter_lock = threading.Lock()
+
+        def _build(_service_id, _service_type):
+            with counter_lock:
+                concurrency["cur"] += 1
+                concurrency["max"] = max(concurrency["max"], concurrency["cur"])
+            # Hold the section briefly so a missing lock would overlap deterministically.
+            threading.Event().wait(0.05)
+            with counter_lock:
+                concurrency["cur"] -= 1
+            return [object()]
+
+        with (
+            patch.object(orchestrator, "build_provision_graph", return_value=_graph()),
+            patch.object(orchestrator, "ServicePolicyBuilder") as spb,
+            patch.object(orchestrator, "_config", return_value=_config_returning(object())),
+        ):
+            spb.build.side_effect = _build
+
+            def _run():
+                orchestrator.onboard_service(SERVICE_ID)
+
+            threads = [threading.Thread(target=_run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=5)
+                assert not t.is_alive(), "onboard_service thread hung (deadlock?)"
+
+        assert concurrency["max"] == 1
+
+    def test_different_service_ids_run_concurrently(self):
+        # Two threads onboard DIFFERENT service_ids. `build` waits on a Barrier(2): both
+        # must arrive for it to release, which can only happen if the two runs overlap.
+        # A bounded timeout means a regression (serialized) trips BrokenBarrierError fast
+        # instead of hanging the suite.
+        barrier = threading.Barrier(2, timeout=5)
+        errors = []
+
+        def _build(_service_id, _service_type):
+            try:
+                barrier.wait()
+            except threading.BrokenBarrierError as e:  # pragma: no cover - regression path
+                errors.append(e)
+            return [object()]
+
+        with (
+            patch.object(orchestrator, "build_provision_graph", return_value=_graph()),
+            patch.object(orchestrator, "ServicePolicyBuilder") as spb,
+            patch.object(orchestrator, "_config", return_value=_config_returning(object())),
+        ):
+            spb.build.side_effect = _build
+
+            def _run(service_id):
+                orchestrator.onboard_service(service_id)
+
+            threads = [
+                threading.Thread(target=_run, args=("svc-a",)),
+                threading.Thread(target=_run, args=("svc-b",)),
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
+                assert not t.is_alive(), "onboard_service thread hung"
+
+        assert errors == [], "different service_ids did not run concurrently"

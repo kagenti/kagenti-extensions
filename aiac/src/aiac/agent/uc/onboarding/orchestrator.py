@@ -20,6 +20,7 @@ rollback** (UC1-only) before the error propagates — see :func:`_rollback`.
 """
 
 import logging
+import threading
 
 from aiac.agent.policy_rules_builder.conflict_detection import PolicyConflictError
 from aiac.agent.policy_rules_builder.graph import (
@@ -46,6 +47,36 @@ _ROLLBACK_ERRORS = (
     LLMAccessError,
     UnparseableLLMResponseError,
 )
+
+
+# --------------------------------------------------------------------------- #
+# Per-service_id serialization                                                 #
+# --------------------------------------------------------------------------- #
+# ``onboard_service`` runs the full provision → build → rollback lifecycle. Two
+# concurrent runs for the SAME ``service_id`` (an overlapping ``POST /apply/service/{id}``
+# and an ``aiac.apply.service.{id}`` NATS delivery, say) each snapshot the existing
+# role/scope names before creating, so both can record the same resolved entity in their
+# created-manifest — and a rollback would then delete an entity the other run still uses.
+# A per-service lock serializes the whole lifecycle so same-service runs proceed one at a
+# time, while DIFFERENT service_ids stay concurrent (each has its own lock). Guarding only
+# ``provision_service`` is insufficient because the rollback runs here in the orchestrator.
+#
+# Multi-replica caveat: this in-process lock serializes within ONE agent replica only.
+# Cross-replica serialization (multiple agent pods sharing a Keycloak realm) needs external
+# coordination (e.g. a distributed lock) and is out of scope here.
+_service_locks: dict[str, threading.Lock] = {}
+_service_locks_guard = threading.Lock()
+
+
+def _lock_for(service_id: str) -> threading.Lock:
+    """Return the per-``service_id`` lock, creating it lazily under the guard lock so two
+    threads racing on a first-seen service_id share one lock instance."""
+    with _service_locks_guard:
+        lock = _service_locks.get(service_id)
+        if lock is None:
+            lock = threading.Lock()
+            _service_locks[service_id] = lock
+        return lock
 
 
 # --------------------------------------------------------------------------- #
@@ -115,19 +146,25 @@ def onboard_service(
     ``compute_and_apply`` call and lands on every derived ``AgentPolicyModel``. It defaults to
     ``DENY`` (least-privilege); a caller onboarding a service that should default to ``ALLOW``
     supplies it here. This is the caller-facing surface for requesting a permissive default
-    end-to-end (onboard → PCE → derived APM → OPA)."""
-    provision = build_provision_graph().invoke(
-        OnboardingProvisionState(trigger=Trigger(entity_id=service_id))
-    )
-    service_type = provision["service_type"]
-    created_roles = provision["created_roles"]
-    created_scopes = provision["created_scopes"]
+    end-to-end (onboard → PCE → derived APM → OPA).
 
-    config = _config()
-    try:
-        rules = ServicePolicyBuilder.build(service_id, service_type)
-    except _ROLLBACK_ERRORS:
-        _rollback(config, service_id, created_roles, created_scopes)
-        raise
+    The full provision → build → rollback lifecycle is serialized per ``service_id`` (see
+    :func:`_lock_for`): a concurrent same-service run cannot corrupt the created-manifest or
+    roll back a shared entity, while different service_ids run concurrently. This is an
+    in-process lock (one agent replica only); cross-replica serialization is out of scope."""
+    with _lock_for(service_id):
+        provision = build_provision_graph().invoke(
+            OnboardingProvisionState(trigger=Trigger(entity_id=service_id))
+        )
+        service_type = provision["service_type"]
+        created_roles = provision["created_roles"]
+        created_scopes = provision["created_scopes"]
 
-    return rules, False, default_effect
+        config = _config()
+        try:
+            rules = ServicePolicyBuilder.build(service_id, service_type)
+        except _ROLLBACK_ERRORS:
+            _rollback(config, service_id, created_roles, created_scopes)
+            raise
+
+        return rules, False, default_effect
