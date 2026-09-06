@@ -74,6 +74,7 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins"
 )
@@ -146,13 +147,14 @@ type exchangeState struct {
 
 // LineageTelemetry emits OTel spans for each request hop observed by authbridge.
 type LineageTelemetry struct {
-	cfg        Config
-	tp         *sdktrace.TracerProvider
-	tracer     trace.Tracer
-	conn       *grpc.ClientConn // OTLP gRPC connection; owned by us, closed on Shutdown
-	ready      atomic.Bool
-	propagator propagation.TextMapPropagator
-	selfID     string // agent's own client ID for the lineage.self.id fact
+	cfg         Config
+	bypassPaths *bypass.Matcher // built in Configure from cfg.BypassPaths
+	tp          *sdktrace.TracerProvider
+	tracer      trace.Tracer
+	conn        *grpc.ClientConn // OTLP gRPC connection; owned by us, closed on Shutdown
+	ready       atomic.Bool
+	propagator  propagation.TextMapPropagator
+	selfID      string // agent's own client ID for the lineage.self.id fact
 	// exportFailures counts batches the collector refused or never received.
 	// Export is asynchronous and the dial is lazy, so this — with the WARN
 	// exportObserver logs — is how an unreachable collector or a TLS chain
@@ -200,7 +202,16 @@ func (p *LineageTelemetry) Configure(raw json.RawMessage) error {
 	if err != nil {
 		return err
 	}
+	// The shared bypass matcher (path.Match globs, path normalization) — the
+	// same package and wiring jwt-validation and sparc use for this key. It
+	// validates at boot: invalid syntax and match-everything patterns refuse
+	// to start.
+	matcher, err := bypass.NewMatcher(cfg.BypassPaths)
+	if err != nil {
+		return fmt.Errorf("lineage-telemetry bypass_paths: %w", err)
+	}
 	p.cfg = cfg
+	p.bypassPaths = matcher
 	return nil
 }
 
@@ -410,12 +421,10 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		return pipeline.Action{Type: pipeline.Continue}
 	}
 
-	// Skip infrastructure paths (health checks, agent-card discovery, etc.)
-	for _, prefix := range p.cfg.BypassPaths {
-		if strings.HasPrefix(pctx.Path, prefix) {
-			pctx.Skip("bypass_path")
-			return pipeline.Action{Type: pipeline.Continue}
-		}
+	// Skip infrastructure paths (health checks, agent-card discovery, etc.).
+	if p.bypassPaths.Match(pctx.Path) {
+		pctx.Skip("bypass_path")
+		return pipeline.Action{Type: pipeline.Continue}
 	}
 
 	// Skip infrastructure outbound targets (OTel exporters, metrics scrapers, etc.).

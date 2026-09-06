@@ -67,8 +67,9 @@ One HTTP exchange through the sidecar produces two OTLP spans.
   span exists emits **no spans at all** and is invisible to lineage. `denied` appears only for
   denials after the request span exists: response-phase denials, or gates ordered after lineage.
   Spans for gate-denied traffic are a named follow-up, not current behaviour.
-- **Bypass.** Requests whose path starts with a `bypass_paths` prefix, and outbound requests whose
-  host matches a `bypass_hosts` glob (`path.Match`, port stripped, case folded), produce no spans
+- **Bypass.** Requests whose path matches a `bypass_paths` glob, and outbound requests whose
+  host matches a `bypass_hosts` glob (both `path.Match`; hosts port-stripped and case folded,
+  paths query-stripped and normalized), produce no spans
   (defaults in §6). `bypass_hosts` is outbound-only: an inbound `Host` is the caller's own header,
   so honouring it there would let a caller suppress the record of its own request.
 
@@ -235,7 +236,7 @@ construction.
 | `max_payload_bytes` | `4096` | producer-side cap on those two values; `0` or unset takes the default, `-1` attaches whole, any other negative is refused at start |
 | `max_attr_bytes` | `256` | cap on every variable-content string attribute and the span name (§4); same `0` / `-1` / negative semantics as `max_payload_bytes` |
 | `mint_traceparent` | `true` | §3.3; `false` = a pure observer that never writes a `traceparent` |
-| `bypass_paths` | `/.well-known/`, `/healthz`, `/readyz`, `/health` | path prefixes that produce no spans |
+| `bypass_paths` | `/.well-known/*`, `/healthz`, `/readyz`, `/health` | path globs (`path.Match`; `*` does not cross `/`) that produce no spans, matched by the shared bypass package (query stripped, path normalized) — the same key and semantics as `jwt-validation` and `sparc` |
 | `bypass_hosts` | `otel-collector`, `otel-collector.*`, `jaeger`, `jaeger.*`, `zipkin`, `zipkin.*`, `prometheus`, `prometheus.*` | outbound host globs that produce no spans |
 | `self_id` | — | this workload's identity (§4: reduced to its last `/`-segment) |
 | `self_id_file` | `/shared/client-id.txt` | read when `self_id` is empty; the producer refuses to start if neither yields an identity |
@@ -243,8 +244,8 @@ construction.
 Setting `bypass_paths` or `bypass_hosts` **replaces** the default list rather than extending it —
 the convention the `ibac`, `sparc` and `cpex` plugins use for their keys of the same name. An
 operator who adds one entry must restate the defaults they want kept. An entry that would match
-everything (empty, whitespace-only, `/` for a path, `*` for a host) is refused at start, as is a
-host entry that is not valid `path.Match` syntax.
+everything (empty, whitespace-only, `*`, `/*` for a path, `*` for a host) is refused at start, as
+is an entry of either kind that is not valid `path.Match` syntax.
 
 Unknown keys are a boot error.
 
@@ -300,7 +301,9 @@ mechanisms named as removed are not to be reintroduced.
   `max_attr_bytes` (default 256) — until now only the two payload values were bounded, so one
   request could put a 100 KB span name into the backend. And the producer samples unconditionally
   (§2): under the SDK-default ParentBased sampler a caller's sampled-out `traceparent` (`…-00`)
-  exported zero spans for the whole chain.
+  exported zero spans for the whole chain. And `bypass_paths` becomes a `path.Match` glob list via
+  the shared bypass matcher (it was a prefix match): the `/health` default no longer swallows
+  `/health-records/...`, and a pattern copied from a sibling plugin means the same thing here.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only

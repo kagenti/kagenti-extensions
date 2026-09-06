@@ -30,6 +30,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/rossoctl/cortex/authbridge/authlib/bypass"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -42,6 +43,7 @@ func newTestPlugin(t *testing.T) (*LineageTelemetry, *tracetest.InMemoryExporter
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exp))
 	p := NewLineageTelemetry()
 	p.cfg = defaultConfig() // the shipped defaults, so a test sees what a deployment sees
+	p.bypassPaths, _ = bypass.NewMatcher(p.cfg.BypassPaths)
 	p.tp = tp
 	p.tracer = tp.Tracer("test")
 	p.selfID = "weather-service"
@@ -926,6 +928,7 @@ func TestSampledOutParentStillExports(t *testing.T) {
 	tp := newTracerProvider(exp, resource.Empty())
 	p := NewLineageTelemetry()
 	p.cfg = defaultConfig()
+	p.bypassPaths, _ = bypass.NewMatcher(p.cfg.BypassPaths)
 	p.tp = tp
 	p.tracer = tp.Tracer("test")
 	p.selfID = "weather-service"
@@ -1294,21 +1297,27 @@ func TestConfig_UnknownKeysRefused(t *testing.T) {
 // anywhere: a matched hop is simply absent from the graph. So both directions
 // are pinned — a match emits nothing, a near-miss emits the full pair.
 
-func TestBypassPaths_PrefixMatchEmitsNothing(t *testing.T) {
+func TestBypassPaths_GlobMatchEmitsNothing(t *testing.T) {
 	cases := []struct {
 		name  string
 		path  string
 		spans int // spans expected from the exchange
 	}{
-		{"prefix match skipped", "/health/live", 0},
-		{"exact prefix skipped", "/health", 0},
+		{"exact match skipped", "/health", 0},
+		{"glob matches one level", "/.well-known/agent.json", 0},
+		{"glob does not cross /", "/.well-known/a/b", 2},
+		{"over-match fixed: not a prefix rule", "/health-records/patient/42", 2},
+		{"non-canonical form normalized", "//health", 0},
 		{"non-matching path emits", "/api/health-report", 2},
-		{"prefix is anchored, not substring", "/v1/health", 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, exp := newTestPlugin(t)
-			p.cfg.BypassPaths = []string{"/health"}
+			// Through Configure, so the test exercises the same NewMatcher
+			// wiring a deployment gets (jwt-validation and sparc shape).
+			if err := p.Configure(json.RawMessage(`{"bypass_paths": ["/.well-known/*", "/health"]}`)); err != nil {
+				t.Fatalf("Configure: %v", err)
+			}
 			pctx := fakeContext(pipeline.Inbound, http.Header{})
 			pctx.Path = tc.path
 			run(t, p, pctx, allow(200))
@@ -1374,17 +1383,33 @@ func TestConfig_BypassEntriesValidated(t *testing.T) {
 		name string
 		raw  string
 	}{
-		{"empty path", `{"bypass_paths": ["/healthz", ""]}`},
-		{"whitespace-only path", `{"bypass_paths": ["  "]}`},
-		{"root path", `{"bypass_paths": ["/"]}`},
 		{"empty host", `{"bypass_hosts": ["jaeger", ""]}`},
 		{"whitespace-only host", `{"bypass_hosts": [" "]}`},
 		{"star host", `{"bypass_hosts": ["*"]}`},
-		{"invalid glob", `{"bypass_hosts": ["[unclosed"]}`},
+		{"invalid host glob", `{"bypass_hosts": ["[unclosed"]}`},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := decodeConfig([]byte(tc.raw)); err == nil {
+				t.Fatalf("%s accepted; it disables the plugin silently", tc.raw)
+			}
+		})
+	}
+	// Path entries are validated by bypass.NewMatcher at Configure — the
+	// shared package jwt-validation and sparc validate with.
+	refusedPaths := []struct {
+		name string
+		raw  string
+	}{
+		{"empty path", `{"bypass_paths": ["/healthz", ""]}`},
+		{"whitespace-only path", `{"bypass_paths": ["  "]}`},
+		{"star path", `{"bypass_paths": ["*"]}`},
+		{"slash-star path", `{"bypass_paths": ["/*"]}`},
+		{"invalid path glob", `{"bypass_paths": ["[unclosed"]}`},
+	}
+	for _, tc := range refusedPaths {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := NewLineageTelemetry().Configure(json.RawMessage(tc.raw)); err == nil {
 				t.Fatalf("%s accepted; it disables the plugin silently", tc.raw)
 			}
 		})

@@ -116,19 +116,25 @@ type Config struct {
 	// Default: true
 	MintTraceparent bool `json:"mint_traceparent" description:"Forward a traceparent naming this request span when no valid one arrived; false = a pure observer that writes no traceparent." default:"true"`
 
-	// BypassPaths lists URL path prefixes that should not generate lineage
+	// BypassPaths lists URL path globs that should not generate lineage
 	// hops. Useful for suppressing infrastructure polling (agent-card
 	// discovery, health checks) that would otherwise flood the lineage graph.
-	// Prefixes, not globs — a path is bypassed when it starts with an entry.
+	// Matched by the shared bypass package (path.Match, query stripped, path
+	// normalized) — the same package and semantics jwt-validation and sparc
+	// use for this key, so a pattern copied between plugins means the same
+	// thing. Note path.Match's "*" does not cross "/": "/.well-known/*"
+	// matches "/.well-known/agent.json" but not "/.well-known/a/b". An
+	// earlier prefix match here silently bypassed real traffic under the
+	// "/health" default ("/health-records/...").
 	//
 	// Setting the key REPLACES this list rather than extending it, the same
 	// convention ibac, sparc and cpex use for their bypass keys: an operator
-	// who adds one prefix must restate the defaults they want to keep.
-	// Entries are trimmed of surrounding whitespace; one that is empty, or
-	// "/", is refused at decode because it would match every path and
-	// silently turn the plugin off.
-	// Default: ["/.well-known/", "/healthz", "/readyz", "/health"]
-	BypassPaths []string `json:"bypass_paths" description:"URL path prefixes that produce no spans; setting the key replaces the default list." default:"/.well-known/, /healthz, /readyz, /health"`
+	// who adds one glob must restate the defaults they want to keep.
+	// Entries are trimmed of surrounding whitespace; bypass.NewMatcher
+	// refuses invalid path.Match syntax and match-everything patterns
+	// (empty, "*", "/*") at boot.
+	// Default: ["/.well-known/*", "/healthz", "/readyz", "/health"]
+	BypassPaths []string `json:"bypass_paths" description:"URL path globs (path.Match) that produce no spans; setting the key replaces the default list." default:"/.well-known/*, /healthz, /readyz, /health"`
 
 	// BypassHosts lists host globs whose exchanges should not generate lineage
 	// hops. Useful for suppressing infrastructure outbound calls such as OTel
@@ -169,7 +175,7 @@ func defaultConfig() Config {
 		MaxPayloadBytes: defaultMaxPayloadBytes,
 		MaxAttrBytes:    defaultMaxAttrBytes,
 		MintTraceparent: true,
-		BypassPaths:     []string{"/.well-known/", "/healthz", "/readyz", "/health"},
+		BypassPaths:     []string{"/.well-known/*", "/healthz", "/readyz", "/health"},
 		BypassHosts: []string{
 			"otel-collector", "otel-collector.*",
 			"jaeger", "jaeger.*",
@@ -260,21 +266,17 @@ func decodeConfig(raw json.RawMessage) (Config, error) {
 	return cfg, nil
 }
 
-// validateBypass trims and checks both bypass lists in place. An entry that
+// validateBypass trims and checks the bypass lists in place. An entry that
 // matches everything disables the plugin silently — every exchange takes the
 // skip, no span is ever emitted, and Ready() still reports true — so it is a
-// boot error rather than a runtime surprise. ibac, sparc and cpex each refuse
-// the same shapes with the same reasoning; the wording of the error mirrors
-// theirs, including the advice to remove the plugin from the pipeline if
-// disabling it is what was meant.
+// boot error rather than a runtime surprise. Paths are only trimmed here:
+// their validation (invalid path.Match syntax, match-everything patterns)
+// lives in bypass.NewMatcher, called at Configure. Hosts are checked here,
+// mirroring ibac / sparc / cpex, including the advice to remove the plugin
+// from the pipeline if disabling it is what was meant.
 func validateBypass(cfg *Config) error {
 	for i, entry := range cfg.BypassPaths {
-		entry = strings.TrimSpace(entry)
-		if entry == "" || entry == "/" {
-			return fmt.Errorf("bypass_paths entry %q matches every path; "+
-				"to disable lineage-telemetry, remove it from the pipeline instead", cfg.BypassPaths[i])
-		}
-		cfg.BypassPaths[i] = entry
+		cfg.BypassPaths[i] = strings.TrimSpace(entry)
 	}
 	for i, entry := range cfg.BypassHosts {
 		entry = strings.TrimSpace(entry)
