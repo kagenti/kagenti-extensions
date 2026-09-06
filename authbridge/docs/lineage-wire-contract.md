@@ -129,7 +129,7 @@ parent at the trace edge, by design.
 
 | header | when | value |
 |---|---|---|
-| `tracestate` | every exchange, both directions, whenever a valid context exists after §3.3 | the caller's members with `lineage-parent` set to this request span id |
+| `tracestate` | both directions, whenever a valid context exists after §3.3 — except a bypassed exchange (§6), a not-yet-ready producer, or an inbound `tracestate` that refuses the insert (malformed member; skipped with a WARN) | the caller's members with `lineage-parent` set to this request span id |
 | `traceparent` | only when the request carried no valid one and `mint_traceparent` is on | `00-<trace id>-<this request span id>-<flags>` |
 
 Nothing else is written. The listener is responsible for carrying these header mutations to the
@@ -147,6 +147,10 @@ instead of being welded by a guess. The consequences per case:
 | caller propagates, application does not | wire | wire: each call a trace of its own, restarted by its outbound sidecar |
 | caller sends no valid context, application propagates | none (restarted) | stamp: one tree under the entry |
 | caller sends no valid context, application does not | none (restarted) | wire: each call a trace of its own |
+
+A bypassed exchange (§6) is a fifth case: no spans at that element and the stamp passes through
+unchanged, so the next element parents on the last element that did stamp — the bypassed hop is
+simply absent from the chain.
 
 ## 4. Attributes
 
@@ -168,7 +172,7 @@ handles `openinference.span.kind`.
 | `lineage.parent.source` | request | `tracestate` \| `wire` \| `none` | which precedence in §3.2 chose the parent. An audit fact; the consumer derives nothing from it |
 | `http.method` | request, when the listener supplies it | `POST` | all listeners do |
 | `url.path` | request, when present | `/mcp` | query-free: anything from `?` on is stripped before emission (per OTel semconv; the query can carry secrets and is never captured) |
-| `url.scheme` | request, when present | `http` | the listener's observed scheme. Optional: the consumer composes `scheme://peer.host + url.path` only when all three exist |
+| `url.scheme` | request, when present | `http` | the listener's observed scheme; `tcp` marks a proxy-sidecar CONNECT tunnel (§5 Limits). Optional: the consumer composes `scheme://peer.host + url.path` only when all three exist |
 | `a2a.method`, `a2a.session_id` | request, a2a | `message/send` | parsed facts |
 | `mcp.method`, `mcp.tool` | request, mcp | `tools/call`, `get_weather` | `mcp.tool` only for `tools/call` |
 | `inference.model` | request, inference | `qwen2.5:7b` | from the parsed request body |
@@ -209,8 +213,12 @@ construction.
   so the loss is visible in the span. A truncated value no longer parses as JSON; the consumer then
   stores it as a string. Deployments that want whole prompts set `max_payload_bytes: -1` or raise it
   (LLM chat prompts on the reference fleet reach 14 KB; a third exceed the 4096 default).
-- TLS-passthrough connections bypass the HTTP pipeline entirely and produce no exchange. That is a
-  capture gap, not a derivation rule: once such a connection is seen, the same rules apply.
+- In envoy-sidecar mode, TLS-passthrough connections bypass Envoy's HTTP filter chain entirely and
+  produce no exchange — a capture gap. In proxy-sidecar mode an HTTPS destination is a CONNECT
+  tunnel, which IS an exchange: an ordinary span pair with `http.method=CONNECT`,
+  `url.scheme=tcp`, `lineage.peer.host` naming the dial target, no path and no payload — the bytes
+  inside the tunnel are opaque. The producer does not filter tunnel exchanges; what they mean is
+  the consumer's call, like every other fact.
 
 ## 6. Producer configuration
 
