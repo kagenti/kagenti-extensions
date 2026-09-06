@@ -126,7 +126,7 @@ Nine components across five Kubernetes Pods plus a Python library layer, all imp
                │                      |
     (𝘶𝘴𝘦𝘳𝘴, 𝘳𝘰𝘭𝘦𝘴, 𝘤𝘭𝘪𝘦𝘯𝘵𝘴)    (𝘈𝘶𝘵𝘩𝘰𝘳𝘪𝘻𝘢𝘵𝘪𝘰𝘯𝘗𝘰𝘭𝘪𝘤𝘺 𝘊𝘙)
 ┌──────────────┼──────────────────────┼───────────────────┐
-│  Rossoctl Interface Pod              │                   │
+│  Rossoctl Interface Pod             │                   │
 │              │                      │                   │
 │      ┌───────┴──────┐      ┌────────┴───────┐           │
 │      │  IdP Config  │      │  PDP Policy    │           │
