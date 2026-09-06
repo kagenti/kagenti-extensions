@@ -269,16 +269,31 @@ def analyze_tool(state: OnboardingProvisionState) -> dict:
 def provision_service(state: OnboardingProvisionState) -> dict:
     """Write the derived roles + scopes into the IdP (idempotent create-or-get + map) and
     persist the discovered service type onto the Keycloak client, via the idp-library.
-    Returns the `ServiceProvision` + `service_type` to the Orchestrator."""
+
+    Returns the `ServiceProvision` + `service_type` to the Orchestrator, plus the
+    **created-manifest** (`created_roles` / `created_scopes`): exactly the entities this run
+    *created*, not the ones it *reused by name*. The idempotent `create_service_role` /
+    `create_service_scope` return the resolved entity whether they created or reused it, so a
+    name is classified as created only when it was **absent** from the realm before this run
+    (snapshot taken before the create loop). The Orchestrator's compensating rollback deletes
+    only this manifest, so a role/scope another service already owns is never torn down."""
     config = _config()
     provision = state.service_provision
     service_id = state.service_id
 
+    created_roles = []
+    created_scopes = []
     try:
+        existing_role_names = {r.name for r in config.get_roles()} if provision.roles else set()
         for role in provision.roles:
-            config.create_service_role(service_id, role)
+            resolved = config.create_service_role(service_id, role)
+            if role.name not in existing_role_names:
+                created_roles.append(resolved)
+        existing_scope_names = {s.name for s in config.get_scopes()} if provision.scopes else set()
         for scope in provision.scopes:
-            config.create_service_scope(service_id, scope)
+            resolved = config.create_service_scope(service_id, scope)
+            if scope.name not in existing_scope_names:
+                created_scopes.append(resolved)
         service = config.get_service(service_id)
         config.set_service_type(service, state.service_type)
     except HTTPException:
@@ -286,4 +301,9 @@ def provision_service(state: OnboardingProvisionState) -> dict:
     except Exception as e:
         raise HTTPException(502, f"IdP Configuration Service unavailable provisioning {service_id!r}: {e}")
 
-    return {"service_provision": provision, "service_type": state.service_type}
+    return {
+        "service_provision": provision,
+        "service_type": state.service_type,
+        "created_roles": created_roles,
+        "created_scopes": created_scopes,
+    }
