@@ -2,6 +2,8 @@ package tui
 
 import (
 	tea "github.com/charmbracelet/bubbletea"
+	"strings"
+	"time"
 
 	"testing"
 
@@ -155,12 +157,73 @@ func TestUsageState_CyclesWrap(t *testing.T) {
 		}
 	}
 	seen := map[usageMetric]bool{}
-	for i := 0; i < 6; i++ {
+	for i := 0; i < usageMetricCount*2; i++ {
 		u.cycleMetric()
 		seen[u.metric] = true
+		if u.metric < 0 || u.metric >= usageMetricCount {
+			t.Fatalf("metric %d out of range after %d cycles", u.metric, i+1)
+		}
 	}
-	if len(seen) != 3 {
-		t.Errorf("metric cycle covered %d of 3 metrics", len(seen))
+	if len(seen) != usageMetricCount {
+		t.Errorf("metric cycle covered %d of %d metrics", len(seen), usageMetricCount)
+	}
+}
+
+// [g] must visit every grouping and return to ungrouped, so an operator can
+// always get back to the sub-row-precision view without leaving the pane.
+func TestUsageState_GroupCycleVisitsAllAndReturns(t *testing.T) {
+	var u usageState // zero value is GroupNone ("")
+
+	want := []usage.Group{usage.GroupStatus, usage.GroupMethod, usage.GroupPlugin, usage.GroupNone}
+	for i, w := range want {
+		u.cycleGroup()
+		if u.group != w {
+			t.Fatalf("cycle %d: group = %q, want %q", i+1, u.group, w)
+		}
+	}
+	// And it keeps cycling rather than sticking.
+	u.cycleGroup()
+	if u.group != usage.GroupStatus {
+		t.Errorf("group = %q after a full lap, want status", u.group)
+	}
+}
+
+// Latency needs the whiskers renderer; everything else uses bars, stacked when a
+// grouping is active. Dispatch is what makes the three forms reachable at all.
+func TestRenderUsageChart_PicksTheRightForm(t *testing.T) {
+	const nl = "\n"
+	base := time.Date(2026, 9, 6, 23, 24, 0, 0, time.UTC)
+	snap := &usage.Snapshot{Buckets: []usage.Bucket{{
+		At:          base,
+		Counts:      usage.Counts{Requests: 10, Tokens: 1000},
+		LatMeanMs:   2000,
+		LatStdDevMs: 400,
+		LatSamples:  10,
+		Series:      map[string]usage.Counts{"200": {Requests: 10, Tokens: 1000}},
+	}}}
+
+	// Latency -> whisker glyphs, never block glyphs.
+	latency := strings.Join(renderUsageChart(snap, metricLatency, usage.GroupNone, 80), nl)
+	if !strings.ContainsRune(latency, whiskerMean) {
+		t.Error("latency did not use the whiskers renderer")
+	}
+	if strings.ContainsAny(latency, "▁▂▃▄▅▆▇█") {
+		t.Error("latency drew bars")
+	}
+	// Latency ignores grouping: there is no per-label latency to break down.
+	grouped := strings.Join(renderUsageChart(snap, metricLatency, usage.GroupStatus, 80), nl)
+	if grouped != latency {
+		t.Error("grouping changed the latency chart, implying a breakdown that does not exist")
+	}
+
+	// Grouped counts -> a legend; ungrouped -> none.
+	stacked := strings.Join(renderUsageChart(snap, metricTokens, usage.GroupStatus, 80), nl)
+	if !strings.Contains(stripANSI(stacked), "200 (") {
+		t.Error("grouped chart has no legend")
+	}
+	plain := strings.Join(renderUsageChart(snap, metricTokens, usage.GroupNone, 80), nl)
+	if strings.Contains(plain, "200 (") {
+		t.Error("ungrouped chart rendered a legend")
 	}
 }
 

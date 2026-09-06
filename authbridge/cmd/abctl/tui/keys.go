@@ -77,6 +77,12 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		case "w":
 			m.usage.cycleWindow()
 			return m.beginFetch()
+		case "g":
+			// Refetch: the grouping is a server-side query parameter, not a
+			// client-side filter, so the current snapshot has no series for the
+			// newly selected dimension.
+			m.usage.cycleGroup()
+			return m.beginFetch()
 		case "r":
 			return m.beginFetch()
 		case "s":
@@ -612,7 +618,7 @@ func (m *model) helpView() string {
 		} else if m.selectedSess != "" {
 			scopeHint = "  [s] this session"
 		}
-		return "[t] metric  [w] window" + scopeHint +
+		return "[t] metric  [w] window  [g] group" + scopeHint +
 			"  [r] refresh  [esc] back  [?] keys  [q] quit"
 	case paneCatalog:
 		if m.catalog == nil {
