@@ -18,8 +18,11 @@ from aiac.agent.policy_rules_builder.conflict_detection import (
 from aiac.agent.policy_rules_builder.diagnostic_models import ConflictStatus, FocalType
 from aiac.agent.policy_rules_builder.graph import (
     Contradiction,
+    LLMAccessError,
     PolicyContradictionError,
+    PolicyRulesBuilderBaseError,
     PolicyRulesBuilderError,
+    UnparseableLLMResponseError,
 )
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule, RuleEffect
@@ -271,6 +274,104 @@ def test_policy_contradiction_error_surfaces_422_conflict_report_and_skips_pce()
     assert body["status"] == ConflictStatus.CONFLICTS_FOUND.value
     assert body["conflicts"][0]["scope"]["name"] == "issues"
     assert body["conflicts"][0]["quotes_verified"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Sanitized PRB-error mapping (#172): status per exception type + leak-free body.
+# A poisoned endpoint/host/API-key is fed into each raised error; the client body
+# must never echo it — full detail goes to the named loggers via log_by_type.     #
+# --------------------------------------------------------------------------- #
+_LEAK_ENDPOINT = "http://secret-endpoint.internal:9443"
+_LEAK_HOST = "secret-host.example"
+_LEAK_KEY = "sk-DEADBEEFcafef00d"
+_POISON = f"unreachable at {_LEAK_ENDPOINT} host={_LEAK_HOST} api_key={_LEAK_KEY}"
+
+
+def _assert_sanitized(resp, expected_status: int) -> None:
+    # The body is exactly a {"detail": <safe summary>} envelope with no leaked substring.
+    assert resp.status_code == expected_status
+    body = resp.json()
+    assert set(body.keys()) == {"detail"}
+    assert isinstance(body["detail"], str) and body["detail"]
+    for secret in (_LEAK_ENDPOINT, _LEAK_HOST, _LEAK_KEY):
+        assert secret not in resp.text
+
+
+def test_llm_access_error_surfaces_502_with_sanitized_body_and_no_leak():
+    # An unreachable LLM endpoint after the transport retry budget is a bad-gateway condition
+    # (502), and the poisoned endpoint/host/key never reaches the client body.
+    err = LLMAccessError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-llm")
+
+    _assert_sanitized(resp, 502)
+    pce.assert_not_called()
+
+
+def test_unparseable_llm_response_error_surfaces_502_with_sanitized_body_and_no_leak():
+    # A reachable-but-unparseable LLM response is likewise an upstream fault (502), sanitized.
+    err = UnparseableLLMResponseError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-llm")
+
+    _assert_sanitized(resp, 502)
+    pce.assert_not_called()
+
+
+def test_policy_rules_builder_error_body_is_sanitized_to_detail_without_leak():
+    # PolicyRulesBuilderError stays 422 (policy-input problem) but its body is now a leak-free
+    # summary, not str(exc) — a poisoned message must not escape to the client.
+    err = PolicyRulesBuilderError(f"Auditor rejected after 3 retries: {_POISON}")
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-reject")
+
+    _assert_sanitized(resp, 422)
+    pce.assert_not_called()
+
+
+def test_policy_rules_builder_base_error_safety_net_surfaces_500():
+    # A bare base error (an unmapped PRB subclass, or the base itself) hits the LAST-registered
+    # safety-net handler → 500, sanitized. The specific subclass handlers still win (see the
+    # 502/422 tests above), because Starlette resolves the most-specific registered handler.
+    err = PolicyRulesBuilderBaseError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-boom")
+
+    _assert_sanitized(resp, 500)
+    pce.assert_not_called()
+
+
+def test_log_by_type_invoked_with_the_raised_error_for_each_sanitized_handler():
+    # Every sanitized handler routes the FULL exception to the per-persona named loggers via
+    # log_by_type(exc) — the client sees only the safe summary, the operator gets the detail.
+    cases = [
+        (LLMAccessError(_POISON), 502),
+        (UnparseableLLMResponseError(_POISON), 502),
+        (PolicyRulesBuilderError(_POISON), 422),
+        (PolicyRulesBuilderBaseError(_POISON), 500),
+    ]
+    for err, expected_status in cases:
+        with (
+            patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+            patch("aiac.agent.controller.routes.compute_and_apply"),
+            patch("aiac.agent.controller.routes.log_by_type") as log,
+        ):
+            resp = client.post("/apply/service/svc-log")
+
+        assert resp.status_code == expected_status
+        log.assert_called_once_with(err)
 
 
 # --------------------------------------------------------------------------- #

@@ -23,9 +23,13 @@ from aiac.agent.policy_rules_builder.conflict_detection import (
     report_from_contradictions,
 )
 from aiac.agent.policy_rules_builder.graph import (
+    LLMAccessError,
     PolicyContradictionError,
+    PolicyRulesBuilderBaseError,
     PolicyRulesBuilderError,
+    UnparseableLLMResponseError,
 )
+from aiac.agent.shared.error_logging import log_by_type
 from aiac.agent.uc.offboarding.offboard import offboard_service
 from aiac.agent.uc.onboarding.orchestrator import onboard_service
 from aiac.agent.uc.policy_update.build import build_policy
@@ -37,14 +41,36 @@ from aiac.policy.model.models import RuleEffect
 app = FastAPI(lifespan=lifespan)
 
 
-# The Policy Rules Builder raises on a policy-input problem, not a server fault: the auditor
-# rejects the proposed rules after exhausting its retry budget (``PolicyRulesBuilderError``). That
-# is a builder failure with no structured finding, so it surfaces as HTTP 422 with a bare
-# ``{"detail": ...}`` body rather than escaping as an uncaught 500. The PCE is never reached — it
-# fires during rule construction inside the use-case handlers.
+# Sanitized-body handlers for the non-``ConflictReport`` PRB failures. Each routes the FULL
+# exception (message + traceback + chained root cause) to its per-persona named logger via
+# ``log_by_type(exc)`` and returns a STATIC, leak-free summary as the HTTP body. The summary is
+# NEVER ``str(exc)``: an endpoint / host / API key embedded in a transport error (or a poisoned
+# message) must never reach the client, so the body is a fixed per-type string. The PCE is never
+# reached — every one of these fires during rule construction inside the use-case handlers.
+def _sanitized(exc: PolicyRulesBuilderBaseError, status_code: int, summary: str) -> JSONResponse:
+    log_by_type(exc)
+    return JSONResponse(status_code=status_code, content={"detail": summary})
+
+
+# The auditor rejects the proposed rules after exhausting its retry budget: a policy-input
+# problem, not a server fault, so 422 (not an uncaught 500).
 @app.exception_handler(PolicyRulesBuilderError)
-def _policy_input_error(_request: Request, exc: Exception) -> JSONResponse:
-    return JSONResponse(status_code=422, content={"detail": str(exc)})
+def _policy_input_error(_request: Request, exc: PolicyRulesBuilderError) -> JSONResponse:
+    return _sanitized(exc, 422, "Policy rules could not be built from the provided policy source.")
+
+
+# The LLM endpoint stayed unreachable after the transport retry budget was exhausted: a bad
+# gateway to the upstream model, so 502.
+@app.exception_handler(LLMAccessError)
+def _llm_access_error(_request: Request, exc: LLMAccessError) -> JSONResponse:
+    return _sanitized(exc, 502, "The policy language model endpoint is currently unavailable.")
+
+
+# The LLM was reachable but returned a response that could not be parsed / failed schema
+# validation: still an upstream-model fault the Controller cannot recover from, so 502.
+@app.exception_handler(UnparseableLLMResponseError)
+def _unparseable_llm_response_error(_request: Request, exc: UnparseableLLMResponseError) -> JSONResponse:
+    return _sanitized(exc, 502, "The policy language model returned an unusable response.")
 
 
 # The two grant/deny conflict mechanisms both surface as a 422 whose body IS a structured
@@ -65,6 +91,18 @@ def _policy_conflict_error(_request: Request, exc: PolicyConflictError) -> JSONR
 def _policy_contradiction_error(_request: Request, exc: PolicyContradictionError) -> JSONResponse:
     report = report_from_contradictions(exc.focal, exc.contradictions)
     return JSONResponse(status_code=422, content=report.model_dump(mode="json"))
+
+
+# Safety net — registered LAST, on purpose. Any ``PolicyRulesBuilderBaseError`` WITHOUT its own
+# handler above (a future subclass, or a bare base error) is an unexpected builder fault → 500,
+# sanitized the same way (never leaks, full detail logged). Registering the base-class net after
+# the specific handlers keeps the intent explicit; resolution itself is by specificity, not order —
+# Starlette walks the exception's MRO and picks the most-specific REGISTERED handler, so a mapped
+# subclass (``LLMAccessError``, ``UnparseableLLMResponseError``, ``PolicyRulesBuilderError``,
+# ``PolicyContradictionError``) always wins over this base handler and never falls through to 500.
+@app.exception_handler(PolicyRulesBuilderBaseError)
+def _policy_builder_base_error(_request: Request, exc: PolicyRulesBuilderBaseError) -> JSONResponse:
+    return _sanitized(exc, 500, "The policy build failed unexpectedly.")
 
 
 # Live on-ramp for the per-onboarding default_effect. The PCE-threading side (#146) exposes
