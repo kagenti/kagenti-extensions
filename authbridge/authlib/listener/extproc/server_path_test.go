@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	extprocv3 "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
+
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/plugins/plugintesting"
 )
@@ -49,29 +50,51 @@ func captureServer(t *testing.T) (*Server, *pathCapture, *pathCapture) {
 // included. pctx.Path must contain only the URL path, exactly as the
 // forward and reverse proxy listeners produce it from r.URL.Path (query
 // dropped, percent-decoding applied) — so plugin behavior keyed on Path
-// cannot differ by listener mode.
+// cannot differ by listener mode. An unparseable target (which net/http
+// would reject with 400 before any pipeline runs) keeps the plain
+// query-strip fallback.
 func TestExtProc_PathMatchesProxyListeners(t *testing.T) {
-	srv, inCap, outCap := captureServer(t)
-
-	stream := &mockStream{
-		ctx: context.Background(),
-		requests: []*extprocv3.ProcessingRequest{
-			inboundRequest(makeHeaders(
-				"x-authbridge-direction", "inbound",
-				":path", "/api/x?secret=1",
-			)),
-			outboundRequest(makeHeaders(
-				":authority", "target-svc",
-				":path", "/api/hello%20world?secret=1&b=2",
-			)),
-		},
+	cases := []struct {
+		name   string
+		target string
+		want   string
+	}{
+		{"query stripped", "/api/x?secret=1", "/api/x"},
+		{"percent-decoded", "/api/hello%20world?secret=1&b=2", "/api/hello world"},
+		{"unparseable falls back to query strip", "/a%zz?secret=1", "/a%zz"},
 	}
-	_ = srv.Process(stream)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// One mock stream per request — each ext_proc stream carries a
+			// single request in production.
+			srv, inCap, outCap := captureServer(t)
+			inStream := &mockStream{
+				ctx: context.Background(),
+				requests: []*extprocv3.ProcessingRequest{
+					inboundRequest(makeHeaders(
+						"x-authbridge-direction", "inbound",
+						":path", tc.target,
+					)),
+				},
+			}
+			_ = srv.Process(inStream)
+			outStream := &mockStream{
+				ctx: context.Background(),
+				requests: []*extprocv3.ProcessingRequest{
+					outboundRequest(makeHeaders(
+						":authority", "target-svc",
+						":path", tc.target,
+					)),
+				},
+			}
+			_ = srv.Process(outStream)
 
-	if want := []string{"/api/x"}; len(inCap.paths) != 1 || inCap.paths[0] != want[0] {
-		t.Errorf("inbound pctx.Path = %q, want %q", inCap.paths, want)
-	}
-	if want := []string{"/api/hello world"}; len(outCap.paths) != 1 || outCap.paths[0] != want[0] {
-		t.Errorf("outbound pctx.Path = %q, want %q", outCap.paths, want)
+			if len(inCap.paths) != 1 || inCap.paths[0] != tc.want {
+				t.Errorf("inbound pctx.Path = %q, want [%q]", inCap.paths, tc.want)
+			}
+			if len(outCap.paths) != 1 || outCap.paths[0] != tc.want {
+				t.Errorf("outbound pctx.Path = %q, want [%q]", outCap.paths, tc.want)
+			}
+		})
 	}
 }

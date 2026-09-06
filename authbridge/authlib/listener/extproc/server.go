@@ -10,7 +10,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -162,7 +161,7 @@ func (s *Server) handleInbound(stream extprocv3.ExternalProcessor_ProcessServer,
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Path:      pathOnly(getHeader(headers, ":path")),
+		Path:      httpx.PathOnly(getHeader(headers, ":path")),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
@@ -187,7 +186,7 @@ func (s *Server) handleInboundBody(stream extprocv3.ExternalProcessor_ProcessSer
 		Direction: pipeline.Inbound,
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
-		Path:      pathOnly(getHeader(headers, ":path")),
+		Path:      httpx.PathOnly(getHeader(headers, ":path")),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
@@ -472,7 +471,7 @@ func (s *Server) handleOutbound(stream extprocv3.ExternalProcessor_ProcessServer
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Host:      authorityOf(headers),
-		Path:      pathOnly(getHeader(headers, ":path")),
+		Path:      httpx.PathOnly(getHeader(headers, ":path")),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
@@ -514,7 +513,7 @@ func (s *Server) handleOutboundBody(stream extprocv3.ExternalProcessor_ProcessSe
 		Method:    getHeader(headers, ":method"),
 		Scheme:    getHeader(headers, ":scheme"),
 		Host:      authorityOf(headers),
-		Path:      pathOnly(getHeader(headers, ":path")),
+		Path:      httpx.PathOnly(getHeader(headers, ":path")),
 		Headers:   headerMapToHTTP(headers),
 		Body:      body,
 		Shared:    s.Shared,
@@ -976,24 +975,6 @@ func requestHasBody(headers *corev3.HeaderMap) bool {
 	}
 	te := getHeader(headers, "transfer-encoding")
 	return te != ""
-}
-
-// pathOnly extracts the URL path from a request target. The :path
-// pseudo-header carries the full target ("/api/x?a=1"), but pctx.Path
-// must hold only the path — see pipeline.Context.Path. It runs the same
-// parser net/http runs for the proxy listeners, so pctx.Path is
-// byte-identical across listener modes (decoding included).
-func pathOnly(target string) string {
-	u, err := url.ParseRequestURI(target)
-	if err != nil {
-		// Unparseable target (empty on CONNECT, garbage): fall back to a
-		// manual strip so a query never leaks into Path.
-		if i := strings.IndexByte(target, '?'); i >= 0 {
-			return target[:i]
-		}
-		return target
-	}
-	return u.Path
 }
 
 func getHeader(headers *corev3.HeaderMap, key string) string {
