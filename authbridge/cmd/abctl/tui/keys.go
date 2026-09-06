@@ -85,10 +85,12 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			// goTop below), and shadowing a vim-style motion inside one pane is
 			// worse than picking a second-choice mnemonic.
 			//
-			// Inert while viewing latency — the aggregator holds no per-label
-			// latency — so the key is not accepted there at all. Silently
-			// swallowing it would look like a broken binding; falling through lets
-			// `b` keep whatever meaning it has elsewhere.
+			// Ignored while viewing latency: the aggregator holds no per-label
+			// latency, so there is no per-status or per-model mean to plot. The
+			// footer and the [?] overlay both say so, which is what keeps this from
+			// reading as a broken binding — `b` reaches no other handler for this
+			// pane (pageActivePane has no paneUsage case), so breaking here simply
+			// drops it.
 			if m.usage.metric.isLatency() {
 				break
 			}

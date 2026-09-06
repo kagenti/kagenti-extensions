@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
@@ -269,6 +270,141 @@ func TestRenderStacked_TinySeriesIsStillVisible(t *testing.T) {
 		if !strings.Contains(plot, strings.Repeat(want, barWidth)) {
 			t.Errorf("series %q drew no band despite being present:\n%s", want, plot)
 		}
+	}
+}
+
+// A bar's height comes from the bucket total, so traffic no label claims must get
+// its own band rather than being absorbed by the named series. Absorbing it drew
+// a bucket that is 10% claude-sonnet-5 as a solid `s` bar: the height said "lots
+// of traffic" and every row claimed to be sonnet.
+func TestAllotRows_UnlabelledTrafficGetsItsOwnBand(t *testing.T) {
+	b := mkSeriesBuckets([]map[string]int64{{"claude-sonnet-5": 100}})[0]
+	b.Counts.Requests = 1000 // only 10% of the bucket is labelled
+	series := collectSeries([]usage.Bucket{b}, metricRequests)
+
+	got := allotRows(b, metricRequests, series, 10, b.Requests)
+
+	rows := map[string]int64{}
+	var sum int64
+	for _, a := range got {
+		rows[a.label] = a.rows
+		sum += a.rows
+	}
+	if sum != 10 {
+		t.Fatalf("allotted %d rows, bar is 10 tall", sum)
+	}
+	if rows["claude-sonnet-5"] != 1 && rows["claude-sonnet-5"] != 2 {
+		t.Errorf("sonnet has %d of 10 rows for 10%% of the bucket", rows["claude-sonnet-5"])
+	}
+	if rows[unlabelledLabel] == 0 {
+		t.Error("the 90% no label claims drew no band")
+	}
+}
+
+// Per-plugin attribution counts one request once per plugin, so byPlugin
+// sub-totals intentionally sum to MORE than the bucket (see the aggregator's
+// foldInto). Dividing by the bucket total over-allotted rows, `acc` ran past the
+// bar height, and whole series fell off the top — on every by-plugin bucket.
+func TestAllotRows_HandlesOverAttributedSeries(t *testing.T) {
+	b := mkSeriesBuckets([]map[string]int64{{"p1": 1000, "p2": 1000, "p3": 1000}})[0]
+	b.Counts.Requests = 1000 // each plugin credited the whole bucket
+	series := collectSeries([]usage.Bucket{b}, metricRequests)
+
+	got := allotRows(b, metricRequests, series, 10, b.Requests)
+
+	var sum int64
+	for _, a := range got {
+		if a.rows < 1 {
+			t.Errorf("series %q allotted %d rows", a.label, a.rows)
+		}
+		sum += a.rows
+	}
+	if sum != 10 {
+		t.Errorf("allotted %d rows for a 10-row bar — series would fall off the chart", sum)
+	}
+	if len(got) != 3 {
+		t.Errorf("allotted %d bands, want all 3 plugins present", len(got))
+	}
+}
+
+// Every band drawn must have a legend entry. Marks come from the palette and
+// repeat once it wraps, so a seventh series could draw with the first one's mark
+// while the legend named neither — an undecodable band.
+func TestRenderStacked_EveryDrawnBandIsInTheLegend(t *testing.T) {
+	labels := map[string]int64{}
+	for i := 0; i < 12; i++ {
+		labels[fmt.Sprintf("series-%c", 'a'+i)] = int64(100 - i*5)
+	}
+	lines := renderStackedBars(mkSeriesBuckets([]map[string]int64{labels}), metricRequests, usage.GroupMethod, 120)
+
+	// Split chart rows from legend rows at the axis.
+	var axisAt int
+	for i, l := range lines {
+		if strings.ContainsRune(stripANSI(l), '┼') {
+			axisAt = i
+			break
+		}
+	}
+	chart := stripANSI(strings.Join(lines[:axisAt], "\n"))
+	legend := stripANSI(strings.Join(lines[axisAt:], "\n"))
+
+	// Collect the distinct marks actually drawn.
+	drawn := map[rune]bool{}
+	for _, r := range chart {
+		if unicode.IsLetter(r) || r == '·' {
+			drawn[r] = true
+		}
+	}
+	if len(drawn) == 0 {
+		t.Fatal("no marks drawn")
+	}
+	for r := range drawn {
+		// The legend lists each mark followed by its name.
+		if !strings.ContainsRune(legend, r) {
+			t.Errorf("mark %q is drawn on the chart but absent from the legend:\n%s", string(r), legend)
+		}
+	}
+}
+
+// Folding the tail must preserve the totals: bounding how many bands are drawn is
+// the point, losing traffic is not.
+func TestFoldTailSeries_PreservesTotals(t *testing.T) {
+	labels := map[string]int64{}
+	var want int64
+	for i := 0; i < 10; i++ {
+		v := int64(100 - i*5)
+		labels[fmt.Sprintf("s%c", 'a'+i)] = v
+		want += v
+	}
+	buckets := mkSeriesBuckets([]map[string]int64{labels})
+	series := collectSeries(buckets, metricRequests)
+
+	kept, folded := foldTailSeries(buckets, metricRequests, series, 4)
+	if len(kept) != 5 { // 4 named + the fold
+		t.Errorf("kept %d series, want 4 named plus the fold", len(kept))
+	}
+	var got int64
+	for _, c := range folded[0].Series {
+		got += c.Requests
+	}
+	if got != want {
+		t.Errorf("folded buckets total %d, want %d — folding lost traffic", got, want)
+	}
+	// An existing "(other)" from the aggregator's own capping must merge, not
+	// collide: two bands both meaning "the rest" would be indefensible.
+	withOther := mkSeriesBuckets([]map[string]int64{{
+		"a": 100, "b": 90, "c": 80, "d": 70, "e": 60, tailLabel: 50,
+	}})
+	s2 := collectSeries(withOther, metricRequests)
+	kept2, _ := foldTailSeries(withOther, metricRequests, s2, 3)
+	seen := 0
+	for _, k := range kept2 {
+		if k.label == tailLabel {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Errorf("%d %q bands after folding, want exactly 1", seen, tailLabel)
 	}
 }
 

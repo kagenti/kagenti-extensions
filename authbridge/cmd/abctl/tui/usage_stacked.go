@@ -8,6 +8,11 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
+// unlabelledLabel names the share of a bucket that no series claims. It reaches
+// the chart as its own band and the legend as its own entry, so a bar whose
+// height exceeds what its labels account for says so.
+const unlabelledLabel = "(unlabelled)"
+
 // maxNamedSeries is how many series get their own mark and legend entry before
 // the rest fold together. Bounded by the palette so no two named series share a
 // colour.
@@ -18,6 +23,93 @@ var maxNamedSeries = len(seriesPalette)
 type seriesKey struct {
 	label string
 	total int64
+}
+
+// tailLabel collects series past maxNamedSeries. Matches the aggregator's own
+// overflow name (usage.overflowLabel) so an operator sees one vocabulary whether
+// the folding happened server-side, from label-cardinality capping, or here for
+// palette reasons.
+const tailLabel = "(other)"
+
+// foldTailSeries collapses everything past keep into a single tailLabel series,
+// rewriting the buckets to match.
+//
+// Folding before drawing, rather than only in the legend, is what makes every
+// band decodable: marks come from the palette and repeat once it wraps, so a
+// seventh series could draw with the same mark as the first while the legend
+// named neither. Returns the buckets unchanged when nothing needs folding, so the
+// common case allocates nothing.
+func foldTailSeries(buckets []usage.Bucket, m usageMetric, series []seriesKey, keep int) ([]seriesKey, []usage.Bucket) {
+	if len(series) <= keep {
+		return series, buckets
+	}
+	tail := make(map[string]bool, len(series)-keep)
+	var tailTotal int64
+	for _, s := range series[keep:] {
+		tail[s.label] = true
+		tailTotal += s.total
+	}
+	// Existing "(other)" from the aggregator's own capping merges in rather than
+	// colliding: two bands both meaning "the rest" would be indefensible.
+	kept := append([]seriesKey(nil), series[:keep]...)
+	for i := range kept {
+		if kept[i].label == tailLabel {
+			kept[i].total += tailTotal
+			tailTotal = 0
+		}
+	}
+	if tailTotal > 0 {
+		kept = append(kept, seriesKey{label: tailLabel, total: tailTotal})
+	}
+
+	out := make([]usage.Bucket, len(buckets))
+	for i, b := range buckets {
+		out[i] = b
+		if len(b.Series) == 0 {
+			continue
+		}
+		merged := make(map[string]usage.Counts, keep+1)
+		var acc usage.Counts
+		for label, c := range b.Series {
+			if tail[label] {
+				// Summed field-wise: usage.Counts.add is unexported, and every field
+				// must be carried or a folded band would under-report.
+				acc.Requests += c.Requests
+				acc.Errors += c.Errors
+				acc.Tokens += c.Tokens
+				acc.CostMicros += c.CostMicros
+				continue
+			}
+			merged[label] = c
+		}
+		if acc.Requests > 0 || acc.Tokens > 0 || acc.Errors > 0 {
+			cur := merged[tailLabel]
+			cur.Requests += acc.Requests
+			cur.Errors += acc.Errors
+			cur.Tokens += acc.Tokens
+			cur.CostMicros += acc.CostMicros
+			merged[tailLabel] = cur
+		}
+		out[i].Series = merged
+	}
+	return kept, out
+}
+
+// unlabelledTotal is how much of the window no series claims, summed across
+// buckets that actually show a remainder band. Returns 0 when the labels account
+// for everything, or over-account for it (per-plugin attribution does).
+func unlabelledTotal(buckets []usage.Bucket, m usageMetric, series []seriesKey) int64 {
+	var out int64
+	for _, b := range buckets {
+		var sum int64
+		for _, s := range series {
+			sum += m.valueOf(b.Series[s.label])
+		}
+		if d := m.value(b) - sum; d > 0 {
+			out += d
+		}
+	}
+	return out
 }
 
 // collectSeries totals each label across every bucket and returns them largest
@@ -89,15 +181,32 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 		return renderBars(buckets, m, width)
 	}
 
+	// Fold everything past maxNamedSeries into one band BEFORE drawing, so every
+	// band on the chart has a legend entry. Drawing each of them with its own mark
+	// while the legend named only the first few left bands nothing could decode —
+	// the marks repeat once the palette wraps, so two unrelated series could even
+	// share one.
+	series, buckets = foldTailSeries(buckets, m, series, maxNamedSeries)
+
+	// The unlabelled remainder is drawn as a band but is not in `series`, so
+	// register it for marks, colour and the legend. Appended last so it ranks
+	// behind every named series and cannot take a palette slot from one.
+	legendSeries := series
+	if unlabelled := unlabelledTotal(buckets, m, series); unlabelled > 0 {
+		legendSeries = append(append([]seriesKey(nil), series...),
+			seriesKey{label: unlabelledLabel, total: unlabelled})
+	}
+
 	// Rank each label once so segment order is identical in every bucket. A stack
 	// whose layers reorder between adjacent bars is unreadable.
-	rank := make(map[string]int, len(series))
-	for i, s := range series {
+	rank := make(map[string]int, len(legendSeries))
+	for i, s := range legendSeries {
 		rank[s.label] = i
 	}
+
 	// One mark per series, assigned once for the whole chart so a letter means the
 	// same thing in every bucket and in the legend.
-	letters := assignLetters(series)
+	letters := assignLetters(legendSeries)
 
 	var peak int64
 	for _, b := range buckets {
@@ -125,7 +234,7 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	out = append(out, renderTimeLabels(buckets))
 	out = append(out, renderValues(buckets, m))
 	out = append(out, "")
-	out = append(out, renderLegend(series, group, letters, rank, width)...)
+	out = append(out, renderLegend(legendSeries, group, letters, rank, width)...)
 	return out
 }
 
@@ -165,6 +274,7 @@ func stackedCell(b usage.Bucket, m usageMetric, group usage.Group,
 // rowAlloc is one series' share of a bar, in whole rows.
 type rowAlloc struct {
 	label string
+	value int64 // this series' metric value in the bucket
 	rows  int64
 }
 
@@ -181,14 +291,29 @@ type rowAlloc struct {
 // and its series vanished anyway. Guaranteed rows are reserved FIRST and the
 // remainder shared out proportionally, so the total always fits.
 func allotRows(b usage.Bucket, m usageMetric, series []seriesKey, barRows, total int64) []rowAlloc {
-	present := make([]rowAlloc, 0, len(series))
+	present := make([]rowAlloc, 0, len(series)+1)
+	var seriesSum int64
 	for _, s := range series {
-		if m.valueOf(b.Series[s.label]) > 0 {
-			present = append(present, rowAlloc{label: s.label})
+		if v := m.valueOf(b.Series[s.label]); v > 0 {
+			present = append(present, rowAlloc{label: s.label, value: v})
+			seriesSum += v
 		}
 	}
-	if len(present) == 0 {
+	if len(present) == 0 || seriesSum == 0 {
 		return nil
+	}
+	// Traffic no label claims gets its own band rather than being absorbed by the
+	// named series. The bar's height comes from the bucket total, so silently
+	// sharing the unlabelled remainder out drew a bucket that is 10%
+	// claude-sonnet-5 as a solid `s` bar — the height said "lots of traffic" and
+	// every row of it claimed to be sonnet.
+	//
+	// Only when the shortfall is large enough to occupy a row: rounding noise does
+	// not deserve a band, and a one-row remainder on every bar would be more
+	// misleading than omitting it.
+	if unlabelled := total - seriesSum; unlabelled > 0 && unlabelled*barRows/total > 0 {
+		present = append(present, rowAlloc{label: unlabelledLabel, value: unlabelled})
+		seriesSum += unlabelled
 	}
 	// More series than rows: the bar cannot show them all, so give a row each to
 	// as many as fit, largest first (series is already sorted). The legend still
@@ -201,13 +326,25 @@ func allotRows(b usage.Bucket, m usageMetric, series []seriesKey, barRows, total
 		return out
 	}
 
-	// One row reserved per series, the rest shared by proportion of the surplus.
+	// Proportions are taken against seriesSum, NOT the bucket total. The two are
+	// not the same number in either direction:
+	//
+	//   - Under: a bucket can carry traffic no label claims, so the labelled
+	//     series may sum to a fraction of the total. Dividing by the total then
+	//     under-allots every series and the leftover rows all went to the largest,
+	//     drawing a bucket that is 10% claude-sonnet-5 as a solid `s` bar.
+	//   - Over: per-plugin attribution counts one request once per plugin that
+	//     ran, so byPlugin sub-totals intentionally sum to MORE than the bucket
+	//     (see the aggregator's foldInto). Dividing by the total then over-allotted
+	//     rows, `acc` ran past barRows, and whole series fell off the top of the
+	//     chart — by-plugin did this on every bucket.
+	//
+	// Normalising against the sum of what is actually drawn makes the shares add
+	// up by construction, whichever way the totals disagree.
 	surplus := barRows - int64(len(present))
 	var assigned int64
 	for i := range present {
-		v := m.valueOf(b.Series[present[i].label])
-		extra := v * surplus / total
-		present[i].rows = 1 + extra
+		present[i].rows = 1 + present[i].value*surplus/seriesSum
 		assigned += present[i].rows
 	}
 	// Integer division leaves rows unassigned; give them to the largest series so
@@ -253,10 +390,9 @@ func paintSegment(text, label string, group usage.Group) string {
 	return text
 }
 
-// renderLegend names each series with its glyph and total. Error statuses are
-// coloured to match their segments, so the legend is the key to the chart rather
-// than a separate vocabulary.
-// renderLegend keys the chart: each series' mark, name and total.
+// renderLegend keys the chart: each series' mark, name and total. Error statuses
+// are coloured to match their segments, so the legend is the key to the chart
+// rather than a separate vocabulary.
 //
 // Returns one or more lines. Wrapping rather than eliding matters because the mark
 // is the only way to identify a band — a series dropped from the legend leaves an
