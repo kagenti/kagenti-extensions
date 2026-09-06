@@ -6,6 +6,8 @@ package extauthz
 import (
 	"context"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
@@ -44,7 +46,7 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	if host == "" {
 		host = headers["host"]
 	}
-	path := httpReq.GetPath()
+	path := pathOnly(httpReq.GetPath())
 	scheme := httpReq.GetScheme()
 
 	// Inbound validation via pipeline
@@ -111,6 +113,25 @@ func authzOutcome(pctx *pipeline.Context) pipeline.Outcome {
 		}
 	}
 	return pipeline.Outcome{FinalAction: pipeline.OutcomeAllow}
+}
+
+// pathOnly extracts the URL path from a request target.
+// AttributeContext.HttpRequest.path carries the full target, query string
+// included, but pctx.Path must hold only the path — see
+// pipeline.Context.Path. It runs the same parser net/http runs for the
+// proxy listeners, so pctx.Path is byte-identical across listener modes
+// (decoding included).
+func pathOnly(target string) string {
+	u, err := url.ParseRequestURI(target)
+	if err != nil {
+		// Unparseable target: fall back to a manual strip so a query
+		// never leaks into Path.
+		if i := strings.IndexByte(target, '?'); i >= 0 {
+			return target[:i]
+		}
+		return target
+	}
+	return u.Path
 }
 
 func mapToHTTPHeader(m map[string]string) http.Header {
