@@ -141,10 +141,12 @@ class TestProvisionFails:
         spb.build.assert_not_called()
 
 
-class TestSuccessReEnablesClient:
-    def test_success_sets_enabled_true_and_does_not_tear_down(self):
-        # On a successful onboarding the Orchestrator re-enables the client (idempotent),
-        # clearing any failed-disable left by a prior attempt. Nothing is torn down.
+class TestSuccessDoesNotReEnableClient:
+    def test_success_does_not_touch_enabled_and_does_not_tear_down(self):
+        # On a successful onboarding the Orchestrator no longer re-enables the client itself —
+        # the caller does that via reenable_service(), but only AFTER compute_and_apply succeeds
+        # (so a PCE failure leaves the client disabled). onboard_service tears nothing down and
+        # never sets enabled here.
         service = object()
         config = _config_returning(service)
         graph = _graph(
@@ -160,6 +162,23 @@ class TestSuccessReEnablesClient:
             spb.build.return_value = [object()]
             orchestrator.onboard_service(SERVICE_ID)
 
+        config.set_service_enabled.assert_not_called()
+        config.delete_service_role.assert_not_called()
+        config.delete_service_scope.assert_not_called()
+        config.unset_service_type.assert_not_called()
+
+
+class TestReenableService:
+    def test_reenable_sets_enabled_true_and_touches_nothing_else(self):
+        # reenable_service is the UC1-only, idempotent post-apply hook the caller runs after a
+        # successful compute_and_apply. It resolves the service and sets enabled=true — nothing else.
+        service = object()
+        config = _config_returning(service)
+
+        with patch.object(orchestrator, "_config", return_value=config):
+            orchestrator.reenable_service(SERVICE_ID)
+
+        config.get_service.assert_called_once_with(SERVICE_ID)
         config.set_service_enabled.assert_called_once_with(service, True)
         config.delete_service_role.assert_not_called()
         config.delete_service_scope.assert_not_called()

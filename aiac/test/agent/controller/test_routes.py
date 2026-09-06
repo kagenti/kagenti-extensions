@@ -61,6 +61,7 @@ def test_apply_service_dispatches_to_orchestrator_and_calls_pce_once():
             return_value=([], False, RuleEffect.DENY),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service") as reenable,
         patch.dict("os.environ", {}, clear=False) as _env,
     ):
         os.environ.pop("AIAC_DEFAULT_EFFECT", None)
@@ -70,6 +71,8 @@ def test_apply_service_dispatches_to_orchestrator_and_calls_pce_once():
     orch.assert_called_once_with("svc-123", RuleEffect.DENY)
     # The onboard route forwards the orchestrator's default_effect to the PCE (least-privilege here).
     pce.assert_called_once_with([], False, RuleEffect.DENY)
+    # The client is re-enabled only after the PCE apply succeeds.
+    reenable.assert_called_once_with("svc-123")
 
 
 def test_apply_service_default_effect_env_allow_reaches_orchestrator_and_pce():
@@ -81,6 +84,7 @@ def test_apply_service_default_effect_env_allow_reaches_orchestrator_and_pce():
             return_value=([], False, RuleEffect.ALLOW),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
         patch.dict("os.environ", {"AIAC_DEFAULT_EFFECT": "Allow"}, clear=False),
     ):
         resp = client.post("/apply/service/svc-123")
@@ -98,6 +102,7 @@ def test_apply_service_default_effect_env_unrecognised_falls_back_to_deny():
             return_value=([], False, RuleEffect.DENY),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
         patch.dict("os.environ", {"AIAC_DEFAULT_EFFECT": "banana"}, clear=False),
     ):
         resp = client.post("/apply/service/svc-123")
@@ -180,6 +185,7 @@ def test_controller_forwards_handler_rules_and_override_verbatim():
             return_value=(rules, False, RuleEffect.DENY),
         ),
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
     ):
         resp = client.post("/apply/service/svc-9")
 
@@ -204,6 +210,27 @@ def test_handler_upstream_error_surfaces_status_and_skips_pce():
 
     assert resp.status_code == 502
     pce.assert_not_called()
+
+
+def test_apply_service_does_not_reenable_when_pce_apply_raises():
+    # The re-enable is strictly post-apply: if compute_and_apply raises, the route never reaches
+    # reenable_service, so the client stays disabled (the failed-service marker) — never left
+    # enabled with no applied policy.
+    with (
+        patch(
+            "aiac.agent.controller.routes.onboard_service",
+            return_value=([], False, RuleEffect.DENY),
+        ),
+        patch(
+            "aiac.agent.controller.routes.compute_and_apply",
+            side_effect=HTTPException(status_code=500),
+        ),
+        patch("aiac.agent.controller.routes.reenable_service") as reenable,
+    ):
+        resp = client.post("/apply/service/svc-pce-boom")
+
+    assert resp.status_code == 500
+    reenable.assert_not_called()
 
 
 def test_policy_rules_builder_error_surfaces_422_and_skips_pce():

@@ -71,7 +71,7 @@ The Orchestrator wraps the `provision → ServicePolicyBuilder.build` pipeline i
 
 **Rollback fires on every attempt.** A permanent failure rolls back once, because the NATS consumer routes it straight to the dead-letter subject (see [aiac-agent.md → Ack contract](../aiac-agent.md#ack-contract)). A retryable `LLMAccessError` re-provisions idempotently and rolls back again on each NATS redelivery. This repeated provision-then-rollback is accepted.
 
-**The success path re-enables the client.** On a successful onboarding the Orchestrator sets the client `enabled=true` (idempotent). This clears a failed-disable left by a prior attempt.
+**The success path re-enables the client — but only after the apply.** The Orchestrator does **not** re-enable the client itself. The caller (Controller route or NATS consumer) re-enables it through `reenable_service(service_id)` **after** its `compute_and_apply` (PCE) call succeeds. `reenable_service` sets the client `enabled=true` (idempotent), which clears a failed-disable left by a prior attempt. The re-enable is deliberately post-apply: if `compute_and_apply` fails, the caller never reaches `reenable_service`, so the client stays disabled (the failed-service marker) instead of being left enabled with no applied policy.
 
 **Rollback is UC1-only.** UC2 (Policy Update) and UC3 (Role Update) provision nothing, so they have nothing to tear down and never disable a client.
 

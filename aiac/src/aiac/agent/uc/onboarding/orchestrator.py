@@ -86,6 +86,20 @@ def _rollback(config: Configuration, service_id: str, created_roles, created_sco
     logger.info("UC1 rollback: disabled client — failed-service marker (service %s)", safe_id)
 
 
+def reenable_service(service_id: str) -> None:
+    """Re-enable the Keycloak client (UC1-only, idempotent), clearing any prior failed-disable marker.
+
+    The **caller** (Controller route or NATS consumer) invokes this AFTER a successful
+    ``compute_and_apply`` (PCE) call — deliberately post-apply. Re-enabling only after the policy
+    is applied means a PCE failure leaves the client **disabled** (the failed-service marker set by
+    a prior :func:`_rollback` stays in place), so a client is never enabled with no applied policy.
+
+    ``set_service_enabled(service, True)`` is idempotent, so a redelivery that re-enables an
+    already-enabled client is a no-op."""
+    config = _config()
+    config.set_service_enabled(config.get_service(service_id), True)
+
+
 def onboard_service(
     service_id: str, default_effect: RuleEffect = RuleEffect.DENY
 ) -> tuple[list[PolicyRule], bool, RuleEffect]:
@@ -93,8 +107,9 @@ def onboard_service(
 
     On any of the four typed build failures (see ``_ROLLBACK_ERRORS``) the Orchestrator runs the
     compensating :func:`_rollback` (UC1-only) and **re-raises** the original error unchanged. On
-    success it re-enables the client (``set_service_enabled(service, True)`` — idempotent), which
-    clears any failed-disable left by a prior attempt.
+    success it does **not** re-enable the client here: the client is re-enabled by the caller via
+    :func:`reenable_service`, but only AFTER the caller's ``compute_and_apply`` (PCE) call succeeds,
+    so a PCE failure leaves the client disabled rather than enabled-with-no-policy.
 
     ``default_effect`` is passed straight back to the Controller so it reaches the single
     ``compute_and_apply`` call and lands on every derived ``AgentPolicyModel``. It defaults to
@@ -115,6 +130,4 @@ def onboard_service(
         _rollback(config, service_id, created_roles, created_scopes)
         raise
 
-    # Success: re-enable the client (idempotent), clearing any prior failed-disable marker.
-    config.set_service_enabled(config.get_service(service_id), True)
     return rules, False, default_effect

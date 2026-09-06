@@ -36,7 +36,7 @@ from aiac.agent.policy_rules_builder.graph import (
     UnparseableLLMResponseError,
 )
 from aiac.agent.shared.error_logging import log_by_type
-from aiac.agent.uc.onboarding.orchestrator import onboard_service
+from aiac.agent.uc.onboarding.orchestrator import onboard_service, reenable_service
 from aiac.agent.uc.policy_update.build import build_policy
 from aiac.agent.uc.role_update.role import update_role
 from aiac.policy.computation import compute_and_apply
@@ -143,6 +143,11 @@ class AiacEventConsumer:
         try:
             rules, override, default_effect = _handle(msg.subject)
             compute_and_apply(rules, override, default_effect)
+            # UC1 only: re-enable the client AFTER a successful compute_and_apply, mirroring the
+            # HTTP route. If compute_and_apply raised above, this is skipped and the client stays
+            # disabled (the failed-service marker), never enabled-with-no-policy.
+            if msg.subject.startswith(_SERVICE_PREFIX):
+                reenable_service(msg.subject[len(_SERVICE_PREFIX) :])
         except Exception as exc:
             # Log exactly once, routed by exception TYPE to its per-persona named logger.
             # FastAPI's exception handlers never fire on this path (there is no request), so

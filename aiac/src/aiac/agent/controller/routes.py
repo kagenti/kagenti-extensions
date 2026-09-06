@@ -31,7 +31,7 @@ from aiac.agent.policy_rules_builder.graph import (
 )
 from aiac.agent.shared.error_logging import log_by_type
 from aiac.agent.uc.offboarding.offboard import offboard_service
-from aiac.agent.uc.onboarding.orchestrator import onboard_service
+from aiac.agent.uc.onboarding.orchestrator import onboard_service, reenable_service
 from aiac.agent.uc.policy_update.build import build_policy
 from aiac.agent.uc.policy_update.rebuild import rebuild_policy
 from aiac.agent.uc.role_update.role import update_role
@@ -133,6 +133,9 @@ def health() -> dict[str, str]:
 def apply_service(service_id: str) -> Response:
     rules, override, default_effect = onboard_service(service_id, _default_effect_from_env())
     compute_and_apply(rules, override, default_effect)
+    # Re-enable the client only AFTER the PCE apply succeeds — a compute_and_apply failure above
+    # propagates and leaves the client disabled (the failed-service marker), never enabled-with-no-policy.
+    reenable_service(service_id)
     return Response(status_code=200)
 
 
