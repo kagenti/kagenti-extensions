@@ -461,7 +461,7 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	reqCtx := p.emitRequestSpan(parent, spanName, spanKind, reqAttrs)
 	exchangeID := reqCtx.SpanID().String()
 	remoteCtx = p.mintTraceparent(ctx, pctx, remoteCtx, reqCtx)
-	restampTracestate(pctx, remoteCtx, exchangeID)
+	stamped := restampTracestate(pctx, remoteCtx, exchangeID)
 
 	common := make([]attribute.KeyValue, 0, len(base)+1)
 	common = append(common, base...)
@@ -474,7 +474,15 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 		spanName: spanName,
 		protocol: protocol,
 	})
-	pctx.Observe("recorded_request")
+	// modify vs observe follows what actually happened to the message: the
+	// stamp (and any minted traceparent under it) is a header rewrite; when
+	// nothing was written — pure-observer config, or a refused Insert — the
+	// exchange was only recorded.
+	if stamped {
+		pctx.Modify("stamped_tracestate")
+	} else {
+		pctx.Observe("recorded_request")
+	}
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
@@ -559,10 +567,15 @@ func (p *LineageTelemetry) mintTraceparent(ctx context.Context, pctx *pipeline.C
 // semantics, not an accident. The listener is
 // responsible for propagating these header mutations (ext_proc emits a
 // SetHeaders diff).
-func restampTracestate(pctx *pipeline.Context, remoteCtx context.Context, exchangeID string) {
+//
+// Reports whether it wrote — which is exactly whether the plugin mutated the
+// forwarded message: whenever mintTraceparent wrote, the restamp that follows
+// succeeds too (a minted context's TraceState is empty, so Insert cannot
+// fail), so a false here means no header of either kind was written.
+func restampTracestate(pctx *pipeline.Context, remoteCtx context.Context, exchangeID string) bool {
 	rsc := trace.SpanContextFromContext(remoteCtx)
 	if !rsc.IsValid() {
-		return
+		return false
 	}
 	ts, err := rsc.TraceState().Insert(tracestateStampKey, exchangeID)
 	if err != nil {
@@ -571,9 +584,10 @@ func restampTracestate(pctx *pipeline.Context, remoteCtx context.Context, exchan
 		// is indistinguishable from "app has no shim".
 		slog.Warn("lineage-telemetry: tracestate stamp rejected; the next element will attribute as wire",
 			"exchange_id", exchangeID, "error", err)
-		return
+		return false
 	}
 	pctx.Headers.Set("tracestate", ts.String())
+	return true
 }
 
 // matchesAnyHost reports whether host matches any configured bypass_hosts

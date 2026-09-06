@@ -973,6 +973,30 @@ func TestConfigSchema_TracksConfig(t *testing.T) {
 	}
 }
 
+// The invocation action follows what happened to the message: the tracestate
+// stamp is a header rewrite (modify); a pure observer that wrote nothing
+// records observe. The repo's action vocabulary is operator-facing.
+func TestInvocationAction_ModifyOnlyWhenStamped(t *testing.T) {
+	// Default config, valid inbound context: the stamp is written.
+	p, _ := newTestPlugin(t)
+	pctx := fakeContext(pipeline.Inbound, traceparent("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"))
+	run(t, p, pctx, allow(200))
+	inv := pctx.Extensions.Invocations.Inbound[0]
+	if string(inv.Action) != "modify" {
+		t.Errorf("stamped exchange action = %q, want modify", inv.Action)
+	}
+
+	// Pure observer: mint off, nothing valid on the wire — nothing written.
+	p2, _ := newTestPlugin(t)
+	p2.cfg.MintTraceparent = false
+	pctx2 := fakeContext(pipeline.Inbound, http.Header{})
+	run(t, p2, pctx2, allow(200))
+	inv2 := pctx2.Extensions.Invocations.Inbound[0]
+	if string(inv2.Action) != "observe" {
+		t.Errorf("unstamped exchange action = %q, want observe", inv2.Action)
+	}
+}
+
 // ---- the forbidden-keys guard ----
 
 // TestForbiddenKeysNeverEmitted scans every attribute of every span emitted
