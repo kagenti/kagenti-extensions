@@ -215,18 +215,21 @@ func humanizeDurationMs(ms float64) string {
 	case ms < 1:
 		return "<1ms"
 	case ms < 9.95:
-		// Bounded below 9.95, not 10: %.1f rounds 9.99 up to "10.0ms", which is
-		// six characters and breaks the width promise the gutter is laid out
-		// against. Same trap one branch down.
+		// Bounded below 9.95, not 10: %.1f rounds 9.99 up to "10.0ms", which is six
+		// characters and breaks the width promise the gutter is laid out against.
 		return fmt.Sprintf("%.1fms", ms) // 1.0ms..9.9ms
-	case ms < 1000:
-		return fmt.Sprintf("%dms", int64(ms)) // 10ms..999ms
+	case ms < 999.5:
+		// Rounded, not truncated. int64(9.99) is 9, so the previous version
+		// reported 9.99ms as "9ms" — a value rounding DOWN past a whole
+		// millisecond, which is a worse error than the wide label the 9.95 bound
+		// above exists to avoid. Same reasoning in each integer branch below.
+		return fmt.Sprintf("%dms", int64(ms+0.5)) // 10ms..999ms
 	case ms < 9_950:
 		return fmt.Sprintf("%.1fs", ms/1000) // 1.0s..9.9s
-	case ms < 600_000:
-		return fmt.Sprintf("%ds", int64(ms)/1000) // 10s..599s
-	case ms < 36_000_000:
-		return fmt.Sprintf("%dm", int64(ms)/60_000) // 10m..599m
+	case ms < 599_500:
+		return fmt.Sprintf("%ds", int64(ms/1000+0.5)) // 10s..599s
+	case ms < 35_970_000:
+		return fmt.Sprintf("%dm", int64(ms/60_000+0.5)) // 10m..599m
 	default:
 		return ">10h"
 	}

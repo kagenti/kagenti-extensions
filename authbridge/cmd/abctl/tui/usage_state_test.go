@@ -268,3 +268,40 @@ func TestUsage_CatalogRoundTripRestartsPolling(t *testing.T) {
 		t.Error("the pre-catalog chain is still alive — two chains would double the poll rate")
 	}
 }
+
+// The header must not claim a breakdown the chart is not showing. Latency has no
+// per-label data, so renderUsageChart ignores the group — a header reading "by
+// status" over a bucket-wide mean asserts a breakdown that does not exist.
+func TestRenderUsage_HeaderDoesNotClaimLatencyBreakdown(t *testing.T) {
+	m := &model{pane: paneUsage, width: 80, bodyHeight: 24}
+	m.usage.group = usage.GroupStatus
+	m.usage.snap = &usage.Snapshot{Buckets: []usage.Bucket{{
+		At: time.Date(2026, 9, 6, 23, 24, 0, 0, time.UTC),
+	}}}
+
+	m.usage.metric = metricTokens
+	if got := m.renderUsage(80, 24); !strings.Contains(got, "by status") {
+		t.Error("count metric header omits the active breakdown")
+	}
+
+	m.usage.metric = metricLatency
+	got := m.renderUsage(80, 24)
+	if strings.Contains(got, "by status") {
+		t.Errorf("latency header claims a breakdown the chart ignores:\n%s", firstLine(got))
+	}
+	if !strings.Contains(got, "no breakdown for latency") {
+		t.Errorf("latency header does not say why there is no breakdown:\n%s", firstLine(got))
+	}
+
+	// The selection survives, so cycling back to a count metric restores it.
+	if m.usage.group != usage.GroupStatus {
+		t.Errorf("group = %q, want the selection preserved", m.usage.group)
+	}
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}

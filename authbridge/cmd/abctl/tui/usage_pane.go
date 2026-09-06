@@ -211,8 +211,16 @@ func (m *model) renderUsage(width, height int) string {
 		scope = "session: " + m.usage.session
 	}
 	window, resolution := m.usage.window()
+	// The header must not claim a breakdown the chart is not showing. Latency has
+	// no per-label data in the aggregator, so renderUsageChart ignores the group
+	// entirely — displaying "by status" over a bucket-wide mean would assert a
+	// breakdown that does not exist. The selection is kept, not cleared, so it is
+	// still there when the operator cycles back to a count metric.
 	grouping := "ungrouped"
-	if m.usage.group != "" && m.usage.group != usage.GroupNone {
+	switch {
+	case m.usage.metric.isLatency():
+		grouping = "no breakdown for latency"
+	case m.usage.group != "" && m.usage.group != usage.GroupNone:
 		grouping = "by " + string(m.usage.group)
 	}
 	b.WriteString(fmt.Sprintf("  USAGE — %s — %s @ %s — %s — %s\n\n",

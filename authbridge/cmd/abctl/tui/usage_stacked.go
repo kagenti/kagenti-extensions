@@ -302,25 +302,63 @@ func renderLegend(series []seriesKey, group usage.Group,
 			flush()
 			cost = 1 + len([]rune(text))
 		}
+		// A single entry can still exceed the width with nothing to wrap against —
+		// one long model name on a narrow terminal. Truncate the NAME rather than
+		// the whole entry, so the mark and the total survive: those are what
+		// identify the band and say how much it is, and a legend line wider than
+		// the terminal wraps and destroys the chart above it.
+		if plain+cost > width {
+			text = truncateLegendText(text, width-plain-1)
+			cost = 1 + len([]rune(text))
+		}
 		parts = append(parts, mark+paintSegment(text, s.label, group))
 		plain += cost
 	}
 	flush()
 
 	if elided > 0 {
-		note := fmt.Sprintf("%s(+%d more)", indent, elided)
-		// Append to the last line when it fits, so a single extra series does not
-		// cost a whole row.
-		if n := len(lines); n > 0 && len([]rune(stripANSIWidth(lines[n-1])))+len(note) <= width {
-			lines[n-1] += sep + strings.TrimPrefix(note, indent)
+		bare := fmt.Sprintf("(+%d more)", elided)
+		// Measure what is actually appended — sep + bare — not the indented form.
+		// Counting the indent instead of the separator happened to agree at width
+		// 80 and was three columns short everywhere else.
+		suffix := len([]rune(sep)) + len([]rune(bare))
+		if n := len(lines); n > 0 && len([]rune(stripANSIWidth(lines[n-1])))+suffix <= width {
+			lines[n-1] += sep + bare
 		} else {
-			lines = append(lines, note)
+			lines = append(lines, indent+bare)
 		}
 	}
 	if len(lines) == 0 {
 		return nil
 	}
 	return lines
+}
+
+// truncateLegendText shortens a legend entry's text to fit, preserving the
+// trailing "(total)" so the entry still says how much the band is worth.
+//
+// The name is what gets cut, with an ellipsis marking it, because a name is
+// recognisable from a prefix while a truncated number is simply wrong.
+func truncateLegendText(text string, max int) string {
+	r := []rune(text)
+	if max <= 0 {
+		return ""
+	}
+	if len(r) <= max {
+		return text
+	}
+	// Keep the parenthesised total if there is room for it plus a token name.
+	if i := strings.LastIndex(text, " ("); i > 0 {
+		total := text[i:]
+		tr := []rune(total)
+		if keep := max - len(tr) - 1; keep > 1 {
+			return string(r[:keep]) + "…" + total
+		}
+	}
+	if max == 1 {
+		return "…"
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // stripANSIWidth returns text with escape sequences removed, for measuring how

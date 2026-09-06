@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -154,6 +156,13 @@ func TestHumanizeDurationMs(t *testing.T) {
 		{10_000, "10s"}, {599_000, "599s"},
 		{600_000, "10m"},
 		{36_000_000, ">10h"},
+		// Boundaries where a rounded label would leave its own branch. Truncating
+		// here reported 9.99ms as "9ms" — rounding DOWN past a whole millisecond,
+		// which is a worse error than the wide label the branch bound prevents.
+		{9.95, "10ms"}, {9.99, "10ms"},
+		{999.4, "999ms"}, {999.6, "1.0s"},
+		{9949, "9.9s"}, {9950, "10s"}, {9999, "10s"},
+		{599_400, "599s"}, {599_600, "10m"},
 	} {
 		if got := humanizeDurationMs(tc.in); got != tc.want {
 			t.Errorf("humanizeDurationMs(%v) = %q, want %q", tc.in, got, tc.want)
@@ -164,17 +173,39 @@ func TestHumanizeDurationMs(t *testing.T) {
 // The width promise is what the gutter is laid out against, so it must hold for
 // every magnitude — the same lesson as humanizeCount, which returned 7 characters
 // above a billion because nobody revisited its fallthrough.
+//
+// Swept densely rather than at listed points: the failures here live at branch
+// boundaries, where a rounded value crosses out of the branch that formatted it,
+// and a hand-written list is exactly what misses those.
 func TestHumanizeDurationMs_NeverExceedsWidth(t *testing.T) {
-	vals := []float64{0, -1, 0.001, 0.999}
-	for _, base := range []float64{1, 4.44, 9.99} {
-		for mag := 1.0; mag <= 1e15; mag *= 10 {
-			vals = append(vals, base*mag)
+	for e := -3.0; e < 10; e += 0.001 {
+		v := math.Pow(10, e)
+		if got := humanizeDurationMs(v); len([]rune(got)) > maxDurationLabelLen {
+			t.Fatalf("humanizeDurationMs(%v) = %q (%d chars), cap is %d",
+				v, got, len([]rune(got)), maxDurationLabelLen)
 		}
 	}
-	for _, v := range vals {
+	for _, v := range []float64{0, -1, 0.001, 0.999, math.MaxFloat64} {
 		if got := humanizeDurationMs(v); len([]rune(got)) > maxDurationLabelLen {
 			t.Errorf("humanizeDurationMs(%v) = %q (%d chars), cap is %d",
 				v, got, len([]rune(got)), maxDurationLabelLen)
+		}
+	}
+}
+
+// No label may understate its value: reporting 9.99ms as "9ms" is a wrong number,
+// not merely a rounded one. Checks that the rendered label never falls below the
+// value it describes by more than the precision it shows.
+func TestHumanizeDurationMs_NeverRoundsDownAcrossAUnit(t *testing.T) {
+	for _, v := range []float64{9.95, 9.99, 999.6, 9999, 599_600} {
+		got := humanizeDurationMs(v)
+		// A label ending in a bare unit must not show fewer whole units than the
+		// value has, once the unit is accounted for.
+		if strings.HasSuffix(got, "ms") && !strings.Contains(got, ".") {
+			var n float64
+			if _, err := fmt.Sscanf(got, "%fms", &n); err == nil && n < v-1 {
+				t.Errorf("humanizeDurationMs(%v) = %q understates by more than 1ms", v, got)
+			}
 		}
 	}
 }

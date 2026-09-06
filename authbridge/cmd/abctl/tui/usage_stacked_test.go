@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,71 @@ func TestRenderLegend_WrapsRatherThanElidingPresentSeries(t *testing.T) {
 		if got := len([]rune(stripANSI(l))); got > 80 {
 			t.Errorf("legend line is %d columns:\n%q", got, stripANSI(l))
 		}
+	}
+}
+
+// A legend line wider than the terminal wraps and destroys the chart above it, so
+// the width bound has to hold even for a single entry with nothing to wrap
+// against — one long model name on a narrow terminal.
+func TestRenderLegend_BoundsALoneOverWideEntry(t *testing.T) {
+	series := []seriesKey{{"anthropic/claude-haiku-4-5-20251001-preview-experimental", 912}}
+	letters := assignLetters(series)
+	rank := map[string]int{series[0].label: 0}
+
+	for _, width := range []int{10, 16, 20, 40, 80} {
+		lines := renderLegend(series, usage.GroupMethod, letters, rank, width)
+		for _, l := range lines {
+			if got := len([]rune(stripANSI(l))); got > width {
+				t.Errorf("width %d: legend line is %d columns:\n%q", width, got, stripANSI(l))
+			}
+		}
+		// The total identifies how much the band is worth, so it survives
+		// truncation wherever there is room for it at all.
+		if width >= 20 {
+			if !strings.Contains(stripANSI(strings.Join(lines, "")), "(912)") {
+				t.Errorf("width %d: truncation dropped the total: %q", width, stripANSI(lines[0]))
+			}
+		}
+	}
+}
+
+// The elision note is appended as sep+note, so the fit check must measure that.
+// Counting the indent instead happened to agree at width 80 and was three columns
+// short everywhere else.
+func TestRenderLegend_ElisionNoteRespectsWidth(t *testing.T) {
+	var series []seriesKey
+	for i := 0; i < 9; i++ {
+		series = append(series, seriesKey{fmt.Sprintf("series-%c-name", 'a'+i), int64(100 - i)})
+	}
+	letters := assignLetters(series)
+	rank := map[string]int{}
+	for i, s := range series {
+		rank[s.label] = i
+	}
+
+	for width := 30; width <= 100; width++ {
+		lines := renderLegend(series, usage.GroupMethod, letters, rank, width)
+		joined := stripANSI(strings.Join(lines, "\n"))
+		if !strings.Contains(joined, "more)") {
+			t.Errorf("width %d: nine series past the palette but no elision note", width)
+		}
+		for _, l := range lines {
+			if got := len([]rune(stripANSI(l))); got > width {
+				t.Errorf("width %d: line is %d columns:\n%q", width, got, stripANSI(l))
+			}
+		}
+	}
+}
+
+func TestTruncateLegendText(t *testing.T) {
+	const text = " claude-sonnet-5 (2.2M)"
+	for _, max := range []int{0, 1, 2, 5, 10, 22, 23, 40} {
+		got := truncateLegendText(text, max)
+		if len([]rune(got)) > max {
+			t.Errorf("truncateLegendText(%d) = %q (%d runes), over budget", max, got, len([]rune(got)))
+		}
+	}
+	if got := truncateLegendText(text, 40); got != text {
+		t.Errorf("a text that already fits was altered: %q", got)
 	}
 }

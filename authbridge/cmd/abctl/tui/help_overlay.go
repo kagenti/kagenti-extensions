@@ -115,7 +115,7 @@ var paneKeys = map[paneID]keyGroup{
 		bindings: []keyBinding{
 			{"m", "cycle metric (tokens/requests/errors/latency)"},
 			{"w", "cycle window (10m/1h/6h)"},
-			{"b", "cycle breakdown (none/status/method/plugin)"},
+			{"b", "cycle breakdown (none/status/method/plugin; not for latency)"},
 			{"s", "toggle session / all sessions"},
 			{"esc", "back"},
 		},
