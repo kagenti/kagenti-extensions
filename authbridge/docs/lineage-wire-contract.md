@@ -52,6 +52,10 @@ One HTTP exchange through the sidecar produces two OTLP spans.
 - The response span is emitted at stream end **even when no response was produced** — client
   disconnect, upstream reset, plugin denial. It then carries `lineage.outcome` and whatever status
   exists, so the row completes as failed instead of dangling.
+- The producer samples unconditionally: a valid caller `traceparent` with the sampled-out flag
+  (`…-00`) does not suppress the spans — lineage is an audit record, and a caller-chosen flag is
+  not an opt-out from being graphed. The forwarded `traceparent` keeps the caller's flags (§3.3: a
+  valid one is never modified); only what this producer exports ignores them.
 - A lone request span means one of three things: the sidecar died mid-exchange; a panic while
   emitting the response span was recovered by the pipeline (a WARN is logged); or the response span
   was emitted but lost — the two halves enter a batching exporter an exchange apart, so a response
@@ -294,7 +298,9 @@ mechanisms named as removed are not to be reintroduced.
   pseudo-header put the query string on the wire regardless of `capture_io`; the proxy listeners
   never delivered it. And every variable-content string attribute plus the span name is capped at
   `max_attr_bytes` (default 256) — until now only the two payload values were bounded, so one
-  request could put a 100 KB span name into the backend.
+  request could put a 100 KB span name into the backend. And the producer samples unconditionally
+  (§2): under the SDK-default ParentBased sampler a caller's sampled-out `traceparent` (`…-00`)
+  exported zero spans for the whole chain.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only

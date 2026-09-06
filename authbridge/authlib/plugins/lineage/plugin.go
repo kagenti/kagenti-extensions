@@ -296,20 +296,28 @@ func (p *LineageTelemetry) Init(ctx context.Context) error {
 		res = resource.Default()
 	}
 
-	// No sampler is set, so the SDK default applies: ParentBased(AlwaysSample),
-	// overridable through OTEL_TRACES_SAMPLER. The sampling flag of a root
-	// span is what a minted traceparent carries downstream (mintTraceparent),
-	// and every peer sidecar is ParentBased too — a ratio sampler here would
-	// silently un-sample whole chains, not just this pod's spans.
-	p.tp = sdktrace.NewTracerProvider(
-		sdktrace.WithBatcher(&exportObserver{SpanExporter: exporter, failures: &p.exportFailures}),
-		sdktrace.WithResource(res),
-	)
+	p.tp = newTracerProvider(&exportObserver{SpanExporter: exporter, failures: &p.exportFailures}, res)
 	p.tracer = p.tp.Tracer("authbridge/" + pluginName)
 
 	p.ready.Store(true)
 	slog.Info("lineage-telemetry: initialized", "endpoint", endpoint, "self_id", p.selfID)
 	return nil
+}
+
+// newTracerProvider builds the provider Init installs. AlwaysSample is
+// explicit and deliberate: lineage is an audit record, and under the SDK
+// default ParentBased sampler a caller sending a valid traceparent with the
+// sampled-out flag (…-00) suppressed both spans — the same caller-controlled
+// opt-out from being graphed that the inbound bypass_hosts decision refuses.
+// The forwarded traceparent keeps the caller's flags (a valid one is never
+// modified); only what this producer exports ignores them. An explicit
+// sampler also means OTEL_TRACES_SAMPLER no longer overrides it.
+func newTracerProvider(exporter sdktrace.SpanExporter, res *resource.Resource) *sdktrace.TracerProvider {
+	return sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(exporter),
+		sdktrace.WithResource(res),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
 }
 
 // isLoopback reports whether endpoint (host:port, already reduced from any URL

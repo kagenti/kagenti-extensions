@@ -24,6 +24,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -911,6 +912,32 @@ func TestConfig_MaxAttrBytes(t *testing.T) {
 				t.Fatalf("max_attr_bytes = %d, want %d", cfg.MaxAttrBytes, tc.want)
 			}
 		})
+	}
+}
+
+// A valid traceparent with the sampled-out flag (…-00) must not suppress the
+// exchange: lineage is an audit record, and a caller-chosen flag is not an
+// opt-out from being graphed. Built on the provider Init installs — the
+// other tests' newTestPlugin provider has no sampler and would pass or fail
+// on the SDK default instead.
+func TestSampledOutParentStillExports(t *testing.T) {
+	exp := tracetest.NewInMemoryExporter()
+	tp := newTracerProvider(exp, resource.Empty())
+	p := NewLineageTelemetry()
+	p.cfg = defaultConfig()
+	p.tp = tp
+	p.tracer = tp.Tracer("test")
+	p.selfID = "weather-service"
+	p.ready.Store(true)
+
+	h := http.Header{}
+	h.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+	run(t, p, fakeContext(pipeline.Inbound, h), allow(200))
+	if err := tp.ForceFlush(context.Background()); err != nil {
+		t.Fatalf("ForceFlush: %v", err)
+	}
+	if got := len(exp.GetSpans()); got != 2 {
+		t.Fatalf("exported %d spans for a sampled-out parent, want 2", got)
 	}
 }
 
