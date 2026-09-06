@@ -247,8 +247,11 @@ construction.
 Setting `bypass_paths` or `bypass_hosts` **replaces** the default list rather than extending it —
 the convention the `ibac`, `sparc` and `cpex` plugins use for their keys of the same name. An
 operator who adds one entry must restate the defaults they want kept. An entry that would match
-everything (empty, whitespace-only, `*`, `/*` for a path, `*` for a host) is refused at start, as
-is an entry of either kind that is not valid `path.Match` syntax.
+everything by its literal shape — empty, whitespace-only, `*` for a host, `*` or `/*` for a
+path — is refused at start, as is an entry of either kind that is not valid `path.Match` syntax.
+(The check is by shape, not by semantics: an exotic glob that happens to match every value, such
+as `?*`, is the operator's own deliberate choice and is accepted — the same behaviour as the
+sibling plugins' keys.)
 
 Unknown keys are a boot error.
 
