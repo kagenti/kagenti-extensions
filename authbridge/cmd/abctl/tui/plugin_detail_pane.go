@@ -63,6 +63,19 @@ func (m *model) showPluginDetail(p *apiclient.PipelinePlugin) {
 			b.WriteString("\n")
 		}
 	}
+	// Metrics section, for plugins implementing pipeline.MetricsProvider.
+	// Same always-newline treatment as Config below: the header is drawn
+	// whether or not there are rows, so navigating between a plugin that
+	// reports counters and one that does not doesn't shift the layout.
+	fmt.Fprintln(&b)
+	b.WriteString(styleMuted.Render("Metrics:"))
+	b.WriteString("\n")
+	if len(p.Metrics) == 0 {
+		b.WriteString("  (none)\n")
+	} else {
+		b.WriteString(formatPluginMetrics(p.Metrics))
+	}
+
 	fmt.Fprintln(&b)
 	// Always-newline format keeps the visual layout consistent whether
 	// the plugin is Configurable (JSON body, multi-line) or not ("(none)",
@@ -79,4 +92,22 @@ func (m *model) showPluginDetail(p *apiclient.PipelinePlugin) {
 
 	m.detailVp.SetContent(b.String())
 	m.detailVp.GotoTop()
+}
+
+// livePipelinePlugin re-resolves a plugin against the current pipeline view by
+// name and direction, so a refreshed view can be rendered into an already-open
+// detail pane. Returns nil for a catalog entry (blank direction), which has no
+// counterpart in the active chain.
+func (m *model) livePipelinePlugin(want *apiclient.PipelinePlugin) *apiclient.PipelinePlugin {
+	if want == nil || m.pipeline == nil || want.Direction == "" {
+		return nil
+	}
+	for _, set := range [][]apiclient.PipelinePlugin{m.pipeline.Inbound, m.pipeline.Outbound} {
+		for i := range set {
+			if set[i].Name == want.Name && set[i].Direction == want.Direction {
+				return &set[i]
+			}
+		}
+	}
+	return nil
 }

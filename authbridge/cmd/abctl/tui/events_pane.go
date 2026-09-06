@@ -3,7 +3,6 @@ package tui
 import (
 	"fmt"
 	"net"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -28,7 +27,9 @@ func newEventsTable() table.Model {
 			{Title: "METHOD", Width: 22},
 			{Title: "STATUS", Width: 7},
 			{Title: "DURATION", Width: 10},
-			{Title: "TOKENS", Width: 8},
+			// Wide enough for "33,650  −10.6k  $0.1289": the request total, what
+			// tool-prune removed from it, and what that was worth.
+			{Title: "TOKENS / SAVED", Width: 24},
 			{Title: "HOST", Width: 20},
 		}),
 		table.WithFocused(true),
@@ -90,12 +91,10 @@ func (m *model) rebuildEventsTable() {
 	// shape as a plaintext call.
 	eventRows := buildEventRows(events)
 
-	// Pair request rows with their response rows. ids drives the # column
-	// (one integer repeated across a request/response exchange); partner
-	// drives the PHASE-column span glyphs (┌/│/└) that visually bracket each
-	// exchange even when other events interleave between request and response.
+	// Pair request rows with their response rows. ids drives the # column: one
+	// integer repeated across a request/response exchange, which is how an
+	// exchange is read off the timeline.
 	ids, partner := computeEventPairs(eventRows)
-	glyphs := computeSpanGlyphs(partner, len(eventRows))
 
 	rows := make([]table.Row, 0, len(eventRows))
 	m.visibleRows = m.visibleRows[:0]
@@ -121,15 +120,15 @@ func (m *model) rebuildEventsTable() {
 		if id, ok := ids[ev]; ok {
 			idCell = strconv.Itoa(id)
 		}
-		// Prefix PHASE with the span glyph for this row's exchange. A request
-		// paired with a later response renders ┌; the response renders └;
-		// events nested between them render │ (with a second level when an
-		// inner exchange sits inside an outer one, e.g. inference calls inside
-		// an a2a message/stream). Unpaired rows get no prefix.
+		// PHASE carries no bracket glyphs. They were box-drawing corners
+		// (┌/│/└) meant to visually connect a request to its response, and they
+		// could only ever be correct for exchanges that NEST. Concurrent
+		// requests cross instead: A starts, B starts, A ends, B ends — for
+		// which a tree has no notation, so both rows claimed to contain each
+		// other and the output was actively misleading. The # column pairs
+		// exchanges exactly (by the proxy-stamped RequestID), which is what the
+		// glyphs were a lossy approximation of.
 		phaseCell := shortPhase(ev.Phase)
-		if p := glyphs[i].prefix(); p != "" {
-			phaseCell = p + " " + phaseCell
-		}
 		rows = append(rows, table.Row{
 			idCell,
 			ev.At.Format("15:04:05.00"),
@@ -140,7 +139,7 @@ func (m *model) rebuildEventsTable() {
 			eventMethod(*ev),
 			statusCell(*ev),
 			durationCell(*ev),
-			tokensCell(*ev),
+			m.tokensCellWithSaving(eventRows, partner, i, ev),
 			truncStr(ev.Host, 20),
 		})
 		m.visibleRows = append(m.visibleRows, er)
@@ -477,19 +476,68 @@ func truncStr(s string, n int) string {
 // never gets a response) from stealing a later response that belongs to a
 // different method.
 //
-// Closest-preceding adjacency is sufficient for current traffic, where a
-// response follows its request. Concurrent same-host+method calls could in
-// principle cross-pair, but this is a navigational cue, not a correctness
-// guarantee; a server-side correlation id would be the fix if that ever bites.
+// Pairing prefers SessionEvent.RequestID, which the proxy stamps on both the
+// request and response event of the same exchange. That is exact, including
+// under concurrency.
+//
+// The closest-preceding heuristic below remains for events with no RequestID —
+// an older proxy, or a listener that has not been taught to stamp it. It matches
+// on direction + host (port-normalized) + method, and it cross-pairs when a
+// client has concurrent same-host+method calls in flight. That is not
+// hypothetical: Claude Code fires its session-title request alongside the main
+// one, and the heuristic drew a 400 from the title request under the main
+// request's row, which read as the pipeline plugin on that row having caused it.
 //
 // IDs are keyed by event pointer so the render loop can look one up without
 // knowing the row index. They start at 1 and increment in first-seen row order
 // so adjacent exchanges get adjacent integers.
 func computeEventPairs(rows []eventRow) (map[*pipeline.SessionEvent]int, map[int]int) {
 	partner := make(map[int]int) // row index → matched row index
+
+	// Exact pass: pair by the proxy-stamped RequestID. Indexed by id so a
+	// response finds its request regardless of how much traffic interleaves
+	// between them.
+	reqByID := make(map[string]int)
+	for i := range rows {
+		e := rows[i].event
+		if e.RequestID == "" || e.Phase != pipeline.SessionRequest {
+			continue
+		}
+		if _, dup := reqByID[e.RequestID]; !dup {
+			reqByID[e.RequestID] = i
+		}
+	}
+	for j := range rows {
+		e := rows[j].event
+		if e.RequestID == "" || e.Phase != pipeline.SessionResponse {
+			continue
+		}
+		i, ok := reqByID[e.RequestID]
+		if !ok {
+			continue
+		}
+		if _, taken := partner[i]; taken {
+			continue
+		}
+		partner[i] = j
+		partner[j] = i
+	}
+
+	// Heuristic pass: only for rows the exact pass could not place.
 	for j := range rows {
 		rj := rows[j].event
 		if rj.Phase != pipeline.SessionResponse {
+			continue
+		}
+		if _, done := partner[j]; done {
+			continue // already paired exactly by RequestID
+		}
+		if rj.RequestID != "" {
+			// It carried an id and still did not pair — a second response for
+			// the same request (a retry, or a streamed reply recorded twice).
+			// Letting it fall through would have the heuristic walk back and
+			// claim an unrelated earlier request, which is exactly the
+			// mis-attribution the id was added to end. Leave it unpaired.
 			continue
 		}
 		for i := j - 1; i >= 0; i-- {
@@ -528,112 +576,6 @@ func computeEventPairs(rows []eventRow) (map[*pipeline.SessionEvent]int, map[int
 		ids[e] = next
 	}
 	return ids, partner
-}
-
-// spanGlyph names which corner / side of a (request, response) exchange a row
-// sits at, for the tree-style bracket in the PHASE column. rune (not byte)
-// because the box-drawing characters are multi-byte in UTF-8.
-type spanGlyph rune
-
-const (
-	glyphNone   spanGlyph = 0
-	glyphStart  spanGlyph = '┌' // request row that pairs with a later response
-	glyphMiddle spanGlyph = '│' // row between a paired request and its response
-	glyphEnd    spanGlyph = '└' // response row paired with an earlier request
-)
-
-// spanLevels holds the box-drawing glyphs for up to two nested exchanges on a
-// single row. outer is the widest exchange containing the row; inner is the
-// next-widest. Deeper nesting is dropped — operators only need the broad
-// shape, and the PHASE column has a finite width budget.
-type spanLevels struct {
-	outer spanGlyph
-	inner spanGlyph
-}
-
-// prefix returns the concatenated rune string for the PHASE-column prefix:
-// e.g. "│┌" when the row is inside an outer exchange and opens an inner one;
-// "└" alone when only an outer endpoint applies; "" when the row is in no
-// exchange span.
-func (s spanLevels) prefix() string {
-	switch {
-	case s.outer == glyphNone:
-		return ""
-	case s.inner == glyphNone:
-		return string(rune(s.outer))
-	default:
-		return string([]rune{rune(s.outer), rune(s.inner)})
-	}
-}
-
-// computeSpanGlyphs assigns each row up to two tree glyphs (outer + inner)
-// from its position relative to all (request, response) exchange spans. The
-// two widest spans containing the row are surfaced; deeper nesting is dropped
-// so the PHASE column doesn't blow its width budget.
-//
-// pairs is the bidirectional map from computeEventPairs: pairs[i]=j AND
-// pairs[j]=i for any matched pair (i, j). Unpaired rows are absent. n is the
-// total row count.
-func computeSpanGlyphs(pairs map[int]int, n int) []spanLevels {
-	out := make([]spanLevels, n)
-	if len(pairs) == 0 {
-		return out
-	}
-	// Collect each pair (a, b) with a < b once; the resp→req mirror entries
-	// are skipped.
-	type span struct{ a, b int }
-	spans := make([]span, 0, len(pairs)/2)
-	for a, b := range pairs {
-		if a < b {
-			spans = append(spans, span{a, b})
-		}
-	}
-
-	glyphAt := func(s span, i int) spanGlyph {
-		switch {
-		case i == s.a:
-			return glyphStart
-		case i == s.b:
-			return glyphEnd
-		case s.a < i && i < s.b:
-			return glyphMiddle
-		}
-		return glyphNone
-	}
-
-	for i := range n {
-		// Find every span this row participates in (endpoint or strictly
-		// inside).
-		var participating []span
-		for _, s := range spans {
-			if s.a <= i && i <= s.b {
-				participating = append(participating, s)
-			}
-		}
-		if len(participating) == 0 {
-			continue
-		}
-		// Sort by width descending — widest first, narrowest last. Stable so
-		// equal-width spans keep declaration order (deterministic tests).
-		sort.SliceStable(participating, func(p, q int) bool {
-			return (participating[p].b - participating[p].a) >
-				(participating[q].b - participating[q].a)
-		})
-		// outer = the widest containing span (the broadest context). inner =
-		// the NARROWEST containing span — the row's own tightest exchange —
-		// NOT the second-widest. A row that is an endpoint of a deeply-nested
-		// pair must still show its ┌/└ corner so its request and response
-		// connect visually; picking the second-widest would let an
-		// intermediate enclosing span's middle bar mask it. Example: a
-		// tools/list pair nested inside both an a2a message/stream span and a
-		// long-lived $transport/stream span would otherwise render "││" on
-		// both rows instead of "│┌" / "│└".
-		out[i].outer = glyphAt(participating[0], i)
-		if len(participating) > 1 {
-			out[i].inner = glyphAt(participating[len(participating)-1], i)
-		}
-	}
-	return out
 }
 
 // matchEventRow does a case-insensitive substring match across every string
@@ -811,4 +753,51 @@ func truncateScopes(scopes []string, n int) string {
 		return strings.Join(scopes, ", ")
 	}
 	return strings.Join(scopes[:n], ", ") + fmt.Sprintf(" +%d more", len(scopes)-n)
+}
+
+// tokensCellWithSaving renders the TOKENS / SAVED cell, splitting the two halves
+// across the rows they actually belong to:
+//
+//   - a REQUEST row that tool-prune rewrote shows what was removed from it,
+//     which is where the plugin's own `modify` invocation already sits;
+//   - a RESPONSE row shows the token total the provider billed.
+//
+// The saving deliberately does NOT go on the response row. Nothing about the
+// response was reduced, and showing it there reads as though it were — the
+// pruning happened on the way out. The two rows share a # so they are read
+// together anyway.
+//
+// The response is still what makes the request-side figure computable: it
+// supplies the prompt token total behind the bytes-to-tokens ratio and the tier
+// that sets the rate. So a request row looks forward to its paired response.
+func (m *model) tokensCellWithSaving(rows []eventRow, partner map[int]int, i int, ev *pipeline.SessionEvent) string {
+	if ev.Phase == pipeline.SessionResponse {
+		return tokensCell(*ev)
+	}
+	if ev.Phase != pipeline.SessionRequest {
+		return ""
+	}
+	ps, ok := decodePruneSaving(ev)
+	if !ok {
+		return ""
+	}
+	j, ok := partner[i]
+	if !ok || j < 0 || j >= len(rows) {
+		return "" // no response yet: the ratio and tier are not known
+	}
+	resp := rows[j].event
+	if resp == nil || resp.Phase != pipeline.SessionResponse {
+		return ""
+	}
+	// Only price against a response that pairs by id. A heuristically-matched
+	// response may belong to a different request, and its cache tier would
+	// then pick the wrong rate — a 12.5x error presented as a measurement.
+	if ev.RequestID == "" || resp.RequestID != ev.RequestID {
+		return ""
+	}
+	tokens, usd, ok := savedTokensAndCost(ps, resp.Inference)
+	if !ok {
+		return ""
+	}
+	return formatSavedOnly(tokens, usd, ps.RateSource, ps.Projected)
 }

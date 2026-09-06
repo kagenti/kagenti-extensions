@@ -655,121 +655,11 @@ func TestHostOnly(t *testing.T) {
 	}
 }
 
-// TestSpanLevels_Prefix locks the PHASE-column prefix: empty levels render as
-// empty string; one level renders one glyph; two levels render two glyphs.
-func TestSpanLevels_Prefix(t *testing.T) {
-	cases := []struct {
-		name string
-		s    spanLevels
-		want string
-	}{
-		{"none", spanLevels{}, ""},
-		{"outer only — start", spanLevels{outer: glyphStart}, "┌"},
-		{"outer only — middle", spanLevels{outer: glyphMiddle}, "│"},
-		{"outer only — end", spanLevels{outer: glyphEnd}, "└"},
-		{"both — outer middle, inner start", spanLevels{outer: glyphMiddle, inner: glyphStart}, "│┌"},
-		{"both — outer middle, inner end", spanLevels{outer: glyphMiddle, inner: glyphEnd}, "│└"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.s.prefix(); got != tc.want {
-				t.Errorf("prefix() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-// TestComputeSpanGlyphs covers per-row tree-glyph assignment for the PHASE
-// column. Up to two levels of (request, response) nesting are surfaced — the
-// widest containing span as outer, the next-widest as inner, deeper dropped.
-func TestComputeSpanGlyphs(t *testing.T) {
-	none := spanLevels{}
-	outer := func(g spanGlyph) spanLevels { return spanLevels{outer: g} }
-	both := func(o, i spanGlyph) spanLevels { return spanLevels{outer: o, inner: i} }
-
-	cases := []struct {
-		name  string
-		pairs map[int]int
-		n     int
-		want  []spanLevels
-	}{
-		{"no pairs", nil, 3, []spanLevels{none, none, none}},
-		{
-			name:  "adjacent pair",
-			pairs: map[int]int{0: 1, 1: 0},
-			n:     2,
-			want:  []spanLevels{outer(glyphStart), outer(glyphEnd)},
-		},
-		{
-			name:  "one row in between",
-			pairs: map[int]int{0: 2, 2: 0},
-			n:     3,
-			want:  []spanLevels{outer(glyphStart), outer(glyphMiddle), outer(glyphEnd)},
-		},
-		{
-			// The real shape: an outer a2a exchange (0,5) bracketing two inner
-			// inference exchanges (1,2) and (3,4).
-			name: "nested exchanges (a2a containing two inference calls)",
-			pairs: map[int]int{
-				0: 5, 5: 0,
-				1: 2, 2: 1,
-				3: 4, 4: 3,
-			},
-			n: 6,
-			want: []spanLevels{
-				outer(glyphStart),
-				both(glyphMiddle, glyphStart),
-				both(glyphMiddle, glyphEnd),
-				both(glyphMiddle, glyphStart),
-				both(glyphMiddle, glyphEnd),
-				outer(glyphEnd),
-			},
-		},
-		{
-			// The #52 case: a pair (2,3) nested THREE deep — inside a middle
-			// span (1,4) inside an outer span (0,5). The innermost pair's
-			// endpoints must still show their ┌/└ corners (so its req/resp
-			// connect) rather than the middle span's bar masking them. inner =
-			// the row's narrowest containing span, not the second-widest.
-			name: "triple-nested innermost pair keeps its corners",
-			pairs: map[int]int{
-				0: 5, 5: 0,
-				1: 4, 4: 1,
-				2: 3, 3: 2,
-			},
-			n: 6,
-			want: []spanLevels{
-				outer(glyphStart),             // 0: outer starts
-				both(glyphMiddle, glyphStart), // 1: outer mid, middle-span starts
-				both(glyphMiddle, glyphStart), // 2: outer mid, innermost STARTS (was masked to middle)
-				both(glyphMiddle, glyphEnd),   // 3: outer mid, innermost ENDS (was masked to middle)
-				both(glyphMiddle, glyphEnd),   // 4: outer mid, middle-span ends
-				outer(glyphEnd),               // 5: outer ends
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := computeSpanGlyphs(tc.pairs, tc.n)
-			if len(got) != len(tc.want) {
-				t.Fatalf("len = %d, want %d", len(got), len(tc.want))
-			}
-			for i := range tc.want {
-				if got[i] != tc.want[i] {
-					t.Errorf("row %d: got {outer=%q inner=%q}, want {outer=%q inner=%q}",
-						i, string(rune(got[i].outer)), string(rune(got[i].inner)),
-						string(rune(tc.want[i].outer)), string(rune(tc.want[i].inner)))
-				}
-			}
-		})
-	}
-}
-
-// TestComputeEventPairs_NestedExchangeGlyphs is the end-to-end #23 shape: an
+// TestComputeEventPairs_NestedExchanges is the end-to-end #23 shape: an
 // inbound a2a message/stream request, two outbound inference exchanges during
 // processing, then the a2a response. The a2a request/response must pair and
-// bracket (┌ … └) with the inference exchanges nested (│┌ … │└) inside.
-func TestComputeEventPairs_NestedExchangeGlyphs(t *testing.T) {
+// exchange, with the inference exchanges falling inside its window.
+func TestComputeEventPairs_NestedExchanges(t *testing.T) {
 	a2aReq := pipeline.SessionEvent{Direction: pipeline.Inbound, Phase: pipeline.SessionRequest,
 		Host: "claude-agent", A2A: &pipeline.A2AExtension{Method: "message/stream"}}
 	infReq1 := pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionRequest,
@@ -795,12 +685,9 @@ func TestComputeEventPairs_NestedExchangeGlyphs(t *testing.T) {
 		t.Errorf("a2a req/resp should share #, got %d vs %d", ids[&events[0]], ids[&events[5]])
 	}
 
-	glyphs := computeSpanGlyphs(partner, len(rows))
-	want := []string{"┌", "│┌", "│└", "│┌", "│└", "└"}
-	for i, w := range want {
-		if got := glyphs[i].prefix(); got != w {
-			t.Errorf("row %d prefix = %q, want %q", i, got, w)
-		}
+	// The inner inference exchanges pair with each other, not across.
+	if partner[1] != 2 || partner[3] != 4 {
+		t.Errorf("inner exchanges should pair 1↔2 and 3↔4, got partner=%v", partner)
 	}
 }
 
@@ -819,6 +706,144 @@ func TestPlural(t *testing.T) {
 	for _, tc := range cases {
 		if got := plural(tc.n); got != tc.want {
 			t.Errorf("plural(%d) = %q, want %q", tc.n, got, tc.want)
+		}
+	}
+}
+
+// TestComputeEventPairs_RequestIDBeatsAdjacency reproduces a real
+// misdiagnosis. Claude Code fires its session-title request concurrently with
+// the main one; both are POSTs to the same host. Interleaved as
+// req(main) req(title) resp(title,400) resp(main,200), the closest-preceding
+// heuristic pairs req(title) with resp(title) — but pairs req(main) with
+// resp(main) only by luck of ordering, and with a different interleaving it
+// draws the title request's 400 under the main request's row.
+//
+// That is exactly what happened: a 400 belonging to a request tool-prune never
+// touched was rendered beneath the row where tool-prune reported a body
+// rewrite, which read as the plugin having broken the request. RequestID makes
+// the pairing exact.
+func TestComputeEventPairs_RequestIDBeatsAdjacency(t *testing.T) {
+	ev := func(phase pipeline.SessionPhase, id string, code int) *pipeline.SessionEvent {
+		return &pipeline.SessionEvent{
+			Direction:  pipeline.Outbound,
+			Phase:      phase,
+			Host:       "litellm.example",
+			RequestID:  id,
+			StatusCode: code,
+		}
+	}
+	// The real interleaving observed in the session store: the title request
+	// is issued first, the main request second, and the title's 400 arrives
+	// before the main response. The heuristic then walks back from the 400 to
+	// the nearest unpaired request — the MAIN one — and brackets them together.
+	title := ev(pipeline.SessionRequest, "bbb", 0)
+	mainReq := ev(pipeline.SessionRequest, "aaa", 0)
+	titleResp := ev(pipeline.SessionResponse, "bbb", 400)
+	mainResp := ev(pipeline.SessionResponse, "aaa", 200)
+	rows := []eventRow{{event: title}, {event: mainReq}, {event: titleResp}, {event: mainResp}}
+
+	_, partner := computeEventPairs(rows)
+
+	if partner[0] != 2 {
+		t.Errorf("title request (row 0) paired with row %d, want 2 (its own 400)", partner[0])
+	}
+	if partner[1] != 3 {
+		t.Errorf("main request (row 1) paired with row %d, want 3 (its own 200)", partner[1])
+	}
+	// The specific failure this fixes: the main request owning the title's 400.
+	if partner[1] == 2 {
+		t.Error("main request paired with the title request's 400 — the misdiagnosis this fixes")
+	}
+}
+
+// TestComputeEventPairs_FallsBackWithoutRequestID keeps the heuristic working
+// for events from a proxy that does not stamp an id, so an older data plane
+// still renders brackets.
+func TestComputeEventPairs_FallsBackWithoutRequestID(t *testing.T) {
+	req := &pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionRequest, Host: "h"}
+	resp := &pipeline.SessionEvent{Direction: pipeline.Outbound, Phase: pipeline.SessionResponse, Host: "h", StatusCode: 200}
+	rows := []eventRow{{event: req}, {event: resp}}
+	_, partner := computeEventPairs(rows)
+	if partner[0] != 1 || partner[1] != 0 {
+		t.Errorf("heuristic pairing broke for id-less events: partner=%v", partner)
+	}
+}
+
+// TestComputeEventPairs_FieldTrace replays a real interleaving captured from a
+// Claude Code session, where the adjacency heuristic mispaired 6 of 15
+// responses — a 3-way rotation (rows 10/11/12) and a straight swap (20/21).
+//
+// The mispairing was not cosmetic. It rendered a 400 beneath every row where
+// tool-prune reported rewriting a body, when each of those 400s belonged to a
+// different concurrent request and every request tool-prune touched returned
+// 200. Ownership here is not guesswork: each response's duration is measured
+// from its own request's start, so subtracting it identifies the true owner
+// independently of the id being tested.
+func TestComputeEventPairs_FieldTrace(t *testing.T) {
+	type spec struct {
+		id    string // true owning request id
+		phase pipeline.SessionPhase
+		host  string
+		code  int
+	}
+	// Order is wall-clock order as observed; ids are the true owners.
+	trace := []spec{
+		{"r07", pipeline.SessionRequest, "mcp.ete", 0},
+		{"r08", pipeline.SessionRequest, "mcp.ete", 0},
+		{"r08", pipeline.SessionResponse, "mcp.ete", 200},
+		{"r09", pipeline.SessionRequest, "litellm", 0},
+		{"r09", pipeline.SessionResponse, "litellm", 200},
+		{"r10", pipeline.SessionRequest, "litellm", 0},
+		{"r11", pipeline.SessionRequest, "litellm", 0}, // tool-prune modified this one
+		{"r10", pipeline.SessionResponse, "litellm", 400},
+		{"r12", pipeline.SessionRequest, "litellm", 0},
+		{"r11", pipeline.SessionResponse, "litellm", 200}, // the modify's real outcome
+		{"r12", pipeline.SessionResponse, "litellm", 400},
+		{"r13", pipeline.SessionRequest, "litellm", 0},
+		{"r14", pipeline.SessionRequest, "litellm", 0}, // tool-prune modified this one
+		{"r07", pipeline.SessionResponse, "mcp.ete", 200},
+		{"r13", pipeline.SessionResponse, "litellm", 400},
+		{"r15", pipeline.SessionRequest, "litellm", 0},
+		{"r16", pipeline.SessionRequest, "mcp.ete", 0},
+		{"r16", pipeline.SessionResponse, "mcp.ete", 400},
+		{"r15", pipeline.SessionResponse, "litellm", 400},
+		{"r14", pipeline.SessionResponse, "litellm", 200}, // the modify's real outcome
+	}
+
+	rows := make([]eventRow, 0, len(trace))
+	for _, s := range trace {
+		rows = append(rows, eventRow{event: &pipeline.SessionEvent{
+			Direction: pipeline.Outbound, Phase: s.phase,
+			Host: s.host, RequestID: s.id, StatusCode: s.code,
+		}})
+	}
+
+	_, partner := computeEventPairs(rows)
+
+	for i, s := range trace {
+		j, ok := partner[i]
+		if !ok {
+			if s.id == "r07" || s.phase == pipeline.SessionRequest {
+				// every request in this trace does get a response
+				t.Errorf("row %d (%s %s) unpaired", i, s.id, s.phase)
+			}
+			continue
+		}
+		if got := rows[j].event.RequestID; got != s.id {
+			t.Errorf("row %d (%s) paired with %s — pairing crossed requests", i, s.id, got)
+		}
+	}
+
+	// The specific regression: no tool-prune-modified request may own a 400.
+	for _, modified := range []string{"r11", "r14"} {
+		for i, s := range trace {
+			if s.phase != pipeline.SessionRequest || s.id != modified {
+				continue
+			}
+			j := partner[i]
+			if code := rows[j].event.StatusCode; code != 200 {
+				t.Errorf("%s (tool-prune modified) paired with a %d; its real response was 200", modified, code)
+			}
 		}
 	}
 }

@@ -744,7 +744,7 @@ func TestPipelineRun_ObserveSynthesizesRecordWhenPluginSkipsIt(t *testing.T) {
 func TestSetBody_ObserveModeIsNoop(t *testing.T) {
 	mutator := &stubPlugin{
 		name: "redactor",
-		caps: PluginCapabilities{WritesBody: true},
+		caps: PluginCapabilities{WritesRequestBody: true},
 		onReq: func(_ context.Context, pctx *Context) Action {
 			pctx.SetBody([]byte("REDACTED"))
 			return Action{Type: Continue}

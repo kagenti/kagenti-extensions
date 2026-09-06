@@ -135,7 +135,13 @@ func NewGeneratedFileSource(certPath, keyPath, trustPath string) (CASource, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(filepath.Dir(certPath), 0o755); err != nil {
+	// 0700, not 0755: this directory is about to hold a CA signing key. The key
+	// file itself is 0600 below, so 0755 exposed the listing rather than the key
+	// — but under the default layout ca_dir sits inside a 0700 ~/.cortex, and with
+	// an explicit --ca-dir elsewhere it had no private parent at all. An existing
+	// directory keeps its mode (MkdirAll does not tighten), so a mounted ca_dir is
+	// unaffected.
+	if err := os.MkdirAll(filepath.Dir(certPath), 0o700); err != nil {
 		return nil, fmt.Errorf("tlsbridge: create ca_dir: %w", err)
 	}
 	// Each file is written atomically (temp + rename) so a reader or a

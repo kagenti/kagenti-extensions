@@ -13,5 +13,10 @@ test/pdp/policy/rego_out/
 # committed fixture and is not under rego_out/, so it stays tracked.
 test/integration/rego_out/
 
+# policy-eval-scenarios generated Rego + per-run pass/fail/skip reports
+# (eval/test_policy_pipeline_eval.py); regenerated per run.
+eval/rego_out/
+eval/reports/
+
 # uc1-onboarding demo's captured .rego snapshots — regenerated per run, not source of truth.
 demo/use-cases/uc1-onboarding/generated/

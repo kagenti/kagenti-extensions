@@ -40,13 +40,13 @@ Two container images are published:
 |-------|----------|
 | `authbridge` | proxy-sidecar combined: authbridge-proxy binary + bundled spiffe-helper |
 | `authbridge-envoy` | envoy-sidecar combined: Envoy + ext_proc + bundled spiffe-helper |
-| `authbridge-lite` | `authbridge-proxy` built with `exclude_plugin_*` tags — auth-only (jwt-validation + token-exchange; OPA + parsers dropped). A build variant, not a separate binary |
+| `authbridge-lite` | `authbridge-proxy` built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set). A build variant, not a separate binary |
 
 | Mode | Image | Use Case | How It Works |
 |------|-------|----------|-------------|
 | `proxy-sidecar` (default) | `authbridge` | HTTP_PROXY-based forward + reverse proxies | Agent routes outbound traffic through forward proxy; reverse proxy validates inbound JWTs |
 | `envoy-sidecar` | `authbridge-envoy` | Transparent interception via iptables | Envoy intercepts all traffic, delegates auth to authbridge via ext_proc gRPC |
-| `lite` | `authbridge-lite` | The `authbridge-proxy` binary built with `exclude_plugin_*` tags (auth-only: jwt-validation + token-exchange) | For size-constrained deployments that don't need protocol-aware session events |
+| `lite` | `authbridge-lite` | The `authbridge-proxy` binary built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set) | For size-constrained deployments that don't need protocol-aware session events |
 
 The operator resolves the mode per workload from `AgentRuntime.Spec.AuthBridgeMode` → namespace ConfigMap → deprecated `rossoctl.io/authbridge-mode` annotation → cluster default (`proxy-sidecar`). See operator#361.
 
@@ -480,7 +480,7 @@ plugin package from being imported and compiled into the binary.
 - [authlib](authlib/README.md) — Shared auth building blocks (Go library)
 - [cmd/authbridge-proxy](cmd/authbridge-proxy/) — proxy-sidecar binary (default mode, full plugin set)
 - [cmd/authbridge-envoy](cmd/authbridge-envoy/) — envoy-sidecar binary (Envoy + ext_proc, full plugin set)
-- `authbridge-lite` image — `cmd/authbridge-proxy` built with `exclude_plugin_*` tags (auth-only); a build variant, not a separate binary
+- `authbridge-lite` image — `cmd/authbridge-proxy` built with `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed plugin set); a build variant, not a separate binary
 - [proxy-init](proxy-init/README.md) — iptables init container (envoy-sidecar mode only)
 - [docs/](docs/) — framework architecture and plugin author references
 

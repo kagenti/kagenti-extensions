@@ -245,7 +245,7 @@ func main() {
 
 	slog.Info("authbridge-cpex starting", "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, cfg.Listener.HealthAddr)
 	if healthErr != nil {
 		log.Fatalf("health server listen: %v", healthErr)
 	}

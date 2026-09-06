@@ -7,11 +7,11 @@ pause-mode contract — the new pieces are a TLS bridge (so HTTPS from
 the client. If you don't need an Anthropic account in the loop, use
 [`hitl-local.md`](hitl-local.md) instead — same demo, less setup.
 
-The [README quickstart][qs] `install-demo.sh` binary isn't compiled
+The [README quickstart][qs] `install.sh` binary isn't compiled
 with `include_plugin_sessionbudget`, so this doc builds
 `authbridge-proxy` from source with the tag on.
 
-[qs]: ../../../README.md#quick-start-local-no-kubernetes
+[qs]: ../../../README.md#quick-start
 
 ## Prerequisites
 
@@ -62,11 +62,13 @@ there even in `roles: [forward]`, and a stale `authbridge-proxy` from
 a prior run will fail boot with `address already in use`. If that
 happens: `pkill -f authbridge-proxy` and relaunch.
 
-The proxy generates `cortex-ca/ca.crt` (relative to the directory it
-runs from) on first launch — that's the trust anchor Claude Code
-needs. From the repo root that resolves to
-`<repo-root>/cortex-ca/ca.crt`; grab the absolute path with
-`ls "$(pwd)/cortex-ca/ca.crt"` from the same terminal. Look for these
+The proxy generates `cortex-ca/ca.crt` on first launch — that's the trust
+anchor Claude Code needs. Note that this path is **relative to the
+directory you started the proxy from**: the config used here
+(`local/config-https.yaml`) sets `ca_dir: "cortex-ca"` explicitly, so it
+does not use the `~/.cortex` default that `--local` would. From the repo
+root it resolves to `<repo-root>/cortex-ca/ca.crt`; get the absolute path
+with `ls "$(pwd)/cortex-ca/ca.crt"` in the same terminal. Look for these
 lines in the log:
 
 ```text
@@ -183,7 +185,8 @@ will fail the TLS handshake against the proxy.
   bucket. Fine for a single-workload laptop demo; in multi-tenant
   deployments one caller exhausting the budget denies all others.
   Leave it off in production and rely on the inbound A2A session ID.
-- **`--demo` overwrites `cortex-ca/demo.yaml`.** If you also run
-  `authbridge-proxy --demo` in the same directory, it will clobber the
-  config from step 2. Use a separate working directory or a config
-  path outside `cortex-ca/`.
+- **`--local` uses `~/.cortex/config.yaml`, not this demo's config.** The
+  two do not collide: this walkthrough passes `-config` explicitly, so
+  running `authbridge-proxy --local` elsewhere touches a different file and
+  a different CA. They do share the loopback ports, so run one at a time.
+  (`--demo` is the old name for `--local` and still works.)

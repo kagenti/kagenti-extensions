@@ -42,6 +42,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/spiffe"
 	authtls "github.com/rossoctl/cortex/authbridge/authlib/tls"
 	"github.com/rossoctl/cortex/authbridge/authlib/tlsbridge"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 
 	// Only HTTP listeners are compiled in: no extproc/extauthz
 	// (no gRPC, no envoy types).
@@ -59,13 +60,13 @@ import (
 // via -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
 var version = "dev"
 
-// demoMode is set by --demo. It suppresses listeners that only make sense with
+// localMode is set by --local. It suppresses listeners that only make sense with
 // iptables enforce-redirect: the demo uses cooperative HTTPS_PROXY, so nothing
 // is ever REDIRECTed to the transparent listener and opening it would just be
 // an idle port. The forward-role preset defaults transparent_proxy_addr to
 // :8082, and config can't unset it (the preset refills an empty value), so this
 // gate is the only way to keep the demo to the listeners it actually uses.
-var demoMode bool
+var localMode bool
 
 // spiffeProviderNeeded reports whether any configured feature actually consumes
 // the SPIFFE Provider: top-level mTLS (needs the X509Source on both listeners)
@@ -122,11 +123,27 @@ func pluginUsesSPIFFEIdentity(p config.PluginEntry) bool {
 func main() {
 	configPath := flag.String("config", "", "path to config YAML file")
 	showVersion := flag.Bool("version", false, "print version and exit")
-	demo := flag.Bool("demo", false,
-		"run a built-in local demo (forward-only TLS bridge + protocol parsers) that decrypts and parses an agent's egress; no --config, cluster, Keycloak, or SPIRE needed")
+	local := flag.Bool("local", false,
+		"run with a built-in local config (forward-only TLS bridge + protocol parsers) that decrypts and parses an agent's egress; no --config, cluster, Keycloak, or SPIRE needed")
+	// --demo is what this flag used to be called. Kept working so a command
+	// already in someone's shell history or notes does not start failing, and
+	// listed as a deprecated alias rather than hidden: an empty usage string
+	// still prints the flag, just with a blank description that reads like a bug.
+	demoDeprecated := flag.Bool("demo", false, "deprecated alias for -local")
+	supervise := flag.Bool("supervise", false,
+		"restart the proxy if it exits (launchd cannot be relied on for this; see supervise.go)")
+	writeConfigOnly := flag.Bool("write-config", false,
+		"with -local: create the built-in config (and its directory) if absent, then exit")
 	caDir := flag.String("ca-dir", "",
-		"CA directory for --demo (auto-generated); defaults to ./"+demoCADirDefault)
+		"CA directory for --local (auto-generated); defaults to ~/"+cortexDirName+"/"+caDirName)
 	flag.Parse()
+	if *supervise {
+		// Before anything binds: this process starts a child that does the real work.
+		if err := runSupervisor("supervise"); err != nil {
+			log.Fatalf("supervise: %v", err)
+		}
+		return
+	}
 
 	if *showVersion {
 		fmt.Println("authbridge-proxy", version)
@@ -136,34 +153,74 @@ func main() {
 	runtimeutil.InitLogging("authbridge-proxy")
 	runtimeutil.StartSignalToggle()
 
-	if *demo {
-		demoMode = true
+	if *demoDeprecated && !*local {
+		slog.Warn("--demo has been renamed to --local; it still works but will be removed",
+			"use", "--local")
+	}
+	if *local || *demoDeprecated {
+		localMode = true
 		if *configPath != "" {
-			log.Fatal("--demo and --config are mutually exclusive")
+			log.Fatal("--local and --config are mutually exclusive")
 		}
+		cortexDir, derr := defaultCortexDir()
+		if derr != nil {
+			log.Fatalf("--local: %v", derr)
+		}
+		// The default moved here from ./cortex-ca. Someone who still has that
+		// directory almost certainly has a client trusting the CA inside it,
+		// and pointing at a stale CA fails silently — every request tunnels
+		// through opaquely and no plugin sees a body. Name both paths.
+		if st, serr := os.Stat(localDirFallback); serr == nil && st.IsDir() && *caDir == "" {
+			slog.Warn("local mode — the CA now lives under $HOME; the ./"+localDirFallback+" here is no longer used",
+				"now_using", filepath.Join(cortexDir, caDirName),
+				"ignored", localDirFallback,
+				"hint", "update the client's CA path (e.g. NODE_EXTRA_CA_CERTS), or pass --ca-dir ./"+localDirFallback+" to keep the old location")
+		}
+		// --ca-dir moves only the CA. The config stays at one known path, so a
+		// client's trust anchor can be relocated without the config going
+		// somewhere a later command can't find.
 		dir := *caDir
 		if dir == "" {
-			dir = demoCADirDefault // relative to cwd — no absolute path baked in
+			dir = filepath.Join(cortexDir, caDirName)
 		}
-		abs, aerr := filepath.Abs(dir)
+		absCA, aerr := filepath.Abs(dir)
 		if aerr != nil {
-			log.Fatalf("--demo: resolving --ca-dir %q: %v", dir, aerr)
+			log.Fatalf("--local: resolving --ca-dir %q: %v", dir, aerr)
 		}
-		// Write the built-in config next to the CA and drive the normal
-		// file-based load + hot-reload path — so editing the file reloads live.
-		p, werr := writeDemoConfig(abs)
+		absCortex, cerr := filepath.Abs(cortexDir)
+		if cerr != nil {
+			log.Fatalf("--local: resolving %q: %v", cortexDir, cerr)
+		}
+		// Drive the normal file-based load + hot-reload path, so editing the
+		// config reloads live.
+		p, werr := writeBuiltinConfig(absCortex, absCA)
 		if werr != nil {
-			log.Fatalf("--demo: %v", werr)
+			log.Fatalf("--local: %v", werr)
 		}
 		*configPath = p
-		slog.Info("demo mode — wrote built-in config next to the CA; edit it to hot-reload",
-			"config", p, "ca_dir", abs)
+		// install.sh needs the config materialised without starting anything: it hands
+		// the proxy to the OS supervisor, which then starts it. Writing the config was
+		// previously a side effect of starting --local, so removing that start removed
+		// the only thing that ever created the file — a fresh install then had nothing
+		// for `abctl service install` to load. Exiting here keeps one source of truth
+		// for the built-in config instead of teaching abctl to write it too.
+		if *writeConfigOnly {
+			// Silent on success. This runs from install.sh, which reports progress
+			// itself; a structured INFO line with timestamps and key=value pairs in the
+			// middle of that output reads like something went wrong. Failures still
+			// surface — writeBuiltinConfig's error is fatal above.
+			return
+		}
+		slog.Info("local mode — using the built-in config; edit it to hot-reload",
+			"config", p, "ca_dir", absCA)
 	} else if *caDir != "" {
-		log.Fatal("--ca-dir only applies with --demo")
+		log.Fatal("--ca-dir only applies with --local")
+	} else if *writeConfigOnly {
+		log.Fatal("--write-config only applies with --local")
 	}
 
 	if *configPath == "" {
-		log.Fatal("--config is required (or use --demo for the local demo)")
+		log.Fatal("--config is required (or use --local for a built-in local config)")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The
@@ -271,6 +328,7 @@ func main() {
 	}
 
 	var sessions *session.Store
+	var usageAgg *usage.Aggregator
 	if cfg.Session.SessionEnabled() {
 		ttl := 30 * time.Minute
 		if cfg.Session.TTL != "" {
@@ -289,6 +347,24 @@ func main() {
 			maxSessions = cfg.Session.MaxSessions
 		}
 		sessions = session.New(ttl, maxEvents, maxSessions)
+
+		// Usage aggregation feeds GET /v1/usage. Registered as a store Recorder
+		// so it sees every appended event, and deliberately independent of the
+		// event store's own retention: session.max_events trims the per-session
+		// event list, but a bucket counter must keep counting after the events
+		// it counted have aged out, or a chart would appear to lose history an
+		// operator could still see a minute ago.
+		//
+		// No Pricer is passed, so cost fields stay absent and the response
+		// reports priced:false — see the TODO on usage.Pricer for where real
+		// rates would come from.
+		// Same session cap as the store, so the two agree on how many sessions
+		// are worth remembering. The aggregator reclaims its coldest ring at the
+		// cap rather than refusing new sessions, which matters because the store
+		// evicts and expires sessions without telling it.
+		usageAgg = usage.New(usage.WithMaxSessions(maxSessions))
+		sessions.AddRecorder(usageAgg)
+
 		slog.Info("session tracking enabled", "ttl", ttl, "maxEvents", maxEvents, "maxSessions", maxSessions)
 	} else {
 		slog.Info("session tracking disabled")
@@ -378,6 +454,7 @@ func main() {
 			Skip:     tlsbridge.NewSkipSet(),
 			Upstream: up,
 			CAPEM:    src.CACertPEM(),
+			CAFile:   caTrustPath(cfg.TLSBridge.CADir),
 		}
 		slog.Info("tls-bridge enabled", "ca_dir", cfg.TLSBridge.CADir)
 	}
@@ -401,9 +478,9 @@ func main() {
 				log.Fatalf("creating transparent inbound proxy: %v", rerr)
 			}
 			rpSrv.Shared = sharedStore
-			// Skipped in --demo: there is no iptables there, so nothing would ever
+			// Skipped in --local: there is no iptables there, so nothing would ever
 			// be REDIRECTed to the listener and every request would fail closed.
-			if demoMode {
+			if localMode {
 				slog.Warn("demo mode: transparent inbound listener not started (no iptables to REDIRECT to it)")
 			} else {
 				rpHTTP, rerr := runtimeutil.StartTransparentInboundServer("transparent-inbound", rpSrv, cfg.Listener.TransparentInboundAddr)
@@ -455,8 +532,8 @@ func main() {
 		// forward proxy's outbound pipeline via HandleTransparentConn, so explicit
 		// HTTP_PROXY egress and iptables-REDIRECTed bypass egress are gated and
 		// tunnelled identically. Closed explicitly on shutdown (not an *http.Server).
-		// Skipped in --demo: no iptables there, so nothing is ever REDIRECTed to it.
-		if !demoMode {
+		// Skipped in --local: no iptables there, so nothing is ever REDIRECTed to it.
+		if !localMode {
 			transparentLn = startTransparentProxy(fpSrv, cfg.Listener.TransparentProxyAddr)
 		}
 	}
@@ -485,6 +562,7 @@ func main() {
 			sessions,
 			sessionapi.WithPipelines(inboundH, outboundH),
 			sessionapi.WithCatalog(sessionapi.PluginsCatalog),
+			sessionapi.WithUsage(usageAgg),
 		)
 		go func() {
 			slog.Warn("session API listening — UNAUTHENTICATED; contains raw user content; never expose via ingress",
@@ -497,7 +575,7 @@ func main() {
 
 	slog.Info("authbridge-proxy starting", "version", version, "mode", cfg.Mode, "logLevel", runtimeutil.LogLevel().String())
 
-	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, ":9091")
+	healthSrv, healthErr := runtimeutil.StartHealthServer(inboundH, outboundH, cfg.Listener.HealthAddr)
 	if healthErr != nil {
 		log.Fatalf("health server listen: %v", healthErr)
 	}
@@ -556,4 +634,19 @@ func startTransparentProxy(fp *forwardproxy.Server, addr string) *net.TCPListene
 		}
 	}()
 	return ln
+}
+
+// caTrustPath returns the absolute path of the CA clients must trust.
+//
+// Absolute because a client is configured with this path (NODE_EXTRA_CA_CERTS
+// and friends) and a mismatched trust anchor fails silently — every request
+// tunnels through opaquely and no plugin sees a body. --local now resolves under
+// $HOME rather than the launch directory, which removes most of the ways that
+// happened, but --ca-dir still accepts a relative path.
+func caTrustPath(caDir string) string {
+	p := filepath.Join(caDir, "ca.crt")
+	if abs, err := filepath.Abs(p); err == nil {
+		return abs
+	}
+	return p
 }

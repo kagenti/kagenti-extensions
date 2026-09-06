@@ -116,7 +116,7 @@ func main() {
 	runtimeutil.StartSignalToggle()
 
 	if *configPath == "" {
-		log.Fatal("--config is required (or use --demo for the local demo)")
+		log.Fatal("--config is required")
 	}
 
 	// Build the SPIFFE Provider when the spiffe block is configured. The

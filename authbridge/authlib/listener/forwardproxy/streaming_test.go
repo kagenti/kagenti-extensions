@@ -32,11 +32,11 @@ type streamingProbe struct {
 	caps            pipeline.PluginCapabilities
 }
 
-func newStreamingProbe(writesBody bool) *streamingProbe {
+func newStreamingProbe(writesRequestBody bool) *streamingProbe {
 	return &streamingProbe{
 		caps: pipeline.PluginCapabilities{
-			ReadsBody:  true,
-			WritesBody: writesBody,
+			ReadsBody:         true,
+			WritesRequestBody: writesRequestBody,
 		},
 	}
 }
@@ -158,13 +158,16 @@ func TestForwardProxy_Streaming_FramesFlowThrough(t *testing.T) {
 	}
 }
 
-// TestForwardProxy_Streaming_WritesBodyFallsBackToBuffered asserts the
-// safety guard: a pipeline with a WritesBody plugin can't take the
-// streaming path (the plugin can't rewrite a body we've already
+// TestForwardProxy_Streaming_WritesResponseBodyFallsBackToBuffered asserts the
+// safety guard: a pipeline with a WritesResponseBody plugin can't take the
+// streaming path (the plugin can't rewrite a response we've already
 // started forwarding). The proxy logs a warning and falls back to
 // buffered, so the response is delivered correctly even though it
 // loses the streaming property.
-func TestForwardProxy_Streaming_WritesBodyFallsBackToBuffered(t *testing.T) {
+//
+// Only the response flag does this. The request-only case is covered by
+// TestForwardProxy_Streaming_RequestOnlyWriterKeepsStreaming.
+func TestForwardProxy_Streaming_WritesResponseBodyFallsBackToBuffered(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
@@ -174,7 +177,7 @@ func TestForwardProxy_Streaming_WritesBodyFallsBackToBuffered(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	probe := newStreamingProbe(true) // WritesBody=true → buffered fallback
+	probe := newResponseWritingProbe() // WritesResponseBody=true → buffered fallback
 	pipe, err := pipeline.New([]pipeline.Plugin{probe})
 	if err != nil {
 		t.Fatalf("New pipeline: %v", err)
@@ -201,11 +204,16 @@ func TestForwardProxy_Streaming_WritesBodyFallsBackToBuffered(t *testing.T) {
 	if !bytes.Contains(body, []byte(`{"id":1}`)) {
 		t.Errorf("body did not contain expected payload: %q", body)
 	}
-	// Buffered path: streaming-aware plugins still see one last=true
-	// frame carrying the whole body. Sanity-check.
-	_, lasts := probe.snapshot()
-	if len(lasts) == 0 || !lasts[len(lasts)-1] {
-		t.Errorf("last call lasts = %v; expected final last=true on buffered fallback", lasts)
+	// Buffered path: streaming-aware plugins see exactly ONE last=true
+	// delivery carrying the whole body. The count is what discriminates
+	// buffered from streaming — the streaming path would deliver one call
+	// per frame plus a final — so assert it rather than just the flag.
+	frames, lasts := probe.snapshot()
+	if len(frames) != 1 {
+		t.Fatalf("plugin saw %d calls, want exactly 1 on the buffered path — lasts=%v", len(frames), lasts)
+	}
+	if !lasts[0] {
+		t.Errorf("buffered delivery lasts = %v, want [true]", lasts)
 	}
 }
 

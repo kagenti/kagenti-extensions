@@ -175,6 +175,7 @@ func (s *Server) recordTunnelOpened(pctx *pipeline.Context) {
 		At:          time.Now(),
 		Direction:   pipeline.Outbound,
 		Phase:       pipeline.SessionRequest,
+		RequestID:   pctx.RequestID(),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:     plugins,
 		Identity:    pipeline.SnapshotIdentity(pctx),

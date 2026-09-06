@@ -133,6 +133,25 @@ func (c *configuredPlugin) OnFinish(ctx context.Context, pctx *Context) {
 	}
 }
 
+// Metrics forwards to the wrapped plugin if it implements MetricsProvider;
+// otherwise returns nil. Required for the same reason as the four above:
+// MetricsProvider is an optional interface, so it is not promoted through the
+// embedded Plugin, and without this every Configurable plugin — which is to
+// say every plugin an operator actually configures — would silently report no
+// metrics at all on /v1/pipeline.
+//
+// This does make every wrapped plugin satisfy MetricsProvider, but unlike
+// StreamingResponder that costs nothing: no dispatch path selects on it, and
+// a non-provider returns nil, which the session API omits. "No such channel"
+// and "channel with nothing in it" therefore still look identical on the wire,
+// which is what abctl renders as "(none)".
+func (c *configuredPlugin) Metrics() []Metric {
+	if mp, ok := c.Plugin.(MetricsProvider); ok {
+		return mp.Metrics()
+	}
+	return nil
+}
+
 // Ready forwards to the wrapped plugin if it implements Readier; otherwise
 // returns true. This matches the existing semantics in Pipeline.Ready
 // (pipeline.go:287-289): plugins without Readier are considered always-ready.

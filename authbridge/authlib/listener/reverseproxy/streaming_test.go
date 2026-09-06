@@ -29,9 +29,9 @@ type streamingProbe struct {
 	caps            pipeline.PluginCapabilities
 }
 
-func newStreamingProbe(writesBody bool) *streamingProbe {
+func newStreamingProbe(writesRequestBody bool) *streamingProbe {
 	return &streamingProbe{
-		caps: pipeline.PluginCapabilities{ReadsBody: true, WritesBody: writesBody},
+		caps: pipeline.PluginCapabilities{ReadsBody: true, WritesRequestBody: writesRequestBody},
 	}
 }
 

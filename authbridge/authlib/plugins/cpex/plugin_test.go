@@ -256,8 +256,8 @@ func TestName(t *testing.T) {
 
 func TestCapabilities_RequiresAnyParser(t *testing.T) {
 	caps := NewCPEX().Capabilities()
-	if !caps.ReadsBody || !caps.WritesBody {
-		t.Fatal("ReadsBody/WritesBody must be true: CPEX policies routinely mutate payloads")
+	if !caps.ReadsBody || !caps.WritesRequestBody {
+		t.Fatal("ReadsBody/WritesRequestBody must be true: CPEX policies routinely mutate payloads")
 	}
 	want := []string{"mcp-parser", "inference-parser", "a2a-parser"}
 	if len(caps.RequiresAny) != len(want) {

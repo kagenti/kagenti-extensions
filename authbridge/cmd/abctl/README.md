@@ -14,7 +14,7 @@ and read individual events as pretty-printed JSON.
 │   default                1h ago     8                          │
 │                                                                 │
 │ ● connected   2.1 ev/s   drops: 0                              │
-│ [↑↓/jk] nav  [↵] drill  [/] filter  [p] pause  [q] quit        │
+│ [↑↓/jk] nav  [↵] drill  [/] filter  [?] keys  [q] quit         │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -52,6 +52,22 @@ and tears the port-forward down.
 The picker shells out to `kubectl` — whatever context you're in is the
 context abctl uses. There's no separate auth.
 
+### Connecting to an existing port-forward
+
+Press `l` on the Namespaces pane to skip the cluster entirely and
+connect straight to `http://localhost:9094` — the session API's default
+port on the local host. Useful when you already have your own
+`kubectl port-forward` running, when abctl runs inside the mesh, or when
+your kubeconfig can't list pods but a tunnel is up.
+
+abctl probes `/v1/sessions` before switching panes, so an endpoint with
+nothing listening surfaces as a footer error and leaves you in the
+picker rather than dropping you into a silently empty session view.
+`Esc` from a session entered this way returns to the Namespaces pane
+(there's no pod to go back to). Pipeline editing (`e`) is unavailable,
+same as `--endpoint` mode: the cluster fields needed to fetch and apply
+the ConfigMap aren't populated.
+
 ### Power-user / scripting bypass
 
 Pass `--endpoint` to skip the picker entirely:
@@ -85,18 +101,42 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 - **Plugin detail**: drill-into-row for Pipeline or Catalog. Shows
   description, position, reads/writes, body access, plugin config, and
   per-dependency satisfaction status against the active chain.
-- **Catalog**: registered-plugin browser, opened by `P` from anywhere.
-  Lists every plugin the running binary knows how to construct,
-  including ones not in the active pipeline. Useful for discovering
-  what's available before adding to the pipeline. Sourced from
-  `/v1/plugins`.
+- **Catalog**: registered-plugin browser, opened by `P` from any
+  session-view pane. Lists every plugin the running binary knows how to
+  construct, including ones not in the active pipeline. Useful for
+  discovering what's available before adding to the pipeline. Sourced
+  from `/v1/plugins`.
+
+Layered on top of all of them:
+
+- **Key help**: a modal overlay listing every keybinding, opened by `?`
+  from anywhere (picker included). The current pane's bindings come
+  first and are highlighted; the global keys and a one-line summary of
+  every other pane follow. While it's up it owns the keyboard — `?`,
+  `Esc`, or `q` closes it (`q` closes the overlay rather than quitting
+  abctl). This is the discoverable home for keys the single-line footer
+  has no room for, `P` among them. Two exceptions: while a pipeline edit
+  is in flight that overlay is already modal and owns `y`/`N`, and while
+  the filter input is focused `?` is a character you're typing (session
+  IDs and hosts can contain one). In both cases `?` is inert until the
+  keyboard is released.
+
+  The body scrolls, so the full reference is reachable on a short
+  terminal: `↑↓`/`jk` by line, `b`/`f` or PgUp/PgDn by page, `u`/`d` by
+  half page, `g`/`G` to the ends. A `[↑↓] scroll  <n>%` affordance
+  appears in the overlay's footer only when the content overflows; the
+  close hint stays pinned there at every scroll position. Resizing the
+  terminal re-ranges the body without losing your place.
 
 ## Keybindings
 
 | Key | Context | Action |
 |---|---|---|
+| `?` | any (not while filtering or mid-edit) | open the key-help overlay (`?`/`Esc`/`q` closes) |
+| `↑ ↓` / `k j`, `b`/`f`, `u`/`d`, `g`/`G` | key help | scroll the overlay |
 | `↑ ↓` / `k j` | picker, list | navigate rows |
 | `Enter` | namespaces | open the namespace |
+| `l` | namespaces | connect directly to `localhost:9094` |
 | `Enter` | pods | port-forward + connect |
 | `Esc` | pods | back to namespaces |
 | `r` | namespaces, pods | reload agent list from cluster |
@@ -108,7 +148,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 | `p` | any | pause/resume stream |
 | `y` | detail | yank event JSON to `/tmp` |
 | `g` / `G` | lists | jump to top / bottom |
-| `P` | sessions, pipeline, plugin-detail | open the registered-plugin catalog |
+| `P` | any session-view pane (not the picker) | open the registered-plugin catalog |
 | `r` | catalog | refresh the catalog from `/v1/plugins` |
 | `e` | pipeline | edit pipeline subtree in `$EDITOR` |
 | `y` | edit/diff | apply the edit |
@@ -116,8 +156,7 @@ The UI has these top-level panes. `Enter` drills in; `Esc` backs out.
 | `r` | edit/error | retry: re-open the editor (post-edit failure) or refetch (fetch failure) |
 | `Esc` | edit/{fetching,editing,applying} | abort the edit, return to Pipeline pane |
 | `Esc` | edit/{waiting,rollback} | background the watch; result lands as a footer flash |
-| `?` | any | (reserved for future help overlay) |
-| `q` / `Ctrl+C` | any | quit |
+| `q` / `Ctrl+C` | any | quit (closes the key-help overlay first, if open) |
 
 ## Editing the pipeline
 

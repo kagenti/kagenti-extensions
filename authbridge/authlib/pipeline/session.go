@@ -83,6 +83,10 @@ type SessionEvent struct {
 	At        time.Time
 	Direction Direction
 	Phase     SessionPhase
+	// RequestID pairs a request event with its response event. Without it a
+	// consumer can only pair positionally, which misattributes whenever a
+	// client has concurrent requests in flight.
+	RequestID string
 	A2A       *A2AExtension
 	MCP       *MCPExtension
 	Inference *InferenceExtension
@@ -212,6 +216,7 @@ type sessionEventWire struct {
 	At          time.Time                  `json:"at"`
 	Direction   Direction                  `json:"direction"`
 	Phase       SessionPhase               `json:"phase"`
+	RequestID   string                     `json:"requestId,omitempty"`
 	A2A         *A2AExtension              `json:"a2a,omitempty"`
 	MCP         *MCPExtension              `json:"mcp,omitempty"`
 	Inference   *InferenceExtension        `json:"inference,omitempty"`
@@ -232,6 +237,7 @@ func (e SessionEvent) MarshalJSON() ([]byte, error) {
 		At:          e.At,
 		Direction:   e.Direction,
 		Phase:       e.Phase,
+		RequestID:   e.RequestID,
 		A2A:         e.A2A,
 		MCP:         e.MCP,
 		Inference:   e.Inference,
@@ -260,6 +266,7 @@ func (e *SessionEvent) UnmarshalJSON(data []byte) error {
 		At:          w.At,
 		Direction:   w.Direction,
 		Phase:       w.Phase,
+		RequestID:   w.RequestID,
 		A2A:         w.A2A,
 		MCP:         w.MCP,
 		Inference:   w.Inference,

@@ -40,7 +40,7 @@ func TestRenderTemplates_PluginWithFields(t *testing.T) {
 				{Name: "timeout_ms", Type: "int", Default: "5000",
 					Description: "Per-call timeout."},
 				{Name: "unclassified_policy", Type: "string", Default: "passthrough",
-					Enum: []string{"passthrough", "judge"},
+					Enum:        []string{"passthrough", "judge"},
 					Description: "Behavior when no parser claimed the request."},
 			},
 		},

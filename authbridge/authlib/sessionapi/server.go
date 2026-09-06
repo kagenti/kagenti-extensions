@@ -20,6 +20,7 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/redact"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // defaultHeartbeatInterval is how often the SSE stream sends a keep-alive
@@ -38,6 +39,10 @@ type Server struct {
 	inbound   *pipeline.Holder
 	outbound  *pipeline.Holder
 	heartbeat time.Duration
+	// usage aggregates events into time buckets for /v1/usage. nil disables
+	// the endpoint (returns 404) — see handleUsage for why that is a 404 and
+	// not an empty snapshot.
+	usage *usage.Aggregator
 	// catalog returns the registered-plugin metadata for /v1/plugins.
 	// nil disables the endpoint (returns 404). The binary wires this to
 	// plugins.Catalog; tests inject a stub provider.
@@ -100,6 +105,12 @@ func WithPipelines(inbound, outbound *pipeline.Holder) Option {
 	}
 }
 
+// WithUsage attaches a usage aggregator so the server exposes GET /v1/usage.
+// Without it that endpoint 404s.
+func WithUsage(a *usage.Aggregator) Option {
+	return func(s *Server) { s.usage = a }
+}
+
 // WithCatalog attaches a CatalogProvider so the server exposes the
 // registered-plugin catalog at GET /v1/plugins. Without this option the
 // endpoint returns 404 — useful in tests, harmless in production
@@ -125,6 +136,7 @@ func New(addr string, store *session.Store, opts ...Option) *Server {
 	mux.HandleFunc("GET /v1/events", s.handleStream)
 	mux.HandleFunc("GET /v1/pipeline", s.handlePipeline)
 	mux.HandleFunc("GET /v1/plugins", s.handlePluginCatalog)
+	mux.HandleFunc("GET /v1/usage", s.handleUsage)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	s.server = &http.Server{
@@ -169,6 +181,10 @@ type pipelinePluginView struct {
 	RequiresAny []string        `json:"requiresAny,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
+	// Metrics is populated for plugins implementing pipeline.MetricsProvider.
+	// Omitted entirely when a plugin reports none, so abctl can distinguish
+	// "no such channel" from "channel with nothing in it".
+	Metrics []pipeline.Metric `json:"metrics,omitempty"`
 }
 
 // handlePipeline returns the composition of the inbound and outbound
@@ -233,6 +249,13 @@ func describePipeline(h *pipeline.Holder, direction string) []pipelinePluginView
 		}
 		if rc, ok := pl.(pipeline.RawConfigProvider); ok {
 			view.Config = redact.JSON(rc.RawConfig())
+		}
+		if mp, ok := pl.(pipeline.MetricsProvider); ok {
+			// Bounded, not redacted: Metric.Name and Metric.Note are free-text
+			// and plugin-controlled, and this endpoint has no authentication. A
+			// key-based redactor cannot help with a value, so the framework caps
+			// the length and MetricsProvider carries the contract.
+			view.Metrics = boundMetrics(mp.Metrics())
 		}
 		out[i] = view
 	}
@@ -334,4 +357,33 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// boundMetrics caps each metric's free-text fields.
+//
+// redact.JSON is not the right tool here: it filters by KEY name (api_key,
+// token, …), and the exposure on this channel is a VALUE — a plugin putting
+// request-derived text into Metric.Name or Metric.Note. Running metrics through
+// a key-based filter would be a no-op that looked like a control.
+//
+// What the framework can enforce is a bound, so a plugin cannot stream content
+// through a field meant for short labels. The rest is a producer contract, stated
+// on pipeline.MetricsProvider: these fields carry labels and caveats, never
+// request or response content. The session API has no authentication.
+func boundMetrics(in []pipeline.Metric) []pipeline.Metric {
+	const maxLabel = 120
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]pipeline.Metric, len(in))
+	for i, m := range in {
+		if len(m.Name) > maxLabel {
+			m.Name = m.Name[:maxLabel]
+		}
+		if len(m.Note) > maxLabel {
+			m.Note = m.Note[:maxLabel]
+		}
+		out[i] = m
+	}
+	return out
 }

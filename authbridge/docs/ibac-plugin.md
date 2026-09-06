@@ -179,6 +179,8 @@ pipeline:
 | `judge_endpoint` | Yes | — | Base URL of the LLM judge service. The plugin POSTs to `{judge_endpoint}/v1/chat/completions`. Any OpenAI-compatible endpoint works (ollama, OpenAI, vLLM, etc). |
 | `judge_model` | Yes | — | Model identifier passed in the chat-completion request, e.g. `"llama3.2:3b"`, `"gpt-4o-mini"`. |
 | `judge_bearer` | No | `""` | Bearer token for the judge endpoint. Leave empty for unauthenticated local LLMs (ollama). |
+| `judge_max_tokens` | No | `1024` | Cap on the judge LLM's reply length. Lower values risk truncating mid-key on hosted models that wrap output in markdown fences. |
+| `judge_json_mode` | No | `true` | Sets `response_format: json_object` in the judge request so hosted models suppress the markdown-fence wrapper around structured output. |
 | `system_prompt` | No | (built-in) | Override the default judge system prompt. The default instructs the model to emit `{"verdict":"allow"\|"deny","reason":"..."}` and to deny when ambiguous. |
 | `timeout_ms` | No | `5000` | Per-call timeout. Validation rejects values below `100` to catch obvious operator mistakes. |
 | `judge_inference` | No | `false` | When `true`, also judge outbound traffic where `Extensions.Inference` is populated (the agent's own LLM-reasoning loop). |

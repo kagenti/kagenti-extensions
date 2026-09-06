@@ -60,7 +60,7 @@ type responseMutator struct{ newBody []byte }
 
 func (*responseMutator) Name() string { return "response-mutator" }
 func (*responseMutator) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{WritesBody: true}
+	return pipeline.PluginCapabilities{WritesResponseBody: true}
 }
 func (*responseMutator) OnRequest(context.Context, *pipeline.Context) pipeline.Action {
 	return pipeline.Action{Type: pipeline.Continue}

@@ -17,7 +17,7 @@ import (
 // point of PR #760 is that EVERY plugin header mutation — not just the
 // old Authorization special case — must reach the upstream request. The
 // plugin declares no capabilities: a header write does not need
-// ReadsBody/WritesBody, mirroring how staticinject/cpex mutate headers.
+// ReadsBody/WritesRequestBody, mirroring how staticinject/cpex mutate headers.
 type headerMutatorPlugin struct {
 	set map[string]string // header -> value to Set (set or overwrite)
 	del []string          // headers to Del

@@ -205,17 +205,15 @@ func cloneCatalog(in []CatalogEntry) []CatalogEntry {
 	}
 	out := make([]CatalogEntry, len(in))
 	for i := range in {
+		// Struct copy, then reallocate the slices. Copying field-by-field
+		// silently drops any capability added later; this picks them up.
 		caps := in[i].Capabilities
+		caps.Requires = append([]string(nil), in[i].Capabilities.Requires...)
+		caps.RequiresAny = append([]string(nil), in[i].Capabilities.RequiresAny...)
 		out[i] = CatalogEntry{
-			Name: in[i].Name,
-			Capabilities: pipeline.PluginCapabilities{
-				ReadsBody:   caps.ReadsBody,
-				WritesBody:  caps.WritesBody,
-				Description: caps.Description,
-				Requires:    append([]string(nil), caps.Requires...),
-				RequiresAny: append([]string(nil), caps.RequiresAny...),
-			},
-			Fields: cloneFieldSchemas(in[i].Fields),
+			Name:         in[i].Name,
+			Capabilities: caps,
+			Fields:       cloneFieldSchemas(in[i].Fields),
 		}
 	}
 	return out

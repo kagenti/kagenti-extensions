@@ -323,7 +323,7 @@ func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// bodyMutatorPlugin declares WritesBody and rewrites pctx.Body via
+// bodyMutatorPlugin declares WritesRequestBody and rewrites pctx.Body via
 // SetBody. Used below to confirm the forwardproxy propagates the
 // mutation to the upstream request.
 type bodyMutatorPlugin struct {
@@ -332,7 +332,7 @@ type bodyMutatorPlugin struct {
 
 func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
 func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{WritesBody: true}
+	return pipeline.PluginCapabilities{WritesRequestBody: true}
 }
 func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	pctx.SetBody(p.newBody)
@@ -342,7 +342,7 @@ func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) p
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// TestForwardProxy_RequestBodyMutation: a WritesBody plugin rewriting
+// TestForwardProxy_RequestBodyMutation: a WritesRequestBody plugin rewriting
 // pctx.Body must cause the upstream backend to receive the new bytes
 // with a correct Content-Length and no Content-Encoding.
 func TestForwardProxy_RequestBodyMutation(t *testing.T) {

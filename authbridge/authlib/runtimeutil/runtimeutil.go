@@ -48,6 +48,14 @@ func InitLogging(binaryName string) {
 	}
 	h := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})
 	slog.SetDefault(slog.New(h).With("binary", binaryName))
+	// slog.SetDefault also routes the standard log package through this handler,
+	// and it does so at Info unless told otherwise. Every fatal startup error in
+	// the binaries goes through log.Fatalf, so without this a port clash — the
+	// most common local failure — prints as INFO and the process then exits,
+	// leaving an operator scanning an apparently clean log for a cause. Fatals
+	// are the only std-log users in these binaries, so raising the bridge to
+	// Error labels them correctly rather than mislabelling anything else.
+	slog.SetLogLoggerLevel(slog.LevelError)
 }
 
 // StartSignalToggle installs a SIGUSR1 handler that toggles the process log

@@ -1,6 +1,8 @@
 package pipeline
 
 import (
+	"github.com/tidwall/gjson"
+
 	"encoding/json"
 	"log/slog"
 	"strconv"
@@ -129,9 +131,75 @@ func DeriveError(pctx *Context) *EventError {
 	}
 	if pctx.StatusCode >= 400 {
 		return &EventError{
-			Kind: "backend_error",
-			Code: strconv.Itoa(pctx.StatusCode),
+			Kind:    "backend_error",
+			Code:    strconv.Itoa(pctx.StatusCode),
+			Message: upstreamErrorKind(pctx.ResponseBody),
 		}
 	}
 	return nil
+}
+
+// upstreamErrorKind extracts the provider's machine-readable error type from an
+// error response body, or "" when there isn't one.
+//
+// REQUIRES A BUFFERED BODY. pctx.ResponseBody is only populated when some
+// plugin in the chain declares ReadsBody, so on an auth-only chain — and in
+// the authbridge-lite build, where the parsers are compiled out — this yields
+// "" and the event stays the bare backend_error/<code> it was before. That is
+// precisely where an operator has the fewest other diagnostics; closing it
+// would mean buffering error responses on chains that otherwise never read a
+// body, which is a listener-level decision, not one to make here.
+//
+// A bare `backend_error / 400` tells an operator nothing about why, which turns
+// every upstream rejection into a guessing exercise. The provider already
+// classifies its own failures, and the classification is what an operator acts
+// on: invalid_request_error means fix the request, rate_limit_error means back
+// off, authentication_error means fix credentials.
+//
+// The human-readable error.message is deliberately NOT captured. Provider
+// messages routinely quote the offending part of the request, and the session
+// store is unauthenticated — the same reason body-mutation events carry only
+// length and sha256. The type and code are enum-like: bounded vocabularies
+// chosen by the provider, carrying no request content.
+func upstreamErrorKind(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	// Bound the parse: an error body is small, and a huge one here means this
+	// isn't an error document at all.
+	if len(body) > 64*1024 {
+		body = body[:64*1024]
+	}
+	if !gjson.ValidBytes(body) {
+		return ""
+	}
+	// Only accept a JSON string. gjson's String() on an object or array returns
+	// that node's RAW JSON, so {"error":{"type":{...}}} would put response body
+	// content — quoted request data, credentials — straight into the
+	// unauthenticated session store, defeating the whole point of excluding
+	// error.message. A numeric code is accepted because a number carries no
+	// payload; anything structured is refused.
+	t := stringOrNumber(gjson.GetBytes(body, "error.type"))
+	if t == "" {
+		t = stringOrNumber(gjson.GetBytes(body, "error.code"))
+	}
+	if t == "" {
+		return ""
+	}
+	if len(t) > 64 {
+		t = t[:64]
+	}
+	return t
+}
+
+// stringOrNumber returns the value only when the node is a JSON string or
+// number. Every other type — object, array, true/false, absent — yields "",
+// because String() on a container returns its raw JSON and that is body content.
+func stringOrNumber(r gjson.Result) string {
+	switch r.Type {
+	case gjson.String, gjson.Number:
+		return r.String()
+	default:
+		return ""
+	}
 }

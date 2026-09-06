@@ -285,8 +285,8 @@ func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// bodyMutatorPlugin declares WritesBody and rewrites the request body
-// to a fixed payload. The pipeline validator requires WritesBody run
+// bodyMutatorPlugin declares WritesRequestBody and rewrites the request body
+// to a fixed payload. The pipeline validator requires WritesRequestBody run
 // after any ReadsBody plugin, which this satisfies by itself (no reader
 // present when used alone).
 type bodyMutatorPlugin struct {
@@ -295,7 +295,7 @@ type bodyMutatorPlugin struct {
 
 func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
 func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{WritesBody: true}
+	return pipeline.PluginCapabilities{WritesRequestBody: true}
 }
 func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	pctx.SetBody(p.newBody)
@@ -305,7 +305,7 @@ func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) p
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// TestReverseProxy_RequestBodyMutation: a WritesBody plugin that
+// TestReverseProxy_RequestBodyMutation: a WritesRequestBody plugin that
 // rewrites pctx.Body via SetBody must cause the upstream backend to
 // receive the new bytes with a correct Content-Length header. Confirms
 // that the reverseproxy request-path propagation is wired to the

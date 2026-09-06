@@ -42,7 +42,7 @@ the request body before it leaves the pod.
 ```
 
 The pipeline is `inference-parser → context-guru`. context-guru is the single
-outbound `WritesBody` plugin (mutually exclusive with `sparc`).
+outbound `WritesRequestBody` plugin (mutually exclusive with `sparc`).
 
 ## The engine: 2 deterministic reducers + extract-code
 
@@ -150,7 +150,7 @@ inject a second sidecar). The extract-code key lives in the `cg-model-key` Secre
   compacted request` log line without altering the request.
 - **collapse stays gentle** (`head/tail: 12`); `extract` (query-aware) is the primary
   reducer that preserves the mid-log needle. Very aggressive collapse can drop it.
-- **context-guru + SPARC are mutually exclusive** on the outbound chain (one WritesBody slot).
+- **context-guru + SPARC are mutually exclusive** on the outbound chain (one WritesRequestBody slot).
 
 ## Files
 

@@ -211,8 +211,13 @@ func (p *SPARC) Capabilities() pipeline.PluginCapabilities {
 		// per-mode runtime requirements are validated/handled below.
 		RequiresAny: []string{"inference-parser", "mcp-parser"},
 		ReadsBody:   true,
-		WritesBody:  true, // MCP result (mcp mode) / completion rewrite (inference mode)
-		Description: "SPARC pre-tool reflection: blocks ungrounded/hallucinated tool calls.",
+		// Response-only: SPARC rewrites the upstream response (respond.go), and
+		// calls pctx.SetBody nowhere. Declaring WritesRequestBody was carried over
+		// from the undirected flag and cost it the single request-mutator slot for
+		// nothing, so a chain like [sparc, tool-prune] could not build even though
+		// the two write different bodies.
+		WritesResponseBody: true,
+		Description:        "SPARC pre-tool reflection: blocks ungrounded/hallucinated tool calls.",
 	}
 }
 

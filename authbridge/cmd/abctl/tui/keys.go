@@ -23,9 +23,89 @@ func catalogPlugins(c *apiclient.PluginCatalog) []apiclient.PluginCatalogEntry {
 	return c.Plugins
 }
 
-// handleKey processes every key press. The filter-input overlay takes
-// precedence; otherwise keys are dispatched based on the active pane.
+// handleKey processes every key press. Modal overlays claim it first, in
+// order: the key-help overlay, then the picker panes, then an in-flight
+// pipeline edit, then the filter input. Only if none of those own the
+// keyboard is the key dispatched based on the active pane.
 func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// The help overlay is modal: while it's up, it owns the keyboard so a
+	// stray key can't navigate the pane hidden underneath. Checked before
+	// every other handler, including the picker and edit overlays, so `?`
+	// is genuinely available everywhere.
+	if m.helpVisible {
+		switch msg.String() {
+		case "?", "esc", "q", "ctrl+c":
+			// `q`/ctrl+c close the overlay rather than quitting abctl:
+			// dismissing a help panel is the overwhelmingly likely intent,
+			// and the overlay itself advertises how to quit.
+			m.helpVisible = false
+			return nil
+		case "g":
+			m.helpVp.GotoTop()
+			return nil
+		case "G":
+			m.helpVp.GotoBottom()
+			return nil
+		}
+		// Everything else goes to the viewport so the reference scrolls:
+		// ↑↓/jk, pgup/pgdn, and the half-page keys the viewport binds by
+		// default. Keys it doesn't recognize are harmlessly ignored, which
+		// preserves the overlay's modality.
+		var cmd tea.Cmd
+		m.helpVp, cmd = m.helpVp.Update(msg)
+		return cmd
+	}
+	// `?` opens the overlay from any pane, with two exceptions. While a
+	// pipeline edit is in flight that overlay is already modal and owns
+	// y/N/r/Esc, so help would swallow the apply confirmation. While the
+	// filter input is focused `?` is a character the user is typing — a
+	// session ID or host can contain one — and stealing it would make
+	// those values unfilterable.
+	if msg.String() == "?" && m.editState.phase == editPhaseDone && !m.filtering {
+		m.helpVisible = true
+		m.syncHelpViewport(true)
+		return nil
+	}
+
+	// The Usage pane owns the keyboard while it is up, except for esc/q which
+	// the shared handling above already routed.
+	if m.pane == paneUsage && !m.filtering {
+		switch msg.String() {
+		case "t":
+			m.usage.cycleMetric()
+			return nil
+		case "w":
+			m.usage.cycleWindow()
+			return m.beginFetch()
+		case "r":
+			return m.beginFetch()
+		case "s":
+			// Toggle scope between this session and all sessions. Only offered
+			// when a session is selected; otherwise there is nothing to toggle to.
+			if m.usage.session != "" {
+				m.usage.session = ""
+			} else if m.selectedSess != "" {
+				m.usage.session = m.selectedSess
+			}
+			return m.beginFetch()
+		}
+	}
+
+	// `u` opens the Usage pane. Scope depends on where it was pressed: from the
+	// events timeline it charts the session being read, from the session picker
+	// it charts everything. Suppressed while filtering, where `u` is a character
+	// the user is typing — the same reasoning as the `?` overlay above.
+	if msg.String() == "u" && !m.filtering && m.editState.phase == editPhaseDone {
+		switch m.pane {
+		case paneEvents, paneDetail:
+			if m.selectedSess != "" {
+				return m.openUsage(m.selectedSess)
+			}
+		case paneSessions:
+			return m.openUsage("")
+		}
+	}
+
 	// Picker panes handle their own keys before session-view logic.
 	if m.pane == paneNamespaces {
 		switch msg.String() {
@@ -36,6 +116,18 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 				m.rebuildPodsTable()
 			}
 			return nil
+		case "l":
+			// Skip the cluster entirely and talk to whatever session API
+			// is already listening locally — an existing port-forward, an
+			// in-mesh abctl, or a tunnel from a kubeconfig that can't list
+			// pods. Probes before switching panes so a dead endpoint stays
+			// an error in the picker rather than an empty session view.
+			if m.loading {
+				return nil
+			}
+			m.pickerErr = ""
+			m.loading = true
+			return connectLocalCmd(m.ctx, m.localEndpointOr())
 		case "r":
 			if m.loading {
 				return nil
@@ -179,6 +271,27 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			} else {
 				m.pane = panePipeline
 			}
+			// Returning INTO Usage has to restart its polling chain. The tick
+			// that was in flight when the catalog opened was dropped by the
+			// `m.pane != paneUsage` guard, so without this nothing reschedules
+			// and the 20s auto-refresh is silently dead until the user backs all
+			// the way out and re-enters with `u` — `r` refetches once but starts
+			// no chain.
+			if m.pane == paneUsage {
+				return m.resumeUsagePolling()
+			}
+		case paneUsage:
+			// Return to whichever pane opened it, from usageState's own field —
+			// model.previousPane is shared with the catalog overlay and gets
+			// clobbered when the catalog is opened from here.
+			if m.usage.returnPane != paneNone {
+				m.pane = m.usage.returnPane
+				m.usage.returnPane = paneNone
+			} else {
+				m.pane = paneSessions
+			}
+			// End the polling chain on the way out.
+			m.usage.tickGen++
 		case paneDetail:
 			m.pane = paneEvents
 		case paneEvents:
@@ -221,7 +334,9 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.previousPane = panePipeline
 			m.showPluginDetail(p)
 			m.pane = panePluginDetail
-			return nil
+			// Fetch immediately rather than waiting for the next refresh tick:
+			// opening the pane is exactly when someone wants current counters.
+			return m.loadPipelineCmd()
 		case paneCatalog:
 			p := m.selectedCatalogEntry()
 			if p == nil {
@@ -447,20 +562,21 @@ func (m *model) helpView() string {
 	}
 	switch m.pane {
 	case paneNamespaces:
-		return "[↑↓/jk] nav  [↵] open  [r] reload  [q] quit"
+		return "[↑↓/jk] nav  [↵] open  [l] " + shortHost(m.localEndpointOr()) +
+			"  [r] reload  [?] keys  [q] quit"
 	case panePods:
-		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [q] quit"
+		return "[↑↓/jk] nav  [↵] connect  [Esc] back  [r] reload  [?] keys  [q] quit"
 	case paneSessions:
 		if m.parentCtx != nil {
-			return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [esc] pods  [p] pause  [q] quit"
+			return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [esc] pods  [p] pause  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] drill  [tab] pipeline  [/] filter  [p] pause  [q] quit"
+		return "[↑↓] nav  [↵] drill  [tab] pipeline  [u] usage  [/] filter  [p] pause  [?] keys  [q] quit"
 	case paneEvents:
 		skipHint := "[s] hide passthru/skip"
 		if m.hideInactive {
 			skipHint = "[s] show all"
 		}
-		base := "[↑↓] nav  [b/f] page  [↵] detail  [esc] back  [/] filter  " + skipHint + "  [p] pause  [q] quit"
+		base := "[↑↓] nav  [b/f] page  [↵] detail  [u] usage  [esc] back  [/] filter  " + skipHint + "  [p] pause  [?] keys  [q] quit"
 		// Surface the hidden-message count so a filtered timeline doesn't
 		// look like data loss. Only annotate when hiding is on AND at
 		// least one message was hidden.
@@ -470,13 +586,13 @@ func (m *model) helpView() string {
 		}
 		return base
 	case paneDetail:
-		return "[↑↓] scroll  [y] yank  [esc] back  [q] quit"
+		return "[↑↓] scroll  [y] yank  [u] usage  [esc] back  [?] keys  [q] quit"
 	case panePipeline:
 		var base string
 		if m.parentCtx != nil {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods  [q] quit"
+			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [esc] pods  [?] keys  [q] quit"
 		} else {
-			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [q] quit"
+			base = "[↑↓] nav  [↵] plugin detail  [e] edit  [tab] sessions  [?] keys  [q] quit"
 		}
 		// Surface a count of plugins with unmet dependencies so a single
 		// "✗" in the DEPS column doesn't get lost in a long list.
@@ -486,14 +602,25 @@ func (m *model) helpView() string {
 		}
 		return base
 	case panePluginDetail:
-		return "[↑↓] scroll  [esc] back  [q] quit"
+		return "[↑↓] scroll  [esc] back  [?] keys  [q] quit"
+	case paneUsage:
+		// [s] only appears when there is a session to scope to, so the footer
+		// never advertises a key that would do nothing.
+		scopeHint := ""
+		if m.usage.session != "" {
+			scopeHint = "  [s] all sessions"
+		} else if m.selectedSess != "" {
+			scopeHint = "  [s] this session"
+		}
+		return "[t] metric  [w] window" + scopeHint +
+			"  [r] refresh  [esc] back  [?] keys  [q] quit"
 	case paneCatalog:
 		if m.catalog == nil {
-			return "loading catalog…  [esc] back  [q] quit"
+			return "loading catalog…  [esc] back  [?] keys  [q] quit"
 		}
-		return "[↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [q] quit"
+		return "[↑↓] nav  [↵] plugin detail  [r] refresh  [esc] back  [?] keys  [q] quit"
 	}
-	return "[q] quit"
+	return "[?] keys  [q] quit"
 }
 
 // layout recomputes component sizes to fit the current terminal. Called on

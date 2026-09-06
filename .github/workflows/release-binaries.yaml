@@ -48,18 +48,48 @@ jobs:
           fi
           echo "Building version ${VERSION}"
           mkdir -p dist
-          for bin in abctl authbridge-proxy; do
-            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-              os="${target%/*}"
-              arch="${target#*/}"
-              echo "==> ${bin} ${os}/${arch}"
-              ( cd "authbridge/cmd/${bin}" && \
-                GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
-                go build -trimpath \
-                  -ldflags "-s -w -X main.version=${VERSION}" \
-                  -o "${GITHUB_WORKSPACE}/dist/${bin}" . )
-              tar -C dist -czf "dist/${bin}_${VERSION}_${os}_${arch}.tar.gz" "${bin}"
-              rm -f "dist/${bin}"
+
+          # authbridge-proxy variants: "<suffix>:<build-tags>". Empty
+          # suffix is the default plugin set. One variant per opt-in
+          # plugin (or one combined "full") — never enumerate combos.
+          # Lite tags are derived from plugin source; see
+          # authbridge/scripts/lite-tags.
+          lite_tags=$(go -C authbridge/scripts/lite-tags run .)
+          declare -a proxy_variants=(
+            ":"
+            "lite:${lite_tags}"
+            "sessionbudget:include_plugin_sessionbudget"
+          )
+
+          build_proxy() {
+            local variant="$1" tags="$2" os="$3" arch="$4"
+            local suffix=""; [ -n "${variant}" ] && suffix="-${variant}"
+            local archive="dist/authbridge-proxy${suffix}_${VERSION}_${os}_${arch}.tar.gz"
+            echo "==> authbridge-proxy${suffix} ${os}/${arch}"
+            ( cd authbridge/cmd/authbridge-proxy && \
+              GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+              go build -trimpath \
+                -tags "${tags}" \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "${GITHUB_WORKSPACE}/dist/authbridge-proxy" . )
+            tar -C dist -czf "${archive}" authbridge-proxy
+            rm -f dist/authbridge-proxy
+          }
+
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+
+            echo "==> abctl ${os}/${arch}"
+            ( cd authbridge/cmd/abctl && \
+              GOWORK=off CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+              go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" \
+                -o "${GITHUB_WORKSPACE}/dist/abctl" . )
+            tar -C dist -czf "dist/abctl_${VERSION}_${os}_${arch}.tar.gz" abctl
+            rm -f dist/abctl
+
+            for entry in "${proxy_variants[@]}"; do
+              build_proxy "${entry%%:*}" "${entry#*:}" "${os}" "${arch}"
             done
           done
           ( cd dist && sha256sum ./*.tar.gz > checksums.txt )
@@ -72,9 +102,21 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${GITHUB_REF_NAME}"
-          notes="Prebuilt \`abctl\` and \`authbridge-proxy\` binaries for linux and macOS (amd64/arm64).
-
-          Verify downloads with \`sha256sum -c checksums.txt\`. On macOS, clear the Gatekeeper quarantine after extracting: \`xattr -dr com.apple.quarantine ./abctl\`."
+          # Build release notes one line at a time so no single string
+          # exceeds yamllint's 150-char cap. Single-quoted arguments keep
+          # backticks literal (no shell expansion).
+          notes=""
+          add() { notes="${notes}${1}"$'\n'; }
+          add 'Prebuilt `abctl` and `authbridge-proxy` binaries for linux and macOS (amd64/arm64).'
+          add ''
+          add '`authbridge-proxy` ships in variants matching the container images:'
+          add 'unqualified (default plugin set, matches the `authbridge` image),'
+          add '`-lite` (trimmed plugin set, matches `authbridge-lite`), plus one variant per'
+          add 'opt-in plugin currently offered for try-out (today: `-sessionbudget`).'
+          add 'Variants track opt-in plugins one-for-one; arbitrary combinations are not published.'
+          add ''
+          add 'Verify downloads with `sha256sum -c checksums.txt`. On macOS, clear the'
+          add 'Gatekeeper quarantine after extracting: `xattr -dr com.apple.quarantine ./abctl`.'
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" dist/*.tar.gz dist/checksums.txt --clobber
           else

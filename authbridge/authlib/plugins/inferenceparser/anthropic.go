@@ -3,6 +3,7 @@ package inferenceparser
 import (
 	"bytes"
 	"encoding/json"
+	"log/slog"
 	"strings"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
@@ -229,6 +230,17 @@ type anthropicStreamEvent struct {
 	} `json:"delta"`
 	Usage *anthropicUsage `json:"usage"`
 
+	// Error carries the payload of an "error" stream event (overloaded_error,
+	// api_error, and friends). Anthropic can abort a stream mid-flight with
+	// this instead of the usual message_delta/message_stop pair, in which case
+	// no usage ever arrives — so it is the single most informative event when
+	// token telemetry comes back empty, and worth surfacing rather than
+	// silently ignoring.
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error"`
+
 	// Index identifies which content block an event belongs to. A response
 	// may contain several blocks (text plus one or more tool calls), and
 	// their deltas are only distinguishable by this index.
@@ -297,7 +309,26 @@ func (s *inferenceStreamState) closeAnthropicTool() {
 func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline.InferenceExtension) {
 	var ev anthropicStreamEvent
 	if err := json.Unmarshal(frame, &ev); err != nil {
+		// A malformed frame drops whatever usage it carried, so a stream can
+		// finish with accumulated completion text and no token counts at all —
+		// logInferenceFinalized then prints every split counter as -1 with
+		// nothing to explain it. Previously a bare return, which made that
+		// outcome undiagnosable. Debug, not Warn: a truncated final frame on a
+		// cancelled turn is routine. Log the length, never the bytes — frames
+		// carry prompt and completion content.
+		slog.Debug("inference-parser: malformed Anthropic streaming frame, skipping",
+			"error", err, "frameLen", len(frame))
 		return
+	}
+	if !knownAnthropicEvents[ev.Type] {
+		// The frame parses, so nothing errors, but the switch below ignores it
+		// and any usage it carried is lost. That means the wire format has moved
+		// ahead of this parser — the one failure mode that silently zeroes token
+		// telemetry while completion text still accumulates. ev.Type is a wire
+		// value, so it goes only to the log, which already carries bodies at
+		// Debug level.
+		slog.Debug("inference-parser: unrecognized Anthropic stream event type — token counts may be incomplete",
+			"type", ev.Type)
 	}
 	switch ev.Type {
 	case "message_start":
@@ -325,6 +356,18 @@ func foldAnthropicFrame(frame []byte, state *inferenceStreamState, ext *pipeline
 		}
 	case "content_block_stop":
 		state.closeAnthropicTool()
+	case "error":
+		// An upstream abort. Not a parse failure, so it must not be reported as
+		// an unrecognized type, and not silently dropped either: it explains an
+		// otherwise inexplicable stream that carried no usage. Warn, unlike the
+		// Debug drops above — the upstream failed the request. The error type
+		// and message are provider-generated diagnostics, not user content.
+		if ev.Error != nil {
+			slog.Warn("inference-parser: Anthropic stream returned an error event — token counts will be incomplete",
+				"errorType", ev.Error.Type, "message", ev.Error.Message)
+		} else {
+			slog.Warn("inference-parser: Anthropic stream returned an error event with no detail — token counts will be incomplete")
+		}
 	case "message_delta":
 		if ev.Delta != nil && ev.Delta.StopReason != "" {
 			ext.FinishReason = ev.Delta.StopReason

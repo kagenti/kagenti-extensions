@@ -398,7 +398,7 @@ func (p *bodyRecorderPlugin) OnResponse(_ context.Context, _ *pipeline.Context) 
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// bodyMutatorPlugin declares WritesBody and rewrites pctx.Body via
+// bodyMutatorPlugin declares WritesRequestBody and rewrites pctx.Body via
 // SetBody. Used to assert extproc emits a BodyMutation on the wire
 // when a plugin rewrites the request body.
 type bodyMutatorPlugin struct {
@@ -407,7 +407,7 @@ type bodyMutatorPlugin struct {
 
 func (p *bodyMutatorPlugin) Name() string { return "body-mutator" }
 func (p *bodyMutatorPlugin) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{WritesBody: true}
+	return pipeline.PluginCapabilities{WritesRequestBody: true}
 }
 func (p *bodyMutatorPlugin) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
 	pctx.SetBody(p.newBody)
@@ -417,7 +417,7 @@ func (p *bodyMutatorPlugin) OnResponse(_ context.Context, _ *pipeline.Context) p
 	return pipeline.Action{Type: pipeline.Continue}
 }
 
-// TestExtProc_RequestBodyMutation_Inbound: a WritesBody plugin must
+// TestExtProc_RequestBodyMutation_Inbound: a WritesRequestBody plugin must
 // produce a RequestBody ProcessingResponse carrying BodyMutation with
 // the new bytes, and the header mutation must request content-encoding
 // be removed.

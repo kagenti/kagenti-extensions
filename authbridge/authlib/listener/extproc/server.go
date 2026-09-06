@@ -241,6 +241,7 @@ func (s *Server) recordInboundSession(pctx *pipeline.Context) {
 		At:          time.Now(),
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionRequest,
+		RequestID:   pctx.RequestID(),
 		A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:     plugins,
@@ -279,6 +280,7 @@ func (s *Server) recordInboundReject(pctx *pipeline.Context, action pipeline.Act
 		At:          time.Now(),
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionDenied,
+		RequestID:   pctx.RequestID(),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
 		Identity:    pipeline.SnapshotIdentity(pctx),
@@ -332,6 +334,7 @@ func (s *Server) recordOutboundReject(pctx *pipeline.Context, action pipeline.Ac
 		At:          time.Now(),
 		Direction:   pipeline.Outbound,
 		Phase:       pipeline.SessionDenied,
+		RequestID:   pctx.RequestID(),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
 		Plugins:     pipeline.SnapshotPlugins(pctx.Extensions.Custom),
 		Identity:    pipeline.SnapshotIdentity(pctx),
@@ -371,6 +374,7 @@ func (s *Server) recordInboundResponseSession(pctx *pipeline.Context) {
 		At:          time.Now(),
 		Direction:   pipeline.Inbound,
 		Phase:       pipeline.SessionResponse,
+		RequestID:   pctx.RequestID(),
 		A2A:         pipeline.SnapshotA2A(pctx.Extensions.A2A),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
 		Plugins:     plugins,
@@ -399,6 +403,7 @@ func (s *Server) recordOutboundResponseSession(pctx *pipeline.Context) {
 		At:          time.Now(),
 		Direction:   pipeline.Outbound,
 		Phase:       pipeline.SessionResponse,
+		RequestID:   pctx.RequestID(),
 		MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
 		Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseResponse),
@@ -446,6 +451,7 @@ func (s *Server) recordOutboundSession(pctx *pipeline.Context) {
 		At:          time.Now(),
 		Direction:   pipeline.Outbound,
 		Phase:       pipeline.SessionRequest,
+		RequestID:   pctx.RequestID(),
 		MCP:         pipeline.SnapshotMCP(pctx.Extensions.MCP),
 		Inference:   pipeline.SnapshotInference(pctx.Extensions.Inference),
 		Invocations: pipeline.SnapshotInvocations(pctx.Extensions.Invocations, pipeline.InvocationPhaseRequest),
@@ -657,7 +663,7 @@ func (s *Server) handleResponseBody(ctx context.Context, body []byte, pctx *pipe
 		s.recordOutboundResponseSession(pctx)
 	}
 
-	// A plugin that declared WritesBody: true and called pctx.SetResponseBody
+	// A plugin that declared WritesResponseBody: true and called pctx.SetResponseBody
 	// flips the ResponseBodyMutated flag. Emit the replacement bytes via
 	// BodyMutation so Envoy rewrites the downstream response; otherwise
 	// pass through with no mutation. The flag avoids the O(n) string

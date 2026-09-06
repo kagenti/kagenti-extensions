@@ -44,6 +44,31 @@ func ApplyPreset(cfg *Config) {
 	// session.enabled: false — main.go skips the API server when the
 	// store itself is nil.
 	setDefault(&cfg.Listener.SessionAPIAddr, ":9094")
+
+	// Health server is default-on for every mode; ":9091" is what the operator's
+	// probe config and the container images expect.
+	setDefault(&cfg.Listener.HealthAddr, ":9091")
+
+	// LAST, so it wins over every default set above. This must live in ApplyPreset
+	// and not in Load: the binaries call Load first and ApplyPreset second, so a
+	// rule placed in Load runs BEFORE the wildcard defaults exist and silently
+	// protects nothing — which is precisely the health_addr / transparent_proxy_addr
+	// case it is here to fix.
+	if cfg.Listener.BindLoopbackOnly {
+		for _, addr := range []*string{
+			&cfg.Listener.ExtProcAddr,
+			&cfg.Listener.ExtAuthzAddr,
+			&cfg.Listener.ForwardProxyAddr,
+			&cfg.Listener.ReverseProxyAddr,
+			&cfg.Listener.TransparentInboundAddr,
+			&cfg.Listener.TransparentProxyAddr,
+			&cfg.Listener.SessionAPIAddr,
+			&cfg.Listener.HealthAddr,
+			&cfg.Stats.StatsAddress,
+		} {
+			*addr = forceLocalhost(*addr)
+		}
+	}
 }
 
 func setDefault(field *string, value string) {

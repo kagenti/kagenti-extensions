@@ -23,19 +23,20 @@ AuthBridge pipeline YAML, not whether it is compiled into the binary
 | Name | Description | Production ready? | Direction | Default config? |
 |------|-------------|--------------------|-----------|------------------|
 | [`a2a-parser`](#a2a-parser) | Parses A2A messages into `pctx.Extensions.A2A` for downstream plugins. | Beta | Inbound | No |
-| [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Coming Soon | Outbound | No |
-| [`cpex`](#cpex) | APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step. | Coming Soon | Outbound | No |
+| [`context-guru`](#context-guru) | Compacts the outbound LLM request context before forwarding. | Opt-in | Outbound | No |
+| [`cpex`](#cpex) | APL DSL + named [CPEX](https://github.com/contextforge-org/cpex) plugins (Cedar, PII, audit, …) over a single chain step. | Opt-in | Outbound | No |
 | [`ibac`](#ibac) | LLM-judge intent-based access control for outbound tool calls. | Alpha | Outbound | No |
 | [`inference-parser`](#inference-parser) | Parses LLM completions into `pctx.Extensions.Inference`. | Alpha | Outbound | No |
 | [`jwt-validation`](#jwt-validation) | Inbound JWT validation (signature, issuer, audience) against JWKS. | Ready | Inbound | YES |
-| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` and enforces a daily budget limit. | Alpha | Inbound | No |
+| [`litellm-budget-track`](#litellm-budget-track) | Tracks `x-litellm-response-cost` (with `-original` fallback) and enforces a daily budget limit. Place on whichever chain carries LLM traffic — inbound when fronting the LLM endpoint, outbound when hosting an agent via `authbridge exec`. | Alpha | Both | No |
 | [`mcp-parser`](#mcp-parser) | Parses MCP tool calls/results into `pctx.Extensions.MCP`. | Beta | Outbound | No |
-| [`opa`](#opa) | OPA policy enforcement for inbound and outbound requests. | Alpha | Both | No |
+| [`opa`](#opa) | [OPA](https://www.openpolicyagent.org/docs) policy enforcement for inbound and outbound requests. | Alpha | Both | No |
 | [`sparc`](#sparc) | Pre-tool reflection: blocks ungrounded/hallucinated tool calls. | Alpha | Outbound | No |
 | [`static-inject`](#static-inject) | Swaps a placeholder credential for a real static credential on outbound requests. | Alpha | Outbound | No |
 | [`session-budget`](#session-budget) | Enforces per-session token, call, and duration budgets via Redis. | Alpha | Outbound | No |
 | [`token-broker`](#token-broker) | Exchanges incoming tokens against a configured IdP via a broker service. | Alpha | Outbound | No |
 | [`token-exchange`](#token-exchange) | RFC 8693 outbound token exchange per route. | Ready | Outbound | YES |
+| [`tool-prune`](#tool-prune) | Removes unused tool definitions from inference requests. | Alpha | Outbound | No |
 
 ## `a2a-parser`
 
@@ -63,12 +64,14 @@ engine pulls a large transitive dependency set.
 
 ## `cpex`
 
-Bridges AuthBridge hooks to the CPEX framework: an APL DSL plus named
+Bridges AuthBridge hooks to the [CPEX](https://github.com/contextforge-org/cpex)
+framework (a policy enforcement runtime for AI agents): an APL DSL plus named
 CPEX policy plugins (Cedar, PII, audit, …). Requires the separate
 `authbridge-cpex` binary (`-tags cpex`, `CGO_ENABLED=1`, links a pinned
-`libcpex_ffi.a`).
+`libcpex_ffi.a`). Full details in [cpex-plugin.md](./cpex-plugin.md);
+see also the plugin's [README](../authlib/plugins/cpex/README.md).
 
-- `hooks.on_request` / `hooks.on_response` (`[]string`) — CPEX hook names to fire on each phase, in order.
+- `hooks.on_request` / `hooks.on_response` (`[]string`) — [CPEX hook names](https://contextforge-org.github.io/cpex/docs/0.1.x/hook-types/) to fire on each phase, in order (AuthBridge classifies traffic onto the `cmf.*` hooks — see [Hook chains](./cpex-plugin.md#hook-chains)).
 - `config` (string) — inline CPEX runtime YAML (`plugins:`/`global:`/`plugin_settings:`); mutually exclusive with `config_file`.
 - `config_file` (string) — path to a file with the CPEX runtime YAML; mutually exclusive with `config`.
 - `fail_open` (bool) — allow traffic through if CPEX itself errors/panics. A CPEX policy *deny* is always honored regardless. Default `false`.
@@ -78,7 +81,17 @@ CPEX policy plugins (Cedar, PII, audit, …). Requires the separate
 ## `ibac`
 
 LLM-judge intent-based access control: judges outbound tool calls
-against recorded inbound user intent.
+against recorded inbound user intent. Full details, including the
+prompt-injection threat model, in [ibac-plugin.md](./ibac-plugin.md).
+
+The "LLM-judge service" is any OpenAI-compatible chat-completions
+endpoint (a local Ollama/vLLM, or a hosted provider) — AuthBridge ships
+no judge of its own. The plugin POSTs the recorded user intent plus the
+proposed action to `{judge_endpoint}/v1/chat/completions` and parses an
+allow/deny verdict from the reply — see
+[Request Flow](./ibac-plugin.md#request-flow). For guidance on which
+model to point it at, see
+[Choosing a Judge Model](./ibac-plugin.md#choosing-a-judge-model).
 
 - `judge_endpoint` (string) — base URL of the LLM-judge service (`{endpoint}/v1/chat/completions`).
 - `judge_model` (string) — model name passed to the judge.
@@ -118,23 +131,51 @@ Validates inbound JWTs: signature via JWKS, issuer, and audience.
 ## `litellm-budget-track`
 
 Tracks the `x-litellm-response-cost` response header and enforces a
-daily spend budget.
+daily spend budget. Full details in
+[litellm-budgettrack-plugin.md](./litellm-budgettrack-plugin.md).
 
-- `spend_file` (string) — path to the JSON spend ledger file; required.
+**Provider-specific:** `x-litellm-response-cost` is emitted only by
+[LiteLLM](https://docs.litellm.ai/), so this plugin works only when
+LiteLLM is the inference provider in front of the model. Against a
+provider that doesn't set the header (raw OpenAI, Ollama, vLLM, …), no
+cost is ever accumulated and the budget never trips.
+
+- `spend_file` (string) — path to the JSON spend ledger file; required. The ledger is a small JSON file the plugin creates and rewrites, holding the current UTC date plus the cumulative spend and call count for that day (it resets automatically at midnight UTC) — see [Ledger Format](./litellm-budgettrack-plugin.md#ledger-format).
 - `max_budget` (float64) — daily budget in USD; required, must be > 0.
+- `input_cost_per_token` (float64) — USD per uncached input token. Optional; used to price **streamed** responses, whose `x-litellm-response-cost` header is 0 because the total isn't known when headers are sent. When every rate is zero, streamed responses contribute 0 to the ledger.
+- `output_cost_per_token` (float64) — USD per output/completion token, same streamed-response path.
+- `cache_write_cost_per_token` (float64) — USD per cache-write (creation) input token. Defaults to `input_cost_per_token` when unset.
+- `cache_read_cost_per_token` (float64) — USD per cache-read input token. Defaults to `input_cost_per_token` when unset. Leaving the two cache tiers unset reproduces a flat rate, which overstates cache-heavy traffic (e.g. Claude Code) by up to ~10x — set them for accurate pricing.
 
 ## `mcp-parser`
 
 Parses MCP tool calls/results into `pctx.Extensions.MCP` for downstream
 policy plugins.
 
+This plugin makes no decisions of its own — it exists to feed others. The
+plugins that consume `pctx.Extensions.MCP` are:
+
+| Consumer | How it uses the MCP extension |
+|---|---|
+| [`ibac`](#ibac) | Reads the tool name and arguments to judge the call against user intent. Declares `mcp-parser` in `RequiresAny`. |
+| [`sparc`](#sparc) | Extracts the tool name/arguments to reflect on, and returns clarifications as MCP results. Declares `mcp-parser` in `RequiresAny`; required in `enforcement: mcp` mode. |
+| [`cpex`](#cpex) | Converts the parsed call/result into a CMF message for the `cmf.tool_pre_invoke` / `cmf.tool_post_invoke` hooks. Declares `mcp-parser` in `RequiresAny`. |
+| [`opa`](#opa) | Exposes the parsed call as `input.mcp` for policy (add `mcp.params` to `include` for arguments). |
+
+Place `mcp-parser` **before** these plugins on the outbound chain;
+without it they see no MCP data and pass the traffic through
+unclassified.
+
 - `paths` (`[]string`) — URL path globs treated as MCP endpoints (for body-less transport detection: SSE GET, session-terminate DELETE). Default `["/mcp"]`.
 
 ## `opa`
 
-Evaluates OPA policy bundles against inbound and outbound requests.
+Evaluates [OPA](https://www.openpolicyagent.org/docs) (Open Policy Agent)
+policy bundles against inbound and outbound requests, using an embedded
+OPA engine and four fixed decision paths. Full details in the plugin's
+[README](../authlib/plugins/opa/README.md).
 
-- `bundle_url` (string) — base URL of the Rossoctl Bundle Server; required.
+- `bundle_url` (string) — base URL of the Rossoctl Bundle Server, the in-cluster service that serves per-agent [OPA policy bundles](https://www.openpolicyagent.org/docs/management-bundles) keyed by SPIFFE ID (see [how it works](../authlib/plugins/opa/README.md#how-it-works)); required.
 - `agent_id_file` (string) — path to the agent's client-ID file. Default `/shared/client-id.txt`.
 - `agent_id` (string) — inline agent ID; overrides `agent_id_file` when set.
 - `polling_min_delay` / `polling_max_delay` (int) — bundle polling interval bounds in seconds. Defaults 10 / 120.
@@ -142,8 +183,13 @@ Evaluates OPA policy bundles against inbound and outbound requests.
 
 ## `sparc`
 
-Pre-tool reflection: sends proposed tool calls to a SPARC reflection
-service and enforces the configured policy on the result.
+Pre-tool reflection: sends proposed tool calls to a
+[SPARC reflection service](../sparc-service/README.md) — a companion
+HTTP service wrapping the `SPARCReflectionComponent` from the
+[agent-lifecycle-toolkit](https://pypi.org/project/agent-lifecycle-toolkit/)
+(ALTK) package — and enforces the configured policy on the result. It
+must be deployed once per cluster before enabling this plugin. Full
+details in [sparc-plugin.md](./sparc-plugin.md).
 
 - `reflector_endpoint` (string) — base URL of the SPARC reflection service (`{endpoint}/reflect`); required.
 - `reflector_bearer` (string) — optional bearer token.
@@ -171,10 +217,15 @@ outbound requests, so the workload never holds the real secret.
 
 ## `session-budget`
 
-Enforces per-session token, call-count, and duration budgets via Redis. Opt-in at build time (`-tags include_plugin_sessionbudget`).
+Enforces per-session token, call-count, and duration budgets via Redis. Opt-in at build time (`-tags include_plugin_sessionbudget`). Full details in [session-budget-plugin.md](./session-budget-plugin.md).
 
 - `redis_url` (string) — Redis/Valkey connection URL; required.
 - `max_tokens` (int64) — cumulative token ceiling per session. `0` = no limit.
+- `max_input_tokens` (int64) — per-kind ceiling for uncached prompt tokens. `0` = no limit.
+- `max_cache_read_tokens` (int64) — per-kind ceiling for prompt tokens served from cache. `0` = no limit.
+- `max_cache_write_tokens` (int64) — per-kind ceiling for prompt tokens written to cache. `0` = no limit.
+- `max_output_tokens` (int64) — per-kind ceiling for generated completion tokens. `0` = no limit.
+- `max_reasoning_tokens` (int64) — per-kind ceiling for reasoning-only output tokens (a subset of output). `0` = no limit.
 - `max_calls` (int64) — max inference calls per session. `0` = no limit.
 - `max_duration_seconds` (int64) — wall-clock session lifetime. `0` = no limit.
 - `on_exceed` (string) — `deny` (default, block), `observe` (log only), or `pause` (HITL webhook approval).
@@ -185,6 +236,10 @@ Enforces per-session token, call-count, and duration budgets via Redis. Opt-in a
 - `session_ttl_seconds` (int) — Redis key TTL; must be ≥ `max_duration_seconds` when the latter is set (enforced at Configure time). Default 7200.
 - `refresh_interval` (string) — how often the local cache syncs from Redis. Default `5s`.
 - `redis_unavailable` (string) — only `fail_open` (default) is implemented; `fail_closed` is rejected at Configure time.
+- `default_session_fallback` (bool) — pool sessionless traffic into a shared `default` bucket. Single-workload only: one caller exhausting the budget denies the rest. Default `false`.
+
+At least one of `max_tokens`, the five per-kind ceilings, `max_calls`, or
+`max_duration_seconds` must be > 0, or Configure fails.
 
 Cold-cache behavior is mode-dependent; see
 [session-budget-plugin.md](session-budget-plugin.md#cold-cache-behavior)
@@ -194,7 +249,10 @@ for details.
 ## `token-broker`
 
 Exchanges incoming tokens against a configured IdP through an external
-token broker service, per host-based routing rules.
+token broker service, per host-based routing rules. An alternative to
+[`token-exchange`](#token-exchange), not a complement — both replace the
+outbound `Authorization` header, so use one or the other on a given
+chain. Full details in [token-broker-plugin.md](./token-broker-plugin.md).
 
 - `broker_url` (string) — base URL of the token broker service; required.
 - `default_policy` (string) — behavior when no route matches: `passthrough` (default) or `broker`.
@@ -208,7 +266,9 @@ token broker service, per host-based routing rules.
 ## `token-exchange`
 
 RFC 8693 outbound token exchange per route. Supports Keycloak, Entra
-ID, Okta, and any RFC 8693-compliant IdP.
+ID, Okta, and any RFC 8693-compliant IdP. For the `IdPProvider`
+interface each IdP implements, see
+[idp-plugin-contract.md](./idp-plugin-contract.md).
 
 - `token_url` (string) — OAuth token endpoint; required unless derived from `provider` + `provider_url`(+`provider_realm`), or the deprecated `keycloak_url`/`keycloak_realm`.
 - `provider` (string) — IdP selector for endpoint derivation and client auth: `keycloak`, `generic`.
@@ -225,3 +285,29 @@ ID, Okta, and any RFC 8693-compliant IdP.
 - `routes.rules` (list) — inline route entries (`host`, `target_audience`, `token_scopes`, `token_url`, `action`), combined with file-loaded routes.
 - `audience_from_host` (bool) — derive audience from host for unrouted requests (waypoint mode). Default `false`.
 - `resolve_placeholders` (bool) — resolve an inbound placeholder-prefixed bearer to its real token before exchange; unresolvable placeholders are denied. Default `false`.
+
+## `tool-prune`
+
+Removes unused tool definitions from the outbound inference manifest, so
+the tokens for tools an agent never calls are not billed on every turn.
+The manifest is assembled by the client, so the proxy is the only place to
+trim it without changing every client.
+
+Requires `inference-parser` earlier in the chain, and must sit after any
+body-reading plugin (it rewrites the request body). Declares
+`WritesRequestBody` only, so response streaming is unaffected.
+
+- `remove` (`[]string`) — tool names to delete from the manifest. The complete verdict: no learning, no state, no storage. Names absent from a given request are ignored. **An empty list is the off switch** — the plugin is inert until a name is added, which is how it ships in the local install.
+- `paths` (`[]string`) — request paths to act on, matched exactly or by suffix. Defaults to `/v1/chat/completions`, `/v1/completions`, `/v1/messages`.
+- `pricing` (`map[model]rates`) — rates keyed by model name **or glob** (`*claude-opus-*`), each with `input_cost_per_million`, `cache_write_cost_per_million`, `cache_read_cost_per_million` (per-million: the unit providers publish, so `3.80` not `0.0000038`). The per-token names are also accepted for `litellm-budget-track` parity; setting both units for one tier fails startup, since they differ by 10^6 and picking a winner silently would misprice by that factor. **Optional**: built-in patterns cover the Claude families on the rossoctl gateway, so `$ saved` works unconfigured; any entry here overrides the built-in. Per model because rates differ ~5x across opus/sonnet/haiku. Built-ins are keyed by *family*, not version, so an opus 4.8 → 5 rename needs no code change. Resolution: exact key → longest matching glob → built-in pattern → flat fallback → unpriced; keys matched case-insensitively. An invalid glob fails startup with the key named.
+- `input_cost_per_million`, `cache_write_cost_per_million`, `cache_read_cost_per_million` (`float`) — optional flat fallback for models absent from `pricing` (per-token variants also accepted). A figure from built-in rates is labelled as such; a model in neither the table nor config is counted in a `requests unpriced` row instead of charged at another model's rate. No output rate: pruning only shrinks the prompt.
+
+Generate the list from local transcripts with `abctl tools scan`, which
+proposes only tools it recognises as Claude Code built-ins and never proposes
+one it has seen called. `--days N` sets the recency window (30 by default) and
+`--all` drops it; widening is the cautious direction, since a longer window
+finds more tools in use and so proposes fewer for removal. With `--write` it
+refuses when it observed no tool calls at all, because "tools you have not
+called" would then mean every tool it knows. See
+[`tool-prune-plugin.md`](./tool-prune-plugin.md) for the measure-then-enforce
+rollout, the metrics readout, and what the saving does and does not change.

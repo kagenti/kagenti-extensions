@@ -103,10 +103,10 @@ func (p *CPEX) Name() string { return "cpex" }
 
 // Capabilities declares body access and content-source requirements.
 //
-//   - ReadsBody / WritesBody: CPEX policies routinely inspect and
+//   - ReadsBody / WritesRequestBody: CPEX policies routinely inspect and
 //     mutate tool args, LLM messages, and HTTP headers, so the
 //     plugin needs the body buffered and writable. (Normalize()
-//     auto-promotes ReadsBody from WritesBody, so this is belt and
+//     auto-promotes ReadsBody from WritesRequestBody, so this is belt and
 //     suspenders.)
 //
 //   - RequiresAny: the plugin reads through pctx.ContentSources()
@@ -118,10 +118,11 @@ func (p *CPEX) Name() string { return "cpex" }
 //     surfaces in the catalog.
 func (p *CPEX) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
-		ReadsBody:   true,
-		WritesBody:  true,
-		RequiresAny: []string{"mcp-parser", "inference-parser", "a2a-parser"},
-		Description: "CPEX bridge: APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step.",
+		ReadsBody:          true,
+		WritesRequestBody:  true,
+		WritesResponseBody: true, // cmf_body / cmf_a2a / cmf_inference rewrite responses
+		RequiresAny:        []string{"mcp-parser", "inference-parser", "a2a-parser"},
+		Description:        "CPEX bridge: APL DSL + named CPEX plugins (Cedar, PII, audit, …) over a single chain step.",
 	}
 }
 

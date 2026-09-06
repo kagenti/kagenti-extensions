@@ -14,6 +14,7 @@ import (
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 	"github.com/rossoctl/cortex/authbridge/authlib/session"
+	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
 // Client is a handle to a session API endpoint. Safe for concurrent use.
@@ -91,6 +92,18 @@ type PipelinePlugin struct {
 	RequiresAny []string        `json:"requiresAny,omitempty"`
 	Description string          `json:"description,omitempty"`
 	Config      json.RawMessage `json:"config,omitempty"`
+	Metrics     []PluginMetric  `json:"metrics,omitempty"`
+}
+
+// PluginMetric mirrors authlib/pipeline.Metric on the wire. Kept as a local
+// type rather than importing the server struct, matching PluginFieldEntry:
+// the client owns its decode shape, and a decode test guards the tags
+// against drift.
+type PluginMetric struct {
+	Name  string  `json:"name"`
+	Value float64 `json:"value"`
+	Unit  string  `json:"unit,omitempty"`
+	Note  string  `json:"note,omitempty"`
 }
 
 // GetPipeline fetches /v1/pipeline.
@@ -172,4 +185,31 @@ func trimSlash(s string) string {
 		s = s[:len(s)-1]
 	}
 	return s
+}
+
+// GetUsage fetches time-bucketed usage aggregates from GET /v1/usage.
+//
+// sessionID empty means all sessions combined. resolution is the width of the
+// buckets returned — the server folds, so a 1h window at 5m arrives as 12
+// buckets rather than 60. Read the returned Snapshot.BucketSeconds rather than
+// assuming the requested resolution was honored.
+//
+// Returns ErrNotFound when the proxy has no usage aggregator wired (older
+// binary, or session tracking disabled), which callers should render as
+// "unavailable" rather than as an empty chart.
+func (c *Client) GetUsage(ctx context.Context, window, resolution time.Duration, sessionID string, group usage.Group) (*usage.Snapshot, error) {
+	q := url.Values{}
+	q.Set("window", window.String())
+	q.Set("resolution", resolution.String())
+	if sessionID != "" {
+		q.Set("session", sessionID)
+	}
+	if group != "" && group != usage.GroupNone {
+		q.Set("group", string(group))
+	}
+	var snap usage.Snapshot
+	if err := c.getJSON(ctx, "/v1/usage?"+q.Encode(), &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
 }

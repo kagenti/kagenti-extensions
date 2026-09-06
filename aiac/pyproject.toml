@@ -42,9 +42,16 @@ force-exclude = true
 select = ["E", "F", "I", "W"]
 
 [tool.pytest.ini_options]
-testpaths = ["test"]
+testpaths = ["test", "eval"]
 pythonpath = ["src"]
+# Bare `pytest` runs unit tests only — every live-infra marker is excluded by
+# default. `-m` on the command line overrides this (last `-m` wins), so
+# `pytest eval/ -m eval_extended` etc. still works to opt back in.
+addopts = ["-m", "not integration and not eval_extended and not eval_consistency and not eval_robustness"]
 markers = [
     "integration: tests that call real LLM endpoints",
     "llm: tests that call the real LLM but mock descriptions/policy (no cluster)",
+    "eval_extended: heavier multi-scenario policy-pipeline evaluation tests — same live infra as `integration`, but several full pipeline runs and many more PRB/LLM calls per session (see eval/test_policy_pipeline_eval.py)",
+    "eval_consistency: PRB run-to-run consistency (same scenario, N repeats, exact grant-set equality) — needs LLM_BASE_URL/LLM_MODEL/LLM_API_KEY only, no Keycloak/opa (see eval/test_policy_pipeline_consistency.py)",
+    "eval_robustness: PRB robustness to mechanical + semantic input perturbation against the truth-table oracle — needs LLM_BASE_URL/LLM_MODEL/LLM_API_KEY only, no Keycloak/opa (see eval/test_policy_pipeline_robustness.py)",
 ]

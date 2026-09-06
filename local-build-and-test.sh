@@ -89,15 +89,16 @@ load_image_to_kind ghcr.io/rossoctl/cortex/authbridge-envoy:local
 echo "✅ Built and loaded: authbridge-envoy:local"
 echo ""
 
-# Build authbridge-lite: the same authbridge-proxy binary/Dockerfile built
-# with exclude_plugin_* tags so only jwt-validation + token-exchange compile
-# in (drops the OPA SDK + parsers). A build variant, not a separate binary.
+# Build authbridge-lite: the same authbridge-proxy binary/Dockerfile
+# built with the trimmed plugin set (see authbridge/scripts/lite-tags).
+# A build variant, not a separate binary.
 echo "=========================================="
-echo "Building authbridge-lite (proxy build variant: auth-only plugins)"
+echo "Building authbridge-lite (proxy build variant: trimmed plugin set, see authbridge/scripts/lite-tags)"
 echo "=========================================="
 cd "${SCRIPT_DIR}/authbridge"
+LITE_TAGS=$(go -C scripts/lite-tags run .)
 ${CONTAINER_RUNTIME} build -f cmd/authbridge-proxy/Dockerfile \
-  --build-arg GO_BUILD_TAGS="exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker" \
+  --build-arg GO_BUILD_TAGS="${LITE_TAGS}" \
   -t ghcr.io/rossoctl/cortex/authbridge-lite:local .
 load_image_to_kind ghcr.io/rossoctl/cortex/authbridge-lite:local
 echo "✅ Built and loaded: authbridge-lite:local"

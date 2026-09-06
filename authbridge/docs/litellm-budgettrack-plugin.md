@@ -1,6 +1,6 @@
 # litellm-budget-track Plugin
 
-Design document for the `litellm-budget-track` AuthBridge inbound pipeline plugin.
+Design document for the `litellm-budget-track` AuthBridge pipeline plugin.
 
 **Issue:** https://github.com/rossoctl/rossoctl/issues/2177
 
@@ -16,8 +16,9 @@ with HTTP 429 when the configured daily budget is exceeded.
 When running AI agents through Cortex (local budget proxy), each agent needs
 a spending cap. LiteLLM returns the cost of each completion in the
 `x-litellm-response-cost` response header. This plugin reads that header in the
-AuthBridge inbound pipeline, tracks cumulative daily spend in a JSON ledger file,
-and blocks further requests once the budget is exhausted.
+AuthBridge pipeline that carries the LLM traffic (see [Pipeline placement](#pipeline-placement)),
+tracks cumulative daily spend in a JSON ledger file, and blocks further requests
+once the budget is exhausted.
 
 ## Architecture
 
@@ -90,6 +91,15 @@ pipeline:
           spend_file: /etc/cortex/spend-authbridge.json
           max_budget: 5.00
 ```
+
+### Pipeline placement
+
+The plugin is direction-agnostic — place it in whichever pipeline carries the LLM
+traffic: **`inbound`** when fronting the LLM endpoint (a reverse proxy the LLM requests
+arrive at, as shown above), **`outbound`** when hosting the agent via
+`rossoctl authbridge exec -- <agent>`, whose forward proxy runs the outbound pipeline on
+the agent's own egress to LiteLLM. In an `authbridge exec` setup nothing reaches the
+inbound pipeline, so a plugin left under `inbound:` there records `$0` — use `outbound:`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|

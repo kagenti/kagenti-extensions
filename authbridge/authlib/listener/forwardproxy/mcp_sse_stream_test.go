@@ -59,7 +59,7 @@ func TestForwardProxy_SSE_StreamsWithoutResponder(t *testing.T) {
 	store := session.New(5*time.Minute, 100, 0)
 	defer store.Close()
 
-	// Empty pipeline: HasStreamingResponders()==false and WritesBody()==false,
+	// Empty pipeline: HasStreamingResponders()==false and WritesRequestBody()==false,
 	// so serveOutbound routes to streamPassthrough — the reporter's plain-proxy
 	// shape (their only outbound plugin, token-exchange, is likewise not a
 	// StreamingResponder).

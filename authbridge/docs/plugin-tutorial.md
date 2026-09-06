@@ -209,12 +209,19 @@ both stay nil even if you try to read them.
 ### Mutating the body
 
 If your plugin needs to **rewrite** the body — prompt-redaction, output
-filtering, content transformation — declare `WritesBody` and call
-`pctx.SetBody` / `pctx.SetResponseBody`:
+filtering, content transformation — declare the direction you write and call
+the matching helper: `WritesRequestBody` for `pctx.SetBody`,
+`WritesResponseBody` for `pctx.SetResponseBody`.
+
+Declare only what you actually write. `WritesResponseBody` is the SSE streaming
+predicate, so claiming it when you only rewrite requests costs every caller on
+that chain incremental relay — a long completion arrives in one lump after a
+silent wait. `WritesRequestBody` costs nothing: requests arrive complete and are
+read end to end before dispatch.
 
 ```go
 func (p *Redactor) Capabilities() pipeline.PluginCapabilities {
-	return pipeline.PluginCapabilities{WritesBody: true} // implies ReadsBody
+	return pipeline.PluginCapabilities{WritesRequestBody: true} // implies ReadsBody
 }
 
 func (p *Redactor) OnRequest(_ context.Context, pctx *pipeline.Context) pipeline.Action {
@@ -232,10 +239,11 @@ for `SetResponseBody`) with a correct `Content-Length` and a cleared
 (never the raw body content).
 
 **Rules enforced by `pipeline.New`:**
-- At most one `WritesBody` plugin per pipeline. Two mutators = ambiguous
-  ordering → build fails at startup.
-- A `WritesBody` plugin must run **after** any `ReadsBody`-only plugin.
-  Readers see the original bytes; a mutator in front would silently
+- At most one mutator **per direction** per pipeline. Two request mutators (or
+  two response mutators) = ambiguous ordering → build fails at startup. One of
+  each is fine; they never rewrite the same bytes.
+- A mutator must run **after** any `ReadsBody`-only plugin, whichever direction
+  it writes. Readers see the original bytes; a mutator in front would silently
   feed them post-rewrite content.
 
 Don't assign `pctx.Body = newBytes` directly — the listener won't

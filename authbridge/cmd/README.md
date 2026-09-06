@@ -13,7 +13,7 @@ image is a build variant of the proxy binary (proxy Dockerfile +
 |---|---|---|---|---|
 | [`authbridge-proxy/`](authbridge-proxy/) | `proxy-sidecar` (default) | HTTP forward + reverse proxies | full (jwt-validation, token-exchange, a2a-parser, mcp-parser, inference-parser) | `ghcr.io/rossoctl/cortex/authbridge` |
 | [`authbridge-envoy/`](authbridge-envoy/) | `envoy-sidecar` | gRPC ext_proc on `:9090` (hooked into Envoy) | full | `ghcr.io/rossoctl/cortex/authbridge-envoy` |
-| `authbridge-lite` _(build variant of `authbridge-proxy`)_ | `proxy-sidecar` | HTTP forward + reverse proxies | lite — `authbridge-proxy` built with `exclude_plugin_*` tags (jwt-validation + token-exchange only; OPA + parsers dropped) | `ghcr.io/rossoctl/cortex/authbridge-lite` |
+| `authbridge-lite` _(build variant of `authbridge-proxy`)_ | `proxy-sidecar` | HTTP forward + reverse proxies | lite — `authbridge-proxy` built with `exclude_plugin_*` tags for a trimmed plugin set (see [`../scripts/lite-tags`](../scripts/lite-tags)) | `ghcr.io/rossoctl/cortex/authbridge-lite` |
 | [`abctl/`](abctl/) | n/a | n/a | n/a | not published — local TUI for the Session Events API |
 
 Each binary directory contains `main.go`, `go.mod`/`go.sum`,
@@ -44,12 +44,21 @@ ConfigMap contracts are documented in
 | 8081 | Forward proxy (outbound; HTTP_PROXY target) |
 | 8082 | Transparent egress listener (enforce-redirect capture target) |
 | 8083 | Transparent inbound listener (`inbound_interception: transparent`) |
-| 9091 | Health |
+| 9091 | Health (`listener.health_addr`) |
 | 9093 | Stats / config inspection |
 | 9094 | Session Events API (consumed by `abctl`) |
 
 `8080` and `8083` are mutually exclusive: `inbound_interception` picks one
 inbound mechanism, and the preset fills only that one's address.
+
+All of these are overridable, which matters for running two proxies on one host:
+a second instance on the default ports dies on a bind conflict. They are not all
+under the same config key — everything above is a `listener.*` address except
+`9093`, which is `stats.stats_address`. The defaults bind every interface, which
+is what Kubernetes probes and sidecar traffic need but not what a laptop wants;
+local single-host setups typically pin them all to `127.0.0.1`. `authbridge-proxy
+--local` ships exactly such a config — see
+[`docs/laptop-token-savings.md`](../docs/laptop-token-savings.md).
 
 `8082` and `8083` are the iptables REDIRECT targets installed by
 [`proxy-init`](../proxy-init/) and must match its `TRANSPARENT_PORT` /
@@ -75,6 +84,7 @@ inbound mechanism, and the preset fills only that one's address.
   iptables init container.
 - **Size-constrained, no protocol-aware events needed**: use the
   `authbridge-lite` image — the `authbridge-proxy` binary built with
-  `exclude_plugin_*` tags (auth-only). Same listener layout, but without
-  parsers/OPA — abctl will only see denial events and basic auth-level
-  invocations, not full A2A/MCP/Inference protocol context.
+  `exclude_plugin_*` tags from `authbridge/scripts/lite-tags` (trimmed
+  plugin set). Same listener layout, but without parsers/OPA — abctl
+  will only see denial events and basic auth-level invocations, not
+  full A2A/MCP/Inference protocol context.

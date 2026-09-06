@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// TestCapabilities_Normalize: WritesBody auto-promotes to ReadsBody so a
+// TestCapabilities_Normalize: WritesRequestBody auto-promotes to ReadsBody so a
 // mutator always satisfies the "must have read" invariant.
 func TestCapabilities_Normalize(t *testing.T) {
 	tests := []struct {
@@ -17,8 +17,8 @@ func TestCapabilities_Normalize(t *testing.T) {
 		wantWrites bool
 	}{
 		{
-			name:       "WritesBody implies ReadsBody",
-			in:         PluginCapabilities{WritesBody: true},
+			name:       "WritesRequestBody implies ReadsBody",
+			in:         PluginCapabilities{WritesRequestBody: true},
 			wantReads:  true,
 			wantWrites: true,
 		},
@@ -40,41 +40,41 @@ func TestCapabilities_Normalize(t *testing.T) {
 			if got.ReadsBody != tc.wantReads {
 				t.Errorf("ReadsBody = %v, want %v", got.ReadsBody, tc.wantReads)
 			}
-			if got.WritesBody != tc.wantWrites {
-				t.Errorf("WritesBody = %v, want %v", got.WritesBody, tc.wantWrites)
+			if got.WritesRequestBody != tc.wantWrites {
+				t.Errorf("WritesRequestBody = %v, want %v", got.WritesRequestBody, tc.wantWrites)
 			}
 		})
 	}
 }
 
-// TestPipeline_NeedsBody_IncludesWritesBody: NeedsBody returns true even
+// TestPipeline_NeedsBody_IncludesWritesRequestBody: NeedsBody returns true even
 // if the only body-touching plugin is a pure mutator. Listeners rely on
 // this to turn on buffering before the mutator sees (and rewrites) the
 // body.
-func TestPipeline_NeedsBody_IncludesWritesBody(t *testing.T) {
+func TestPipeline_NeedsBody_IncludesWritesRequestBody(t *testing.T) {
 	p := mustBuild(t, &stubPlugin{
 		name: "mutator",
-		caps: PluginCapabilities{WritesBody: true},
+		caps: PluginCapabilities{WritesRequestBody: true},
 	})
 	if !p.NeedsBody() {
-		t.Error("NeedsBody should be true when any plugin declares WritesBody")
+		t.Error("NeedsBody should be true when any plugin declares WritesRequestBody")
 	}
-	if !p.WritesBody() {
-		t.Error("WritesBody should be true")
+	if !p.WritesRequestBody() {
+		t.Error("WritesRequestBody should be true")
 	}
 }
 
-// TestNew_RejectsTwoMutators: two WritesBody plugins in one pipeline
+// TestNew_RejectsTwoMutators: two WritesRequestBody plugins in one pipeline
 // have ambiguous mutation ordering; Pipeline.New rejects the build and
 // the error names both plugins so an operator reading pod logs can
 // identify which two to reconcile.
 func TestNew_RejectsTwoMutators(t *testing.T) {
 	_, err := New([]Plugin{
-		&stubPlugin{name: "redactor-a", caps: PluginCapabilities{WritesBody: true}},
-		&stubPlugin{name: "redactor-b", caps: PluginCapabilities{WritesBody: true}},
+		&stubPlugin{name: "redactor-a", caps: PluginCapabilities{WritesRequestBody: true}},
+		&stubPlugin{name: "redactor-b", caps: PluginCapabilities{WritesRequestBody: true}},
 	})
 	if err == nil {
-		t.Fatal("expected error for two WritesBody plugins")
+		t.Fatal("expected error for two WritesRequestBody plugins")
 	}
 	if !strings.Contains(err.Error(), "redactor-a") || !strings.Contains(err.Error(), "redactor-b") {
 		t.Errorf("error should name both plugins, got %q", err.Error())
@@ -87,7 +87,7 @@ func TestNew_RejectsTwoMutators(t *testing.T) {
 // reader mutated content.
 func TestNew_RejectsReaderAfterMutator(t *testing.T) {
 	_, err := New([]Plugin{
-		&stubPlugin{name: "rewriter", caps: PluginCapabilities{WritesBody: true}},
+		&stubPlugin{name: "rewriter", caps: PluginCapabilities{WritesRequestBody: true}},
 		&stubPlugin{name: "parser", caps: PluginCapabilities{ReadsBody: true}},
 	})
 	if err == nil {
@@ -104,7 +104,7 @@ func TestNew_RejectsReaderAfterMutator(t *testing.T) {
 func TestNew_AcceptsReaderBeforeMutator(t *testing.T) {
 	_, err := New([]Plugin{
 		&stubPlugin{name: "parser", caps: PluginCapabilities{ReadsBody: true}},
-		&stubPlugin{name: "rewriter", caps: PluginCapabilities{WritesBody: true}},
+		&stubPlugin{name: "rewriter", caps: PluginCapabilities{WritesRequestBody: true}},
 	})
 	if err != nil {
 		t.Fatalf("reader-before-mutator should be valid, got %v", err)

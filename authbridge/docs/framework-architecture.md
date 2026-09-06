@@ -74,8 +74,8 @@ type PluginCapabilities struct {
     Reads      []string // extension slot names this plugin reads
     Writes     []string // extension slot names this plugin writes
     ReadsBody  bool     // plugin reads pctx.Body / pctx.ResponseBody
-    WritesBody bool     // plugin mutates body via pctx.SetBody / pctx.SetResponseBody
-    BodyAccess bool     // deprecated: alias for ReadsBody (folded by Normalize)
+    WritesRequestBody  bool    // plugin mutates the request body via pctx.SetBody
+    WritesResponseBody bool    // plugin mutates the response body via pctx.SetResponseBody
 }
 ```
 
@@ -85,9 +85,9 @@ Declared once per plugin instance. `pipeline.New` validates that every `Read` is
 plugin "guardrail" reads slot "mcp" but no earlier plugin writes it
 ```
 
-`ReadsBody: true` (or the legacy `BodyAccess` alias) on *any* plugin in a chain causes `Pipeline.NeedsBody()` to return true, which the **listener** uses to negotiate Envoy's `ProcessingMode` (BUFFERED vs HEADERS-only). Without this, the gRPC ext_proc server never asks for the body and parsers see `pctx.Body == nil`.
+`ReadsBody: true` on *any* plugin in a chain causes `Pipeline.NeedsBody()` to return true, which the **listener** uses to negotiate Envoy's `ProcessingMode` (BUFFERED vs HEADERS-only). Without this, the gRPC ext_proc server never asks for the body and parsers see `pctx.Body == nil`.
 
-`WritesBody: true` declares that the plugin may rewrite the body via `pctx.SetBody` / `pctx.SetResponseBody`; the listener propagates the mutation to the wire. See §6, "Body mutation" for the full body-mutation contract (capability rules, ordering constraints, Content-Encoding policy).
+`WritesRequestBody: true` declares that the plugin may rewrite the request body via `pctx.SetBody`; `WritesResponseBody: true` declares the response side via `pctx.SetResponseBody`. The listener propagates the mutation to the wire, and only `WritesResponseBody` forfeits incremental SSE relay. See §6, "Body mutation" for the full body-mutation contract (capability rules, ordering constraints, Content-Encoding policy).
 
 ### `OnRequest(ctx, pctx) Action`
 Called when a request is entering the pipeline. Plugins typically read request headers / body, mutate one or more extension slots, and return `Continue` or `Reject`.
@@ -111,7 +111,7 @@ type Context struct {
     Host      string           // :authority / Host
     Path      string           // :path
     Headers   http.Header
-    Body      []byte           // nil unless a plugin declared BodyAccess: true
+    Body      []byte           // nil unless a plugin declared ReadsBody: true
     StartedAt time.Time        // listener wall-clock at request entry
 
     Agent    *AgentIdentity   // this workload's SPIFFE / Keycloak identity
@@ -130,8 +130,8 @@ type Context struct {
 **Ownership rules:**
 - Plugins **read** any field they declared in `Capabilities.Reads`.
 - Plugins **write** fields they declared in `Capabilities.Writes`. By convention each extension slot has exactly one writer (the parser plugin).
-- Plugins read `pctx.Body` / `pctx.ResponseBody` only if they declared `ReadsBody: true` (or the deprecated `BodyAccess: true`).
-- Plugins mutate body content via `pctx.SetBody(newBytes)` / `pctx.SetResponseBody(newBytes)`, and only if they declared `WritesBody: true`. Direct assignment (`pctx.Body = ...`) compiles but bypasses listener propagation and misses the Invocation + body-mutation event emission — see §6, "Body mutation."
+- Plugins read `pctx.Body` / `pctx.ResponseBody` only if they declared `ReadsBody: true`.
+- Plugins mutate body content via `pctx.SetBody(newBytes)` if they declared `WritesRequestBody: true`, or `pctx.SetResponseBody(newBytes)` if they declared `WritesResponseBody: true`. Direct assignment (`pctx.Body = ...`) compiles but bypasses listener propagation and misses the Invocation + body-mutation event emission — see §6, "Body mutation."
 - `Identity` is populated by whichever auth plugin ran (jwt-validation ships a `claimsIdentity` adapter around `validation.Claims`; a SAML / mTLS / custom plugin publishes its own adapter). The framework reads it through the `Identity` interface (`Subject()` / `ClientID()` / `Scopes()`) so no plugin-specific type leaks into `pipeline/`.
 - `Agent`, `Session` are populated by the listener before `Run`. Plugins treat them as read-only.
 - `ResponseBody` appears between `Run` and `RunResponse` — plugins must not read it in `OnRequest`.
@@ -417,7 +417,7 @@ func (p *Pipeline) RunFinish(ctx context.Context, pctx *Context, outcome Outcome
 func (p *Pipeline) Start(ctx context.Context) error                                // invoke Init on Initializer plugins
 func (p *Pipeline) Stop(ctx context.Context)                                       // invoke Shutdown on Shutdowner plugins
 func (p *Pipeline) Plugins() []Plugin                                              // defensive copy
-func (p *Pipeline) NeedsBody() bool                                                // OR over all plugins' BodyAccess
+func (p *Pipeline) NeedsBody() bool                                                // OR over ReadsBody + both write flags
 ```
 
 `New` validates capability wiring at startup: every `Read` must be satisfied by some earlier plugin's `Write`. `plugins.Build` additionally validates the cross-plugin relationship declarations — `Requires`, `RequiresAny`, `After`, `Claims` — before returning the pipeline to the listener. See [`plugin-reference.md` "Declaring plugin relationships"](./plugin-reference.md#declaring-plugin-relationships).
@@ -584,20 +584,31 @@ Always sequential. No priority / mode / fire-and-forget semantics yet. This is t
 
 ### Body mutation
 
-A plugin that declares `WritesBody: true` may rewrite the request or response body. The framework owns the propagation to the wire; plugins only call `pctx.SetBody(newBytes)` / `pctx.SetResponseBody(newBytes)`.
+A plugin declares the direction it rewrites: `WritesRequestBody: true` for the request body (`pctx.SetBody`), `WritesResponseBody: true` for the response body (`pctx.SetResponseBody`). The framework owns the propagation to the wire; plugins only call the helper.
 
-**Capability model.** Three booleans on `PluginCapabilities`:
+**Capability model.** Body access is declared per direction on `PluginCapabilities`:
 
 | Field | Meaning | Listener effect |
 |---|---|---|
 | `ReadsBody` | plugin reads `pctx.Body` / `pctx.ResponseBody` | buffers the body; plugin sees the bytes |
-| `WritesBody` | plugin may call `pctx.SetBody` / `pctx.SetResponseBody` | implies `ReadsBody`; propagates mutations |
-| `BodyAccess` (deprecated) | legacy alias for `ReadsBody` | folded by `Normalize()`, removed in a future release |
+| `WritesRequestBody` | plugin may call `pctx.SetBody` | implies `ReadsBody`; propagates request mutations |
+| `WritesResponseBody` | plugin may call `pctx.SetResponseBody` | implies `ReadsBody`; propagates response mutations **and forces the buffered response path** |
+
+**Why the directions are separate.** `Pipeline.WritesResponseBody()` is the SSE
+streaming predicate: both proxy listeners consult it to decide whether a
+`text/event-stream` response may be relayed incrementally. It was previously one
+undirected flag, which meant a plugin rewriting only the *request* body disabled
+*response* streaming for bytes it never touched. The cost was latency and feel
+rather than correctness — the buffered path restores the body verbatim — but a
+long completion arriving in one lump after a silent wait is the first thing
+anyone notices. Request bodies are never streamed (they arrive complete with a
+`Content-Length` and are read end to end before dispatch), so a request-only
+mutator now keeps incremental relay.
 
 `pipeline.New` enforces two rules at build time:
 
-1. **At most one `WritesBody` plugin per pipeline.** Multiple mutators would have ambiguous ordering semantics; the error names both plugins so an operator debugging pod logs knows which two to reconcile.
-2. **`WritesBody` cannot precede a `ReadsBody`-only plugin.** A reader expects to see the original bytes; putting a mutator before it would silently feed the reader the post-rewrite content.
+1. **At most one mutator per direction per pipeline.** Multiple mutators writing the same bytes would have ambiguous ordering semantics; the error names both plugins so an operator debugging pod logs knows which two to reconcile. A request mutator and a response mutator coexist fine.
+2. **A mutator of either direction cannot precede a `ReadsBody`-only plugin.** A reader expects to see the original bytes; putting a mutator before it would silently feed the reader the post-rewrite content.
 
 **Mutation helpers.** `SetBody` / `SetResponseBody` replace the byte slice and flip an internal `bodyMutated` / `responseBodyMutated` flag that listeners read via `pctx.BodyMutated()` / `pctx.ResponseBodyMutated()`. They also auto-emit:
 
@@ -802,7 +813,7 @@ The plugin interface is **not** semver-stable yet (AuthBridge is pre-1.0). Chang
 - **`pctx.Record` helpers**: `Allow` / `Skip` / `Observe` / `Modify` / `Record` / `DenyAndRecord` on `Context`. Framework-managed attribution (`currentPlugin`, `currentPhase`, `Path`) fills Invocation fields automatically.
 - **Open plugin registry**: plugins self-register from `init()` via `plugins.RegisterPlugin`. Third-party plugins in external modules drop in via a side-effect import. Closed `registry` map literal removed.
 - **Config hot-reload**: new `pipeline.Holder` (atomic wrapper) + `authlib/reloader` package (fsnotify-driven). Listeners receive `*Holder` instead of `*Pipeline`; the reloader atomically swaps the holder's contents when the config file changes. `mode` and `listener.*` edits are refused (pod restart required); any other change is picked up within the kubelet sync window (~60s). See §9.
-- **Body mutation**: `PluginCapabilities.BodyAccess` split into `ReadsBody` / `WritesBody`. New `pctx.SetBody` / `pctx.SetResponseBody` helpers flip a mutation flag; all three listeners (extproc / forwardproxy / reverseproxy) propagate the rewrite to the upstream with correct `Content-Length` and cleared `Content-Encoding`. `BodyAccess` kept as deprecated alias. See §6, "Body mutation."
+- **Body mutation**: `PluginCapabilities.BodyAccess` split into `ReadsBody` / `WritesRequestBody`. New `pctx.SetBody` / `pctx.SetResponseBody` helpers flip a mutation flag; all three listeners (extproc / forwardproxy / reverseproxy) propagate the rewrite to the upstream with correct `Content-Length` and cleared `Content-Encoding`. `BodyAccess` was kept as a deprecated alias at the time; it has since been removed. See §6, "Body mutation."
 - **Detyped framework**: `pipeline/` no longer imports plugin-specific packages. **Breaking**: `Context.Claims *validation.Claims` → `Context.Identity Identity` (interface with `Subject()`/`ClientID()`/`Scopes()`); plugins publish adapters. `Context.Route` removed (was dead code). `Invocation`'s nine jwt-validation + token-exchange specific fields (`ExpectedIssuer`, `TokenSubject`, `RouteHost`, `CacheHit`, etc.) collapsed into `Details map[string]string`; built-in plugins migrated to `Details["expected_issuer"]` etc. `SessionEvent.TargetAudience` removed (was only populated from dead `pctx.Route`). Third-party plugins get a clean diagnostic slot they can populate without framework edits.
 - **Single-owner packages relocated**: `authlib/validation` → `authlib/plugins/jwtvalidation/validation`. `authlib/exchange` / `authlib/cache` / `authlib/spiffe` → `authlib/plugins/tokenexchange/{exchange,cache,spiffe}`. Each plugin now lives in its own directory (`plugins/jwtvalidation/plugin.go`, `plugins/tokenexchange/plugin.go`) and self-registers via its own init(). `authlib/bypass`, `authlib/routing`, `authlib/auth` stay shared.
 - **Plugin relationship declarations**: `PluginCapabilities` extended with four chain-scoped fields — `Requires` (all-must-be-earlier), `RequiresAny` (at-least-one-earlier), `After` (soft ordering), `Claims` (mutex on a semantic resource). Validated at `plugins.Build` time (startup + hot-reload); all errors per chain are collected into one report. `authlib/contracts/claims.go` ships `ClaimAuthorizationHeader` as the initial canonical claim constant. `token-exchange` and `token-broker` migrated to declare it, so configuring both on the same outbound chain now fails startup instead of silently clobbering each other's Authorization header. See [`plugin-reference.md` "Declaring plugin relationships"](./plugin-reference.md#declaring-plugin-relationships).
@@ -821,9 +832,9 @@ Breaking changes will be announced in `authbridge/CHANGELOG.md` (TBD) before a 1
 
 **Package sources:**
 
-- `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`, `WritesBody`.
+- `pipeline.go` — `Pipeline` type, `New`, `Run`, `RunResponse`, `Start`, `Stop`, `Plugins`, `NeedsBody`, `WritesRequestBody`, `WritesResponseBody`.
 - `holder.go` — `Holder`, the atomic slot listeners hold in place of a raw `*Pipeline`.
-- `plugin.go` — `Plugin` interface, `PluginCapabilities` (with `ReadsBody` / `WritesBody` / deprecated `BodyAccess` + `Normalize()`; chain-scoped relationship fields `Requires` / `RequiresAny` / `After` / `Claims`), `Configurable`, `Initializer`, `Shutdowner`, `Readier`, `Finisher`.
+- `plugin.go` — `Plugin` interface, `PluginCapabilities` (with `ReadsBody` / `WritesRequestBody` / `WritesResponseBody` + `Normalize()`; chain-scoped relationship fields `Requires` / `RequiresAny` / `After` / `Claims`), `Configurable`, `Initializer`, `Shutdowner`, `Readier`, `Finisher`.
 - `outcome.go` — `Outcome` struct + `OutcomeAction` (allow / deny / error) for `Finisher` consumers; `Context.Outcome()` getter.
 - `action.go` — `Action`, `ActionType`, `Violation`, helper constructors (`Deny`, `DenyStatus`, `DenyWithDetails`, `Challenge`, `RateLimited`), `StatusFromCode`.
 - `context.go` — `Context`, `Direction`, `AgentIdentity`, the `pctx.Record` / `Allow` / `Skip` / `Observe` / `Modify` / `DenyAndRecord` helpers, and `pctx.SetBody` / `SetResponseBody` / `BodyMutated` / `ResponseBodyMutated` for body mutation.

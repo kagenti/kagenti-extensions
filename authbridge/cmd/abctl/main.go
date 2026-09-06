@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
@@ -25,8 +26,45 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommand dispatch happens before flag.Parse: a non-flag first
+	// argument selects a subcommand, and anything else falls through to the
+	// terminal UI, preserving the original flags-only invocation.
+	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
+		switch os.Args[1] {
+		case "tools":
+			os.Exit(runTools(os.Args[2:], os.Stdout, os.Stderr))
+		case "claude-code":
+			os.Exit(runClaudeCode(os.Args[2:], os.Stdout, os.Stderr))
+		case "service":
+			os.Exit(runService(os.Args[2:], os.Stdout, os.Stderr))
+		default:
+			fmt.Fprintf(os.Stderr, "abctl: unknown subcommand %q (known: tools, claude-code, service)\n", os.Args[1])
+			os.Exit(2)
+		}
+	}
+
+	// Without this, `abctl --help` printed only -endpoint and -version, so the
+	// subcommands were invisible to anyone who asked the tool what it could do — the
+	// service commands most of all, since those are what you need when Cortex is down.
+	flag.Usage = func() {
+		fmt.Fprint(flag.CommandLine.Output(), `abctl — inspect and run Cortex
+
+Usage:
+  abctl                      open the traffic viewer (TUI)
+  abctl service <action>     run Cortex as a service: install, uninstall,
+                             status, stop, start, restart
+  abctl claude-code <action> point Claude Code at Cortex: enable, disable, status
+  abctl tools <action>       tool-definition costs: scan
+
+Run a subcommand with no action, or with --help, for its own usage.
+
+Flags:
+`)
+		flag.PrintDefaults()
+	}
+
 	endpoint := flag.String("endpoint", "",
-		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl opens a Namespaces → Pods picker.")
+		"AuthBridge session API URL (e.g. http://localhost:9094). When omitted, abctl connects to the Cortex on this machine if one is running, otherwise it opens a Namespaces → Pods picker.")
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
 
@@ -41,11 +79,34 @@ func main() {
 	// $TMPDIR bounded for users who edit often.
 	_ = edit.SweepStaleTempfiles()
 
+	// With no --endpoint, prefer a Cortex running on this machine. Before this,
+	// a bare `abctl` on a laptop demanded kubectl and opened a cluster picker,
+	// so the local install — the whole quickstart — needed
+	// `--endpoint http://localhost:47601` typed every time.
+	//
+	// Only when it is actually answering: a stale config from an install that is
+	// no longer running must not hijack abctl away from the picker for someone
+	// working against a cluster.
+	local := localSessionEndpoint()
+	localUp := localSessionAPIUp(local)
+	if *endpoint == "" && localUp {
+		*endpoint = local
+	}
+
 	// Friendly check: if picker mode and no kubectl, fail fast with a
 	// clear message instead of a stack trace later.
 	if *endpoint == "" {
 		if _, err := exec.LookPath("kubectl"); err != nil {
-			fmt.Fprintln(os.Stderr, "abctl: kubectl not found on PATH; install it or pass --endpoint http://...")
+			msg := "abctl: kubectl not found on PATH; install it or pass --endpoint http://..."
+			// Name the more likely cause first when there is a local install that
+			// simply is not running — "install kubectl" is unhelpful advice to
+			// someone who has never wanted a cluster.
+			if local != "" && !dialable(local) {
+				msg = "abctl: nothing is listening on " + local + " (from ~/.cortex/config.yaml).\n" +
+					"  Start it:  abctl service start   (or: abctl service install)\n" +
+					"  Or pass --endpoint http://... , or install kubectl to browse a cluster."
+			}
+			fmt.Fprintln(os.Stderr, msg)
 			os.Exit(1)
 		}
 	}
@@ -59,7 +120,14 @@ func main() {
 		cancel()
 	}()
 
+	// LocalEndpoint only when it answered. Passing an unresponsive configured
+	// address would point [l] at it and take away the in-cluster default, so a
+	// working `kubectl port-forward` on 9094 could not be reached with the one key
+	// that exists for exactly that.
 	opts := tui.RunOptions{Endpoint: *endpoint}
+	if localUp {
+		opts.LocalEndpoint = local
+	}
 	if *endpoint == "" {
 		opts.Lister = cluster.NewLister()
 		opts.PortForwarder = cluster.NewPortForwarder()

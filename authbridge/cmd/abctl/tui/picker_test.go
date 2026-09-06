@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -415,3 +417,202 @@ func TestRefreshTickAfterEscDoesNotPanic(t *testing.T) {
 
 // silence unused-import nag if test build trims this file later
 var _ = time.Second
+
+// --- [l] localhost:9094 shortcut -----------------------------------------
+
+// sessionAPIStub serves the minimum /v1/sessions response the `[l]` probe
+// needs, so the shortcut can be exercised end-to-end against a real HTTP
+// endpoint rather than a mocked client.
+func sessionAPIStub(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/sessions", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"sessions":[]}`))
+	})
+	mux.HandleFunc("/v1/pipeline", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"inbound":[],"outbound":[]}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestLocalhostKeybindConnects(t *testing.T) {
+	srv := sessionAPIStub(t)
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+
+	// `l` should dispatch a probe Cmd and mark the model loading.
+	_, cmd := mm.Update(keyRune('l'))
+	if cmd == nil {
+		t.Fatal("`l` on paneNamespaces should produce a connect Cmd")
+	}
+	if !mm.loading {
+		t.Fatal("`l` should set m.loading while the probe is in flight")
+	}
+
+	// Run the probe against the stub (not the real localhost:9094) and feed
+	// the result back through Update.
+	msg := connectLocalCmd(context.Background(), srv.URL)()
+	lc, ok := msg.(localConnectedMsg)
+	if !ok {
+		t.Fatalf("connectLocalCmd produced %T, want localConnectedMsg", msg)
+	}
+	if lc.err != nil {
+		t.Fatalf("probe against stub failed: %v", lc.err)
+	}
+	updated, _ = mm.Update(lc)
+	mm = updated.(*model)
+
+	if mm.pane != paneSessions {
+		t.Fatalf("after `l` connect, pane should be paneSessions, got %v", mm.pane)
+	}
+	if mm.client == nil {
+		t.Fatal("after `l` connect, m.client should be set")
+	}
+	if mm.endpoint != srv.URL {
+		t.Fatalf("endpoint = %q, want %q", mm.endpoint, srv.URL)
+	}
+	if !mm.localDirect {
+		t.Fatal("localDirect should be true after connecting via `l`")
+	}
+	if mm.activePF != nil {
+		t.Fatal("`l` must not create a port-forward")
+	}
+	if mm.loading {
+		t.Fatal("localConnectedMsg should clear m.loading")
+	}
+}
+
+func TestLocalhostKeybindProbeFailureStaysInPicker(t *testing.T) {
+	// Point at a closed port so the probe fails fast.
+	srv := sessionAPIStub(t)
+	dead := srv.URL
+	srv.Close()
+
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+
+	msg := connectLocalCmd(context.Background(), dead)()
+	lc := msg.(localConnectedMsg)
+	if lc.err == nil {
+		t.Fatal("probe against a closed port should fail")
+	}
+	updated, _ = mm.Update(lc)
+	mm = updated.(*model)
+
+	if mm.pane != paneNamespaces {
+		t.Fatalf("failed probe should leave the user in the picker, got pane %v", mm.pane)
+	}
+	if mm.client != nil {
+		t.Fatal("failed probe must not set a client")
+	}
+	if mm.pickerErr == "" {
+		t.Fatal("failed probe should surface an error in the footer")
+	}
+	if !strings.Contains(mm.pickerErr, "localhost:9094") {
+		t.Fatalf("picker error should name the endpoint it tried, got %q", mm.pickerErr)
+	}
+	if mm.loading {
+		t.Fatal("failed probe should clear m.loading")
+	}
+}
+
+// Esc out of a session entered via `[l]` has no pod to return to, so it
+// must land on Namespaces rather than an empty Pods table.
+func TestLocalhostEscReturnsToNamespaces(t *testing.T) {
+	srv := sessionAPIStub(t)
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	mm = updated.(*model)
+	if mm.pane != paneSessions {
+		t.Fatalf("setup: expected paneSessions, got %v", mm.pane)
+	}
+	updated, _ = mm.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	mm = updated.(*model)
+	if mm.pane != paneNamespaces {
+		t.Fatalf("Esc from an `l`-entered session should return to Namespaces, got %v", mm.pane)
+	}
+	if mm.localDirect {
+		t.Fatal("localDirect should be cleared on back-out")
+	}
+}
+
+// The namespaces footer and empty state must advertise `[l]`, otherwise
+// the shortcut is undiscoverable.
+func TestLocalhostKeybindIsAdvertised(t *testing.T) {
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	mm = updated.(*model)
+	if !strings.Contains(mm.View(), "[l] localhost:9094") {
+		t.Fatalf("namespaces footer should advertise [l]:\n%s", mm.View())
+	}
+
+	// Empty-state hint: the no-agents case is exactly when `l` is most
+	// useful, so it should be mentioned there too.
+	m2 := newPickerModel(context.Background(), &fakeLister{namespaces: []cluster.AgentNamespace{}}, nil)
+	u2, _ := m2.Update(m2.Init()())
+	mm2 := u2.(*model)
+	if !strings.Contains(mm2.View(), "[l]") {
+		t.Fatalf("empty-state hint should mention [l]:\n%s", mm2.View())
+	}
+}
+
+// `l` must not be swallowed when the picker is mid-load, and must not
+// hijack the vim-right binding in the session panes.
+func TestLocalhostKeybindScoping(t *testing.T) {
+	srv := sessionAPIStub(t)
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	mm.loading = true
+	_, cmd := mm.Update(keyRune('l'))
+	if cmd != nil {
+		t.Fatal("`l` while loading should be a no-op")
+	}
+	mm.loading = false
+
+	// In the sessions pane, `l` is vim-right (drill in), not connect-local.
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	mm = updated.(*model)
+	mm.pane = paneSessions
+	before := mm.endpoint
+	_, _ = mm.Update(keyRune('l'))
+	if mm.endpoint != before {
+		t.Fatal("`l` in the sessions pane should not re-trigger a local connect")
+	}
+}
+
+// A session entered via `[l]` has no pod/namespace, so pipeline editing
+// must report the limitation rather than opening a broken edit. This is
+// the same guard `--endpoint` mode relies on; asserted here because the
+// README documents the behavior for `[l]` specifically.
+func TestLocalhostEditIsUnavailable(t *testing.T) {
+	srv := sessionAPIStub(t)
+	m := newPickerModel(context.Background(), &fakeLister{namespaces: fixtureNamespaces}, nil)
+	updated, _ := m.Update(m.Init()())
+	mm := updated.(*model)
+	updated, _ = mm.Update(connectLocalCmd(context.Background(), srv.URL)())
+	mm = updated.(*model)
+	mm.pane = panePipeline
+
+	updated, cmd := mm.Update(keyRune('e'))
+	mm = updated.(*model)
+	if cmd != nil {
+		t.Fatal("`e` after an `l` connect should not start an edit")
+	}
+	if mm.editState.phase != editPhaseDone {
+		t.Fatalf("`e` should not enter an edit phase, got %v", mm.editState.phase)
+	}
+	if !strings.Contains(mm.flash, "picker") {
+		t.Fatalf("`e` should flash the picker-required hint, got %q", mm.flash)
+	}
+}

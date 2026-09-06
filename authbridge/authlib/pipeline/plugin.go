@@ -24,18 +24,35 @@ type PluginCapabilities struct {
 	// a read silently sees "no body."
 	ReadsBody bool
 
-	// WritesBody: the plugin may mutate pctx.Body / pctx.ResponseBody
-	// (call pctx.SetBody / pctx.SetResponseBody). Implies ReadsBody —
-	// Normalize() auto-promotes. Listener propagates the mutation to
-	// the wire (ext_proc BodyMutation, or the outbound http.Request /
-	// downstream http.Response for proxy listeners).
+	// WritesRequestBody: the plugin may mutate pctx.Body (call
+	// pctx.SetBody). Implies ReadsBody — Normalize() auto-promotes.
+	// Listener propagates the mutation to the wire (ext_proc
+	// BodyMutation, or the outbound http.Request for proxy listeners).
 	//
-	// Pipeline.New rejects a pipeline that has more than one WritesBody
-	// plugin per direction — mutation ordering would be ambiguous.
-	// Waypoint mode (ext_authz) cannot support WritesBody at all:
-	// ext_authz has no body-mutation field. main.go enforces this at
-	// process boot.
-	WritesBody bool
+	// Pipeline.New rejects a pipeline that has more than one
+	// WritesRequestBody plugin per direction — mutation ordering would
+	// be ambiguous. Waypoint mode (ext_authz) cannot support body
+	// mutation at all: ext_authz has no body-mutation field. main.go
+	// enforces this at process boot.
+	//
+	// Declaring this does NOT cost response streaming. Requests are
+	// never streamed — they arrive complete with a Content-Length and
+	// are read end to end before dispatch — so rewriting one says
+	// nothing about whether the response may be relayed incrementally.
+	WritesRequestBody bool
+
+	// WritesResponseBody: the plugin may mutate pctx.ResponseBody (call
+	// pctx.SetResponseBody). Implies ReadsBody — Normalize() auto-promotes.
+	//
+	// This is the streaming predicate. A plugin that rewrites a response
+	// needs the whole response to rewrite it, so listeners fall back from
+	// incremental SSE relay to the buffered path when — and only when —
+	// some plugin in the chain declares this. See
+	// Pipeline.WritesResponseBody.
+	//
+	// Pipeline.New rejects more than one WritesResponseBody plugin per
+	// direction, for the same ordering reason as the request side.
+	WritesResponseBody bool
 
 	// Requires names plugins that MUST be present in the same chain
 	// AND appear earlier (lower index). Matches are case-sensitive
@@ -71,12 +88,12 @@ type PluginCapabilities struct {
 	Description string
 }
 
-// Normalize applies WritesBody-implies-ReadsBody promotion.
+// Normalize applies WritesRequestBody-implies-ReadsBody promotion.
 // Called by Pipeline.New for every plugin's declared capabilities so the
 // rest of the framework reads a normalized form. Plugins never need to
 // call this themselves.
 func (c PluginCapabilities) Normalize() PluginCapabilities {
-	if c.WritesBody {
+	if c.WritesRequestBody || c.WritesResponseBody {
 		c.ReadsBody = true
 	}
 	return c

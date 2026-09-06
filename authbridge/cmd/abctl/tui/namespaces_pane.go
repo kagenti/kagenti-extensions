@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
+	"github.com/rossoctl/cortex/authbridge/cmd/abctl/apiclient"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/cluster"
 	"github.com/rossoctl/cortex/authbridge/cmd/abctl/edit"
 )
@@ -43,6 +44,30 @@ func loadAgentsCmd(ctx context.Context, lister cluster.Lister) tea.Cmd {
 	return func() tea.Msg {
 		ns, err := lister.ListAgents(ctx)
 		return agentsLoadedMsg{namespaces: ns, err: err}
+	}
+}
+
+// localConnectedMsg carries the result of probing localEndpoint for the
+// `[l]` shortcut. client is non-nil only when the probe succeeded.
+type localConnectedMsg struct {
+	client   *apiclient.Client
+	endpoint string
+	err      error
+}
+
+// connectLocalCmd probes localEndpoint's /v1/sessions and, on success,
+// hands back a ready client. The probe matters because there's no
+// port-forward subprocess to fail loudly here — without it, a wrong
+// guess would drop the operator into a silently empty session view.
+func connectLocalCmd(ctx context.Context, endpoint string) tea.Cmd {
+	return func() tea.Msg {
+		c := apiclient.New(endpoint)
+		probeCtx, cancel := context.WithTimeout(ctx, localProbeTimeout)
+		defer cancel()
+		if _, err := c.ListSessions(probeCtx); err != nil {
+			return localConnectedMsg{err: err}
+		}
+		return localConnectedMsg{client: c, endpoint: endpoint}
 	}
 }
 

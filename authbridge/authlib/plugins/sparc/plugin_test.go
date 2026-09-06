@@ -335,10 +335,22 @@ func TestInference_MCPModeOnResponseIsNoop(t *testing.T) {
 	}
 }
 
+// TestCapabilities pins SPARC as a RESPONSE-side mutator. It rewrites the
+// upstream response (respond.go) and calls pctx.SetBody nowhere, so declaring
+// WritesRequestBody was carried over from the undirected flag and cost it the
+// single request-mutator slot for nothing — a chain like [sparc, tool-prune]
+// could not build even though the two write different bodies.
 func TestCapabilities(t *testing.T) {
 	caps := NewSPARC().Capabilities()
-	if !caps.WritesBody || !caps.ReadsBody {
-		t.Error("expected ReadsBody+WritesBody")
+	if !caps.WritesResponseBody {
+		t.Error("expected WritesResponseBody — SPARC rewrites the response")
+	}
+	if caps.WritesRequestBody {
+		t.Error("must not declare WritesRequestBody: SPARC never calls pctx.SetBody, " +
+			"and the claim blocks any real request mutator from sharing the chain")
+	}
+	if !caps.Normalize().ReadsBody {
+		t.Error("a write flag must promote ReadsBody")
 	}
 	if len(caps.RequiresAny) == 0 {
 		t.Error("expected RequiresAny parsers")

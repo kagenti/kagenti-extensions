@@ -178,8 +178,8 @@ At least one must appear earlier in the chain so the parser has populated
 `pctx.Extensions.MCP` / `.Inference` / `.A2A` before cpex extracts CMF
 content. `Pipeline.Build` rejects misordered chains at boot.
 
-cpex also declares `ReadsBody: true, WritesBody: true`. Only one
-`WritesBody` plugin is permitted per direction; chaining cpex with
+cpex also declares `ReadsBody: true, WritesRequestBody: true`. Only one
+`WritesRequestBody` plugin is permitted per direction; chaining cpex with
 another mutator (e.g. an inline transformer) will fail at boot.
 
 A typical inbound chain:

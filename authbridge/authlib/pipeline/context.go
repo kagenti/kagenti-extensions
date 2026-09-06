@@ -115,6 +115,10 @@ type Context struct {
 	// compute SessionEvent.Duration without walking the event history.
 	StartedAt time.Time
 
+	// requestID backs RequestID(), which generates it on first use. See
+	// requestid.go for why it is lazy rather than a constructor argument.
+	requestID string
+
 	Agent    *AgentIdentity
 	Identity Identity     // nil before an auth plugin runs
 	Session  *SessionView // nil unless session tracking is enabled
@@ -387,12 +391,20 @@ func (c *Context) DenyAndRecord(reason, code, message string) Action {
 	return Deny(code, message)
 }
 
-// SetBody replaces the request body with newBody. Only meaningful when
-// the plugin declares WritesBody: true in its Capabilities — the
-// listener consults pctx.BodyMutated() after Run to decide whether to
-// emit the new bytes on the wire. Plugins without WritesBody that call
-// SetBody mutate the in-memory Context (readers downstream see the
-// change), but the wire is unchanged.
+// SetBody replaces the request body with newBody. A plugin that calls it
+// must declare WritesRequestBody: true in its Capabilities — the listener
+// consults pctx.BodyMutated() after Run to decide whether to emit the new
+// bytes on the wire.
+//
+// NOTE — the capability is a contract, not an enforcement. SetBody sets
+// bodyMutated unconditionally outside observe mode, and the listeners gate
+// purely on pctx.BodyMutated(), so a plugin that calls SetBody WITHOUT
+// declaring the capability still reaches the wire. This divergence is
+// documented rather than closed: adding the enforcement silently would
+// break any out-of-tree plugin relying on today's behaviour, so it needs
+// its own compatibility review. Do not read it as licence to skip the
+// declaration in order to keep response streaming — declaring
+// WritesRequestBody costs no streaming (see PluginCapabilities).
 //
 // Under ErrorPolicyObserve (shadow mode) SetBody is a NO-OP on bytes:
 // the in-memory body is not replaced, bodyMutated stays false, and
@@ -432,6 +444,10 @@ func (c *Context) SetBody(newBody []byte) {
 // Invocation + body-mutation/event emitted; never logs the body —
 // and the same observe-mode suppression: under ErrorPolicyObserve the
 // response body is untouched and the Invocation is marked Shadow=true.
+//
+// A plugin that calls this must declare WritesResponseBody: true. That
+// declaration is what makes listeners buffer the response instead of
+// relaying SSE frames incrementally, so it must not be omitted.
 func (c *Context) SetResponseBody(newBody []byte) {
 	if c.inFinish {
 		slog.Warn("pipeline: plugin called pctx.SetResponseBody during OnFinish — dropped (response already sent)",

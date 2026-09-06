@@ -12,7 +12,7 @@ import (
 )
 
 // TestBuild_InChainAfterInferenceParser confirms the plugin assembles on the
-// outbound chain when a parser precedes it (RequiresAny + the single-WritesBody
+// outbound chain when a parser precedes it (RequiresAny + the single-WritesRequestBody
 // slot are accepted together).
 func TestBuild_InChainAfterInferenceParser(t *testing.T) {
 	p, err := plugins.Build([]config.PluginEntry{
