@@ -98,18 +98,59 @@ func foldTailSeries(buckets []usage.Bucket, m usageMetric, series []seriesKey, k
 // unlabelledTotal is how much of the window no series claims, summed across
 // buckets that actually show a remainder band. Returns 0 when the labels account
 // for everything, or over-account for it (per-plugin attribution does).
-func unlabelledTotal(buckets []usage.Bucket, m usageMetric, series []seriesKey) int64 {
+func unlabelledTotal(buckets []usage.Bucket, m usageMetric, series []seriesKey, peak int64) int64 {
 	var out int64
 	for _, b := range buckets {
 		var sum int64
 		for _, s := range series {
 			sum += m.valueOf(b.Series[s.label])
 		}
-		if d := m.value(b) - sum; d > 0 {
+		d := m.value(b) - sum
+		if d <= 0 {
+			continue
+		}
+		// Count it only when this bucket would actually DRAW the band. allotRows
+		// requires the remainder to fill at least one row, so summing every
+		// shortfall here named "(unlabelled)" in the legend for a chart that never
+		// draws it — a key to a band that is not there.
+		if drawsRemainderBand(d, m.value(b), barRowsFor(m.value(b), peak)) {
 			out += d
 		}
 	}
 	return out
+}
+
+// drawsRemainderBand reports whether an unclaimed share of a bucket is large
+// enough to occupy a row.
+//
+// One predicate with two callers on purpose: allotRows decides whether to DRAW the
+// band and unlabelledTotal decides whether to NAME it in the legend, and when
+// those two disagreed the legend keyed a band the chart never drew. They had
+// already drifted once — truncating in one and rounding in the other — which is
+// the whole reason this is a named function.
+//
+// Rounds rather than truncates: on a one-row bar 940/1000 truncates to zero rows,
+// so the remainder was excluded and the single row went to a named series holding
+// 3% of the bucket.
+func drawsRemainderBand(remainder, total, barRows int64) bool {
+	if remainder <= 0 || total <= 0 || barRows <= 0 {
+		return false
+	}
+	return 2*remainder*barRows >= total
+}
+
+// barRowsFor is a bar's height in whole rows. Shared by the renderer and by
+// unlabelledTotal so the legend's idea of which bands are drawn cannot drift from
+// the chart's.
+func barRowsFor(total, peak int64) int64 {
+	if total <= 0 || peak <= 0 {
+		return 0
+	}
+	rows := total * int64(plotRows) / peak
+	if rows == 0 {
+		rows = 1 // non-zero traffic never renders as an empty column
+	}
+	return rows
 }
 
 // collectSeries totals each label across every bucket and returns them largest
@@ -188,11 +229,18 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	// share one.
 	series, buckets = foldTailSeries(buckets, m, series, maxNamedSeries)
 
+	var peak int64
+	for _, b := range buckets {
+		if v := m.value(b); v > peak {
+			peak = v
+		}
+	}
+
 	// The unlabelled remainder is drawn as a band but is not in `series`, so
 	// register it for marks, colour and the legend. Appended last so it ranks
 	// behind every named series and cannot take a palette slot from one.
 	legendSeries := series
-	if unlabelled := unlabelledTotal(buckets, m, series); unlabelled > 0 {
+	if unlabelled := unlabelledTotal(buckets, m, series, peak); unlabelled > 0 {
 		legendSeries = append(append([]seriesKey(nil), series...),
 			seriesKey{label: unlabelledLabel, total: unlabelled})
 	}
@@ -207,13 +255,6 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	// One mark per series, assigned once for the whole chart so a letter means the
 	// same thing in every bucket and in the legend.
 	letters := assignLetters(legendSeries)
-
-	var peak int64
-	for _, b := range buckets {
-		if v := m.value(b); v > peak {
-			peak = v
-		}
-	}
 
 	out := make([]string, 0, plotRows+4)
 	for row := plotRows; row >= 1; row-- {
@@ -250,10 +291,7 @@ func stackedCell(b usage.Bucket, m usageMetric, group usage.Group,
 	}
 	// Whole rows only — see the renderStackedBars comment on why segments cannot
 	// use partial blocks.
-	barRows := total * int64(plotRows) / peak
-	if barRows == 0 {
-		barRows = 1 // non-zero traffic must never render as an empty column
-	}
+	barRows := barRowsFor(total, peak)
 	if int64(row) > barRows {
 		return strings.Repeat(" ", barWidth)
 	}
@@ -311,7 +349,7 @@ func allotRows(b usage.Bucket, m usageMetric, series []seriesKey, barRows, total
 	// Only when the shortfall is large enough to occupy a row: rounding noise does
 	// not deserve a band, and a one-row remainder on every bar would be more
 	// misleading than omitting it.
-	if unlabelled := total - seriesSum; unlabelled > 0 && unlabelled*barRows/total > 0 {
+	if unlabelled := total - seriesSum; drawsRemainderBand(unlabelled, total, barRows) {
 		present = append(present, rowAlloc{label: unlabelledLabel, value: unlabelled})
 		seriesSum += unlabelled
 	}
@@ -319,9 +357,23 @@ func allotRows(b usage.Bucket, m usageMetric, series []seriesKey, barRows, total
 	// as many as fit, largest first (series is already sorted). The legend still
 	// names the rest.
 	if int64(len(present)) >= barRows {
-		out := present[:barRows]
-		for i := range out {
-			out[i].rows = 1
+		// Keep the LARGEST bands, not the first barRows of them. present ends with
+		// the unlabelled remainder, so truncating positionally dropped exactly the
+		// band that keeps the bar honest: a 3-row bar that was 94% unclaimed
+		// reattributed all of it to the named series, which is the misattribution
+		// the remainder exists to prevent.
+		byValue := append([]rowAlloc(nil), present...)
+		sort.SliceStable(byValue, func(i, j int) bool { return byValue[i].value > byValue[j].value })
+		keep := make(map[string]bool, barRows)
+		for _, a := range byValue[:barRows] {
+			keep[a.label] = true
+		}
+		out := make([]rowAlloc, 0, barRows)
+		for _, a := range present { // preserve stacking order
+			if keep[a.label] {
+				a.rows = 1
+				out = append(out, a)
+			}
 		}
 		return out
 	}
@@ -405,12 +457,12 @@ func renderLegend(series []seriesKey, group usage.Group,
 	const sep = "   "
 	const indent = "  "
 
+	// No cap here. foldTailSeries has already reduced the series to at most
+	// maxNamedSeries named bands plus a "(other)" fold, and re-capping at the same
+	// number cut that fold off — the largest unnamed band was drawn on the chart
+	// and replaced in the legend by "(+1 more)", which named nothing. Whatever
+	// reaches this function is what the chart draws, so all of it gets an entry.
 	named := series
-	elided := 0
-	if len(named) > maxNamedSeries {
-		elided = len(named) - maxNamedSeries
-		named = named[:maxNamedSeries]
-	}
 
 	var lines []string
 	var parts []string
@@ -452,18 +504,6 @@ func renderLegend(series []seriesKey, group usage.Group,
 	}
 	flush()
 
-	if elided > 0 {
-		bare := fmt.Sprintf("(+%d more)", elided)
-		// Measure what is actually appended — sep + bare — not the indented form.
-		// Counting the indent instead of the separator happened to agree at width
-		// 80 and was three columns short everywhere else.
-		suffix := len([]rune(sep)) + len([]rune(bare))
-		if n := len(lines); n > 0 && len([]rune(stripANSIWidth(lines[n-1])))+suffix <= width {
-			lines[n-1] += sep + bare
-		} else {
-			lines = append(lines, indent+bare)
-		}
-	}
 	if len(lines) == 0 {
 		return nil
 	}

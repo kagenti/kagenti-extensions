@@ -233,8 +233,13 @@ func TestRenderStacked_OverflowSeriesAreMarked(t *testing.T) {
 	}
 	lines := renderStackedBars(mkSeriesBuckets([]map[string]int64{labels}), metricRequests, usage.GroupMethod, 80)
 	joined := stripANSI(strings.Join(lines, "\n"))
-	if !strings.Contains(joined, "more)") {
-		t.Errorf("legend does not report series past the palette: %q", joined)
+	// Series past the palette fold into one named band. A "(+N more)" count would
+	// be worse: the band is drawn, so it needs a key, not a tally.
+	if !strings.Contains(joined, tailLabel) {
+		t.Errorf("legend does not name the folded band %q: %q", tailLabel, joined)
+	}
+	if strings.Contains(joined, "more)") {
+		t.Errorf("legend reports a count instead of naming the drawn band: %q", joined)
 	}
 }
 
@@ -496,10 +501,10 @@ func TestRenderLegend_BoundsALoneOverWideEntry(t *testing.T) {
 	}
 }
 
-// The elision note is appended as sep+note, so the fit check must measure that.
-// Counting the indent instead happened to agree at width 80 and was three columns
-// short everywhere else.
-func TestRenderLegend_ElisionNoteRespectsWidth(t *testing.T) {
+// renderLegend names everything it is handed — capping is foldTailSeries' job, and
+// doing it in both places cut the fold off. Whatever the chart draws must be
+// named, at every width, wrapping as needed.
+func TestRenderLegend_NamesEverySeriesAtEveryWidth(t *testing.T) {
 	var series []seriesKey
 	for i := 0; i < 9; i++ {
 		series = append(series, seriesKey{fmt.Sprintf("series-%c-name", 'a'+i), int64(100 - i)})
@@ -513,14 +518,39 @@ func TestRenderLegend_ElisionNoteRespectsWidth(t *testing.T) {
 	for width := 30; width <= 100; width++ {
 		lines := renderLegend(series, usage.GroupMethod, letters, rank, width)
 		joined := stripANSI(strings.Join(lines, "\n"))
-		if !strings.Contains(joined, "more)") {
-			t.Errorf("width %d: nine series past the palette but no elision note", width)
+		for _, s := range series {
+			if !strings.Contains(joined, s.label) {
+				t.Errorf("width %d: legend omits %q, whose band is drawn", width, s.label)
+			}
 		}
 		for _, l := range lines {
 			if got := len([]rune(stripANSI(l))); got > width {
 				t.Errorf("width %d: line is %d columns:\n%q", width, got, stripANSI(l))
 			}
 		}
+	}
+}
+
+// The fold must survive the legend. foldTailSeries emits maxNamedSeries named
+// bands plus "(other)"; re-capping at maxNamedSeries cut that fold off, so the
+// largest unnamed band was drawn and the legend said "(+1 more)" — naming nothing.
+func TestRenderLegend_KeepsTheFoldedBand(t *testing.T) {
+	var series []seriesKey
+	for i := 0; i < 12; i++ {
+		series = append(series, seriesKey{fmt.Sprintf("series-%c", 'a'+i), int64(100 - i*5)})
+	}
+	kept, _ := foldTailSeries(nil, metricRequests, series, maxNamedSeries)
+	if len(kept) != maxNamedSeries+1 {
+		t.Fatalf("foldTailSeries kept %d, want %d named plus the fold", len(kept), maxNamedSeries)
+	}
+	letters := assignLetters(kept)
+	rank := map[string]int{}
+	for i, s := range kept {
+		rank[s.label] = i
+	}
+	joined := stripANSI(strings.Join(renderLegend(kept, usage.GroupMethod, letters, rank, 120), "\n"))
+	if !strings.Contains(joined, tailLabel) {
+		t.Errorf("legend dropped the folded band:\n%s", joined)
 	}
 }
 
@@ -534,5 +564,59 @@ func TestTruncateLegendText(t *testing.T) {
 	}
 	if got := truncateLegendText(text, 40); got != text {
 		t.Errorf("a text that already fits was altered: %q", got)
+	}
+}
+
+// A short bar cannot show every band, so it keeps the LARGEST — not the first few
+// by position. present ends with the unlabelled remainder, so positional
+// truncation dropped exactly the band that keeps the bar honest: a 3-row bar that
+// was 94% unclaimed reattributed all of it to the named series.
+func TestAllotRows_ShortBarKeepsTheLargestBands(t *testing.T) {
+	b := mkSeriesBuckets([]map[string]int64{{"a": 30, "b": 20, "c": 10}})[0]
+	b.Counts.Requests = 1000 // 94% of the bucket claimed by no label
+	series := collectSeries([]usage.Bucket{b}, metricRequests)
+
+	for _, barRows := range []int64{1, 2, 3, 4, 10} {
+		got := allotRows(b, metricRequests, series, barRows, b.Requests)
+		var sum int64
+		found := false
+		for _, a := range got {
+			sum += a.rows
+			if a.label == unlabelledLabel {
+				found = true
+			}
+		}
+		if sum != barRows {
+			t.Errorf("barRows=%d: allotted %d rows", barRows, sum)
+		}
+		if !found {
+			t.Errorf("barRows=%d: dropped the unlabelled band, reattributing 94%% of the bucket", barRows)
+		}
+	}
+}
+
+// The legend must not key a band the chart never draws. allotRows only emits the
+// remainder when it fills a row, so the legend has to use the same predicate.
+func TestUnlabelledTotal_OnlyCountsDrawnBands(t *testing.T) {
+	// A one-token shortfall against a large bucket cannot fill a row.
+	b := mkSeriesBuckets([]map[string]int64{{"a": 999}})[0]
+	b.Counts.Requests = 1000
+	series := collectSeries([]usage.Bucket{b}, metricRequests)
+
+	if got := unlabelledTotal([]usage.Bucket{b}, metricRequests, series, b.Requests); got != 0 {
+		t.Errorf("unlabelledTotal = %d for a sub-row shortfall, want 0", got)
+	}
+	// And the rendered legend agrees.
+	joined := stripANSI(strings.Join(renderStackedBars([]usage.Bucket{b}, metricRequests, usage.GroupMethod, 80), "\n"))
+	if strings.Contains(joined, unlabelledLabel) {
+		t.Errorf("legend names %q for a band that is never drawn:\n%s", unlabelledLabel, joined)
+	}
+
+	// A large shortfall does draw, and is named.
+	b2 := mkSeriesBuckets([]map[string]int64{{"a": 100}})[0]
+	b2.Counts.Requests = 1000
+	s2 := collectSeries([]usage.Bucket{b2}, metricRequests)
+	if got := unlabelledTotal([]usage.Bucket{b2}, metricRequests, s2, b2.Requests); got != 900 {
+		t.Errorf("unlabelledTotal = %d, want 900", got)
 	}
 }
