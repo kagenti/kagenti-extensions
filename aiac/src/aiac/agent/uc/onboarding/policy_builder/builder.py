@@ -31,9 +31,19 @@ before.
 
 import logging
 
-from aiac.agent.policy_rules_builder.conflict_detection import PolicyConflictError, detect_conflicts
+from aiac.agent.policy_rules_builder.conflict_detection import (
+    PolicyConflictError,
+    detect_conflicts,
+    report_from_contradictions,
+)
 from aiac.agent.policy_rules_builder.conflict_enrichment import enrich_report
-from aiac.agent.policy_rules_builder.graph import build_role_denies, build_role_rules, build_scope_rules
+from aiac.agent.policy_rules_builder.diagnostic_models import ConflictReport
+from aiac.agent.policy_rules_builder.graph import (
+    PolicyContradictionError,
+    build_role_denies,
+    build_role_rules,
+    build_scope_rules,
+)
 from aiac.agent.policy_rules_builder.policy_source import get_policy_source
 from aiac.agent.shared.focal_entities import resolve_focal_entities
 from aiac.agent.shared.roles import flatten_role
@@ -57,8 +67,26 @@ class ServicePolicyBuilder:
         focal = resolve_focal_entities(service_id, service_type, config=_config())
 
         rules: list[PolicyRule] = []
+        # #168: the fan-out must NOT abort on the FIRST policy contradiction. Each PRB call is
+        # guarded: a ``PolicyContradictionError`` (the LLM auditor's *policy finding* -- this focal's
+        # rule set is withheld) is accumulated as its ``(focal, contradictions)`` and the fan-out
+        # CONTINUES, so every focal's contradiction is collected in one build rather than the report
+        # stopping at whichever pair the loop happened to reach first. A HARD failure
+        # (PolicyRulesBuilderError / LLMAccessError / UnparseableLLMResponseError -- sibling
+        # PolicyRulesBuilderBaseError subclasses that are NOT PolicyContradictionError) is deliberately
+        # NOT caught here: it aborts the build immediately and propagates so the Orchestrator rolls
+        # back. We catch the narrow PolicyContradictionError ONLY -- never the base -- so a hard fault
+        # can never be silently folded into the report.
+        contradictions: list[PolicyContradictionError] = []
+
+        def _guarded(fn, *args) -> None:
+            try:
+                rules.extend(fn(*args))
+            except PolicyContradictionError as exc:
+                contradictions.append(exc)
+
         for scope in focal.own_scopes:
-            rules.extend(build_scope_rules(focal.candidate_roles, scope))
+            _guarded(build_scope_rules, focal.candidate_roles, scope)
         # Door B -- user-role-focal DENY-only pass at the focus's OWN-scope onboarding, alongside
         # the scope-focal pass above. Fan the kind=User subset of the (already flattened+deduped)
         # candidate roles over the focus's own scopes to surface each user role's exclusivity
@@ -69,11 +97,11 @@ class ServicePolicyBuilder:
         # the scope-focal (role, own-scope) grant and the Door B (role, own-scope) prohibition in
         # the same build.
         for user_role in (r for r in focal.candidate_roles if r.kind is RoleKind.USER):
-            rules.extend(build_role_denies(user_role, focal.own_scopes))
+            _guarded(build_role_denies, user_role, focal.own_scopes)
         if service_type is ServiceType.AGENT:
             for own_role in focal.own_roles:
                 for role in flatten_role(own_role):
-                    rules.extend(build_role_rules(role, focal.other_scopes))
+                    _guarded(build_role_rules, role, focal.other_scopes)
         # Inline, deterministic (non-LLM) conflict detection over the COMBINED state (#2504): this
         # build's fully assembled rules (scope-focal grants + Door B denies) PLUS the already-applied
         # inbound rules of the OTHER services on the scopes this build touches, read from the Policy
@@ -88,7 +116,23 @@ class ServicePolicyBuilder:
         # side-effect-free). Detection is order-independent (keyed on ids), so tool-first vs
         # agent-first onboarding yields the identical outcome.
         combined = rules + applied_rules_for_scopes(rules)
-        report = detect_conflicts(combined)
+        structural = detect_conflicts(combined)
+        # #168: UNION the deterministic conflict survey (allow∩deny over the combined state) with the
+        # auditor contradictions accumulated during the fan-out, into ONE ConflictReport. Each withheld
+        # focal is reshaped via ``report_from_contradictions`` into the SAME Conflict-row shape the
+        # structural detector emits (real-id-less rows with quotes_verified=False), so a focal withheld
+        # for a genuine contradiction surfaces as Conflict rows alongside the structural overlaps rather
+        # than being lost. ``evaluated_count`` mirrors both producers -- the distinct (role.id, scope.id)
+        # pairs the detector examined plus one per accumulated focal -- but the raise decision below reads
+        # only ``report.conflicts`` (any conflict => CONFLICTS_FOUND), so the merge is order-independent.
+        conflicts = list(structural.conflicts)
+        unevaluated = list(structural.unevaluated)
+        for exc in contradictions:
+            per_focal = report_from_contradictions(exc.focal, exc.contradictions)
+            conflicts.extend(per_focal.conflicts)
+            unevaluated.extend(per_focal.unevaluated)
+        evaluated_count = len({(r.role.id, r.scope.id) for r in combined}) + len(contradictions)
+        report = ConflictReport.from_survey(conflicts, unevaluated, evaluated_count=evaluated_count)
         if report.conflicts:
             # A conflict was found: NOW (and only now) run the LLM explain/quote survey over the
             # exact pairs detect_conflicts surfaced -- classifying each kind and extracting verbatim,
