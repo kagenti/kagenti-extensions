@@ -423,11 +423,11 @@ func (p *LineageTelemetry) OnRequest(ctx context.Context, pctx *pipeline.Context
 	protocol := protocolOf(pctx)
 	self := serviceLabel(p.selfID)
 	spanKind := spanKindFor(pctx.Direction)
-	spanName := requestSpanName(self, protocol, spanOp(pctx, protocol))
+	spanName := truncate(requestSpanName(self, protocol, spanOp(pctx, protocol)), p.cfg.MaxAttrBytes)
 
 	// Facts shared by both spans (exchange.id is appended once the request
 	// span exists, since it IS the request span id).
-	base := baseAttrs(pctx, self, protocol)
+	base := p.baseAttrs(pctx, self, protocol)
 
 	// Request-span attributes: role + shared facts + request-only facts.
 	reqAttrs := make([]attribute.KeyValue, 0, len(base)+8)
@@ -652,7 +652,7 @@ func (p *LineageTelemetry) OnFinish(ctx context.Context, pctx *pipeline.Context)
 		attrs = append(attrs, attribute.Int("http.status_code", status))
 	}
 	if deniedBy != "" {
-		attrs = append(attrs, attribute.String("lineage.denied_by", deniedBy))
+		attrs = append(attrs, p.capped("lineage.denied_by", deniedBy))
 	}
 	if p.cfg.CaptureIO {
 		if v := ioOutputValue(pctx, state.protocol); v != "" {
@@ -721,16 +721,28 @@ func spanKindFor(dir pipeline.Direction) trace.SpanKind {
 
 // baseAttrs returns the facts carried on BOTH spans except exchange.id (added
 // once the request span id is known) and role (differs per span).
-func baseAttrs(pctx *pipeline.Context, self, protocol string) []attribute.KeyValue {
+func (p *LineageTelemetry) baseAttrs(pctx *pipeline.Context, self, protocol string) []attribute.KeyValue {
 	attrs := []attribute.KeyValue{
 		attribute.String("lineage.direction", pctx.Direction.String()),
-		attribute.String("lineage.self.id", self),
+		p.capped("lineage.self.id", self),
 		attribute.String("lineage.protocol", protocol),
 	}
 	if pctx.Host != "" {
-		attrs = append(attrs, attribute.String("lineage.peer.host", pctx.Host))
+		attrs = append(attrs, p.capped("lineage.peer.host", pctx.Host))
 	}
 	return attrs
+}
+
+// capped returns a string span attribute whose value is bounded by
+// max_attr_bytes. Every variable-content string attribute goes through here —
+// several are caller-controlled (url.path, Host, mcp.tool from the request
+// body, a2a.session_id) and the SDK never truncates on its own. The
+// fixed-vocabulary facts (lineage.role, lineage.direction, lineage.protocol,
+// lineage.parent.source, lineage.outcome) and the 16-hex exchange id are
+// bounded by construction and skip it; input.value / output.value carry their
+// own max_payload_bytes cap.
+func (p *LineageTelemetry) capped(key, val string) attribute.KeyValue {
+	return attribute.String(key, truncate(val, p.cfg.MaxAttrBytes))
 }
 
 // appendRequestFacts adds the request-only facts: HTTP method/path/scheme, the
@@ -741,44 +753,44 @@ func (p *LineageTelemetry) appendRequestFacts(attrs []attribute.KeyValue, pctx *
 	if pctx.Method != "" {
 		// "http.method" is the pre-v1.21 OTel semconv key, kept deliberately —
 		// see the http.status_code note on the response span.
-		attrs = append(attrs, attribute.String("http.method", pctx.Method))
+		attrs = append(attrs, p.capped("http.method", pctx.Method))
 	}
 	if path := urlPath(pctx); path != "" {
-		attrs = append(attrs, attribute.String("url.path", path))
+		attrs = append(attrs, p.capped("url.path", path))
 	}
 	if pctx.Scheme != "" {
-		attrs = append(attrs, attribute.String("url.scheme", pctx.Scheme))
+		attrs = append(attrs, p.capped("url.scheme", pctx.Scheme))
 	}
 	switch protocol {
 	case "a2a":
 		a := pctx.Extensions.A2A
 		if a.Method != "" {
-			attrs = append(attrs, attribute.String("a2a.method", a.Method))
+			attrs = append(attrs, p.capped("a2a.method", a.Method))
 		}
 		if a.SessionID != "" {
-			attrs = append(attrs, attribute.String("a2a.session_id", a.SessionID))
+			attrs = append(attrs, p.capped("a2a.session_id", a.SessionID))
 		}
 	case "mcp":
 		m := pctx.Extensions.MCP
 		if m.Method != "" {
-			attrs = append(attrs, attribute.String("mcp.method", m.Method))
+			attrs = append(attrs, p.capped("mcp.method", m.Method))
 		}
 		if t := mcpTool(pctx); t != "" {
-			attrs = append(attrs, attribute.String("mcp.tool", t))
+			attrs = append(attrs, p.capped("mcp.tool", t))
 		}
 	case "inference":
 		if model := pctx.Extensions.Inference.Model; model != "" {
-			attrs = append(attrs, attribute.String("inference.model", model))
+			attrs = append(attrs, p.capped("inference.model", model))
 		}
 	}
 	// Principal facts: request span, inbound only, and only from a validated
 	// JWT (pctx.Identity non-nil).
 	if pctx.Direction == pipeline.Inbound && pctx.Identity != nil {
 		if s := pctx.Identity.Subject(); s != "" {
-			attrs = append(attrs, attribute.String("lineage.principal.sub", s))
+			attrs = append(attrs, p.capped("lineage.principal.sub", s))
 		}
 		if c := pctx.Identity.ClientID(); c != "" {
-			attrs = append(attrs, attribute.String("lineage.principal.client", c))
+			attrs = append(attrs, p.capped("lineage.principal.client", c))
 		}
 	}
 	if p.cfg.CaptureIO {

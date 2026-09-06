@@ -187,6 +187,13 @@ Span names: request = `{self.id} {protocol} {op}`, where op is `mcp.tool` (else 
 `a2a.method`, or `inference.model`, falling back to `url.path`, and is omitted when empty;
 response = the request name + ` response`.
 
+Every variable-content string attribute above, and the request span name, is capped at
+`max_attr_bytes` (default 256), cut on a UTF-8 boundary and suffixed `…[truncated]` — several of
+these values are caller-controlled (`url.path`, `lineage.peer.host`, `mcp.tool`,
+`a2a.session_id`) and the SDK never truncates on its own. `input.value` / `output.value` carry
+their own `max_payload_bytes` cap (§5); the fixed-vocabulary facts and the hex ids are bounded by
+construction.
+
 ## 5. Payloads
 
 - `input.value` and `output.value` are the parsers' semantic reduction of the request and
@@ -214,6 +221,7 @@ response = the request name + ` response`.
 | `otel_ca_file` | — | PEM bundle to verify the collector's certificate against, for a private CA; implies `otel_tls`, and `otel_ca_file` with `otel_tls: false` is refused. An unreadable file, or one with no certificate, refuses to start |
 | `capture_io` | `false` | attach `input.value` / `output.value` |
 | `max_payload_bytes` | `4096` | producer-side cap on those two values; `0` or unset takes the default, `-1` attaches whole, any other negative is refused at start |
+| `max_attr_bytes` | `256` | cap on every variable-content string attribute and the span name (§4); same `0` / `-1` / negative semantics as `max_payload_bytes` |
 | `mint_traceparent` | `true` | §3.3; `false` = a pure observer that never writes a `traceparent` |
 | `bypass_paths` | `/.well-known/`, `/healthz`, `/readyz`, `/health` | path prefixes that produce no spans |
 | `bypass_hosts` | `otel-collector`, `otel-collector.*`, `jaeger`, `jaeger.*`, `zipkin`, `zipkin.*`, `prometheus`, `prometheus.*` | outbound host globs that produce no spans |
@@ -276,7 +284,9 @@ mechanisms named as removed are not to be reintroduced.
 - **v1.6.2** — `url.path` and the span-name fallback derived from it are query-free: the producer
   strips anything from `?` on before emission. Until now the envoy-sidecar listener's raw `:path`
   pseudo-header put the query string on the wire regardless of `capture_io`; the proxy listeners
-  never delivered it.
+  never delivered it. And every variable-content string attribute plus the span name is capped at
+  `max_attr_bytes` (default 256) — until now only the two payload values were bounded, so one
+  request could put a 100 KB span name into the backend.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only

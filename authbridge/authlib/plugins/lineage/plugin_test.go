@@ -847,6 +847,73 @@ func TestQueryStringNeverEmitted(t *testing.T) {
 	}
 }
 
+// Variable-content attributes and the span name are caller-controlled (a
+// long path, a huge Host header, a tool name from the request body) and the
+// SDK never truncates on its own; max_attr_bytes must bound them all.
+func TestAttrBytesCapsCallerControlledValues(t *testing.T) {
+	long := strings.Repeat("x", 100_000)
+	p, exp := newTestPlugin(t)
+	pctx := fakeContext(pipeline.Outbound, http.Header{})
+	pctx.Path = "/" + long
+	pctx.Host = "evil-" + long + ".example:8000"
+	pctx.Extensions.MCP = &pipeline.MCPExtension{
+		Method: "tools/call",
+		Params: map[string]any{"name": "tool_" + long},
+	}
+
+	run(t, p, pctx, allow(200))
+	req, resp := roleSplit(t, exp.GetSpans())
+
+	max := defaultMaxAttrBytes
+	for _, key := range []string{"url.path", "lineage.peer.host", "mcp.tool"} {
+		v := attrStr(req, key)
+		if len(v) > max {
+			t.Errorf("attr %q is %d bytes, cap is %d", key, len(v), max)
+		}
+		if !strings.HasSuffix(v, truncatedSuffix) {
+			t.Errorf("attr %q lost bytes without the truncation marker", key)
+		}
+	}
+	if len(req.Name) > max {
+		t.Errorf("request span name is %d bytes, cap is %d", len(req.Name), max)
+	}
+	// The response name is the capped request name + " response".
+	if want := req.Name + " response"; resp.Name != want {
+		t.Errorf("response span name = %q, want %q", resp.Name, want)
+	}
+}
+
+func TestConfig_MaxAttrBytes(t *testing.T) {
+	cases := []struct {
+		raw     string
+		want    int
+		wantErr bool
+	}{
+		{raw: `{}`, want: defaultMaxAttrBytes},
+		{raw: `{"max_attr_bytes": 0}`, want: defaultMaxAttrBytes},
+		{raw: `{"max_attr_bytes": 64}`, want: 64},
+		{raw: `{"max_attr_bytes": -1}`, want: unboundedPayload},
+		{raw: `{"max_attr_bytes": -2}`, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			cfg, err := decodeConfig([]byte(tc.raw))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("accepted; it removes the cap silently")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if cfg.MaxAttrBytes != tc.want {
+				t.Fatalf("max_attr_bytes = %d, want %d", cfg.MaxAttrBytes, tc.want)
+			}
+		})
+	}
+}
+
 // ---- the forbidden-keys guard ----
 
 // TestForbiddenKeysNeverEmitted scans every attribute of every span emitted

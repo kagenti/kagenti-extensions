@@ -26,6 +26,13 @@ const defaultMaxPayloadBytes = 4096
 // refused at decode, so a typo cannot quietly attach whole payloads.
 const unboundedPayload = -1
 
+// defaultMaxAttrBytes bounds every variable-content string attribute and the
+// span name. Several of those values are caller-controlled (url.path, Host,
+// mcp.tool from the request body, a2a.session_id) and the SDK never truncates
+// on its own — without this cap one request can put a 100 KB span name into
+// the backend. 256 comfortably fits real paths, hosts and tool names.
+const defaultMaxAttrBytes = 256
+
 // Config holds the per-plugin configuration decoded from the pipeline YAML.
 type Config struct {
 	// OTelEndpoint is the OTLP gRPC endpoint (host:port, http://host:port, or
@@ -83,6 +90,16 @@ type Config struct {
 	// Ignored when CaptureIO is false.
 	// Default: 4096
 	MaxPayloadBytes int `json:"max_payload_bytes"`
+
+	// MaxAttrBytes caps every variable-content string attribute (url.path,
+	// lineage.peer.host, mcp.tool, a2a.session_id, …) and the span name, cut
+	// on a UTF-8 boundary with the same truncation marker as payloads.
+	// input.value / output.value keep their own MaxPayloadBytes cap, and
+	// fixed-vocabulary facts (lineage.role, lineage.outcome, …) are bounded by
+	// construction. Zero (or unset) uses defaultMaxAttrBytes; -1 removes the
+	// cap, and any other negative is refused at decode.
+	// Default: 256
+	MaxAttrBytes int `json:"max_attr_bytes"`
 
 	// MintTraceparent — both directions — forwards a W3C traceparent naming
 	// this exchange's request span when the request arrived with no
@@ -150,6 +167,7 @@ func defaultConfig() Config {
 	return Config{
 		OTelEndpoint:    defaultOTelEndpoint,
 		MaxPayloadBytes: defaultMaxPayloadBytes,
+		MaxAttrBytes:    defaultMaxAttrBytes,
 		MintTraceparent: true,
 		BypassPaths:     []string{"/.well-known/", "/healthz", "/readyz", "/health"},
 		BypassHosts: []string{
@@ -184,6 +202,13 @@ func decodeConfig(raw json.RawMessage) (Config, error) {
 	}
 	if cfg.MaxPayloadBytes < unboundedPayload {
 		return Config{}, fmt.Errorf("lineage-telemetry config: max_payload_bytes %d is invalid; use -1 to attach whole values or a positive byte cap", cfg.MaxPayloadBytes)
+	}
+	// Same convention as max_payload_bytes: 0 = the default, -1 = no cap.
+	if cfg.MaxAttrBytes == 0 {
+		cfg.MaxAttrBytes = defaultMaxAttrBytes
+	}
+	if cfg.MaxAttrBytes < unboundedPayload {
+		return Config{}, fmt.Errorf("lineage-telemetry config: max_attr_bytes %d is invalid; use -1 to remove the cap or a positive byte cap", cfg.MaxAttrBytes)
 	}
 	// gRPC NewClient expects host:port only, so reduce a URL form (e.g.
 	// http://collector:4317/v1/traces) to its host — TrimPrefix left any path
