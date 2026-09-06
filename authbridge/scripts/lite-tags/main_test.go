@@ -16,7 +16,7 @@ func TestDiscover_ExpectedTags(t *testing.T) {
 		t.Fatalf("discover: %v", err)
 	}
 	got := strings.Join(tags, ",")
-	want := "exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker,exclude_plugin_toolprune"
+	want := "exclude_plugin_a2aparser,exclude_plugin_ibac,exclude_plugin_inferenceparser,exclude_plugin_lineage,exclude_plugin_mcpparser,exclude_plugin_opa,exclude_plugin_sparc,exclude_plugin_tokenbroker,exclude_plugin_toolprune"
 	if got != want {
 		t.Errorf("output changed\n got: %s\nwant: %s", got, want)
 	}
