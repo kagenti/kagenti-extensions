@@ -33,17 +33,13 @@ func (p *InferenceParser) Capabilities() pipeline.PluginCapabilities {
 
 // endpointPath returns pctx.Path with any query string removed.
 //
-// The listeners disagree on what Path holds, and dialect dispatch below is
-// exact-match, so this has to be normalised in one place. The HTTP listeners
-// set Path from r.URL.Path, which already excludes the query; extproc sets it
-// from the HTTP/2 :path pseudo-header, which per RFC 9113 §8.3.1 includes it.
-//
-// Claude Code posts to /v1/messages?beta=true, so without this the request
-// falls to the default arm on the envoy-sidecar path and the parser records no
-// inference telemetry at all — and once OnRequest did match, the four
-// dialect-selection sites below would send an Anthropic stream to the OpenAI
-// parser. Both failure modes are silent, which is why every site normalises
-// rather than only the dispatch switch.
+// Every listener now guarantees Path is query-free (see pipeline.Context.Path),
+// so this is defense in depth for contexts constructed outside a listener
+// (tests, future transports). It stays because the failure mode it guards is
+// silent: Claude Code posts to /v1/messages?beta=true, and with a query
+// attached the exact-match dialect dispatch below falls to the default arm and
+// records no inference telemetry at all — or worse, sends an Anthropic stream
+// to the OpenAI parser.
 func endpointPath(pctx *pipeline.Context) string {
 	path, _, _ := strings.Cut(pctx.Path, "?")
 	return path

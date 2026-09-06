@@ -16,6 +16,7 @@ import (
 	rpcstatus "google.golang.org/genproto/googleapis/rpc/status"
 
 	"github.com/rossoctl/cortex/authbridge/authlib/auth"
+	"github.com/rossoctl/cortex/authbridge/authlib/listener/httpx"
 	"github.com/rossoctl/cortex/authbridge/authlib/pipeline"
 )
 
@@ -44,7 +45,7 @@ func (s *Server) Check(ctx context.Context, req *authv3.CheckRequest) (*authv3.C
 	if host == "" {
 		host = headers["host"]
 	}
-	path := httpReq.GetPath()
+	path := httpx.PathOnly(httpReq.GetPath())
 	scheme := httpReq.GetScheme()
 
 	// Inbound validation via pipeline
@@ -120,7 +121,6 @@ func mapToHTTPHeader(m map[string]string) http.Header {
 	}
 	return h
 }
-
 
 // deniedFromAction renders a pipeline Reject as an ext_authz CheckResponse
 // preserving the plugin's status, headers, and body. The flat

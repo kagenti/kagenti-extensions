@@ -104,9 +104,20 @@ type Context struct {
 	// fixtures, an unrecognized transport, etc.). Plugins that need a
 	// concrete scheme should pick a default explicitly — treating ""
 	// as "assume http" would silently mask missing listener plumbing.
-	Scheme  string
-	Host    string
-	Path    string
+	Scheme string
+	Host   string
+
+	// Path is the URL path of the request, never including a query
+	// string: the proxy listeners populate it from r.URL.Path, and
+	// ext_proc / ext_authz run the raw request target through the same
+	// URL parser (httpx.PathOnly → url.ParseRequestURI), so the value
+	// is identical across listener modes — modulo unparseable targets,
+	// which net/http rejects with 400 before any pipeline runs and the
+	// Envoy-fed listeners keep query-stripped but otherwise raw.
+	// Plugins may match, log, or feed Path into policy without
+	// stripping a query themselves.
+	Path string
+
 	Headers http.Header
 	Body    []byte // nil unless at least one plugin declares BodyAccess: true
 
