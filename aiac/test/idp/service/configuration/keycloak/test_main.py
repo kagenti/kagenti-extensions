@@ -695,11 +695,89 @@ class TestSetServiceType:
         )
         assert resp.status_code == 422
 
+    def test_empty_type_clears_client_type_attribute(self):
+        # The #176 client sends {"type": ""} as the CLEAR signal. Clearing drops the client.type
+        # key (read-merge update_client) while preserving other attributes; returns 200.
+        admin = MagicMock()
+        admin.get_client.return_value = {
+            "id": "svc-uuid", "attributes": {"existing": "keep", "client.type": "Agent"}
+        }
+        resp = _make_client(admin).post(f"/services/svc-uuid/type?realm={REALM}", json={"type": ""})
+        assert resp.status_code == 200
+        admin.update_client.assert_called_once_with("svc-uuid", {"attributes": {"existing": "keep"}})
+
+    def test_empty_type_is_idempotent_when_already_clear(self):
+        # Clearing an already-clear type (no client.type attribute) is not an error — the
+        # read-merge simply writes back the unchanged attributes and returns success.
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "attributes": {"existing": "keep"}}
+        resp = _make_client(admin).post(f"/services/svc-uuid/type?realm={REALM}", json={"type": ""})
+        assert resp.status_code == 200
+        admin.update_client.assert_called_once_with("svc-uuid", {"attributes": {"existing": "keep"}})
+
+    def test_missing_body_returns_422(self):
+        admin = MagicMock()
+        resp = _make_client(admin).post(f"/services/svc-uuid/type?realm={REALM}")
+        assert resp.status_code == 422
+
     def test_returns_502_on_keycloak_error(self):
         admin = MagicMock()
         admin.get_client.side_effect = KeycloakError(error_message="not found", response_code=404)
         resp = _make_client(admin).post(
             f"/services/svc-uuid/type?realm={REALM}", json={"type": "Agent"}
+        )
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# POST /services/{service_id}/enabled (UC1 rollback disable / re-enable)
+# ---------------------------------------------------------------------------
+
+
+class TestSetServiceEnabled:
+    def test_disable_calls_update_client_and_returns_200(self):
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "my-app", "enabled": False}
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/enabled?realm={REALM}", json={"enabled": False}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+        admin.update_client.assert_called_once_with("svc-uuid", {"enabled": False})
+
+    def test_enable_calls_update_client_with_true(self):
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "my-app", "enabled": True}
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/enabled?realm={REALM}", json={"enabled": True}
+        )
+        assert resp.status_code == 200
+        admin.update_client.assert_called_once_with("svc-uuid", {"enabled": True})
+
+    def test_disable_is_idempotent_when_already_disabled(self):
+        # Disabling an already-disabled client is not an error — update_client is issued and a
+        # success status returned.
+        admin = MagicMock()
+        admin.get_client.return_value = {"id": "svc-uuid", "clientId": "my-app", "enabled": False}
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/enabled?realm={REALM}", json={"enabled": False}
+        )
+        assert resp.status_code == 200
+
+    def test_missing_body_returns_422(self):
+        admin = MagicMock()
+        resp = _make_client(admin).post(f"/services/svc-uuid/enabled?realm={REALM}")
+        assert resp.status_code == 422
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.update_client.side_effect = KeycloakError(error_message="boom", response_code=500)
+        resp = _make_client(admin).post(
+            f"/services/svc-uuid/enabled?realm={REALM}", json={"enabled": False}
         )
         assert resp.status_code == 502
         assert "error" in resp.json()
@@ -904,6 +982,75 @@ class TestAssignRoleToService:
             error_message="failure", response_code=500
         )
         resp = _make_client(admin).post(f"/services/svc-uuid/roles/role-id?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /services/{service_id}/roles/{role_id} (unmap-then-delete, UC1 rollback)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteRoleFromService:
+    def _wire(self, admin):
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.get_realm_role_by_id.return_value = {"id": "role-id", "name": "src-helper"}
+
+    def test_unmaps_role_from_service_account_then_deletes_realm_role(self):
+        # Unmap-then-delete order: the role mapping is removed from the service account FIRST,
+        # then the realm role is deleted (a still-mapped role cannot be deleted cleanly).
+        from unittest.mock import call
+
+        admin = MagicMock()
+        self._wire(admin)
+        resp = _make_client(admin).delete(f"/services/svc-uuid/roles/role-id?realm={REALM}")
+        assert resp.status_code == 200
+        admin.assert_has_calls([
+            call.delete_realm_roles_of_user("sa-user-id", [{"id": "role-id", "name": "src-helper"}]),
+            call.delete_realm_role("src-helper"),
+        ])
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.get_client_service_account_user.side_effect = KeycloakError(
+            error_message="boom", response_code=500
+        )
+        resp = _make_client(admin).delete(f"/services/svc-uuid/roles/role-id?realm={REALM}")
+        assert resp.status_code == 502
+        assert "error" in resp.json()
+
+    def teardown_method(self):
+        app.dependency_overrides.clear()
+
+
+# ---------------------------------------------------------------------------
+# DELETE /services/{service_id}/scopes/{scope_id} (unmap-then-delete, UC1 rollback)
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteScopeFromService:
+    def test_unmaps_scope_from_client_then_deletes_client_scope(self):
+        # Unmap-then-delete order: the scope is removed from the client's default scopes FIRST,
+        # then the client scope itself is deleted.
+        from unittest.mock import call
+
+        admin = MagicMock()
+        resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
+        assert resp.status_code == 200
+        admin.assert_has_calls([
+            call.delete_client_default_client_scope("svc-uuid", "scope-id"),
+            call.delete_client_scope("scope-id"),
+        ])
+
+    def test_returns_502_on_keycloak_error(self):
+        admin = MagicMock()
+        admin.delete_client_default_client_scope.side_effect = KeycloakError(
+            error_message="boom", response_code=500
+        )
+        resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
         assert resp.status_code == 502
         assert "error" in resp.json()
 

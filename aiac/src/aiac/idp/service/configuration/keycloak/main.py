@@ -170,7 +170,13 @@ class _RoleCreate(BaseModel):
 
 
 class _ServiceTypeUpdate(BaseModel):
-    type: Literal["Agent", "Tool"]
+    # Empty string is the CLEAR signal the #176 client sends ({"type": ""}) to unset a service's
+    # type; "Agent"/"Tool" set it. Any other value is rejected with the standard 422.
+    type: Literal["Agent", "Tool", ""]
+
+
+class _ServiceEnabledUpdate(BaseModel):
+    enabled: bool
 
 
 class _DiscoveryToken(BaseModel):
@@ -304,8 +310,30 @@ def set_service_type(
         # Merge into the existing attributes so we don't clobber other client attributes;
         # Keycloak replaces the whole attributes map on update.
         attributes = dict(client.get("attributes") or {})
-        attributes[_SERVICE_TYPE_ATTRIBUTE] = body.type  # capitalized plain string
+        if body.type:
+            attributes[_SERVICE_TYPE_ATTRIBUTE] = body.type  # capitalized plain string
+        else:
+            # Empty type = clear: drop the attribute. Idempotent — popping an already-absent
+            # key is a no-op, so clearing an already-clear type is not an error.
+            attributes.pop(_SERVICE_TYPE_ATTRIBUTE, None)
         admin.update_client(service_id, {"attributes": attributes})
+        return admin.get_client(service_id)
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.post("/services/{service_id}/enabled", status_code=200)
+def set_service_enabled(
+    service_id: str, body: _ServiceEnabledUpdate, admin: KeycloakAdmin = Depends(get_admin)
+):
+    """Enable or disable a service's Keycloak client (UC1 rollback disable / success re-enable).
+
+    Writes ``enabled`` straight through ``update_client``; Keycloak merges a partial client
+    representation, so no read is needed. Idempotent — disabling an already-disabled client (or
+    enabling an already-enabled one) is not an error. Returns the updated client.
+    """
+    try:
+        admin.update_client(service_id, {"enabled": body.enabled})
         return admin.get_client(service_id)
     except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
@@ -378,6 +406,27 @@ def assign_role_to_service(service_id: str, role_id: str, admin: KeycloakAdmin =
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
+@app.delete("/services/{service_id}/roles/{role_id}", status_code=200)
+def delete_role_from_service(
+    service_id: str, role_id: str, admin: KeycloakAdmin = Depends(get_admin)
+):
+    """Tear down a realm role this service created (UC1 rollback).
+
+    Unmap-then-delete: remove the role mapping from the service account FIRST, then delete the
+    realm role. A still-mapped role cannot be deleted cleanly, so the ordering lives here (the
+    #176 client issues a single DELETE and relies on the service to sequence the two admin calls).
+    ``delete_realm_role`` takes the role *name*, so resolve the role by id before unmapping.
+    """
+    try:
+        sa_user = admin.get_client_service_account_user(service_id)
+        role = admin.get_realm_role_by_id(role_id)
+        admin.delete_realm_roles_of_user(sa_user["id"], [role])  # unmap first
+        admin.delete_realm_role(role["name"])  # then delete
+        return JSONResponse(status_code=200, content={})
+    except KeycloakError as e:
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
 @app.get("/services/{service_id}/scopes")
 def list_service_scopes(service_id: str, admin: KeycloakAdmin = Depends(get_admin)):
     try:
@@ -427,6 +476,24 @@ def assign_scope_to_service(service_id: str, scope_id: str, admin: KeycloakAdmin
     except KeycloakError as e:
         if e.response_code == 409:
             return JSONResponse(status_code=409, content={"error": str(e)})
+        return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+@app.delete("/services/{service_id}/scopes/{scope_id}", status_code=200)
+def delete_scope_from_service(
+    service_id: str, scope_id: str, admin: KeycloakAdmin = Depends(get_admin)
+):
+    """Tear down a client scope this service created (UC1 rollback).
+
+    Unmap-then-delete: remove the scope from the client's default scopes FIRST, then delete the
+    client scope. The ordering lives here (the #176 client issues a single DELETE and relies on
+    the service to sequence the two admin calls).
+    """
+    try:
+        admin.delete_client_default_client_scope(service_id, scope_id)  # unmap first
+        admin.delete_client_scope(scope_id)  # then delete
+        return JSONResponse(status_code=200, content={})
+    except KeycloakError as e:
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
