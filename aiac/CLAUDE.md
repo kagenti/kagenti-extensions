@@ -13,33 +13,6 @@ For current file list, `ls docs/specs/` and `ls docs/specs/components/`.
 
 When a document under `docs/specs/` contains a markdown link to another file, use the AskUserQuestion tool to ask before reading it — present "Yes" and "No" as clickable options. If the user picks Yes, read the file normally. If No, treat the link as a label and continue without reading it.
 
-## Issue tracking
-
-Issues are tracked as **GitHub issues** on the `s-and-p-team/cortex` repo,
-organized in the org-level **AIAC** Project (Projects v2):
-<https://github.com/orgs/s-and-p-team/projects/1>. Use `gh` to read and manage
-them.
-
-Note: `s-and-p-team/cortex` is the AIAC team's fork of the canonical upstream
-`rossoctl/cortex`. Tracking issues on the fork (not upstream) is deliberate —
-PRs still target upstream, but issue tracking stays on the team fork, so the
-`-R s-and-p-team/cortex` scoping below is intentional.
-
-Hierarchy: the Project groups **Feature**-typed container issues — one per
-component area, nested via GitHub **native sub-issues** to form the tree — over
-**Task**-typed leaf issues. Every issue carries the `aiac` label plus cumulative
-`area:<path>` labels; open issues also carry a `status:<value>` label, and the
-Project's built-in **Status** field mirrors that value.
-
-```bash
-# list / view (filter to the AIAC set)
-gh issue list -R s-and-p-team/cortex --label aiac --state all
-gh issue view <number> -R s-and-p-team/cortex
-```
-
-Filtered web list:
-<https://github.com/s-and-p-team/cortex/issues?q=is%3Aissue+label%3Aaiac>
-
 ## Issue tracking — codebase inspection policy
 
 When working on an issue would benefit from inspecting the relevant source code, use the AskUserQuestion tool to ask before doing so — present "Yes" and "No" as clickable options. If the user picks Yes, inspect the codebase normally. If No, work from the issue description and existing context only.
@@ -231,11 +204,7 @@ demo workloads, which don't) and CPU/memory requests + limits.
 
 ### Issue tracker
 
-GitHub issues on `s-and-p-team/cortex`, filtered by the `aiac` label, tracked in the org-level AIAC Project. See `docs/agents/issue-tracker.md`.
-
-### Triage labels
-
-Issue status is tracked with `status:<value>` labels; the board's built-in **Status** field carries the same values. See `docs/agents/triage-labels.md`.
+GitHub issues on `s-and-p-team/cortex` (the origin fork), filtered by the `aiac` label. See `docs/agents/issue-tracker.md`.
 
 ### Domain docs
 
