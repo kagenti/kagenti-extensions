@@ -19,9 +19,17 @@ data:
   AIAC_AC_MODEL: "RBAC"
   # Per-request LLM timeout (seconds): a stalled connection raises after this instead
   # of wedging /apply forever. Timeouts are transient, so _structured_call retries them
-  # up to UPSTREAM_MAX_RETRIES (default 3) with exponential backoff before surfacing.
+  # up to LLM_MAX_RETRIES (default 3, below) with exponential backoff before surfacing.
+  # (The LLM seam uses LLM_MAX_RETRIES, not UPSTREAM_MAX_RETRIES.)
   LLM_REQUEST_TIMEOUT: "120"
   UPSTREAM_MAX_RETRIES: "3"
+  # Dedicated LLM retry cadence for the Policy Rules Builder seam
+  # (graph._llm_retry_config). DELIBERATELY SEPARATE from UPSTREAM_MAX_RETRIES
+  # above (which governs the IdP/MCP/K8s transport seams): the LLM call is slower
+  # and fails differently, so it gets its own attempt count + backoff bounds.
+  LLM_MAX_RETRIES: "3"
+  LLM_RETRY_BACKOFF_MIN: "1"
+  LLM_RETRY_BACKOFF_MAX: "30"
 
 ---
 # Prerequisites: create this Secret before applying this manifest:

@@ -15,18 +15,22 @@ from openai import APIConnectionError, APITimeoutError
 from aiac.agent.policy_rules_builder.graph import (
     AuditVerdict,
     Contradiction,
+    LLMAccessError,
     PolicyContradictionError,
+    PolicyRulesBuilderBaseError,
     PolicyRulesBuilderError,
     RoleSelection,
     ScopeSelection,
+    UnparseableLLMResponseError,
     _build_llm,
+    _llm_retry_config,
     build_role_denies,
     build_role_rules,
     build_scope_rules,
 )
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule, RuleEffect
-from aiac.shared.upstream import is_transient
+from aiac.shared.upstream import is_transient, max_retries
 
 
 # --------------------------------------------------------------------------- #
@@ -202,14 +206,17 @@ def test_auditor_rejects_past_budget_raises():
 
 
 # --------------------------------------------------------------------------- #
-# Slice 9 — a persistently-unavailable LLM is transport-retried UPSTREAM_MAX_    #
-# RETRIES times, then the original transport error propagates (never swallowed). #
+# Slice 9 — a persistently-unavailable LLM is transport-retried LLM_MAX_RETRIES  #
+# times (#166 gave the LLM seam its own knob, decoupled from UPSTREAM_MAX_        #
+# RETRIES), then #165 surfaces a TYPED LLMAccessError (not the raw transport      #
+# error) whose __cause__ chains back to the original ConnectionError.            #
 # time.sleep is patched so tenacity's backoff waits are skipped.               #
 # --------------------------------------------------------------------------- #
-def test_llm_unavailable_raises_after_upstream_max_retries(monkeypatch):
-    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "2")
+def test_llm_unavailable_raises_after_llm_max_retries(monkeypatch):
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
 
-    invoke = MagicMock(side_effect=ConnectionError("down"))
+    original = ConnectionError("down")
+    invoke = MagicMock(side_effect=original)
     runnable = MagicMock()
     runnable.invoke = invoke
     llm = MagicMock()
@@ -219,10 +226,11 @@ def test_llm_unavailable_raises_after_upstream_max_retries(monkeypatch):
         stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
         stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
         stack.enter_context(patch("time.sleep"))  # NOT tenacity.nap.sleep (ineffective)
-        with pytest.raises(ConnectionError):
+        with pytest.raises(LLMAccessError) as exc:
             build_role_rules(_role(), [_scope("s-write", "write")])
 
-    assert invoke.call_count == 2
+    assert invoke.call_count == 2  # retry cadence unchanged
+    assert exc.value.__cause__ is original  # original transient chained, not swallowed
 
 
 # --------------------------------------------------------------------------- #
@@ -248,11 +256,13 @@ def test_openai_timeout_and_connection_errors_are_transient(exc):
 
 
 def test_llm_timeout_is_retried_then_reraised(monkeypatch):
-    """A never-returning LLM that raises APITimeoutError is retried UPSTREAM_MAX_RETRIES
-    times and then surfaces — proving the timeout path self-heals rather than wedging."""
-    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "2")
+    """A never-returning LLM that raises APITimeoutError is retried LLM_MAX_RETRIES
+    times and then surfaces as a TYPED LLMAccessError (#165) — proving the timeout path
+    self-heals rather than wedging, while the original timeout stays chained on __cause__."""
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
 
-    invoke = MagicMock(side_effect=APITimeoutError(request=_openai_request()))
+    original = APITimeoutError(request=_openai_request())
+    invoke = MagicMock(side_effect=original)
     runnable = MagicMock()
     runnable.invoke = invoke
     llm = MagicMock()
@@ -262,10 +272,11 @@ def test_llm_timeout_is_retried_then_reraised(monkeypatch):
         stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
         stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
         stack.enter_context(patch("time.sleep"))
-        with pytest.raises(APITimeoutError):
+        with pytest.raises(LLMAccessError) as exc:
             build_role_rules(_role(), [_scope("s-write", "write")])
 
     assert invoke.call_count == 2
+    assert exc.value.__cause__ is original
 
 
 # --------------------------------------------------------------------------- #
@@ -293,6 +304,68 @@ def test_build_llm_defaults_timeout_on_bad_env(monkeypatch):
         _build_llm()
 
     assert mk.call_args.kwargs["timeout"] == 120
+
+
+# =========================================================================== #
+# #165 — the _structured_call seam surfaces TYPED, SANITIZED LLM-access errors  #
+# instead of reraising the raw transient/parse exception. From a consumer's     #
+# view an unreachable LLM (after retries) and a reachable-but-unparseable        #
+# response are two distinct, catchable types, and NEITHER message leaks the      #
+# endpoint / host / API key. Exercised at the same seam the transport slices     #
+# use: patch _build_llm so the real _structured_call runs against a mock invoke. #
+# The underlying error is loaded with a fake endpoint/host/key so the            #
+# sanitization assertion is meaningful.                                          #
+# =========================================================================== #
+_FAKE_ENDPOINT = "https://secret-llm.internal:8443/v1"
+_FAKE_HOST = "secret-llm.internal"
+_FAKE_KEY = "sk-supersecretapikey0123456789"
+_LEAK_SUBSTRINGS = (_FAKE_ENDPOINT, _FAKE_HOST, _FAKE_KEY)
+
+
+def _run_with_failing_invoke(error, monkeypatch):
+    """Drive build_role_rules with a mock LLM whose .invoke() always raises `error`, so the
+    real _structured_call runs its retry loop + typed-raise wrapper. Returns the raised
+    exception (captured via pytest.raises). Retries are bounded to 2 and backoff sleeps skipped."""
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    invoke = MagicMock(side_effect=error)
+    runnable = MagicMock()
+    runnable.invoke = invoke
+    llm = MagicMock()
+    llm.with_structured_output.return_value = runnable
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
+        stack.enter_context(patch("time.sleep"))
+        with pytest.raises(PolicyRulesBuilderBaseError) as exc:
+            build_role_rules(_role(), [_scope("s-write", "write")])
+    return exc.value
+
+
+def test_transient_exhaustion_raises_sanitized_llm_access_error(monkeypatch):
+    # A transient error that never clears (retry budget exhausted) -> LLMAccessError, chained.
+    leaky = ConnectionError(f"cannot reach {_FAKE_ENDPOINT} host={_FAKE_HOST} key={_FAKE_KEY}")
+    raised = _run_with_failing_invoke(leaky, monkeypatch)
+
+    assert type(raised) is LLMAccessError  # exact type, not the raw ConnectionError
+    assert raised.__cause__ is leaky  # original transient chained
+    message = str(raised)
+    for secret in _LEAK_SUBSTRINGS:
+        assert secret not in message  # message is sanitized -- no endpoint/host/key leak
+
+
+def test_parse_error_raises_sanitized_unparseable_response_error(monkeypatch):
+    # A NON-transient failure (reachable LLM, but its response cannot be parsed / fails schema
+    # validation) is not retried; #165 surfaces it as UnparseableLLMResponseError, chained + sanitized.
+    leaky = ValueError(f"could not parse structured output from {_FAKE_ENDPOINT} host={_FAKE_HOST} key={_FAKE_KEY}")
+    raised = _run_with_failing_invoke(leaky, monkeypatch)
+
+    assert type(raised) is UnparseableLLMResponseError  # distinct from LLMAccessError
+    assert isinstance(raised, PolicyRulesBuilderBaseError)  # shares the PRB base hierarchy
+    assert raised.__cause__ is leaky  # original parse/validation error chained
+    message = str(raised)
+    for secret in _LEAK_SUBSTRINGS:
+        assert secret not in message  # message is sanitized -- no endpoint/host/key leak
 
 
 # =========================================================================== #
@@ -843,3 +916,117 @@ def test_door_b_explicit_prohibition_deny_only():
         rules = build_role_denies(devops, [source, issues])
 
     assert rules == [PolicyRule(role=devops, scope=source, effect=RuleEffect.DENY)]
+
+
+# =========================================================================== #
+# #166 — the PRB LLM seam (_structured_call) gets its OWN retry cadence,        #
+# independent of the shared UPSTREAM_MAX_RETRIES that governs the IdP/MCP/K8s   #
+# transport seams. Knobs: LLM_MAX_RETRIES (default 3), LLM_RETRY_BACKOFF_MIN    #
+# (default 1), LLM_RETRY_BACKOFF_MAX (default 30), each read at call time and   #
+# tolerant of unset / non-numeric values (mirrors _request_timeout). Exercised  #
+# at the same seam the transport slices use: set the env knobs and patch        #
+# _build_llm so the real _structured_call runs its retry loop against a mock     #
+# invoke; time.sleep is patched so tenacity's backoff waits are skipped.        #
+# =========================================================================== #
+def test_llm_retry_config_defaults_when_unset(monkeypatch):
+    # Every knob unset -> the issue's stated defaults 3 / 1 / 30.
+    for var in ("LLM_MAX_RETRIES", "LLM_RETRY_BACKOFF_MIN", "LLM_RETRY_BACKOFF_MAX"):
+        monkeypatch.delenv(var, raising=False)
+
+    cfg = _llm_retry_config()
+
+    assert (cfg.max_retries, cfg.backoff_min, cfg.backoff_max) == (3, 1, 30)
+
+
+def _failing_llm(error):
+    """Build a mock LLM whose .invoke() always raises `error`, so the real _structured_call
+    runs its retry loop against it. Returns (llm, invoke_mock)."""
+    invoke = MagicMock(side_effect=error)
+    runnable = MagicMock()
+    runnable.invoke = invoke
+    llm = MagicMock()
+    llm.with_structured_output.return_value = runnable
+    return llm, invoke
+
+
+def test_structured_call_honors_llm_max_retries(monkeypatch):
+    # The LLM loop's attempt count comes from LLM_MAX_RETRIES; UPSTREAM_MAX_RETRIES is set high on
+    # purpose and must be ignored here (proves the loop reads the dedicated knob, not the shared one).
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "5")
+
+    llm, invoke = _failing_llm(ConnectionError("down"))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
+        stack.enter_context(patch("time.sleep"))
+        with pytest.raises(LLMAccessError):
+            build_role_rules(_role(), [_scope("s-write", "write")])
+
+    assert invoke.call_count == 2  # LLM_MAX_RETRIES, not UPSTREAM_MAX_RETRIES (=5)
+
+
+def test_structured_call_backoff_bounds_from_env(monkeypatch):
+    # The exponential-backoff bounds flow from LLM_RETRY_BACKOFF_MIN / _MAX into the retry wait.
+    # One attempt (no sleep) is enough: we assert the wait_exponential CONSTRUCTION bounds.
+    monkeypatch.setenv("LLM_MAX_RETRIES", "1")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MIN", "7")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MAX", "9")
+
+    llm, _ = _failing_llm(ConnectionError("down"))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
+        stack.enter_context(patch("time.sleep"))
+        we = stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.wait_exponential"))
+        with pytest.raises(LLMAccessError):
+            build_role_rules(_role(), [_scope("s-write", "write")])
+
+    assert we.call_args.kwargs["min"] == 7
+    assert we.call_args.kwargs["max"] == 9
+
+
+def test_structured_call_decoupled_from_upstream_max_retries(monkeypatch):
+    # Decoupling proof (#166): with LLM_MAX_RETRIES UNSET, the LLM loop uses its OWN default (3) and
+    # ignores UPSTREAM_MAX_RETRIES entirely -- while the shared max_retries() STILL reads
+    # UPSTREAM_MAX_RETRIES for the IdP/MCP/K8s seams.
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)
+    monkeypatch.setenv("UPSTREAM_MAX_RETRIES", "2")
+
+    assert max_retries() == 2  # the shared knob is untouched -- other seams keep honoring it
+
+    llm, invoke = _failing_llm(ConnectionError("down"))
+
+    with ExitStack() as stack:
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph.get_policy_source", return_value=_Source()))
+        stack.enter_context(patch("aiac.agent.policy_rules_builder.graph._build_llm", return_value=llm))
+        stack.enter_context(patch("time.sleep"))
+        with pytest.raises(LLMAccessError):
+            build_role_rules(_role(), [_scope("s-write", "write")])
+
+    assert invoke.call_count == 3  # LLM default, NOT UPSTREAM_MAX_RETRIES (=2) -> decoupled
+
+
+def test_llm_retry_config_reads_env(monkeypatch):
+    # Well-formed values are read straight through from the env.
+    monkeypatch.setenv("LLM_MAX_RETRIES", "5")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MIN", "2")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MAX", "45")
+
+    cfg = _llm_retry_config()
+
+    assert (cfg.max_retries, cfg.backoff_min, cfg.backoff_max) == (5, 2, 45)
+
+
+def test_llm_retry_config_tolerates_non_numeric(monkeypatch):
+    # Garbage / empty values must each fall back to their default WITHOUT crashing the
+    # request (mirrors _request_timeout's tolerant parse).
+    monkeypatch.setenv("LLM_MAX_RETRIES", "not-a-number")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MIN", "garbage")
+    monkeypatch.setenv("LLM_RETRY_BACKOFF_MAX", "")
+
+    cfg = _llm_retry_config()
+
+    assert (cfg.max_retries, cfg.backoff_min, cfg.backoff_max) == (3, 1, 30)

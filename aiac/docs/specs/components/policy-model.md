@@ -94,6 +94,81 @@ No HTTP client dependency. No `requests`, no `python-dotenv`.
 
 All models use `model_config = ConfigDict(extra='ignore')`.
 
+#### Class Diagrams
+
+Class relationships split by root class.
+
+**`ServicePolicyModel`** — the persistent source of truth, one per service. Every rule lands here as an inbound edge on the SPM that owns the rule's scope.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class ServicePolicyModel {
+        +service_id : str
+        +service_type : ServiceType
+        +owned_roles : Role[]
+        +owned_scopes : Scope[]
+        +inbound_allow_rules : PolicyRule[]
+        +inbound_deny_rules : PolicyRule[]
+    }
+    class PolicyRule {
+        +role : Role
+        +scope : Scope
+        +effect : RuleEffect
+    }
+    class RuleEffect {
+        <<enumeration>>
+        ALLOW
+        DENY
+    }
+
+    ServicePolicyModel "1" o-- "0..*" PolicyRule : inbound_allow/deny_rules
+    PolicyRule --> RuleEffect : effect
+```
+
+**`PolicyModel`** — top-level container: every agent's derived policy. `AgentPolicyModel` is a pure derived projection built by the PCE from the relevant `ServicePolicyModel`s; it is not persisted itself.
+
+```mermaid
+classDiagram
+    direction LR
+
+    class PolicyModel {
+        +agents : AgentPolicyModel[]
+    }
+    class AgentPolicyModel {
+        +agent_id : str
+        +default_effect : RuleEffect
+        +agent_scopes : Scope[]
+        +target_allow_scopes : Dict~str,Scope[]~
+        +target_deny_scopes : Dict~str,Scope[]~
+        +inbound_subject_allow_rules : PolicyRule[]
+        +inbound_subject_deny_rules : PolicyRule[]
+        +inbound_source_allow_rules : PolicyRule[]
+        +inbound_source_deny_rules : PolicyRule[]
+        +outbound_target_allow_rules : PolicyRule[]
+        +outbound_target_deny_rules : PolicyRule[]
+        +outbound_subject_allow_rules : PolicyRule[]
+        +outbound_subject_deny_rules : PolicyRule[]
+    }
+    class PolicyRule {
+        +scope : Scope
+        +effect : RuleEffect
+    }
+    class RuleEffect {
+        <<enumeration>>
+        ALLOW
+        DENY
+    }
+
+    PolicyModel "1" *-- "0..*" AgentPolicyModel : agents
+    AgentPolicyModel "1" o-- "0..*" PolicyRule : inbound_subject/source_allow/deny_rules · outbound_target/subject_allow/deny_rules
+    AgentPolicyModel --> RuleEffect : default_effect
+    PolicyRule --> RuleEffect : effect
+```
+
+Legend: `*--` composition (owned, deleted with parent); `o--` aggregation (holds a list of); `-->` reference (a field of this type).
+
 #### New `Role` / `Scope` fields (defined in `aiac.idp.configuration.models`)
 
 The two-layer model requires ownership and a user/agent distinction on the IdP types. These fields are **defined in `aiac.idp.configuration.models`** (the deep population from Keycloak is handoff 02's concern), but the policy model depends on them for SPM routing and APM derivation:

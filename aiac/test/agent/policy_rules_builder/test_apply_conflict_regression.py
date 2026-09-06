@@ -267,10 +267,19 @@ def _drive_apply_with_passes(scope_rules, deny_rules, applied=None) -> tuple[Mag
     source is stubbed and the explain seam returns a fixed ExplainResult, so no live endpoint or
     on-disk policy file is touched even on the conflicting path."""
     provision = MagicMock()
-    provision.invoke.return_value = {"service_type": ServiceType.TOOL}
+    # The provision graph now also returns the created-manifest (issue 171); onboard_service reads
+    # both keys. Empty here — these cases pin the PCE/enrichment seams, not the UC1 rollback.
+    provision.invoke.return_value = {
+        "service_type": ServiceType.TOOL,
+        "created_roles": [],
+        "created_scopes": [],
+    }
     explained = ExplainResult(kind=ConflictKind.DIRECT, granting_quotes=[], prohibiting_quotes=[])
     with (
         patch("aiac.agent.uc.onboarding.orchestrator.build_provision_graph", return_value=provision),
+        # The Orchestrator's IdP seam: the success path re-enables the client and the failure path
+        # rolls back through it (issue 171). Stubbed so neither touches a live IdP.
+        patch("aiac.agent.uc.onboarding.orchestrator._config", return_value=MagicMock()),
         patch(f"{_BUILDER}._config", return_value=MagicMock()),
         patch(f"{_BUILDER}.resolve_focal_entities", return_value=_focal_own_scope()),
         patch(f"{_BUILDER}.build_scope_rules", return_value=scope_rules),

@@ -25,6 +25,10 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | POST | `/roles` | `POST /admin/realms/{realm}/roles` | Create realm-level role |
 | POST | `/services/{service_id}/roles/{role_id}` | `admin.get_client_service_account_user(service_id)` → `admin.assign_realm_roles(user_id, ...)` | Assign existing realm role to service account |
 | GET | `/services/{service_id}/discovery-token` | `admin.get_client(service_id)` → (idempotent) `add_mapper_to_client` → `KeycloakOpenID(...).token(grant_type="client_credentials")` | Mint a bearer token, minted **as the service's own client**, whose `aud` contains that client's client-id — for authenticating UC-1 tool discovery against the tool's AuthBridge sidecar |
+| DELETE | `/services/{service_id}/roles/{role_id}` | `get_client_service_account_user` → `delete_realm_roles_of_user(user_id, [{"id": role_id}])` → `get_realm_role_by_id(role_id)` → `delete_realm_role(role_name)` | Remove the role mapping from the service account, then delete the realm role (unmap-then-delete; shared-object safe) |
+| DELETE | `/services/{service_id}/scopes/{scope_id}` | `delete_default_default_client_scope(scope_id)` → `delete_client_scope(scope_id)` | Remove the scope mapping from the client, then delete the client scope (unmap-then-delete; shared-object safe) |
+| POST (empty/clear type) | `/services/{service_id}/type` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"attributes": {...}})` | Unset the service type — clear the `client.type` attribute via read-merge (same pattern as set) |
+| POST | `/services/{service_id}/enabled` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"enabled": <bool>})` | Enable or disable a service's Keycloak client (the writer for `Service.enabled`) |
 | GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
 
 `GET /subjects?role_id={role_id}` (filtered variant):
@@ -127,6 +131,35 @@ serviceId]`:
 6. Returns `200 OK` with `{"access_token": ..., "client_id": ..., "issuer": ..., "audience": [...]}`.
 7. Returns `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
+`DELETE /services/{service_id}/roles/{role_id}` (teardown — remove role mapping + delete realm role):
+1. Calls `admin.get_client_service_account_user(service_id)` and extracts `user["id"]`.
+2. Calls `admin.delete_realm_roles_of_user(user_id, [{"id": role_id}])` to remove the mapping from the service account (**unmap first**).
+3. **Shared-object safety.** Before it deletes the realm role, it confirms no other service account still holds it. If another client references the role, it stops after the unmap and does **not** delete the role.
+4. Resolves the role name via `admin.get_realm_role_by_id(role_id)`, then calls `admin.delete_realm_role(role_name)` to delete the realm role.
+5. Idempotent — an already-removed mapping or already-deleted role is treated as success.
+6. Returns `200 OK` on success; `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`DELETE /services/{service_id}/scopes/{scope_id}` (teardown — remove scope mapping + delete client scope):
+1. Calls `admin.delete_default_default_client_scope(scope_id)` to remove the default-scope assignment from the client (**unmap first**).
+2. **Shared-object safety.** Before it deletes the client scope, it confirms no other client still has it assigned. If another client references the scope, it stops after the unmap and does **not** delete the scope.
+3. Calls `admin.delete_client_scope(scope_id)` to delete the client scope.
+4. Idempotent — an already-removed assignment or already-deleted scope is treated as success.
+5. Returns `200 OK` on success; `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+**Unset service type** (`POST /services/{service_id}/type` with an empty/clear type):
+1. Calls `admin.get_client(service_id)` and copies its existing `attributes`.
+2. Removes (or empties) the **`client.type`** attribute and calls `admin.update_client(service_id, {"attributes": {...}})`. The remaining attributes are merged, not clobbered — the same read-merge pattern as setting the type.
+3. Idempotent — clearing an already-clear type is not an error.
+4. Returns `200 OK` with the updated client JSON (re-fetched via `admin.get_client`); `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+`POST /services/{service_id}/enabled` (enable/disable the client — the writer for `Service.enabled`):
+Accepts JSON body `{"enabled": true | false}` (rejected with `422` otherwise). It:
+1. Calls `admin.get_client(service_id)`, then `admin.update_client(service_id, {"enabled": <bool>})`.
+2. Idempotent — disabling an already-disabled client (or enabling an already-enabled one) is not an error.
+3. Returns `200 OK` with the updated client JSON (re-fetched via `admin.get_client`); `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
+
+The UC1 compensating rollback (see the AIAC Agent UC1 spec) consumes these four operations: it deletes the roles and scopes Provision created, unsets the type, and disables the client as a failed-service marker.
+
 All endpoints except `/health` require a `?realm=<realm>` query parameter specifying the Keycloak realm to operate in. Returns `422 Unprocessable Entity` if the parameter is absent. `/health` accepts no realm parameter — it calls `_get_or_create_admin(os.environ["KEYCLOAK_ADMIN_REALM"])` directly.
 
 All GET endpoints return `200 OK` with a JSON array on success, except `/subjects/{subject_id}/assignments` which returns a JSON object with `realmMappings` and `serviceMappings` fields. All endpoints return `502 Bad Gateway` with a JSON error body if the Keycloak Admin API call fails.
@@ -217,4 +250,8 @@ docker build -f aiac/src/aiac/idp/service/configuration/keycloak/Dockerfile \
 - `GET /services/{service_id}/scopes`: call `admin.get_client_default_client_scopes(service_id)`.
 - `GET /roles/{role_name}/composites`: call `admin.get_composite_realm_roles_of_role(role_name=role_name)`.
 - `POST /services/{service_id}/roles/{role_id}`: call `admin.get_client_service_account_user(service_id)` → extract `user["id"]` → call `admin.assign_realm_roles(user_id, [{"id": role_id}])`.
+- `DELETE /services/{service_id}/roles/{role_id}`: `get_client_service_account_user(service_id)` → `delete_realm_roles_of_user(user_id, [{"id": role_id}])` (unmap first), then — only if no other service account holds it — `get_realm_role_by_id(role_id)` → `delete_realm_role(role_name)`.
+- `DELETE /services/{service_id}/scopes/{scope_id}`: `delete_default_default_client_scope(scope_id)` (unmap first), then — only if no other client has it assigned — `delete_client_scope(scope_id)`.
+- Unset type (`POST /services/{service_id}/type` with an empty type, or `DELETE /services/{service_id}/type`): `get_client(service_id)` → drop the `client.type` attribute → `update_client(service_id, {"attributes": {...}})` (read-merge, same as set).
+- `POST /services/{service_id}/enabled`: `get_client(service_id)` → `update_client(service_id, {"enabled": <bool>})`. This is the writer for `Service.enabled`; all service reads already return the client representation unmodified (see above), so `enabled` is surfaced on read for `get_service` / `get_services`.
 - On `KeycloakError`, return HTTP 502 with `{"error": str(e)}`.

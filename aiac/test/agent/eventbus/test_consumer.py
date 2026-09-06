@@ -20,6 +20,14 @@ from aiac.agent.eventbus.stream import (
     MAX_DELIVER,
     STREAM_NAME,
 )
+from aiac.agent.policy_rules_builder.conflict_detection import PolicyConflictError
+from aiac.agent.policy_rules_builder.diagnostic_models import ConflictReport, ConflictStatus
+from aiac.agent.policy_rules_builder.graph import (
+    LLMAccessError,
+    PolicyContradictionError,
+    PolicyRulesBuilderError,
+    UnparseableLLMResponseError,
+)
 from aiac.policy.model.models import RuleEffect
 
 
@@ -100,13 +108,57 @@ def test_dispatch_acks_on_success():
             return_value=([], False, RuleEffect.DENY),
         ),
         patch("aiac.agent.eventbus.consumer.compute_and_apply") as pce,
+        patch("aiac.agent.eventbus.consumer.reenable_service") as reenable,
     ):
         asyncio.run(consumer._dispatch(msg))
 
     # _dispatch forwards the normalized (rules, override, default_effect) triple to the PCE.
     pce.assert_called_once_with([], False, RuleEffect.DENY)
+    # UC1 service-onboarding subject: the client is re-enabled with the derived service_id, only
+    # after the PCE apply succeeds.
+    reenable.assert_called_once_with("svc-1")
     msg.ack.assert_called_once()
     msg.term.assert_not_called()
+
+
+def test_dispatch_does_not_reenable_when_pce_apply_raises():
+    # The re-enable is strictly post-apply: if compute_and_apply raises, _dispatch never reaches
+    # reenable_service, so the client stays disabled (the failed-service marker). The failure is
+    # then handled by the normal ack/DLQ path (here: left unacked below MAX_DELIVER).
+    consumer = AiacEventConsumer()
+    consumer._nc = _fake_nc()
+    msg = _fake_msg("aiac.apply.service.svc-1", num_delivered=MAX_DELIVER - 1)
+
+    with (
+        patch(
+            "aiac.agent.eventbus.consumer.onboard_service",
+            return_value=([], False, RuleEffect.DENY),
+        ),
+        patch("aiac.agent.eventbus.consumer.compute_and_apply", side_effect=RuntimeError("pce boom")),
+        patch("aiac.agent.eventbus.consumer.reenable_service") as reenable,
+    ):
+        asyncio.run(consumer._dispatch(msg))
+
+    reenable.assert_not_called()
+    msg.ack.assert_not_called()
+
+
+def test_dispatch_does_not_reenable_for_non_service_subject():
+    # Re-enable is UC1-only: a role-update subject that applies cleanly must NOT re-enable any
+    # client (role updates provision nothing and disable nothing).
+    consumer = AiacEventConsumer()
+    consumer._nc = AsyncMock()
+    msg = _fake_msg("aiac.apply.role.role-1")
+
+    with (
+        patch("aiac.agent.eventbus.consumer.update_role", return_value=([], True)),
+        patch("aiac.agent.eventbus.consumer.compute_and_apply"),
+        patch("aiac.agent.eventbus.consumer.reenable_service") as reenable,
+    ):
+        asyncio.run(consumer._dispatch(msg))
+
+    reenable.assert_not_called()
+    msg.ack.assert_called_once()
 
 
 def test_dispatch_leaves_message_unacked_before_max_deliver():
@@ -133,6 +185,75 @@ def test_dispatch_routes_to_dlq_after_max_deliver():
     msg.ack.assert_not_called()
     msg.term.assert_called_once()
     consumer._nc.jetstream.return_value.publish.assert_called_once_with(DLQ_SUBJECT, msg.data)
+
+
+_PERMANENT_EXCEPTIONS = [
+    PolicyConflictError(ConflictReport(status=ConflictStatus.CONFLICTS_FOUND)),
+    PolicyContradictionError("scope:read", []),
+    PolicyRulesBuilderError("builder blew up"),
+    UnparseableLLMResponseError("cannot parse"),
+]
+
+
+@pytest.mark.parametrize(
+    "exc", _PERMANENT_EXCEPTIONS, ids=[type(e).__name__ for e in _PERMANENT_EXCEPTIONS]
+)
+def test_dispatch_terminates_permanent_failure_immediately_below_max_deliver(exc):
+    # Every permanent failure is DLQ'd + term()ed on FIRST delivery, never left to
+    # redeliver — even though num_delivered is well below MAX_DELIVER — and logged once.
+    consumer = AiacEventConsumer()
+    consumer._nc = _fake_nc()
+    msg = _fake_msg("aiac.apply.service.svc-1", num_delivered=1)
+
+    with (
+        patch("aiac.agent.eventbus.consumer.onboard_service", side_effect=exc),
+        patch("aiac.agent.eventbus.consumer.log_by_type") as log,
+    ):
+        asyncio.run(consumer._dispatch(msg))
+
+    msg.ack.assert_not_called()
+    msg.term.assert_called_once()
+    consumer._nc.jetstream.return_value.publish.assert_called_once_with(DLQ_SUBJECT, msg.data)
+    log.assert_called_once_with(exc)
+
+
+def test_dispatch_leaves_retryable_llm_access_error_unacked_below_max_deliver():
+    # A retryable failure (LLMAccessError — a transient LLM outage that may clear) is left
+    # UNACKED below MAX_DELIVER so NATS redelivers it; not term()ed, not acked. Logged once.
+    consumer = AiacEventConsumer()
+    consumer._nc = _fake_nc()
+    msg = _fake_msg("aiac.apply.service.svc-1", num_delivered=MAX_DELIVER - 1)
+    exc = LLMAccessError("endpoint unreachable")
+
+    with (
+        patch("aiac.agent.eventbus.consumer.onboard_service", side_effect=exc),
+        patch("aiac.agent.eventbus.consumer.log_by_type") as log,
+    ):
+        asyncio.run(consumer._dispatch(msg))
+
+    msg.ack.assert_not_called()
+    msg.term.assert_not_called()
+    consumer._nc.jetstream.assert_not_called()
+    log.assert_called_once_with(exc)
+
+
+def test_dispatch_routes_retryable_llm_access_error_to_dlq_at_max_deliver():
+    # A retryable failure that never clears is DLQ'd + term()ed once MAX_DELIVER is reached.
+    consumer = AiacEventConsumer()
+    consumer._nc = _fake_nc()
+    msg = _fake_msg("aiac.apply.service.svc-1", num_delivered=MAX_DELIVER)
+    exc = LLMAccessError("endpoint unreachable")
+
+    with (
+        patch("aiac.agent.eventbus.consumer.onboard_service", side_effect=exc),
+        patch("aiac.agent.eventbus.consumer.log_by_type") as log,
+    ):
+        asyncio.run(consumer._dispatch(msg))
+
+    msg.ack.assert_not_called()
+    msg.term.assert_called_once()
+    consumer._nc.jetstream.return_value.publish.assert_called_once_with(DLQ_SUBJECT, msg.data)
+    log.assert_called_once_with(exc)
 
 
 def test_start_with_retry_retries_on_failure_then_succeeds():

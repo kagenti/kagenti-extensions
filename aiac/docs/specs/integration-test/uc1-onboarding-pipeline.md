@@ -9,8 +9,8 @@
 
 > **Ladder, not one test.** This spec was previously a single "complete two-policy" test that assumed a
 > **two-stack** topology (one AIAC stack per `policy.md` variant) which is **not deployed** and so could
-> never run. It is now a **ladder** of three gradual, runnable tests against **one** AIAC stack, plus a
-> **deferred** two-policy rung:
+> never run. It is now a **ladder** of three gradual, runnable happy-path tests against **one** AIAC
+> stack, a **failure-path** rollback rung, plus a **deferred** two-policy rung:
 >
 > | Rung | Issue | Onboards | Proves |
 > |---|---|---|---|
@@ -18,6 +18,7 @@
 > | 2 | `testing/5.4.2-uc1-onboard-agent-then-tool.md` | agent → tool | onboarding the tool **after** the agent completes the agent's outbound gate (PCE additive merge) |
 > | 3 | `testing/5.4.3-uc1-onboard-tool-then-agent.md` | tool → agent | the happy path; **and, vs rung 2, onboarding-order-independence** |
 > | 4 | `testing/5.4.4-uc1-onboard-two-policies.md` | two policies | **deferred / TBD**; two-stack impl discarded |
+> | 5 | `testing/5.4.5-uc1-onboard-failure-rollback.md` | agent (LLM seam broken) | UC-1 **compensating rollback**: a build failure tears down what Provision created, unsets `client.type`, disables the client (`enabled=false`); a clean re-onboard re-enables |
 
 > **Relationship to `policy-pipeline`.** This is the **onboarding-order-focused sibling** of
 > [policy-pipeline.md](policy-pipeline.md). Identical *scenario facts and truth tables* (same three users,
@@ -31,7 +32,7 @@
 
 `aiac/test/integration/` — pytest modules marked `@pytest.mark.integration`, one per rung
 (`test_uc1_onboard_agent_only.py`, `test_uc1_onboard_agent_then_tool.py`,
-`test_uc1_onboard_tool_then_agent.py`). Each is a thin module that wraps the shared harness in a
+`test_uc1_onboard_tool_then_agent.py`, `test_uc1_onboard_failure_rollback.py`). Each is a thin module that wraps the shared harness in a
 one-line session fixture and supplies only its own rung's oracle (verdicts computed from
 `scenario_uc1.py`) and live assertions. They import three shared modules:
 
@@ -193,6 +194,40 @@ the **agent** and merges them onto the agent's stored `AgentPolicyModel`, re-ups
 Rung 1 (agent only) is the exception by construction: with no tool onboarded there are no tool scopes in
 the universe, so the outbound user gate is **empty** (all deny). Inbound is unaffected.
 
+## Failure path — compensating rollback (rung 5)
+
+Rungs 1–3 prove the happy path. Rung 5 proves the **failure path**: a build failure must leave **no
+partial footprint** and a **visible failed-service marker**, per the UC-1
+[Failure & Rollback](../components/aiac-agent/uc1-service-onboarding.md#failure--rollback) contract.
+
+**Inducing a deterministic build failure.** Service Provision's nodes are non-LLM (label read, AgentCard
+/ `tools/list` read, IdP writes), so they **succeed** and create the agent's roles/scopes; the LLM is
+first reached inside `ServicePolicyBuilder.build` (the PRB). The rung points the in-cluster agent at an
+**unreachable LLM** (an invalid `LLM_BASE_URL` / `LLM_API_KEY`, restored afterward) so the PRB's LLM seam
+exhausts its retries and raises `LLMAccessError`. Provision has already written the entities, so this is
+exactly the provision-succeeded / build-failed shape the rollback exists for.
+
+**Flow:** cleanup → break the LLM seam → `POST /apply/service/{github-agent id}` → restore the LLM seam →
+re-onboard → cleanup.
+
+**Assert (failed onboard):**
+1. `POST /apply/service/{id}` returns **`502`** with a **sanitized** body (`{"detail": …}` — **no**
+   `ConflictReport`, no endpoint/host/key).
+2. **No partial footprint** — the agent's provisioned roles + client scopes are **absent** (rollback
+   deleted exactly what this run created) and `client.type` is **unset** (via `KeycloakAdmin`).
+3. **Failed-service marker** — the agent's Keycloak client is **`enabled=false`**.
+4. **No CR** — no `AuthorizationPolicy` CR was upserted for the agent.
+
+**Assert (clean re-onboard):** with the LLM seam restored, `POST /apply/service/{id}` returns **`200`**,
+the roles/scopes exist with their expected descriptions, `client.type=Agent`, the client is
+**`enabled=true`** (the success path cleared the failed-disable), and the `AuthorizationPolicy` CR is
+upserted — the ordinary rung-1 end state. Because rollback deletes only what **this** run created (the
+created-manifest), the re-onboard recreates the footprint cleanly.
+
+Like the other rungs, this asserts **observable Keycloak + CR state** only — never internal orchestrator
+structure. It is the live counterpart of the UC-1 rollback unit coverage (teardown-of-created +
+failed-marker + success re-enable).
+
 ## Expected output
 
 Verdicts are **computed from** the `scenario_uc1.py` pair-lists (these tables are the human-readable
@@ -325,6 +360,11 @@ unset it **skips cleanly** (it never false-passes).
 - **Onboarding-order-independence is asserted, not assumed** (rungs 2 vs 3). Rung 3's intended end state
   is checked identical to rung 2's published expectations, and the real plugin's decisions are asserted in
   the tool→agent order. A divergence is a bug.
+- **The failure path is asserted, not assumed** (rung 5). A build failure — induced deterministically by
+  an unreachable LLM seam so `ServicePolicyBuilder.build` raises `LLMAccessError` after Provision has
+  written its entities — must leave **no partial footprint**, unset `client.type`, and disable the client
+  (`enabled=false`); a clean re-onboard re-enables it. Asserted on observable Keycloak + CR state, never
+  on internal orchestrator structure.
 - **Per-scope two-gate AND.** UC-1's per-skill operator roles are mapped to the tool scopes by
   capability-match, so the capability gate is populated; the plugin enforces the real per-scope AND. The
   agent reaches all four tool scopes, so the user gate discriminates.
@@ -353,7 +393,7 @@ unset it **skips cleanly** (it never false-passes).
   wired.
 
 Tracking issues: `testing/5.4-uc1-onboarding-integration-test.md` (epic) + `5.4.1`/`5.4.2`/`5.4.3` (rungs)
-+ `5.4.4` (deferred two-policy).
++ `5.4.4` (deferred two-policy) + `5.4.5` (failure-path rollback).
 
 ## Out of Scope
 

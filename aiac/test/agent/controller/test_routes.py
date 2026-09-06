@@ -18,8 +18,11 @@ from aiac.agent.policy_rules_builder.conflict_detection import (
 from aiac.agent.policy_rules_builder.diagnostic_models import ConflictStatus, FocalType
 from aiac.agent.policy_rules_builder.graph import (
     Contradiction,
+    LLMAccessError,
     PolicyContradictionError,
+    PolicyRulesBuilderBaseError,
     PolicyRulesBuilderError,
+    UnparseableLLMResponseError,
 )
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule, RuleEffect
@@ -58,6 +61,7 @@ def test_apply_service_dispatches_to_orchestrator_and_calls_pce_once():
             return_value=([], False, RuleEffect.DENY),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service") as reenable,
         patch.dict("os.environ", {}, clear=False) as _env,
     ):
         os.environ.pop("AIAC_DEFAULT_EFFECT", None)
@@ -67,6 +71,8 @@ def test_apply_service_dispatches_to_orchestrator_and_calls_pce_once():
     orch.assert_called_once_with("svc-123", RuleEffect.DENY)
     # The onboard route forwards the orchestrator's default_effect to the PCE (least-privilege here).
     pce.assert_called_once_with([], False, RuleEffect.DENY)
+    # The client is re-enabled only after the PCE apply succeeds.
+    reenable.assert_called_once_with("svc-123")
 
 
 def test_apply_service_default_effect_env_allow_reaches_orchestrator_and_pce():
@@ -78,6 +84,7 @@ def test_apply_service_default_effect_env_allow_reaches_orchestrator_and_pce():
             return_value=([], False, RuleEffect.ALLOW),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
         patch.dict("os.environ", {"AIAC_DEFAULT_EFFECT": "Allow"}, clear=False),
     ):
         resp = client.post("/apply/service/svc-123")
@@ -95,6 +102,7 @@ def test_apply_service_default_effect_env_unrecognised_falls_back_to_deny():
             return_value=([], False, RuleEffect.DENY),
         ) as orch,
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
         patch.dict("os.environ", {"AIAC_DEFAULT_EFFECT": "banana"}, clear=False),
     ):
         resp = client.post("/apply/service/svc-123")
@@ -177,6 +185,7 @@ def test_controller_forwards_handler_rules_and_override_verbatim():
             return_value=(rules, False, RuleEffect.DENY),
         ),
         patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+        patch("aiac.agent.controller.routes.reenable_service"),
     ):
         resp = client.post("/apply/service/svc-9")
 
@@ -201,6 +210,27 @@ def test_handler_upstream_error_surfaces_status_and_skips_pce():
 
     assert resp.status_code == 502
     pce.assert_not_called()
+
+
+def test_apply_service_does_not_reenable_when_pce_apply_raises():
+    # The re-enable is strictly post-apply: if compute_and_apply raises, the route never reaches
+    # reenable_service, so the client stays disabled (the failed-service marker) — never left
+    # enabled with no applied policy.
+    with (
+        patch(
+            "aiac.agent.controller.routes.onboard_service",
+            return_value=([], False, RuleEffect.DENY),
+        ),
+        patch(
+            "aiac.agent.controller.routes.compute_and_apply",
+            side_effect=HTTPException(status_code=500),
+        ),
+        patch("aiac.agent.controller.routes.reenable_service") as reenable,
+    ):
+        resp = client.post("/apply/service/svc-pce-boom")
+
+    assert resp.status_code == 500
+    reenable.assert_not_called()
 
 
 def test_policy_rules_builder_error_surfaces_422_and_skips_pce():
@@ -271,6 +301,104 @@ def test_policy_contradiction_error_surfaces_422_conflict_report_and_skips_pce()
     assert body["status"] == ConflictStatus.CONFLICTS_FOUND.value
     assert body["conflicts"][0]["scope"]["name"] == "issues"
     assert body["conflicts"][0]["quotes_verified"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Sanitized PRB-error mapping (#172): status per exception type + leak-free body.
+# A poisoned endpoint/host/API-key is fed into each raised error; the client body
+# must never echo it — full detail goes to the named loggers via log_by_type.     #
+# --------------------------------------------------------------------------- #
+_LEAK_ENDPOINT = "http://secret-endpoint.internal:9443"
+_LEAK_HOST = "secret-host.example"
+_LEAK_KEY = "sk-DEADBEEFcafef00d"
+_POISON = f"unreachable at {_LEAK_ENDPOINT} host={_LEAK_HOST} api_key={_LEAK_KEY}"
+
+
+def _assert_sanitized(resp, expected_status: int) -> None:
+    # The body is exactly a {"detail": <safe summary>} envelope with no leaked substring.
+    assert resp.status_code == expected_status
+    body = resp.json()
+    assert set(body.keys()) == {"detail"}
+    assert isinstance(body["detail"], str) and body["detail"]
+    for secret in (_LEAK_ENDPOINT, _LEAK_HOST, _LEAK_KEY):
+        assert secret not in resp.text
+
+
+def test_llm_access_error_surfaces_502_with_sanitized_body_and_no_leak():
+    # An unreachable LLM endpoint after the transport retry budget is a bad-gateway condition
+    # (502), and the poisoned endpoint/host/key never reaches the client body.
+    err = LLMAccessError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-llm")
+
+    _assert_sanitized(resp, 502)
+    pce.assert_not_called()
+
+
+def test_unparseable_llm_response_error_surfaces_502_with_sanitized_body_and_no_leak():
+    # A reachable-but-unparseable LLM response is likewise an upstream fault (502), sanitized.
+    err = UnparseableLLMResponseError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-llm")
+
+    _assert_sanitized(resp, 502)
+    pce.assert_not_called()
+
+
+def test_policy_rules_builder_error_body_is_sanitized_to_detail_without_leak():
+    # PolicyRulesBuilderError stays 422 (policy-input problem) but its body is now a leak-free
+    # summary, not str(exc) — a poisoned message must not escape to the client.
+    err = PolicyRulesBuilderError(f"Auditor rejected after 3 retries: {_POISON}")
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-reject")
+
+    _assert_sanitized(resp, 422)
+    pce.assert_not_called()
+
+
+def test_policy_rules_builder_base_error_safety_net_surfaces_500():
+    # A bare base error (an unmapped PRB subclass, or the base itself) hits the LAST-registered
+    # safety-net handler → 500, sanitized. The specific subclass handlers still win (see the
+    # 502/422 tests above), because Starlette resolves the most-specific registered handler.
+    err = PolicyRulesBuilderBaseError(_POISON)
+    with (
+        patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+        patch("aiac.agent.controller.routes.compute_and_apply") as pce,
+    ):
+        resp = client.post("/apply/service/svc-boom")
+
+    _assert_sanitized(resp, 500)
+    pce.assert_not_called()
+
+
+def test_log_by_type_invoked_with_the_raised_error_for_each_sanitized_handler():
+    # Every sanitized handler routes the FULL exception to the per-persona named loggers via
+    # log_by_type(exc) — the client sees only the safe summary, the operator gets the detail.
+    cases = [
+        (LLMAccessError(_POISON), 502),
+        (UnparseableLLMResponseError(_POISON), 502),
+        (PolicyRulesBuilderError(_POISON), 422),
+        (PolicyRulesBuilderBaseError(_POISON), 500),
+    ]
+    for err, expected_status in cases:
+        with (
+            patch("aiac.agent.controller.routes.onboard_service", side_effect=err),
+            patch("aiac.agent.controller.routes.compute_and_apply"),
+            patch("aiac.agent.controller.routes.log_by_type") as log,
+        ):
+            resp = client.post("/apply/service/svc-log")
+
+        assert resp.status_code == expected_status
+        log.assert_called_once_with(err)
 
 
 # --------------------------------------------------------------------------- #

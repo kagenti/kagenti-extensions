@@ -57,9 +57,23 @@ flowchart TD
 2. Call `ServicePolicyBuilder.build(service_id, service_type)` → get back `list[PolicyRule]`. Service Policy Builder re-resolves the focus service from the IdP catalog by its internal client UUID (`service_id`; Provision has already persisted its roles/scopes), so it needs only the id, not the `ServiceProvision`.
 3. Return `(list[PolicyRule], override=False)` to the Controller.
 
-No LLM calls, retry logic, or response assembly in the Orchestrator beyond sequencing.
+No LLM calls or response assembly in the Orchestrator beyond sequencing and the compensating rollback (see [Failure & Rollback](#failure--rollback)).
 
-**Replay safety (at-least-once delivery):** Service Provision IdP writes are **idempotent** (create-or-get by name: `create_service_role` / `create_service_scope` return the existing entity on a duplicate call). The PCE reconcile is also idempotent. If the pod crashes between Service Provision completing and the PCE call, NATS redelivers and the full pipeline re-runs safely to convergence. There is **no rollback logic**.
+**Replay safety (at-least-once delivery):** Service Provision IdP writes are **idempotent** (create-or-get by name: `create_service_role` / `create_service_scope` return the existing entity on a duplicate call). The PCE reconcile is also idempotent. If the pod crashes between Service Provision completing and the PCE call, NATS redelivers and the full pipeline re-runs safely to convergence — the success re-run stays idempotent. A build **failure**, however, triggers a **compensating rollback** (see [Failure & Rollback](#failure--rollback)) before the error propagates.
+
+---
+
+## Failure & Rollback
+
+The Orchestrator wraps the `provision → ServicePolicyBuilder.build` pipeline in a compensating rollback. On any of `PolicyConflictError`, `PolicyRulesBuilderError`, `LLMAccessError`, or `UnparseableLLMResponseError`, the Orchestrator rolls back what Service Provision created, logs the rollback actions (info), and **re-raises** the original error. The Controller then maps the re-raised error to its HTTP status (see [aiac-agent.md → Error Handling](../aiac-agent.md#error-handling)).
+
+**Rollback is a full teardown of what Provision created.** The `provision_service` node now returns a **created-manifest** — exactly the roles and scopes it **created** on this run, not the ones it reused by name. For each entity in that manifest, rollback **unmaps then deletes** it (the order the IdP library requires), and unsets the client `type` attribute. It then **disables the Keycloak client** (`enabled=false`), which is the failed-service marker visible in the admin UI. Because rollback tears down only what this run added, it never removes a pre-existing entity that another service shares. The IdP teardown and disable primitives (`delete_service_role`, `delete_service_scope`, `unset_service_type`, enable/disable) are specified in [`../library-idp.md`](../library-idp.md).
+
+**Rollback fires on every attempt.** A permanent failure rolls back once, because the NATS consumer routes it straight to the dead-letter subject (see [aiac-agent.md → Ack contract](../aiac-agent.md#ack-contract)). A retryable `LLMAccessError` re-provisions idempotently and rolls back again on each NATS redelivery. This repeated provision-then-rollback is accepted.
+
+**The success path re-enables the client — but only after the apply.** The Orchestrator does **not** re-enable the client itself. The caller (Controller route or NATS consumer) re-enables it through `reenable_service(service_id)` **after** its `compute_and_apply` (PCE) call succeeds. `reenable_service` sets the client `enabled=true` (idempotent), which clears a failed-disable left by a prior attempt. The re-enable is deliberately post-apply: if `compute_and_apply` fails, the caller never reaches `reenable_service`, so the client stays disabled (the failed-service marker) instead of being left enabled with no applied policy.
+
+**Rollback is UC1-only.** UC2 (Policy Update) and UC3 (Role Update) provision nothing, so they have nothing to tear down and never disable a client.
 
 ---
 
@@ -224,10 +238,11 @@ Neither guard alone is sufficient — ownership-based exclusion keeps own entiti
    - **user roles** — realm roles linked to at least one subject (via `subjects[*].roles`, composite-expanded through `flatten_role`) and not owned by any service (`role.id` not in the union of every service's role ids). These carry `kind=User`.
    - **other scopes** — `aiac.managed` scopes from `all_scopes` with `serviceId != focus.serviceId`.
 5. **Flatten candidate roles to their closure** before any PRB call, via the shared `flatten_role` helper (see [Composite role flattening](#composite-role-flattening)): union of other-agent roles + user roles, deduplicated by `role.id` (`candidate_roles`); on the agent path, also expand each of the focus service's own roles.
-6. Call PRB and merge:
+6. Call PRB and merge. Wrap each PRB call; catch `PolicyContradictionError`, accumulate `(focal, contradictions)`, and **continue** the fan-out (accumulate-and-merge). A hard failure — `PolicyRulesBuilderError`, `LLMAccessError`, or `UnparseableLLMResponseError` — aborts the fan-out immediately and propagates, so the Orchestrator can roll back (see [Failure & Rollback](#failure--rollback)). The PRB raise semantics are specified in [`policy-rules-builder.md`](policy-rules-builder.md) (handoff 03).
    - **`service_type = tool`:** call `build_scope_rules(candidate_roles, scope)` for each of the focus service's own scopes. Merge results into a single `list[PolicyRule]`.
    - **`service_type = agent`:** call `build_scope_rules(candidate_roles, scope)` for each own scope; for each of the focus service's own roles, call `build_role_rules(r, other_scopes)` **once per role `r` in that role's closure**. Merge all results into a single `list[PolicyRule]`.
-7. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
+7. Merge contradictions into one report. After the fan-out, run `detect_conflicts` and **union** its deterministic conflicts with the accumulated auditor contradictions into a single `ConflictReport` (a withheld focal appears as a Conflict row). If the report has any conflicts, run a best-effort `enrich_report`, then raise `PolicyConflictError(report)` — which the Controller maps to `422`. If the report has no conflicts, continue.
+8. Return the merged `list[PolicyRule]` to the Orchestrator. (The Orchestrator pairs it with `override=False` for the Controller — see [Architecture overview](#architecture-overview).)
 
 **Note on "all relevant scopes":** relevance (which of `other_scopes` maps to each `agent_role`) is determined by the PRB, not here. This module always passes the full ownership-excluded scope universe; the PRB emits only the relevant rule mappings. See [`policy-rules-builder.md`](policy-rules-builder.md).
 

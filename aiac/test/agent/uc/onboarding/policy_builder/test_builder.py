@@ -19,6 +19,14 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
+from aiac.agent.policy_rules_builder.conflict_detection import PolicyConflictError
+from aiac.agent.policy_rules_builder.graph import (
+    Contradiction,
+    LLMAccessError,
+    PolicyContradictionError,
+    PolicyRulesBuilderError,
+    UnparseableLLMResponseError,
+)
 from aiac.agent.uc.onboarding.policy_builder import builder
 from aiac.idp.configuration.models import RoleKind, Scope, Service, ServiceType, Subject
 from aiac.idp.configuration.models import Role as RoleModel
@@ -648,3 +656,165 @@ class TestDoorB:
         assert agent_a == agent_b
         # the tool's build owns the (tester, source-read) deny in either order
         assert ("tester", "source-read", RuleEffect.DENY) in tool_a
+
+
+class TestContradictionAccumulation:
+    """#168 — build() must NOT abort on the first PRB contradiction. Every focal's
+    ``PolicyContradictionError`` is accumulated across the fan-out, merged with the deterministic
+    conflict survey into ONE report, and raised as the single report-carrying ``PolicyConflictError``
+    (the existing 422 error). ``enrich_report`` is patched to identity so the assertions read the
+    merged (structural + contradiction) report directly; ``get_policy_source`` is patched so the
+    best-effort fetch never touches a live source."""
+
+    def test_two_contradicting_focals_merge_into_one_report_with_both(self):
+        # Two OWN scopes -> build_scope_rules is called twice. Each call raises a contradiction with
+        # a DISTINCT focal + candidate. If build aborted on the first, only one would ever reach the
+        # report; the accumulate-and-merge behaviour is proven by BOTH appearing in the one report.
+        s1 = _scope("weather.forecast", service_id=FOCUS_ID)
+        s2 = _scope("weather.history", service_id=FOCUS_ID)
+        other_role = _role("github.agent", kind=RoleKind.AGENT)
+        focus = _service(FOCUS_ID, scopes=[s1, s2])
+        other = _service(OTHER_ID, roles=[other_role])
+
+        def _contradict(roles, scope):
+            cand = "github.agent" if scope.name == "weather.forecast" else "slack.bot"
+            raise PolicyContradictionError(
+                f"scope name={scope.name}: desc",
+                [Contradiction(candidate_name=cand, description=f"{cand} collides on {scope.name}")],
+            )
+
+        with (
+            patch.object(builder, "get_policy_source"),
+            patch.object(builder, "enrich_report", side_effect=lambda report, *a, **k: report),
+        ):
+            with pytest.raises(PolicyConflictError) as ei:
+                _invoke(
+                    ServiceType.TOOL,
+                    services=[focus, other],
+                    all_scopes=[s1, s2],
+                    subjects=[],
+                    scope_rules=_contradict,
+                )
+
+        report = ei.value.report
+        pairs = {(c.role.name, c.scope.name) for c in report.conflicts}
+        # SCOPE-focal contradictions surface as (candidate role, focal scope) rows — both present.
+        assert pairs == {
+            ("github.agent", "weather.forecast"),
+            ("slack.bot", "weather.history"),
+        }
+
+    def test_structural_conflict_unions_with_accumulated_contradiction(self):
+        # One pass emits a real allow∩deny STRUCTURAL conflict; a later (Door B) pass raises an auditor
+        # CONTRADICTION. The single raised report must carry BOTH — the deterministic survey unioned
+        # with the accumulated contradiction (structural rows keep real ids; contradiction rows carry
+        # empty ids).
+        own_scope = _scope("issues", scope_id="issues-id", service_id=FOCUS_ID)
+        agent_role = _role("github.agent", role_id="agent-id", kind=RoleKind.AGENT)
+        tester = _role("tester", role_id="tester-id", kind=RoleKind.USER, aiac_managed=False)
+        subject = _subject("tina", roles=[tester])
+        focus = _service(FOCUS_ID, scopes=[own_scope])
+        other = _service(OTHER_ID, roles=[agent_role])
+
+        def _scope_side(roles, scope):
+            # a real (github.agent, issues) allow∩deny overlap -> detect_conflicts surfaces it
+            return [
+                PolicyRule(role=agent_role, scope=scope, effect=RuleEffect.ALLOW),
+                PolicyRule(role=agent_role, scope=scope, effect=RuleEffect.DENY),
+            ]
+
+        def _deny_side(role, scopes):
+            # Door B user-role pass raises an auditor contradiction -> tester's rule set withheld
+            raise PolicyContradictionError(
+                "role name=tester: desc",
+                [Contradiction(candidate_name="issues", description="tester exclusivity collides")],
+            )
+
+        with (
+            patch.object(builder, "get_policy_source"),
+            patch.object(builder, "enrich_report", side_effect=lambda report, *a, **k: report),
+        ):
+            with pytest.raises(PolicyConflictError) as ei:
+                _invoke(
+                    ServiceType.TOOL,
+                    services=[focus, other],
+                    all_scopes=[own_scope],
+                    subjects=[subject],
+                    scope_rules=_scope_side,
+                    role_denies=_deny_side,
+                )
+
+        report = ei.value.report
+        # structural overlap keeps its real ids; the withheld focal's contradiction is an id-less row.
+        assert any(c.role.id == "agent-id" and c.scope.id == "issues-id" for c in report.conflicts)
+        assert any(c.role.name == "tester" and c.role.id == "" for c in report.conflicts)
+
+
+class TestHardFailureShortCircuits:
+    """#168 — a HARD PRB failure (PolicyRulesBuilderError / LLMAccessError /
+    UnparseableLLMResponseError) is NOT accumulated: it aborts the build immediately and propagates
+    unchanged (so the Orchestrator rolls back). No report is produced — ``detect_conflicts`` is never
+    reached. Guards against widening the ``except`` to the shared PolicyRulesBuilderBaseError."""
+
+    @pytest.mark.parametrize(
+        "make_exc",
+        [
+            lambda: PolicyRulesBuilderError("auditor rejected after retries"),
+            lambda: LLMAccessError("endpoint unreachable"),
+            lambda: UnparseableLLMResponseError("schema-invalid response"),
+        ],
+        ids=["builder-error", "llm-access", "unparseable"],
+    )
+    def test_hard_failure_propagates_and_produces_no_report(self, make_exc):
+        own_scope = _scope("weather.forecast", service_id=FOCUS_ID)
+        other_role = _role("github.agent", kind=RoleKind.AGENT)
+        focus = _service(FOCUS_ID, scopes=[own_scope])
+        other = _service(OTHER_ID, roles=[other_role])
+
+        exc = make_exc()
+
+        def _raise_hard(roles, scope):
+            raise exc
+
+        with patch.object(builder, "detect_conflicts") as dc:
+            with pytest.raises(type(exc)) as ei:
+                _invoke(
+                    ServiceType.TOOL,
+                    services=[focus, other],
+                    all_scopes=[own_scope],
+                    subjects=[],
+                    scope_rules=_raise_hard,
+                )
+            # the SAME exception object bubbles out (not caught, not wrapped in PolicyConflictError)
+            assert ei.value is exc
+            # short-circuit: no conflict survey ran, so no report was produced
+            dc.assert_not_called()
+
+
+class TestCleanRunUnchanged:
+    """#168 — a clean fan-out (no contradiction, no structural conflict) returns the merged rule list
+    UNCHANGED and raises nothing; the accumulate-and-merge machinery is inert on the happy path."""
+
+    def test_clean_run_returns_merged_rules_unchanged(self):
+        own_role = _role("weather.agent")
+        own_scope = _scope("weather.forecast", service_id=FOCUS_ID)
+        other_role = _role("github.agent", kind=RoleKind.AGENT)
+        other_scope = _scope("github.issue", service_id=OTHER_ID)
+        focus = _service(
+            FOCUS_ID, roles=[own_role], scopes=[own_scope], service_type=ServiceType.AGENT
+        )
+        other = _service(OTHER_ID, roles=[other_role], scopes=[other_scope])
+        scope_rule = _rule(other_role, own_scope)
+        role_rule = _rule(own_role, other_scope)
+
+        result, _, _, _, _ = _invoke(
+            ServiceType.AGENT,
+            services=[focus, other],
+            all_scopes=[own_scope, other_scope],
+            subjects=[],
+            scope_rules=lambda roles, scope: [scope_rule],
+            role_rules=lambda role, scopes: [role_rule],
+        )
+
+        # both ALLOW-only passes merge cleanly: no allow∩deny overlap, no contradiction, no raise.
+        assert result == [scope_rule, role_rule]

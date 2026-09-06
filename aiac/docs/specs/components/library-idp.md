@@ -95,6 +95,11 @@ Represents a service (Keycloak: `client`).
 | `roles` | `list[Role]` | _(roles for this client)_ | `[]` |
 | `scopes` | `list[Scope]` | _(default client scopes)_ | `[]` |
 
+> **`Service.enabled` writer / read path.** `enabled` is written through
+> `Configuration.set_service_enabled` (below); it is **no longer** validated then discarded. Both
+> `get_service` and `get_services` surface the current value, so a rollback disable
+> (`enabled=false`) and a success re-enable (`enabled=true`) are observable on read.
+
 **Service type resolution** (`Service._resolve_keycloak_fields`, a `model_validator(mode="before")`). AIAC calls the concept "service type" everywhere; the backing Keycloak client attribute is named **`client.type`**. Resolution precedence:
 
 1. An explicit `type` already present on the input wins (never overridden).
@@ -198,6 +203,15 @@ class Configuration:
     def create_service_scope(self, service_id: str, scope) -> Scope: ...
 
     def set_service_type(self, service: Service, service_type: ServiceType) -> Service: ...
+
+    # Teardown + disable — consumed by the UC1 compensating rollback. The two deletes obey
+    # unmap-then-delete order and shared-object safety (see the note below); unset/enable reuse
+    # the set_service_type read-merge pattern. All four use the same _request / run_upstream
+    # transport (retry + backoff) as the methods above.
+    def delete_service_role(self, service: Service, role: Role) -> None: ...
+    def delete_service_scope(self, service: Service, scope: Scope) -> None: ...
+    def unset_service_type(self, service: Service) -> Service: ...
+    def set_service_enabled(self, service: Service, enabled: bool) -> Service: ...
 
     # Mint a bearer token, minted as the service's own client, whose `aud` contains that
     # client's client-id — for authenticating UC-1 tool discovery against the tool's
@@ -336,6 +350,43 @@ class Configuration:
 2. The service persists the value onto the Keycloak client as the **`client.type`** attribute (a plain string, capitalized). The Keycloak attribute name is an IdP-Service/mapping-layer detail — callers pass the generic `service_type` and never see it.
 3. Raises `RuntimeError` on non-2xx HTTP status.
 4. Returns the updated `Service` instance parsed from the response (`type` now resolved from the new attribute).
+
+`delete_service_role(service: Service, role: Role) -> None`: teardown of a role this service created.
+1. Issues `DELETE {AIAC_PDP_CONFIG_URL}/services/{service.id}/roles/{role.id}`, appending `?realm=<self.realm>`.
+2. The service removes the role mapping from the service account **first**, then deletes the realm role (**unmap-then-delete** order — a still-mapped role cannot be deleted cleanly).
+3. Idempotent: deleting an already-gone role is not an error.
+4. Subject to shared-object safety (below): a role that another service still references is **not** deleted — it is at most unmapped from this service.
+5. Raises `RuntimeError` on non-2xx HTTP status. Returns `None`.
+
+`delete_service_scope(service: Service, scope: Scope) -> None`: teardown of a scope this service created.
+1. Issues `DELETE {AIAC_PDP_CONFIG_URL}/services/{service.id}/scopes/{scope.id}`, appending `?realm=<self.realm>`.
+2. The service removes the scope mapping from the client **first**, then deletes the client scope (**unmap-then-delete** order).
+3. Idempotent: deleting an already-gone scope is not an error.
+4. Subject to shared-object safety (below): a scope that another service still references is **not** deleted — it is at most unmapped from this service.
+5. Raises `RuntimeError` on non-2xx HTTP status. Returns `None`.
+
+`unset_service_type(service: Service) -> Service`: clears the service type.
+1. Issues the clear-type request against `{AIAC_PDP_CONFIG_URL}/services/{service.id}/type` (an empty/clear type), appending `?realm=<self.realm>`.
+2. The service clears the **`client.type`** attribute with the same read-merge-`update_client` pattern `set_service_type` uses.
+3. Idempotent: clearing an already-clear type is not an error.
+4. Raises `RuntimeError` on non-2xx HTTP status. Returns the updated `Service` (`type` now `None`).
+
+`set_service_enabled(service: Service, enabled: bool) -> Service`: the **writer** for the `Service.enabled` field.
+1. Issues `POST {AIAC_PDP_CONFIG_URL}/services/{service.id}/enabled` with body `{"enabled": <bool>}`, appending `?realm=<self.realm>`.
+2. The service calls `update_client(enabled=…)` on the Keycloak client.
+3. Idempotent: disabling an already-disabled client (or enabling an already-enabled one) is not an error.
+4. Raises `RuntimeError` on non-2xx HTTP status. Returns the updated `Service` with the new `enabled` value.
+
+> **Shared-object safety.** Provisioning uses **create-or-reuse-by-name** (`create_service_role` /
+> `create_service_scope` reuse an existing realm role / client scope of the same name), so one role
+> or scope can be shared by several services. Teardown therefore deletes **only** an object **this**
+> service created — identified through the created-manifest that UC1 Service Provision returns — **and**
+> that no other service still references. As defense in depth, the delete path (enforced in the IdP
+> Configuration Service — see `idp-configuration-service.md`) refuses to delete a role or scope that is
+> still mapped to another client: such an object is at most unmapped from the caller, never deleted.
+> The **consumer** of these four operations is the UC1 compensating rollback (see the AIAC Agent UC1
+> spec, `aiac-agent/uc1-service-onboarding.md`), which deletes what Provision created, unsets the
+> type, and disables the client as a failed-service marker.
 
 ### Configuration
 

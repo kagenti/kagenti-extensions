@@ -9,7 +9,7 @@ exhaustion) -- never a silent []. An auditor-approved empty selection is a valid
 
 import logging
 import os
-from typing import Any, TypedDict, TypeVar, cast
+from typing import Any, NamedTuple, TypedDict, TypeVar, cast
 
 from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
@@ -19,7 +19,7 @@ from tenacity import Retrying, retry_if_exception, stop_after_attempt, wait_expo
 
 from aiac.idp.configuration.models import Role, Scope
 from aiac.policy.model.models import PolicyRule, RuleEffect
-from aiac.shared.upstream import is_transient, max_retries
+from aiac.shared.upstream import is_transient
 
 from .policy_source import get_policy_source
 from .prompts import build_auditor_messages, build_proposer_messages
@@ -39,6 +39,46 @@ def _request_timeout() -> float:
     except (TypeError, ValueError):
         return _DEFAULT_LLM_REQUEST_TIMEOUT
     return value if value > 0 else _DEFAULT_LLM_REQUEST_TIMEOUT
+
+
+_DEFAULT_LLM_MAX_RETRIES = 3
+_DEFAULT_LLM_RETRY_BACKOFF_MIN = 1.0
+_DEFAULT_LLM_RETRY_BACKOFF_MAX = 30.0
+
+_N = TypeVar("_N", int, float)
+
+
+class LLMRetryConfig(NamedTuple):
+    """The PRB LLM seam's dedicated retry cadence (attempt count + backoff bounds)."""
+
+    max_retries: int
+    backoff_min: float
+    backoff_max: float
+
+
+def _env_number(name: str, default: _N, cast: type[_N]) -> _N:
+    """Read env var ``name`` and parse it with ``cast`` (int/float), tolerant of an unset or
+    non-numeric value — a bad value must not crash the request, it falls back to ``default``
+    (mirrors ``_request_timeout`` / ``aiac.shared.upstream.max_retries``). A non-positive value
+    also falls back, so a knob can never disable retries or set a zero/negative backoff."""
+    try:
+        value = cast(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _llm_retry_config() -> LLMRetryConfig:
+    """The PRB LLM seam's retry cadence, read at call time. DELIBERATELY SEPARATE from the shared
+    ``UPSTREAM_MAX_RETRIES`` (``aiac.shared.upstream.max_retries``, which still governs the
+    IdP/MCP/K8s transport seams): the LLM call is slower and fails in different ways, so it gets
+    its own knobs — ``LLM_MAX_RETRIES`` (default 3), ``LLM_RETRY_BACKOFF_MIN`` (default 1),
+    ``LLM_RETRY_BACKOFF_MAX`` (default 30) — each tolerant of unset / non-numeric values."""
+    return LLMRetryConfig(
+        max_retries=_env_number("LLM_MAX_RETRIES", _DEFAULT_LLM_MAX_RETRIES, int),
+        backoff_min=_env_number("LLM_RETRY_BACKOFF_MIN", _DEFAULT_LLM_RETRY_BACKOFF_MIN, float),
+        backoff_max=_env_number("LLM_RETRY_BACKOFF_MAX", _DEFAULT_LLM_RETRY_BACKOFF_MAX, float),
+    )
 
 
 class _Selection(BaseModel):
@@ -74,10 +114,23 @@ class AuditVerdict(BaseModel):
     contradictions: list[Contradiction] = []
 
 
-class PolicyRulesBuilderError(RuntimeError): ...
+class PolicyRulesBuilderBaseError(Exception): ...
 
+class PolicyRulesBuilderError(PolicyRulesBuilderBaseError): ...
 
-class PolicyContradictionError(Exception):
+class LLMAccessError(PolicyRulesBuilderBaseError):
+    """Raised by ``_structured_call`` when the LLM endpoint stays unreachable after the transport
+    retry budget is exhausted (a transient failure that never cleared). The message is sanitized --
+    it never carries the endpoint / host / API key; the raw transport error is chained on
+    ``__cause__`` for internal logging only."""
+
+class UnparseableLLMResponseError(PolicyRulesBuilderBaseError):
+    """Raised by ``_structured_call`` when the LLM is REACHABLE but its response cannot be parsed /
+    fails schema validation (a non-transient failure, so it is not retried). Distinct from
+    ``LLMAccessError`` (endpoint unreachable) so a consumer can tell the two apart. Sanitized the
+    same way -- no endpoint / host / API key in the message; original error chained on ``__cause__``."""
+
+class PolicyContradictionError(PolicyRulesBuilderBaseError):
     """Raised when the policy GENUINELY both grants and prohibits the same (focal, candidate) pair
     (a direct conflict or a coarse-scope granularity mismatch). Carries the focal entity and ALL
     genuine contradictions in a single raise; the PRB fails closed (withholds the focal entity's
@@ -138,13 +191,28 @@ def _structured_call(schema: type[T], messages: list[BaseMessage]) -> T:
     failure (e.g. a bad request or a validation error) fails identically on every attempt, so
     it is surfaced immediately (consistent with ``aiac.shared.upstream``)."""
     runnable = _build_llm().with_structured_output(schema)
+    # Dedicated LLM retry cadence (LLM_MAX_RETRIES / LLM_RETRY_BACKOFF_MIN / LLM_RETRY_BACKOFF_MAX),
+    # independent of the shared UPSTREAM_MAX_RETRIES that still governs the IdP/MCP/K8s seams.
+    retry_cfg = _llm_retry_config()
     retryer = Retrying(
         retry=retry_if_exception(is_transient),
-        stop=stop_after_attempt(max_retries()),
-        wait=wait_exponential(multiplier=1, min=1, max=30),
+        stop=stop_after_attempt(retry_cfg.max_retries),
+        wait=wait_exponential(multiplier=1, min=retry_cfg.backoff_min, max=retry_cfg.backoff_max),
         reraise=True,
     )
-    return cast(T, retryer(runnable.invoke, messages))
+    try:
+        return cast(T, retryer(runnable.invoke, messages))
+    except Exception as err:
+        # reraise=True hands back the ORIGINAL last exception (never a tenacity RetryError), so we
+        # classify it exactly as the retry loop did. A still-transient error here means the retry
+        # budget was exhausted against an unreachable LLM -> LLMAccessError. The message is STATIC
+        # (never str(err)) so an endpoint/host/API key embedded in the transport error cannot leak;
+        # the raw error stays reachable via __cause__ (chained with ``from err``) for internal logs.
+        if is_transient(err):
+            raise LLMAccessError("LLM endpoint unreachable after exhausting transport retries") from err
+        # Non-transient: the LLM was reachable but its response could not be parsed / failed schema
+        # validation. Same static, endpoint-free message; original error chained via __cause__.
+        raise UnparseableLLMResponseError("LLM returned an unparseable or schema-invalid response") from err
 
 
 # shared node helpers (typed against _PRBWorking; direction specifics passed as kwargs)
