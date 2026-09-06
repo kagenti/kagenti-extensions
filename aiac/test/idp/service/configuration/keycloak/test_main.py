@@ -1045,6 +1045,18 @@ class TestDeleteRoleFromService:
         assert resp.status_code == 502
         assert "error" in resp.json()
 
+    def test_already_gone_role_404_is_idempotent_success(self):
+        # Idempotent teardown: on a UC1 rollback retry the realm role is already gone, so
+        # get_realm_role_by_id raises KeycloakGetError(404). This must be treated as success
+        # (200), not 502 — otherwise the rollback aborts before unset-type + disable.
+        admin = MagicMock()
+        admin.get_client_service_account_user.return_value = {"id": "sa-user-id"}
+        admin.get_realm_role_by_id.side_effect = KeycloakError(
+            error_message="Could not find role", response_code=404
+        )
+        resp = _make_client(admin).delete(f"/services/svc-uuid/roles/role-id?realm={REALM}")
+        assert resp.status_code == 200
+
     def teardown_method(self):
         app.dependency_overrides.clear()
 
@@ -1094,6 +1106,17 @@ class TestDeleteScopeFromService:
         resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
         assert resp.status_code == 502
         assert "error" in resp.json()
+
+    def test_already_gone_scope_404_is_idempotent_success(self):
+        # Idempotent teardown: on a UC1 rollback retry the client scope (or its mapping) is
+        # already gone, so the delete raises KeycloakDeleteError(404). This must be treated as
+        # success (200), not 502 — otherwise the rollback aborts before unset-type + disable.
+        admin = MagicMock()
+        admin.delete_client_default_client_scope.side_effect = KeycloakError(
+            error_message="Could not find client scope", response_code=404
+        )
+        resp = _make_client(admin).delete(f"/services/svc-uuid/scopes/scope-id?realm={REALM}")
+        assert resp.status_code == 200
 
     def teardown_method(self):
         app.dependency_overrides.clear()

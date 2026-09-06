@@ -433,6 +433,12 @@ def delete_role_from_service(
             admin.delete_realm_role(role["name"])  # then delete
         return JSONResponse(status_code=200, content={})
     except KeycloakError as e:
+        # Idempotent teardown: an already-gone role or mapping surfaces as 404
+        # (python-keycloak raises KeycloakGetError/KeycloakDeleteError with
+        # response_code 404). A UC1 rollback retry must treat that as success, so it
+        # proceeds to unset-type + disable instead of aborting here. Other errors → 502.
+        if getattr(e, "response_code", None) == 404:
+            return JSONResponse(status_code=200, content={})
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 
@@ -512,6 +518,12 @@ def delete_scope_from_service(
             admin.delete_client_scope(scope_id)  # then delete
         return JSONResponse(status_code=200, content={})
     except KeycloakError as e:
+        # Idempotent teardown: an already-gone scope or mapping surfaces as 404
+        # (python-keycloak raises KeycloakDeleteError with response_code 404). A UC1
+        # rollback retry must treat that as success, so it proceeds to unset-type +
+        # disable instead of aborting here. Other errors → 502.
+        if getattr(e, "response_code", None) == 404:
+            return JSONResponse(status_code=200, content={})
         return JSONResponse(status_code=502, content={"error": str(e)})
 
 

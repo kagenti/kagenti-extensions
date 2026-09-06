@@ -1,8 +1,10 @@
 # Issue tracker: GitHub (AIAC convention)
 
 Issues live as GitHub issues on **`s-and-p-team/cortex`** (the `origin` fork),
-filtered by the `aiac` label. Use the `gh` CLI for all operations, scoped with
-`-R s-and-p-team/cortex`.
+filtered by the `aiac` label. Use the `gh` CLI for all operations: repository-scoped
+issue and label commands take `-R s-and-p-team/cortex`, while Projects commands are
+account-scoped — they take `--owner s-and-p-team` (and `--project-id` for item
+updates), and need the `project` scope on the token (`gh auth refresh -s project`).
 
 This file exists so the engineering skills (`to-issues`, `triage`, `to-prd`,
 `qa`) have a single place to read the convention from.

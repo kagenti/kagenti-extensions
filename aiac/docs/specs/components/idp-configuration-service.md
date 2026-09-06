@@ -27,7 +27,7 @@ A FastAPI web service that proxies Keycloak Admin REST API endpoints. Returns Id
 | GET | `/services/{service_id}/discovery-token` | `admin.get_client(service_id)` → (idempotent) `add_mapper_to_client` → `KeycloakOpenID(...).token(grant_type="client_credentials")` | Mint a bearer token, minted **as the service's own client**, whose `aud` contains that client's client-id — for authenticating UC-1 tool discovery against the tool's AuthBridge sidecar |
 | DELETE | `/services/{service_id}/roles/{role_id}` | `get_client_service_account_user` → `delete_realm_roles_of_user(user_id, [{"id": role_id}])` → `get_realm_role_by_id(role_id)` → `delete_realm_role(role_name)` | Remove the role mapping from the service account, then delete the realm role (unmap-then-delete; shared-object safe) |
 | DELETE | `/services/{service_id}/scopes/{scope_id}` | `delete_default_default_client_scope(scope_id)` → `delete_client_scope(scope_id)` | Remove the scope mapping from the client, then delete the client scope (unmap-then-delete; shared-object safe) |
-| POST (empty/clear type) or DELETE | `/services/{service_id}/type` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"attributes": {...}})` | Unset the service type — clear the `client.type` attribute via read-merge (same pattern as set) |
+| POST (empty/clear type) | `/services/{service_id}/type` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"attributes": {...}})` | Unset the service type — clear the `client.type` attribute via read-merge (same pattern as set) |
 | POST | `/services/{service_id}/enabled` | `admin.get_client(service_id)` → `admin.update_client(service_id, {"enabled": <bool>})` | Enable or disable a service's Keycloak client (the writer for `Service.enabled`) |
 | GET | `/health` | `admin.get_server_info()` — uses `KEYCLOAK_ADMIN_REALM`; no `?realm=` param | Readiness probe |
 
@@ -146,7 +146,7 @@ serviceId]`:
 4. Idempotent — an already-removed assignment or already-deleted scope is treated as success.
 5. Returns `200 OK` on success; `502 Bad Gateway` with `{"error": ...}` on `KeycloakError`.
 
-**Unset service type** (`POST /services/{service_id}/type` with an empty/clear type, or a dedicated `DELETE /services/{service_id}/type`):
+**Unset service type** (`POST /services/{service_id}/type` with an empty/clear type):
 1. Calls `admin.get_client(service_id)` and copies its existing `attributes`.
 2. Removes (or empties) the **`client.type`** attribute and calls `admin.update_client(service_id, {"attributes": {...}})`. The remaining attributes are merged, not clobbered — the same read-merge pattern as setting the type.
 3. Idempotent — clearing an already-clear type is not an error.
