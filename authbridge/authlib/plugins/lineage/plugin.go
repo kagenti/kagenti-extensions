@@ -743,8 +743,8 @@ func (p *LineageTelemetry) appendRequestFacts(attrs []attribute.KeyValue, pctx *
 		// see the http.status_code note on the response span.
 		attrs = append(attrs, attribute.String("http.method", pctx.Method))
 	}
-	if pctx.Path != "" {
-		attrs = append(attrs, attribute.String("url.path", pctx.Path))
+	if path := urlPath(pctx); path != "" {
+		attrs = append(attrs, attribute.String("url.path", path))
 	}
 	if pctx.Scheme != "" {
 		attrs = append(attrs, attribute.String("url.scheme", pctx.Scheme))
@@ -845,9 +845,20 @@ func spanOp(pctx *pipeline.Context, protocol string) string {
 		}
 	}
 	if op == "" {
-		op = pctx.Path
+		op = urlPath(pctx)
 	}
 	return op
+}
+
+// urlPath returns pctx.Path without any query string. The extproc listener
+// populates Path from the raw :path pseudo-header, query included; the proxy
+// listeners use the parsed r.URL.Path, which excludes it. Stripping here keeps
+// url.path and the span-name fallback query-free under every listener — a
+// query can carry secrets that must not reach the trace store even with
+// capture_io off.
+func urlPath(pctx *pipeline.Context) string {
+	path, _, _ := strings.Cut(pctx.Path, "?")
+	return path
 }
 
 // mcpTool returns the tool name for an MCP tools/call, or "" otherwise.

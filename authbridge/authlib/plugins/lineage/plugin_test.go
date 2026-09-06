@@ -830,6 +830,23 @@ func TestPrincipalFacts_OutboundNeverEmitsPrincipal(t *testing.T) {
 	}
 }
 
+// The extproc listener populates pctx.Path from the raw :path pseudo-header,
+// query string included; url.path and the span-name fallback must never
+// carry it.
+func TestQueryStringNeverEmitted(t *testing.T) {
+	p, exp := newTestPlugin(t)
+	pctx := fakeContext(pipeline.Outbound, http.Header{})
+	pctx.Path = "/api/search?token=sekret"
+
+	run(t, p, pctx, allow(200))
+	req, _ := roleSplit(t, exp.GetSpans())
+
+	checkAttr(t, req, "url.path", "/api/search")
+	if req.Name != "weather-service http /api/search" {
+		t.Errorf("request span name = %q, want query-free", req.Name)
+	}
+}
+
 // ---- the forbidden-keys guard ----
 
 // TestForbiddenKeysNeverEmitted scans every attribute of every span emitted

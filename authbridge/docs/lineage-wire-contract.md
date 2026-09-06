@@ -1,4 +1,4 @@
-# Lineage wire contract — two-span sidecar lineage (v1.6.1)
+# Lineage wire contract — two-span sidecar lineage (v1.6.2)
 
 What the AuthBridge `lineage-telemetry` plugin emits, what it writes onto the wire, and what the
 data-governance `sidecar` interactions algorithm (ADR-0030) commits to when consuming it.
@@ -167,7 +167,7 @@ handles `openinference.span.kind`.
 | `lineage.protocol` | both | `a2a` \| `mcp` \| `inference` \| `http` | which parser matched; `http` = none |
 | `lineage.parent.source` | request | `tracestate` \| `wire` \| `none` | which precedence in §3.2 chose the parent. An audit fact; the consumer derives nothing from it |
 | `http.method` | request, when the listener supplies it | `POST` | all listeners do |
-| `url.path` | request, when present | `/mcp` | |
+| `url.path` | request, when present | `/mcp` | query-free: anything from `?` on is stripped before emission (per OTel semconv; the query can carry secrets and is never captured) |
 | `url.scheme` | request, when present | `http` | the listener's observed scheme. Optional: the consumer composes `scheme://peer.host + url.path` only when all three exist |
 | `a2a.method`, `a2a.session_id` | request, a2a | `message/send` | parsed facts |
 | `mcp.method`, `mcp.tool` | request, mcp | `tools/call`, `get_weather` | `mcp.tool` only for `tools/call` |
@@ -273,6 +273,10 @@ The producer must not emit these, and the consumer reads nothing from them.
 Version ladder, newest first. Each line is what changed on the wire or in the vocabulary; the
 mechanisms named as removed are not to be reintroduced.
 
+- **v1.6.2** — `url.path` and the span-name fallback derived from it are query-free: the producer
+  strips anything from `?` on before emission. Until now the envoy-sidecar listener's raw `:path`
+  pseudo-header put the query string on the wire regardless of `capture_io`; the proxy listeners
+  never delivered it.
 - **v1.6.1** — prose and configuration only; spans and wire unchanged. `lineage.self.id` is documented
   as reduced to its last `/`-segment before emission, which the producer has always done;
   `otel_ca_file` added for a collector under a private CA; `bypass_hosts` becomes an outbound-only
