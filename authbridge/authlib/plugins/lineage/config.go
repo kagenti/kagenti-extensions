@@ -39,7 +39,7 @@ type Config struct {
 	// https://host:port). An https:// scheme implies OTelTLS=true. Any other
 	// URL scheme is rejected at decode (see decodeConfig).
 	// Default: "localhost:4317"
-	OTelEndpoint string `json:"otel_endpoint"`
+	OTelEndpoint string `json:"otel_endpoint" description:"OTLP gRPC target: host:port, http://host:port or https://host:port; any other scheme is refused." default:"localhost:4317"`
 
 	// OTelTLS selects the OTLP transport. False (the default) dials plaintext,
 	// which is correct for the in-pod loopback collector but sends spans —
@@ -53,7 +53,7 @@ type Config struct {
 	// an explicit otel_tls:false, and an http:// endpoint with otel_tls:true
 	// or OTelCAFile — the scheme states a transport intent, and the knobs
 	// must agree with it.
-	OTelTLS bool `json:"otel_tls"`
+	OTelTLS bool `json:"otel_tls" description:"Dial the collector with TLS, verified against the system roots or otel_ca_file; an https:// endpoint implies it." default:"false"`
 
 	// OTelCAFile is a PEM bundle of CA certificates to verify the collector's
 	// serving certificate against, for a collector whose certificate is not
@@ -64,7 +64,7 @@ type Config struct {
 	// pool the dial verifies against: an unreadable file, or one with no
 	// certificate in it, refuses to start rather than falling back to the
 	// system roots. Empty (the default) verifies against the system roots.
-	OTelCAFile string `json:"otel_ca_file"`
+	OTelCAFile string `json:"otel_ca_file" description:"PEM bundle to verify the collector certificate against (a private CA); implies otel_tls."`
 
 	// CaptureIO when true attaches parsed request/response content as
 	// input.value (request span) and output.value (response span)
@@ -76,7 +76,7 @@ type Config struct {
 	//
 	// Off by default — enable only if traces do not contain PII or the
 	// OTel backend enforces appropriate access controls.
-	CaptureIO bool `json:"capture_io"`
+	CaptureIO bool `json:"capture_io" description:"Attach parsed request/response content as input.value / output.value." default:"false"`
 
 	// MaxPayloadBytes caps the size of the input.value / output.value
 	// attributes attached under CaptureIO. A payload longer than this is cut on
@@ -89,7 +89,7 @@ type Config struct {
 	// and any other negative is refused at decode.
 	// Ignored when CaptureIO is false.
 	// Default: 4096
-	MaxPayloadBytes int `json:"max_payload_bytes"`
+	MaxPayloadBytes int `json:"max_payload_bytes" description:"Byte cap on input.value / output.value; 0 or unset takes the default, -1 attaches whole values." default:"4096"`
 
 	// MaxAttrBytes caps every variable-content string attribute (url.path,
 	// lineage.peer.host, mcp.tool, a2a.session_id, …) and the span name, cut
@@ -99,7 +99,7 @@ type Config struct {
 	// construction. Zero (or unset) uses defaultMaxAttrBytes; -1 removes the
 	// cap, and any other negative is refused at decode.
 	// Default: 256
-	MaxAttrBytes int `json:"max_attr_bytes"`
+	MaxAttrBytes int `json:"max_attr_bytes" description:"Byte cap on every variable-content string attribute and the span name; 0 or unset takes the default, -1 removes the cap." default:"256"`
 
 	// MintTraceparent — both directions — forwards a W3C traceparent naming
 	// this exchange's request span when the request arrived with no
@@ -114,7 +114,7 @@ type Config struct {
 	// Set false for a pure observer that must not add a header the
 	// application would see (the exchange then fragments, visibly).
 	// Default: true
-	MintTraceparent bool `json:"mint_traceparent"`
+	MintTraceparent bool `json:"mint_traceparent" description:"Forward a traceparent naming this request span when no valid one arrived; false = a pure observer that writes no traceparent." default:"true"`
 
 	// BypassPaths lists URL path prefixes that should not generate lineage
 	// hops. Useful for suppressing infrastructure polling (agent-card
@@ -128,7 +128,7 @@ type Config struct {
 	// "/", is refused at decode because it would match every path and
 	// silently turn the plugin off.
 	// Default: ["/.well-known/", "/healthz", "/readyz", "/health"]
-	BypassPaths []string `json:"bypass_paths"`
+	BypassPaths []string `json:"bypass_paths" description:"URL path prefixes that produce no spans; setting the key replaces the default list." default:"/.well-known/, /healthz, /readyz, /health"`
 
 	// BypassHosts lists host globs whose exchanges should not generate lineage
 	// hops. Useful for suppressing infrastructure outbound calls such as OTel
@@ -147,7 +147,7 @@ type Config struct {
 	// empty, "*", or not valid path.Match syntax is refused at decode.
 	// Default: ["otel-collector", "otel-collector.*", "jaeger", "jaeger.*",
 	// "zipkin", "zipkin.*", "prometheus", "prometheus.*"]
-	BypassHosts []string `json:"bypass_hosts"`
+	BypassHosts []string `json:"bypass_hosts" description:"Outbound host globs (path.Match, port stripped, case folded) that produce no spans; ignored inbound; replaces the default list." default:"otel-collector, otel-collector.*, jaeger, jaeger.*, zipkin, zipkin.*, prometheus, prometheus.*"`
 
 	// SelfID is the agent's own stable identifier, emitted as the
 	// lineage.self.id fact on every span. Typically the Keycloak client ID
@@ -155,12 +155,12 @@ type Config struct {
 	// containing "/" (a SPIFFE ID) is reduced to its last non-empty path
 	// segment before emission — see serviceLabel — so two identities that
 	// differ only above that segment emit the same lineage.self.id.
-	SelfID string `json:"self_id"`
+	SelfID string `json:"self_id" description:"This workload identity, emitted as lineage.self.id; a SPIFFE ID is reduced to its last path segment."`
 
 	// SelfIDFile is the path to a file containing the agent's own client ID.
 	// Defaults to /shared/client-id.txt (the operator-mounted credential).
 	// Ignored when SelfID is set.
-	SelfIDFile string `json:"self_id_file"`
+	SelfIDFile string `json:"self_id_file" description:"Read when self_id is empty; the plugin refuses to start if neither yields an identity." default:"/shared/client-id.txt"`
 }
 
 func defaultConfig() Config {

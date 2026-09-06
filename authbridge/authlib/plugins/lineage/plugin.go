@@ -171,6 +171,13 @@ func NewLineageTelemetry() *LineageTelemetry {
 
 func (p *LineageTelemetry) Name() string { return pluginName }
 
+// ConfigSchema exposes the Config fields for schema-aware tooling
+// (/v1/plugins, /v1/pipeline, abctl edit templates), the same one-line
+// delegation every configurable sibling plugin uses.
+func (p *LineageTelemetry) ConfigSchema() []pipeline.FieldSchema {
+	return pipeline.SchemaOf(Config{})
+}
+
 func (p *LineageTelemetry) Capabilities() pipeline.PluginCapabilities {
 	return pipeline.PluginCapabilities{
 		// At least one protocol parser must be present and earlier in the
@@ -1040,10 +1047,11 @@ func ioOutputValue(pctx *pipeline.Context, protocol string) string {
 
 // Compile-time interface assertions.
 var (
-	_ pipeline.Plugin       = (*LineageTelemetry)(nil)
-	_ pipeline.Configurable = (*LineageTelemetry)(nil)
-	_ pipeline.Initializer  = (*LineageTelemetry)(nil)
-	_ pipeline.Shutdowner   = (*LineageTelemetry)(nil)
-	_ pipeline.Finisher     = (*LineageTelemetry)(nil)
-	_ pipeline.Readier      = (*LineageTelemetry)(nil)
+	_ pipeline.Plugin         = (*LineageTelemetry)(nil)
+	_ pipeline.Configurable   = (*LineageTelemetry)(nil)
+	_ pipeline.Initializer    = (*LineageTelemetry)(nil)
+	_ pipeline.Shutdowner     = (*LineageTelemetry)(nil)
+	_ pipeline.Finisher       = (*LineageTelemetry)(nil)
+	_ pipeline.Readier        = (*LineageTelemetry)(nil)
+	_ pipeline.SchemaProvider = (*LineageTelemetry)(nil)
 )

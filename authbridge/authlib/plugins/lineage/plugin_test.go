@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"reflect"
 	"slices"
 	"strings"
 	"sync/atomic"
@@ -938,6 +939,37 @@ func TestSampledOutParentStillExports(t *testing.T) {
 	}
 	if got := len(exp.GetSpans()); got != 2 {
 		t.Fatalf("exported %d spans for a sampled-out parent, want 2", got)
+	}
+}
+
+// The schema must track Config exactly — every operator key present, each
+// with a description — so /v1/plugins and abctl never render a blank field,
+// and a twelfth key added without a description goes red here.
+func TestConfigSchema_TracksConfig(t *testing.T) {
+	schema := NewLineageTelemetry().ConfigSchema()
+	byName := map[string]pipeline.FieldSchema{}
+	for _, f := range schema {
+		byName[f.Name] = f
+	}
+	cfgType := reflect.TypeOf(Config{})
+	keys := 0
+	for i := 0; i < cfgType.NumField(); i++ {
+		key, _, _ := strings.Cut(cfgType.Field(i).Tag.Get("json"), ",")
+		if key == "" || key == "-" {
+			continue
+		}
+		keys++
+		f, ok := byName[key]
+		if !ok {
+			t.Errorf("schema missing config key %q", key)
+			continue
+		}
+		if f.Description == "" {
+			t.Errorf("config key %q has no description tag", key)
+		}
+	}
+	if len(schema) != keys {
+		t.Errorf("schema has %d fields, Config has %d json keys", len(schema), keys)
 	}
 }
 
