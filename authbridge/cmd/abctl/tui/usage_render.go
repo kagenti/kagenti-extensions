@@ -17,8 +17,15 @@ import (
 // for stacked segments — narrower and the block glyphs stop reading as distinct
 // textures, which is what carries the encoding when color is unavailable.
 const (
-	barWidth  = 4
-	barGap    = 1
+	barWidth = 4
+	// barGap is 2, not 1, so a value label always has a separating column. Labels
+	// are up to 5 wide ("48.2k", "1.2ms"); at a stride of 5 two adjacent labels
+	// touched and read as one nonsense number ("1.2ms0"). Widening the gap keeps
+	// every label — alternating them instead would have dropped the newest
+	// bucket's value on a narrow terminal and hidden the "0" that distinguishes an
+	// idle minute from a small one. Ten bars at stride 6 plus the gutter is 66
+	// columns, still inside 80.
+	barGap    = 2
 	barStride = barWidth + barGap
 	plotRows  = 10 // vertical resolution before partial blocks
 	axisLabel = 6  // "  50k " gutter
@@ -37,6 +44,11 @@ const (
 	metricTokens usageMetric = iota
 	metricRequests
 	metricErrors
+	metricLatency
+
+	// usageMetricCount bounds the [t] cycle. Kept adjacent to the iota block so
+	// adding a metric means editing one line here.
+	usageMetricCount = iota
 )
 
 func (m usageMetric) String() string {
@@ -45,21 +57,35 @@ func (m usageMetric) String() string {
 		return "requests"
 	case metricErrors:
 		return "errors"
+	case metricLatency:
+		return "latency"
 	default:
 		return "tokens"
 	}
 }
 
-// value extracts this metric from a bucket.
-func (m usageMetric) value(b usage.Bucket) int64 {
+// isLatency reports whether this metric needs the whiskers renderer rather than
+// bars. Latency is a distribution, not a magnitude from zero, so it gets a
+// different form — see the comment on the whisker glyphs.
+func (m usageMetric) isLatency() bool { return m == metricLatency }
+
+// valueOf extracts this metric from a per-label Counts. Bucket embeds Counts, so
+// value below delegates here — one place decides what each metric means, and a
+// stacked segment can never disagree with the bar it sits inside.
+func (m usageMetric) valueOf(c usage.Counts) int64 {
 	switch m {
 	case metricRequests:
-		return b.Requests
+		return c.Requests
 	case metricErrors:
-		return b.Errors
+		return c.Errors
 	default:
-		return b.Tokens
+		return c.Tokens
 	}
+}
+
+// value extracts this metric from a bucket.
+func (m usageMetric) value(b usage.Bucket) int64 {
+	return m.valueOf(b.Counts)
 }
 
 // renderBars draws the ungrouped bar chart: a y-axis with humanized labels, one
@@ -166,7 +192,11 @@ func renderAxis(n int) string {
 	for i := 0; i < n; i++ {
 		sb.WriteString(strings.Repeat("─", barWidth))
 		if i < n-1 {
+			// One tick plus dashes for the rest of the gap, so the tick stays on
+			// the bar boundary and the baseline remains continuous whatever barGap
+			// is set to.
 			sb.WriteString("┴")
+			sb.WriteString(strings.Repeat("─", barGap-1))
 		}
 	}
 	return sb.String()

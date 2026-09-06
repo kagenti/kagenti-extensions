@@ -273,10 +273,55 @@ func TestFooterHintsMentionUsageKey(t *testing.T) {
 	// The usage pane's own footer must not fall through to the bare default.
 	m.pane = paneUsage
 	got := m.helpView()
-	for _, want := range []string{"[t] metric", "[w] window", "[r] refresh"} {
+	for _, want := range []string{"[m] metric", "[w] window", "[b] breakdown"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("usage footer omits %q:\n  %s", want, got)
 		}
+	}
+
+	// Latency has no per-label breakdown, so the footer must not advertise [b]
+	// there — a key shown as available but inert reads as a broken binding.
+	m.usage.metric = metricLatency
+	got = m.helpView()
+	if strings.Contains(got, "[b]") {
+		t.Errorf("latency footer advertises the inert breakdown key:\n  %s", got)
+	}
+	if !strings.Contains(got, "[m] metric") {
+		t.Errorf("latency footer lost the metric key:\n  %s", got)
+	}
+}
+
+// Every key the usage footer advertises must be one the pane actually handles,
+// and every key it handles should be advertised. A binding nobody can discover
+// and a hint that does nothing are the same class of bug.
+func TestUsageFooterMatchesHandledKeys(t *testing.T) {
+	m := &model{pane: paneUsage, selectedSess: "s1"}
+
+	// Keys the pane handles, per the paneUsage switch in handleKey.
+	handled := []string{"m", "w", "b", "s"}
+	footer := m.helpView()
+	for _, k := range handled {
+		if !strings.Contains(footer, "["+k+"]") {
+			t.Errorf("footer omits handled key %q:\n  %s", k, footer)
+		}
+	}
+	// And the retired ones must be gone from both surfaces.
+	for _, k := range []string{"[t]", "[g]", "[r]"} {
+		if strings.Contains(footer, k) {
+			t.Errorf("footer still advertises retired key %s:\n  %s", k, footer)
+		}
+	}
+	for _, kb := range paneKeys[paneUsage].bindings {
+		if kb.keys == "t" || kb.keys == "g" || kb.keys == "r" {
+			t.Errorf("help overlay still lists retired key %q", kb.keys)
+		}
+	}
+}
+
+// `g` is globally "go to top". The usage pane must not shadow it.
+func TestUsagePane_DoesNotShadowGlobalG(t *testing.T) {
+	if strings.Contains((&model{pane: paneUsage}).helpView(), "[g]") {
+		t.Error("usage footer claims [g], which is the global go-to-top motion")
 	}
 }
 

@@ -58,6 +58,9 @@ type usageState struct {
 	loading   bool
 	lastFetch time.Time
 
+	// group is the active breakdown; GroupNone renders the ungrouped bars.
+	group usage.Group
+
 	// reqSeq is the id of the most recently ISSUED request. Any reply carrying a
 	// smaller id is stale and dropped.
 	reqSeq uint64
@@ -97,10 +100,31 @@ func (u *usageState) window() (window, resolution time.Duration) {
 	return w.window, w.resolution
 }
 
-// cycleMetric advances [t]. Only the three count metrics are cycled here;
-// latency gets its own renderer (mean-with-whiskers), which is a follow-up.
+// cycleMetric advances [t] across the count metrics and latency. Latency uses a
+// different renderer (mean-with-whiskers) because a bar encodes magnitude from a
+// zero baseline and mean latency has no meaningful zero.
 func (u *usageState) cycleMetric() {
-	u.metric = (u.metric + 1) % 3
+	u.metric = (u.metric + 1) % usageMetricCount
+}
+
+// cycleGroup advances [g] through the groupings. Ungrouped keeps sub-row
+// precision via partial blocks; a grouped view trades that for the breakdown,
+// since a fractional top cell cannot also encode a segment boundary.
+func (u *usageState) cycleGroup() {
+	switch u.group {
+	// The zero value is "" and GroupNone is "none": both mean ungrouped, so both
+	// must advance to status. Matching only GroupNone sent a freshly opened pane
+	// to the default arm, which set GroupNone and made the first [g] press a
+	// no-op.
+	case "", usage.GroupNone:
+		u.group = usage.GroupStatus
+	case usage.GroupStatus:
+		u.group = usage.GroupMethod
+	case usage.GroupMethod:
+		u.group = usage.GroupPlugin
+	default:
+		u.group = usage.GroupNone
+	}
 }
 
 func (u *usageState) cycleWindow() {
@@ -116,11 +140,12 @@ func (m *model) fetchUsage() tea.Cmd {
 	client := m.client
 	window, resolution := m.usage.window()
 	session := m.usage.session
+	group := m.usage.group
 	req := m.usage.reqSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		snap, err := client.GetUsage(ctx, window, resolution, session, usage.GroupNone)
+		snap, err := client.GetUsage(ctx, window, resolution, session, group)
 		return usageLoadedMsg{snap: snap, req: req, err: err}
 	}
 }
@@ -157,6 +182,26 @@ func (m *model) resumeUsagePolling() tea.Cmd {
 	return tea.Batch(m.beginFetch(), usageTick(m.usage.tickGen))
 }
 
+// renderUsageChart picks the form the data calls for.
+//
+// Three renderers rather than one parameterised one, because the forms differ in
+// kind and not just in decoration: bars encode a magnitude from zero with
+// sub-row precision; a stack trades that precision for a breakdown, since a
+// fractional top cell cannot also encode a segment boundary; and latency is a
+// distribution whose zero is meaningless, so it gets marks and a range instead.
+func renderUsageChart(snap *usage.Snapshot, m usageMetric, group usage.Group, width int) []string {
+	if m.isLatency() {
+		// Grouping is ignored here: the aggregator carries no per-label latency,
+		// so a "by status" latency chart would silently show the bucket-wide mean
+		// under a heading implying otherwise.
+		return renderWhiskers(snap.Buckets, width)
+	}
+	if group != "" && group != usage.GroupNone {
+		return renderStackedBars(snap.Buckets, m, group, width)
+	}
+	return renderBars(snap.Buckets, m, width)
+}
+
 // renderUsage draws the pane.
 func (m *model) renderUsage(width, height int) string {
 	var b strings.Builder
@@ -166,8 +211,20 @@ func (m *model) renderUsage(width, height int) string {
 		scope = "session: " + m.usage.session
 	}
 	window, resolution := m.usage.window()
-	b.WriteString(fmt.Sprintf("  USAGE — %s — %s @ %s — %s\n\n",
-		scope, window, resolution, m.usage.metric))
+	// The header must not claim a breakdown the chart is not showing. Latency has
+	// no per-label data in the aggregator, so renderUsageChart ignores the group
+	// entirely — displaying "by status" over a bucket-wide mean would assert a
+	// breakdown that does not exist. The selection is kept, not cleared, so it is
+	// still there when the operator cycles back to a count metric.
+	grouping := "ungrouped"
+	switch {
+	case m.usage.metric.isLatency():
+		grouping = "no breakdown for latency"
+	case m.usage.group != "" && m.usage.group != usage.GroupNone:
+		grouping = "by " + string(m.usage.group)
+	}
+	b.WriteString(fmt.Sprintf("  USAGE — %s — %s @ %s — %s — %s\n\n",
+		scope, window, resolution, m.usage.metric, grouping))
 
 	switch {
 	case m.usage.err != nil && errors.Is(m.usage.err, errUsageUnsupported):
@@ -183,7 +240,7 @@ func (m *model) renderUsage(width, height int) string {
 	case m.usage.snap == nil:
 		b.WriteString("  (no data)\n")
 	default:
-		for _, line := range renderBars(m.usage.snap.Buckets, m.usage.metric, width) {
+		for _, line := range renderUsageChart(m.usage.snap, m.usage.metric, m.usage.group, width) {
 			b.WriteString(line)
 			b.WriteString("\n")
 		}
