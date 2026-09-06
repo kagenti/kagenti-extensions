@@ -1170,3 +1170,284 @@ class TestFieldPassThrough:
                 roles = Configuration.for_realm(REALM).get_roles()
         assert roles[0].kind == RoleKind.AGENT
         spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# delete_service_role — teardown of a role this service created
+#
+# The library issues a SINGLE DELETE to the unmap-then-delete endpoint; the
+# service removes the role mapping from the service account first, then deletes
+# the realm role (unmap-then-delete order + shared-object safety are enforced
+# service-side — see idp-configuration-service.md / issue #177). At this seam we
+# assert the correct single call, the None return, error propagation, and that
+# an idempotent (already-gone) success does not raise.
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteServiceRole:
+    def _make_service(self, **kwargs):
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        return Service.model_validate({**defaults, **kwargs})
+
+    def _make_role(self, **kwargs):
+        defaults = {"id": "role-id", "name": "reader", "composite": False}
+        return Role.model_validate({**defaults, **kwargs})
+
+    def test_issues_delete_to_unmap_then_delete_endpoint(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        role = self._make_role(id="role-id")
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)) as m:
+            result = Configuration.for_realm(REALM).delete_service_role(service, role)
+        assert result is None
+        assert m.call_args[0][0] == f"{BASE}/services/svc-uuid/roles/role-id"
+
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)) as m:
+            Configuration.for_realm(REALM).delete_service_role(service, role)
+        assert m.call_args[1].get("params") == {"realm": REALM}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_err(502)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).delete_service_role(service, role)
+
+    def test_idempotent_already_gone_does_not_raise(self, monkeypatch):
+        # The service treats an already-removed mapping / already-deleted role as
+        # success (2xx); the library must not raise on that idempotent response.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        role = self._make_role()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)):
+            result = Configuration.for_realm(REALM).delete_service_role(service, role)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# delete_service_scope — teardown of a scope this service created
+#
+# Same shape as delete_service_role: a single DELETE to the unmap-then-delete
+# endpoint; the service removes the scope mapping from the client first, then
+# deletes the client scope (ordering + shared-object safety enforced service-side).
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteServiceScope:
+    def _make_service(self, **kwargs):
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        return Service.model_validate({**defaults, **kwargs})
+
+    def _make_scope(self, **kwargs):
+        defaults = {"id": "scope-id", "name": "read:data"}
+        return Scope.model_validate({**defaults, **kwargs})
+
+    def test_issues_delete_to_unmap_then_delete_endpoint(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        scope = self._make_scope(id="scope-id")
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)) as m:
+            result = Configuration.for_realm(REALM).delete_service_scope(service, scope)
+        assert result is None
+        assert m.call_args[0][0] == f"{BASE}/services/svc-uuid/scopes/scope-id"
+
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        scope = self._make_scope()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)) as m:
+            Configuration.for_realm(REALM).delete_service_scope(service, scope)
+        assert m.call_args[1].get("params") == {"realm": REALM}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        scope = self._make_scope()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_err(502)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).delete_service_scope(service, scope)
+
+    def test_idempotent_already_gone_does_not_raise(self, monkeypatch):
+        # The service treats an already-removed assignment / already-deleted scope
+        # as success (2xx); the library must not raise on that idempotent response.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        scope = self._make_scope()
+        with patch("aiac.idp.configuration.api.requests.delete", return_value=_ok({}, 204)):
+            result = Configuration.for_realm(REALM).delete_service_scope(service, scope)
+        assert result is None
+
+
+# ---------------------------------------------------------------------------
+# unset_service_type — clears the client.type attribute
+#
+# Reuses the set_service_type POST /services/{id}/type pattern with an empty/clear
+# type; the service clears client.type via the same read-merge-update_client path.
+# Returns the updated Service (type now None). Idempotent — clearing an
+# already-clear type is not an error.
+# ---------------------------------------------------------------------------
+
+
+class TestUnsetServiceType:
+    def _make_service(self, **kwargs):
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        return Service.model_validate({**defaults, **kwargs})
+
+    def test_returns_service_with_type_cleared(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service(attributes={"client.type": "Agent"})
+        # The service returns the updated client with client.type gone → type resolves to None.
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)):
+            result = Configuration.for_realm(REALM).unset_service_type(service)
+        assert isinstance(result, Service)
+        assert result.type is None
+
+    def test_posts_to_type_endpoint_with_empty_type_body(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)) as m:
+            Configuration.for_realm(REALM).unset_service_type(service)
+        assert m.call_args[0][0] == f"{BASE}/services/svc-uuid/type"
+        assert m.call_args[1].get("json") == {"type": ""}
+
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)) as m:
+            Configuration.for_realm(REALM).unset_service_type(service)
+        assert m.call_args[1].get("params") == {"realm": REALM}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_err(502)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).unset_service_type(service)
+
+    def test_idempotent_clearing_already_clear_type_does_not_raise(self, monkeypatch):
+        # A service with no client.type: clearing is a no-op the service reports as
+        # success; the returned Service still has type None and no error is raised.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()  # type already None
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)):
+            result = Configuration.for_realm(REALM).unset_service_type(service)
+        assert result.type is None
+
+
+# ---------------------------------------------------------------------------
+# set_service_enabled — the writer for Service.enabled
+#
+# POST /services/{id}/enabled with {"enabled": bool} → the service calls
+# update_client(enabled=…). Returns the updated Service. Idempotent (disabling an
+# already-disabled client is not an error). The round-trip block below proves the
+# writer is wired and that get_service / get_services surface the current value.
+# ---------------------------------------------------------------------------
+
+
+class TestSetServiceEnabled:
+    def _make_service(self, **kwargs):
+        defaults = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        return Service.model_validate({**defaults, **kwargs})
+
+    def test_returns_service_with_new_enabled_value(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service(enabled=True)
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": False}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)):
+            result = Configuration.for_realm(REALM).set_service_enabled(service, False)
+        assert isinstance(result, Service)
+        assert result.enabled is False
+
+    def test_posts_to_enabled_endpoint_with_enabled_body(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": False}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)) as m:
+            Configuration.for_realm(REALM).set_service_enabled(service, False)
+        assert m.call_args[0][0] == f"{BASE}/services/svc-uuid/enabled"
+        assert m.call_args[1].get("json") == {"enabled": False}
+
+    def test_forwards_realm_as_query_param(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": False}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)) as m:
+            Configuration.for_realm(REALM).set_service_enabled(service, False)
+        assert m.call_args[1].get("params") == {"realm": REALM}
+
+    def test_raises_on_non_2xx(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service()
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_err(502)):
+            with pytest.raises(RuntimeError):
+                Configuration.for_realm(REALM).set_service_enabled(service, False)
+
+    def test_idempotent_disabling_already_disabled_does_not_raise(self, monkeypatch):
+        # Disabling an already-disabled client is a no-op the service reports as
+        # success; the returned Service is still enabled=False and no error is raised.
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service(enabled=False)
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": False}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)):
+            result = Configuration.for_realm(REALM).set_service_enabled(service, False)
+        assert result.enabled is False
+
+    def test_re_enable_returns_enabled_true(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        service = self._make_service(enabled=False)
+        updated = {"id": "svc-uuid", "clientId": "svc-uuid", "name": "my-svc", "enabled": True}
+        with patch("aiac.idp.configuration.api.requests.post", return_value=_ok(updated, 200)):
+            result = Configuration.for_realm(REALM).set_service_enabled(service, True)
+        assert result.enabled is True
+
+
+class TestServiceEnabledRoundTrip:
+    """Service.enabled round-trips: the writer (set_service_enabled) sets it and the
+    read paths (get_service / get_services) surface the current value — not discarded
+    after validation."""
+
+    SERVICE_ID = "svc-uuid"
+
+    def test_set_then_read_via_get_service_surfaces_disabled(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        # set_service_enabled(..., False) writes the disable...
+        set_resp = _ok(
+            {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": False},
+            200,
+        )
+        service = Service.model_validate(
+            {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": True}
+        )
+        with patch("aiac.idp.configuration.api.requests.post", return_value=set_resp):
+            after_set = Configuration.for_realm(REALM).set_service_enabled(service, False)
+        assert after_set.enabled is False
+
+        # ...and a subsequent get_service reflects the disabled value from the service.
+        raw = {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": False}
+        with patch(
+            "aiac.idp.configuration.api.requests.get",
+            side_effect=[_ok(raw), _ok([]), _ok([]), _ok([]), _ok([])],
+        ):
+            read_back = Configuration.for_realm(REALM).get_service(self.SERVICE_ID)
+        assert read_back.enabled is False
+
+    def test_get_services_surfaces_enabled_value(self, monkeypatch):
+        monkeypatch.setenv("AIAC_PDP_CONFIG_URL", BASE)
+        services = [
+            {"id": self.SERVICE_ID, "clientId": self.SERVICE_ID, "name": "my-svc", "enabled": False}
+        ]
+        with patch(
+            "aiac.idp.configuration.api.requests.get",
+            side_effect=[_ok(services), _ok([]), _ok([]), _ok([]), _ok([])],
+        ):
+            result = Configuration.for_realm(REALM).get_services()
+        assert result[0].enabled is False

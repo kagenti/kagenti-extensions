@@ -210,6 +210,41 @@ class Configuration:
         )
         return Service.model_validate(resp.json())
 
+    def unset_service_type(self, service: Service) -> Service:
+        """Clear a service's type — consumed by the UC1 rollback.
+
+        Reuses the ``set_service_type`` transport: ``POST /services/{service.id}/type`` with an
+        empty/clear type body. The config service clears the ``client.type`` attribute with the
+        same read-merge-``update_client`` pattern ``set_service_type`` uses. Idempotent — clearing
+        an already-clear type is not an error. Raises ``RuntimeError`` on a non-OK status. Returns
+        the updated ``Service`` (``type`` now ``None``).
+        """
+        resp = self._request(
+            "POST",
+            f"/services/{service.id}/type",
+            json={"type": ""},
+            params=self._params(),
+        )
+        return Service.model_validate(resp.json())
+
+    def set_service_enabled(self, service: Service, enabled: bool) -> Service:
+        """The **writer** for ``Service.enabled`` — consumed by the UC1 rollback (disable a failed
+        service's client) and the success re-enable path.
+
+        Issues ``POST /services/{service.id}/enabled`` with body ``{"enabled": <bool>}``; the config
+        service calls ``update_client(enabled=…)`` on the Keycloak client. Idempotent — disabling an
+        already-disabled client (or enabling an already-enabled one) is not an error. Raises
+        ``RuntimeError`` on a non-OK status. Returns the updated ``Service`` with the new ``enabled``
+        value (``get_service`` / ``get_services`` surface it on subsequent reads).
+        """
+        resp = self._request(
+            "POST",
+            f"/services/{service.id}/enabled",
+            json={"enabled": enabled},
+            params=self._params(),
+        )
+        return Service.model_validate(resp.json())
+
     def create_service_role(self, service_id: str, role: _NamedDefinition) -> Role:
         """Idempotent create-or-get of a realm role by name, then map it to ``service_id``.
 
@@ -249,3 +284,32 @@ class Configuration:
         )
         get_resp = self._request("GET", f"/services/{service.id}", params=self._params())
         return Service.model_validate(get_resp.json())
+
+    def delete_service_role(self, service: Service, role: Role) -> None:
+        """Teardown of a role this service created — consumed by the UC1 rollback.
+
+        Issues a single ``DELETE /services/{service.id}/roles/{role.id}``. The config service
+        removes the role mapping from the service account **first**, then deletes the realm role
+        (**unmap-then-delete** order — a still-mapped role cannot be deleted cleanly), and is
+        shared-object safe: a role another service still references is at most unmapped, never
+        deleted. Both are enforced service-side. Idempotent — the service treats an already-gone
+        mapping / role as success, so this raises only on a genuine non-OK status (via ``_check``).
+        Returns ``None``.
+        """
+        self._request(
+            "DELETE", f"/services/{service.id}/roles/{role.id}", params=self._params()
+        )
+
+    def delete_service_scope(self, service: Service, scope: Scope) -> None:
+        """Teardown of a scope this service created — consumed by the UC1 rollback.
+
+        Issues a single ``DELETE /services/{service.id}/scopes/{scope.id}``. The config service
+        removes the scope mapping from the client **first**, then deletes the client scope
+        (**unmap-then-delete** order), and is shared-object safe: a scope another service still
+        references is at most unmapped, never deleted. Both are enforced service-side. Idempotent —
+        the service treats an already-gone assignment / scope as success, so this raises only on a
+        genuine non-OK status (via ``_check``). Returns ``None``.
+        """
+        self._request(
+            "DELETE", f"/services/{service.id}/scopes/{scope.id}", params=self._params()
+        )
