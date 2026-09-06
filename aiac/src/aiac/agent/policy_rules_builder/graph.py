@@ -78,7 +78,17 @@ class PolicyRulesBuilderBaseError(Exception): ...
 
 class PolicyRulesBuilderError(PolicyRulesBuilderBaseError): ...
 
-class LLMAccessError(PolicyRulesBuilderBaseError): ...
+class LLMAccessError(PolicyRulesBuilderBaseError):
+    """Raised by ``_structured_call`` when the LLM endpoint stays unreachable after the transport
+    retry budget is exhausted (a transient failure that never cleared). The message is sanitized --
+    it never carries the endpoint / host / API key; the raw transport error is chained on
+    ``__cause__`` for internal logging only."""
+
+class UnparseableLLMResponseError(PolicyRulesBuilderBaseError):
+    """Raised by ``_structured_call`` when the LLM is REACHABLE but its response cannot be parsed /
+    fails schema validation (a non-transient failure, so it is not retried). Distinct from
+    ``LLMAccessError`` (endpoint unreachable) so a consumer can tell the two apart. Sanitized the
+    same way -- no endpoint / host / API key in the message; original error chained on ``__cause__``."""
 
 class PolicyContradictionError(PolicyRulesBuilderBaseError):
     """Raised when the policy GENUINELY both grants and prohibits the same (focal, candidate) pair
@@ -147,7 +157,19 @@ def _structured_call(schema: type[T], messages: list[BaseMessage]) -> T:
         wait=wait_exponential(multiplier=1, min=1, max=30),
         reraise=True,
     )
-    return cast(T, retryer(runnable.invoke, messages))
+    try:
+        return cast(T, retryer(runnable.invoke, messages))
+    except Exception as err:
+        # reraise=True hands back the ORIGINAL last exception (never a tenacity RetryError), so we
+        # classify it exactly as the retry loop did. A still-transient error here means the retry
+        # budget was exhausted against an unreachable LLM -> LLMAccessError. The message is STATIC
+        # (never str(err)) so an endpoint/host/API key embedded in the transport error cannot leak;
+        # the raw error stays reachable via __cause__ (chained with ``from err``) for internal logs.
+        if is_transient(err):
+            raise LLMAccessError("LLM endpoint unreachable after exhausting transport retries") from err
+        # Non-transient: the LLM was reachable but its response could not be parsed / failed schema
+        # validation. Same static, endpoint-free message; original error chained via __cause__.
+        raise UnparseableLLMResponseError("LLM returned an unparseable or schema-invalid response") from err
 
 
 # shared node helpers (typed against _PRBWorking; direction specifics passed as kwargs)
