@@ -113,11 +113,10 @@ var paneKeys = map[paneID]keyGroup{
 	paneUsage: {
 		title: "USAGE (this pane)",
 		bindings: []keyBinding{
-			{"t", "cycle metric (tokens/requests/errors/latency)"},
+			{"m", "cycle metric (tokens/requests/errors/latency)"},
 			{"w", "cycle window (10m/1h/6h)"},
-			{"g", "cycle grouping (none/status/method/plugin)"},
+			{"b", "cycle breakdown (none/status/method/plugin)"},
 			{"s", "toggle session / all sessions"},
-			{"r", "refresh now"},
 			{"esc", "back"},
 		},
 	},

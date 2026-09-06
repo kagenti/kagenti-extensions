@@ -71,19 +71,31 @@ func (m *model) handleKey(msg tea.KeyMsg) tea.Cmd {
 	// the shared handling above already routed.
 	if m.pane == paneUsage && !m.filtering {
 		switch msg.String() {
-		case "t":
+		case "m":
+			// Metric. `t` (for "tokens") named one of the four values rather than
+			// the axis, and every other binding here is the first letter of what it
+			// changes.
 			m.usage.cycleMetric()
 			return nil
 		case "w":
 			m.usage.cycleWindow()
 			return m.beginFetch()
-		case "g":
-			// Refetch: the grouping is a server-side query parameter, not a
+		case "b":
+			// Breakdown. NOT `g` for "group": `g` is globally "go to top" (see
+			// goTop below), and shadowing a vim-style motion inside one pane is
+			// worse than picking a second-choice mnemonic.
+			//
+			// Inert while viewing latency — the aggregator holds no per-label
+			// latency — so the key is not accepted there at all. Silently
+			// swallowing it would look like a broken binding; falling through lets
+			// `b` keep whatever meaning it has elsewhere.
+			if m.usage.metric.isLatency() {
+				break
+			}
+			// Refetch: the breakdown is a server-side query parameter, not a
 			// client-side filter, so the current snapshot has no series for the
 			// newly selected dimension.
 			m.usage.cycleGroup()
-			return m.beginFetch()
-		case "r":
 			return m.beginFetch()
 		case "s":
 			// Toggle scope between this session and all sessions. Only offered
@@ -618,8 +630,16 @@ func (m *model) helpView() string {
 		} else if m.selectedSess != "" {
 			scopeHint = "  [s] this session"
 		}
-		return "[t] metric  [w] window  [g] group" + scopeHint +
-			"  [r] refresh  [esc] back  [?] keys  [q] quit"
+		// [b] is omitted under latency rather than shown as a no-op: a footer that
+		// advertises an inert key is worse than a shorter footer.
+		breakdownHint := "  [b] breakdown"
+		if m.usage.metric.isLatency() {
+			breakdownHint = ""
+		}
+		// No [r]: the pane polls every 20s on its own, so a manual refresh key
+		// bought nothing but a line of footer.
+		return "[m] metric  [w] window" + breakdownHint + scopeHint +
+			"  [esc] back  [?] keys  [q] quit"
 	case paneCatalog:
 		if m.catalog == nil {
 			return "loading catalog…  [esc] back  [?] keys  [q] quit"
