@@ -17,6 +17,13 @@ var (
 	colorMuted    = lipgloss.AdaptiveColor{Light: "#6B7280", Dark: "#9CA3AF"}
 	colorInbound  = lipgloss.AdaptiveColor{Light: "#1D4ED8", Dark: "#93C5FD"}
 	colorOutbound = lipgloss.AdaptiveColor{Light: "#B45309", Dark: "#FCD34D"}
+
+	// colorOnSeries is the foreground for a letter drawn on a series background
+	// (the usage pane's stacked bars). Inverted relative to the palette: those
+	// backgrounds are mid-tone in both themes, so the mark needs the opposite end
+	// of the ramp to stay legible — white on the darker light-theme grounds, near
+	// black on the lighter dark-theme ones.
+	colorOnSeries = lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#111827"}
 )
 
 var (

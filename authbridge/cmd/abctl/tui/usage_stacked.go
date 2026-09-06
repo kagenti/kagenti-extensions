@@ -8,22 +8,10 @@ import (
 	"github.com/rossoctl/cortex/authbridge/authlib/usage"
 )
 
-// segmentGlyphs are the textures a stacked bar cycles through, densest first.
-//
-// Redundant with color on purpose. Color alone fails three ways here: a terminal
-// with no color support, a viewer with a colour-vision deficiency, and a
-// screenshot pasted into an issue. A distinct glyph per series survives all
-// three, so the chart is readable from texture alone and color is an accelerant
-// rather than the encoding.
-//
-// Ordered densest-to-sparsest so the largest series (sorted first below) is also
-// the visually heaviest, which matches what a reader expects from a stack.
-var segmentGlyphs = [...]rune{'█', '▓', '▒', '░'}
-
-// overflowGlyph marks the series past len(segmentGlyphs) — including the
-// aggregator's own "(other)" bucket. Distinct from the four above so "several
-// small series folded together" never looks like a named one.
-const overflowGlyph = '·'
+// maxNamedSeries is how many series get their own mark and legend entry before
+// the rest fold together. Bounded by the palette so no two named series share a
+// colour.
+var maxNamedSeries = len(seriesPalette)
 
 // seriesKey is one label's total across the window, used to decide segment order
 // and which labels get their own glyph.
@@ -54,14 +42,6 @@ func collectSeries(buckets []usage.Bucket, m usageMetric) []seriesKey {
 		return out[i].label < out[j].label
 	})
 	return out
-}
-
-// glyphFor assigns each series its texture by rank.
-func glyphFor(rank int) rune {
-	if rank < len(segmentGlyphs) {
-		return segmentGlyphs[rank]
-	}
-	return overflowGlyph
 }
 
 // isErrorStatus reports whether a group=status label denotes a failure, so it can
@@ -115,6 +95,9 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	for i, s := range series {
 		rank[s.label] = i
 	}
+	// One mark per series, assigned once for the whole chart so a letter means the
+	// same thing in every bucket and in the legend.
+	letters := assignLetters(series)
 
 	var peak int64
 	for _, b := range buckets {
@@ -132,7 +115,7 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 			sb.WriteString(strings.Repeat(" ", axisLabel))
 		}
 		for _, b := range buckets {
-			sb.WriteString(stackedCell(b, m, group, series, rank, peak, row))
+			sb.WriteString(stackedCell(b, m, group, series, rank, letters, peak, row))
 			sb.WriteString(strings.Repeat(" ", barGap))
 		}
 		out = append(out, strings.TrimRight(sb.String(), " "))
@@ -142,14 +125,15 @@ func renderStackedBars(buckets []usage.Bucket, m usageMetric, group usage.Group,
 	out = append(out, renderTimeLabels(buckets))
 	out = append(out, renderValues(buckets, m))
 	out = append(out, "")
-	out = append(out, renderLegend(series, group, width))
+	out = append(out, renderLegend(series, group, letters, rank, width)...)
 	return out
 }
 
 // stackedCell renders one bar's glyphs for one row, choosing the segment whose
 // cumulative height covers this row.
 func stackedCell(b usage.Bucket, m usageMetric, group usage.Group,
-	series []seriesKey, rank map[string]int, peak int64, row int) string {
+	series []seriesKey, rank map[string]int, letters map[string]rune,
+	peak int64, row int) string {
 
 	total := m.value(b)
 	if total <= 0 || peak <= 0 {
@@ -165,28 +149,73 @@ func stackedCell(b usage.Bucket, m usageMetric, group usage.Group,
 		return strings.Repeat(" ", barWidth)
 	}
 
-	// Walk the series in rank order, accumulating rows, until we pass this row.
-	// Rows are allotted proportionally to each series' share of the bucket.
+	// Walk the allotment bottom-up until we pass this row.
 	var acc int64
-	for _, s := range series {
-		v := m.valueOf(b.Series[s.label])
-		if v <= 0 {
-			continue
-		}
-		segRows := v * barRows / total
-		if segRows == 0 {
-			segRows = 1 // a present series must occupy at least one cell
-		}
-		acc += segRows
+	for _, alloc := range allotRows(b, m, series, barRows, total) {
+		acc += alloc.rows
 		if int64(row) <= acc {
-			cell := strings.Repeat(string(glyphFor(rank[s.label])), barWidth)
-			return paintSegment(cell, s.label, group)
+			return paintMark(alloc.label, letters, rank, group)
 		}
 	}
 	// Rounding left this row uncovered: attribute it to the largest series rather
 	// than punching a hole in the middle of a bar.
-	cell := strings.Repeat(string(glyphFor(0)), barWidth)
-	return paintSegment(cell, series[0].label, group)
+	return paintMark(series[0].label, letters, rank, group)
+}
+
+// rowAlloc is one series' share of a bar, in whole rows.
+type rowAlloc struct {
+	label string
+	rows  int64
+}
+
+// allotRows divides a bar's rows among the series present in it.
+//
+// Every present series gets at least one row, so a model with a rounding-error
+// share of the traffic is still visible — "claude-haiku at 912 tokens against
+// 2.2M" is exactly the case an operator wants to spot, and a segment floored to
+// zero rows makes it indistinguishable from absent.
+//
+// The floor cannot simply be applied per series, which is what the previous
+// version did: with three series in a ten-row bar the largest took 9 rows and the
+// two floored ones landed on rows 10 and 11, so the eleventh fell outside the bar
+// and its series vanished anyway. Guaranteed rows are reserved FIRST and the
+// remainder shared out proportionally, so the total always fits.
+func allotRows(b usage.Bucket, m usageMetric, series []seriesKey, barRows, total int64) []rowAlloc {
+	present := make([]rowAlloc, 0, len(series))
+	for _, s := range series {
+		if m.valueOf(b.Series[s.label]) > 0 {
+			present = append(present, rowAlloc{label: s.label})
+		}
+	}
+	if len(present) == 0 {
+		return nil
+	}
+	// More series than rows: the bar cannot show them all, so give a row each to
+	// as many as fit, largest first (series is already sorted). The legend still
+	// names the rest.
+	if int64(len(present)) >= barRows {
+		out := present[:barRows]
+		for i := range out {
+			out[i].rows = 1
+		}
+		return out
+	}
+
+	// One row reserved per series, the rest shared by proportion of the surplus.
+	surplus := barRows - int64(len(present))
+	var assigned int64
+	for i := range present {
+		v := m.valueOf(b.Series[present[i].label])
+		extra := v * surplus / total
+		present[i].rows = 1 + extra
+		assigned += present[i].rows
+	}
+	// Integer division leaves rows unassigned; give them to the largest series so
+	// the bar reaches its full height.
+	if rem := barRows - assigned; rem > 0 {
+		present[0].rows += rem
+	}
+	return present
 }
 
 // segmentStyle reports whether a series should be drawn as an error, separated
@@ -199,7 +228,24 @@ func isErrorSeries(label string, group usage.Group) bool {
 	return group == usage.GroupStatus && isErrorStatus(label)
 }
 
-// paintSegment applies the error style when the series calls for it.
+// paintMark renders one series' cell: its letter, repeated across the bar width,
+// on the series background.
+//
+// Repeated rather than centred so the segment reads as a solid band — a single
+// letter floating in a 4-column cell looks like a data point, not a share of a
+// stack.
+func paintMark(label string, letters map[string]rune, rank map[string]int, group usage.Group) string {
+	r, ok := letters[label]
+	if !ok {
+		r = '?'
+	}
+	return seriesStyle(rank[label], isErrorSeries(label, group)).
+		Render(strings.Repeat(string(r), barWidth))
+}
+
+// paintSegment applies the error style to legend text when the series calls for
+// it. Foreground only: a coloured background belongs on the chart marks, where it
+// encodes the series, not on a line of prose.
 func paintSegment(text, label string, group usage.Group) string {
 	if isErrorSeries(label, group) {
 		return styleError.Render(text)
@@ -210,39 +256,87 @@ func paintSegment(text, label string, group usage.Group) string {
 // renderLegend names each series with its glyph and total. Error statuses are
 // coloured to match their segments, so the legend is the key to the chart rather
 // than a separate vocabulary.
-func renderLegend(series []seriesKey, group usage.Group, width int) string {
+// renderLegend keys the chart: each series' mark, name and total.
+//
+// Returns one or more lines. Wrapping rather than eliding matters because the mark
+// is the only way to identify a band — a series dropped from the legend leaves an
+// unreadable segment on the chart, and model names are long enough
+// ("claude-haiku-4-5-20251001") that three of them do not fit 80 columns on one
+// line. Only series past maxNamedSeries fold into a count, and those share a
+// colour anyway.
+func renderLegend(series []seriesKey, group usage.Group,
+	letters map[string]rune, rank map[string]int, width int) []string {
 	const sep = "   "
-	var parts []string
-	// Track the printable width separately: paintSegment may add ANSI escapes,
-	// which occupy no columns but do inflate len(). Measuring the styled string
-	// would under-fill the line; measuring the plain text keeps it honest.
-	plain := 2 // leading indent
-	elided := 0
+	const indent = "  "
 
-	for i, s := range series {
-		entry := fmt.Sprintf("%c %s (%s)", glyphFor(i), s.label, humanizeCount(s.total))
-		cost := len([]rune(entry))
+	named := series
+	elided := 0
+	if len(named) > maxNamedSeries {
+		elided = len(named) - maxNamedSeries
+		named = named[:maxNamedSeries]
+	}
+
+	var lines []string
+	var parts []string
+	plain := len(indent)
+
+	flush := func() {
+		if len(parts) > 0 {
+			lines = append(lines, indent+strings.Join(parts, sep))
+			parts = nil
+			plain = len(indent)
+		}
+	}
+
+	for _, s := range named {
+		mark := seriesStyle(rank[s.label], isErrorSeries(s.label, group)).
+			Render(string(letters[s.label]))
+		text := fmt.Sprintf(" %s (%s)", s.label, humanizeCount(s.total))
+		// Measured on the plain text: the mark is one column however many bytes of
+		// escape sequence it carries.
+		cost := 1 + len([]rune(text))
 		if len(parts) > 0 {
 			cost += len(sep)
 		}
-		// Reserve room for the "(+N more)" note so the line cannot overflow while
-		// admitting the very entry that would need eliding.
-		if plain+cost+len("   (+99 more)") > width && len(parts) > 0 {
-			elided = len(series) - i
-			break
+		if plain+cost > width && len(parts) > 0 {
+			flush()
+			cost = 1 + len([]rune(text))
 		}
-		parts = append(parts, paintSegment(entry, s.label, group))
+		parts = append(parts, mark+paintSegment(text, s.label, group))
 		plain += cost
-		// Past the glyph set every series shares the overflow marker, so naming
-		// them individually stops being informative.
-		if i+1 >= len(segmentGlyphs) {
-			elided = len(series) - i - 1
-			break
+	}
+	flush()
+
+	if elided > 0 {
+		note := fmt.Sprintf("%s(+%d more)", indent, elided)
+		// Append to the last line when it fits, so a single extra series does not
+		// cost a whole row.
+		if n := len(lines); n > 0 && len([]rune(stripANSIWidth(lines[n-1])))+len(note) <= width {
+			lines[n-1] += sep + strings.TrimPrefix(note, indent)
+		} else {
+			lines = append(lines, note)
 		}
 	}
-	out := "  " + strings.Join(parts, sep)
-	if elided > 0 {
-		out += fmt.Sprintf("%s(+%d more)", sep, elided)
+	if len(lines) == 0 {
+		return nil
 	}
-	return out
+	return lines
+}
+
+// stripANSIWidth returns text with escape sequences removed, for measuring how
+// many columns a styled string occupies.
+func stripANSIWidth(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b {
+			for i < len(s) && s[i] != 'm' {
+				i++
+			}
+			i++
+			continue
+		}
+		b.WriteByte(s[i])
+		i++
+	}
+	return b.String()
 }

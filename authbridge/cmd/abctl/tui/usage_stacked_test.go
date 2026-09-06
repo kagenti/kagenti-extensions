@@ -47,21 +47,75 @@ func stripANSI(s string) string {
 	return b.String()
 }
 
-// Each series must get its own texture, so the chart is readable with no colour
+// Each series must get a distinct mark, so the chart is readable with no colour
 // at all — a terminal without colour support, a colour-vision deficiency, or a
-// screenshot in an issue.
-func TestRenderStacked_DistinctGlyphsPerSeries(t *testing.T) {
+// screenshot in an issue. Shaded blocks failed this in practice: █ against ▓ is
+// nearly indistinguishable in most terminal fonts.
+func TestRenderStacked_DistinctMarksPerSeries(t *testing.T) {
 	buckets := mkSeriesBuckets([]map[string]int64{
 		{"200": 10, "429": 5, "500": 2},
 	})
-	lines := renderStackedBars(buckets, metricRequests, usage.GroupStatus, 80)
-	plot := stripANSI(strings.Join(lines, "\n"))
+	plot := stripANSI(strings.Join(renderStackedBars(buckets, metricRequests, usage.GroupStatus, 80), "\n"))
 
-	// Three series, so three distinct glyphs from the densest end.
-	for _, g := range []string{"█", "▓", "▒"} {
-		if !strings.Contains(plot, g) {
-			t.Errorf("expected glyph %q in the stack; got:\n%s", g, plot)
+	// Status labels have no letters, so their marks are the leading digits.
+	for _, want := range []string{"2", "4", "5"} {
+		if !strings.Contains(plot, strings.Repeat(want, barWidth)) {
+			t.Errorf("expected a %q band in the stack; got:\n%s", want, plot)
 		}
+	}
+}
+
+// The mark must be derived from the label so a band is self-describing, and
+// sibling models must not collide on a shared vendor prefix — every claude-*
+// yielding "c" would defeat the point.
+func TestSeriesLetter(t *testing.T) {
+	for _, tc := range []struct {
+		label string
+		want  rune
+	}{
+		{"claude-sonnet-5", 's'},
+		{"claude-opus-5", 'o'},
+		{"claude-haiku-4-5-20251001", 'h'},
+		{"anthropic/claude-sonnet-5", 's'}, // provider prefix skipped too
+		{"gpt-4o", 'o'},                    // gpt is a vendor token; 4 is not a letter
+		{"inference-parser", 'i'},
+		{"tool-prune", 't'},
+		{"denied", 'd'},
+		{"200", '2'}, // no letters at all: fall back to the first character
+		{"429", '4'},
+		{"(other)", 'o'},
+		{"", '?'},
+	} {
+		if got := seriesLetter(tc.label); got != tc.want {
+			t.Errorf("seriesLetter(%q) = %q, want %q", tc.label, string(got), string(tc.want))
+		}
+	}
+}
+
+// Two series sharing a mark is the failure the shaded blocks had. Uniqueness
+// beats the mnemonic, and the largest series keeps the intuitive letter.
+func TestAssignLetters_AreUnique(t *testing.T) {
+	series := []seriesKey{
+		{"claude-opus-5", 100},  // wants 'o'
+		{"claude-sonnet-5", 90}, // wants 's'
+		{"(other)", 80},         // also wants 'o' — must yield
+		{"openai/gpt-4o", 70},   // 'o' taken as well
+		{"ollama-llama3", 60},
+	}
+	letters := assignLetters(series)
+	if len(letters) != len(series) {
+		t.Fatalf("assigned %d marks for %d series", len(letters), len(series))
+	}
+	seen := map[rune]string{}
+	for label, r := range letters {
+		if prev, dup := seen[r]; dup {
+			t.Errorf("mark %q assigned to both %q and %q", string(r), prev, label)
+		}
+		seen[r] = label
+	}
+	// The largest series keeps its derived letter.
+	if letters["claude-opus-5"] != 'o' {
+		t.Errorf("largest series lost its mnemonic: got %q", string(letters["claude-opus-5"]))
 	}
 }
 
@@ -176,9 +230,9 @@ func TestRenderStacked_OverflowSeriesAreMarked(t *testing.T) {
 		labels[string(rune('a'+i))] = int64(12 - i)
 	}
 	lines := renderStackedBars(mkSeriesBuckets([]map[string]int64{labels}), metricRequests, usage.GroupMethod, 80)
-	legend := stripANSI(lines[len(lines)-1])
-	if !strings.Contains(legend, "more)") {
-		t.Errorf("legend does not report elided series: %q", legend)
+	joined := stripANSI(strings.Join(lines, "\n"))
+	if !strings.Contains(joined, "more)") {
+		t.Errorf("legend does not report series past the palette: %q", joined)
 	}
 }
 
@@ -190,7 +244,92 @@ func TestRenderStacked_SmallBucketStillDraws(t *testing.T) {
 	})
 	lines := renderStackedBars(buckets, metricRequests, usage.GroupStatus, 80)
 	bottom := stripANSI(lines[plotRows-1]) // last plot row
-	if strings.Count(bottom, "█") < barWidth*2 {
+	if strings.Count(bottom, "2") < barWidth*2 {
 		t.Errorf("the tiny bucket drew no segment:\n%q", bottom)
+	}
+}
+
+// A series that is a rounding error of the bucket must still occupy a row.
+// "claude-haiku at 912 tokens against 2.2M" is exactly the case an operator wants
+// to spot, and a segment floored to zero rows is indistinguishable from absent.
+//
+// The per-series floor alone was not enough: with three series in a ten-row bar
+// the largest took 9 rows and the two floored ones landed on rows 10 and 11, so
+// the eleventh fell outside the bar and vanished anyway.
+func TestRenderStacked_TinySeriesIsStillVisible(t *testing.T) {
+	buckets := mkSeriesBuckets([]map[string]int64{{
+		"claude-sonnet-5":           22000, // 2.2M tokens at 100x
+		"claude-opus-5":             1050,
+		"claude-haiku-4-5-20251001": 9, // 0.04% of the bucket
+	}})
+	plot := stripANSI(strings.Join(renderStackedBars(buckets, metricTokens, usage.GroupMethod, 80), "\n"))
+
+	for _, want := range []string{"s", "o", "h"} {
+		if !strings.Contains(plot, strings.Repeat(want, barWidth)) {
+			t.Errorf("series %q drew no band despite being present:\n%s", want, plot)
+		}
+	}
+}
+
+// Allotment must fill the bar exactly: overshooting pushes top segments outside
+// the frame, undershooting leaves a gap at the top.
+func TestAllotRows_SumsToBarHeight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		values  map[string]int64
+		barRows int64
+	}{
+		{"tiny tail", map[string]int64{"a": 22000, "b": 1050, "c": 9}, 10},
+		{"even split", map[string]int64{"a": 10, "b": 10, "c": 10}, 9},
+		{"more series than rows", map[string]int64{"a": 5, "b": 4, "c": 3, "d": 2, "e": 1}, 3},
+		{"single series", map[string]int64{"a": 7}, 10},
+		{"one row", map[string]int64{"a": 7, "b": 3}, 1},
+	} {
+		b := mkSeriesBuckets([]map[string]int64{tc.values})[0]
+		series := collectSeries([]usage.Bucket{b}, metricRequests)
+		got := allotRows(b, metricRequests, series, tc.barRows, b.Requests)
+
+		var sum int64
+		for _, a := range got {
+			if a.rows < 1 {
+				t.Errorf("%s: series %q allotted %d rows", tc.name, a.label, a.rows)
+			}
+			sum += a.rows
+		}
+		if sum != tc.barRows {
+			t.Errorf("%s: allotted %d rows, bar is %d tall", tc.name, sum, tc.barRows)
+		}
+	}
+}
+
+// The legend is the only key to a band, so a present series must never be elided
+// for width — it wraps instead. Model names are long enough that three do not fit
+// 80 columns on one line.
+func TestRenderLegend_WrapsRatherThanElidingPresentSeries(t *testing.T) {
+	series := []seriesKey{
+		{"claude-sonnet-5", 4_600_000},
+		{"claude-opus-5", 218_000},
+		{"claude-haiku-4-5-20251001", 1900},
+	}
+	letters := assignLetters(series)
+	rank := map[string]int{}
+	for i, s := range series {
+		rank[s.label] = i
+	}
+
+	lines := renderLegend(series, usage.GroupMethod, letters, rank, 80)
+	joined := stripANSI(strings.Join(lines, "\n"))
+	for _, s := range series {
+		if !strings.Contains(joined, s.label) {
+			t.Errorf("legend dropped %q:\n%s", s.label, joined)
+		}
+	}
+	if strings.Contains(joined, "more)") {
+		t.Errorf("legend elided a named series instead of wrapping:\n%s", joined)
+	}
+	for _, l := range lines {
+		if got := len([]rune(stripANSI(l))); got > 80 {
+			t.Errorf("legend line is %d columns:\n%q", got, stripANSI(l))
+		}
 	}
 }
