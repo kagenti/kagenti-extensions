@@ -58,7 +58,29 @@ without touching the rest of the graph.
 | Dedup | PRB generates a full rule set; the PCE's additive merge handles dedup on write |
 | LLM call pattern | **Propose → LLM auditor** (2 structured calls). The auditor is **three-way**: approve → build; reject → feed its reason back into propose (bounded fix-and-retry, `MAX_AUDIT_RETRIES = 3`); **genuine grant/deny contradiction → raise**. Raises on retry exhaustion |
 | Empty result | An auditor-**approved** empty selection is a valid `[]` (deny-by-default). An **all-deny** result (`granted=[]`, `denied≠[]`) is a **first-class valid output** — a durable prohibition is meaningful with no current grant. Empty proposals are still audited |
-| Error contract | Raises on policy-source failure, LLM failure, audit-budget exhaustion, or a genuine grant/deny **contradiction** (`PolicyContradictionError`, **fail-closed** — the focal entity's whole rule set is withheld) — no silent empty-list returns |
+| Error contract | Raises on policy-source failure, LLM failure, audit-budget exhaustion, or a genuine grant/deny **contradiction** — no silent empty-list returns. See **Exceptions** for the full taxonomy |
+
+---
+
+## Exceptions
+
+The PRB raises a small, closed hierarchy. Every message is **sanitized**: it never contains the
+LLM endpoint, host, or API key. The HTTP column is the status a **single-entity caller** returns.
+The async **retry class** is a separate axis — see the decoupling note below the table.
+
+| Exception | Where raised | HTTP (single-entity) | Async class | Notes |
+|---|---|---|---|---|
+| `PolicyRulesBuilderBaseError` | Base of the hierarchy — **never raised directly** | 500 | — | A safety net at the HTTP boundary |
+| `PolicyRulesBuilderError` | `_audit`, after `MAX_AUDIT_RETRIES` (3) ordinary rejections | 422 | permanent | The audit budget is exhausted |
+| `LLMAccessError` | `_structured_call`, when **transient** failures (5xx / connect / timeout) are **exhausted** | 502 | **retryable** | Wraps the original error; message sanitized |
+| `UnparseableLLMResponseError` | `_structured_call`, when the LLM is **reachable but the response is unparseable / schema-invalid** | 502 | permanent | A non-transient parse or validation error; message sanitized |
+| `PolicyContradictionError` | `_audit`, on a **genuine** intra-focal grant/deny contradiction | 422 | permanent | Carries the focal entity + all contradictions; short-circuits past retry. UC1 aggregates it — see **Contradiction contract** |
+| `PolicyConflictError` | `ServicePolicyBuilder.build` (UC1, `conflict_detection.py`) — **not** the graph | 422 | permanent | Carries a `ConflictReport`; aggregates per-focal contradictions across a UC1 run |
+
+**HTTP status is decoupled from the async retry class.** `LLMAccessError` and
+`UnparseableLLMResponseError` both map to **502**, but only `LLMAccessError` is **retryable** — the
+unparseable case is **permanent**. A caller must read the async class, not the HTTP code, to decide
+whether to retry.
 
 ---
 
@@ -232,14 +254,28 @@ policy — and, when `conflict_names` is present, adjudicate each as a genuine c
 
 ### LLM + retries
 
-`ChatOpenAI(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0)`. Two
-retry layers, kept distinct:
+`ChatOpenAI(base_url=LLM_BASE_URL, model=LLM_MODEL, api_key=LLM_API_KEY, temperature=0,
+max_retries=0, timeout=LLM_REQUEST_TIMEOUT)`. The client does **no** retries of its own
+(`max_retries=0`); the `_structured_call` seam owns all LLM retry logic. Two retry layers stay
+distinct:
 
 - **`MAX_AUDIT_RETRIES`** (module constant, default `3`) — the semantic fix-and-retry loop
-  between audit and propose.
-- **`UPSTREAM_MAX_RETRIES`** (env, default `3`) — tenacity (`stop_after_attempt`, exponential
-  backoff, `reraise=True`) around each LLM call for transport failures. The Phase-1 file read
-  does **not** retry; it raises directly.
+  between audit and propose. This is the **audit** budget. It is distinct from the LLM transport
+  budget below.
+- **LLM transport retries** — a single seam-level tenacity `Retrying` in `_structured_call`,
+  driven by **dedicated LLM knobs** (not the shared `UPSTREAM_MAX_RETRIES`): `LLM_MAX_RETRIES`
+  (default `3`), `LLM_RETRY_BACKOFF_MIN` (`1`) and `LLM_RETRY_BACKOFF_MAX` (`30`). `is_transient`
+  classifies which failures retry (5xx / connect / timeout). `LLM_REQUEST_TIMEOUT` (default `120`)
+  bounds each request. The Phase-1 file read does **not** retry; it raises directly.
+
+`_structured_call` has two raise outcomes:
+
+- **Transient failures exhausted** → raise `LLMAccessError` (502, **retryable**). It wraps the
+  original error and sanitizes the message.
+- **Reachable but the response is unparseable / schema-invalid** (a non-transient parse or
+  validation error) → raise `UnparseableLLMResponseError` (502, **permanent**), sanitized.
+
+See **Exceptions** for the full taxonomy and the HTTP-vs-retry-class decoupling.
 
 ---
 
@@ -274,7 +310,14 @@ to a human, partial-apply, re-author the policy, split the scope) is a **separat
   the call fails closed regardless). Generation errors are **never** reported (LLM noise, not a policy
   finding). The entry-point signature stays `-> list[PolicyRule]`; **the raise is the report**.
 - **Fail-closed.** The focal entity's whole rule set is withheld (whether to salvage the
-  non-conflicting rules is a treatment decision — deferred).
+  non-conflicting rules is a treatment decision — deferred). A **genuine** `PolicyContradictionError`
+  short-circuits past retry — retrying cannot fix a real conflict.
+- **Multi-focal aggregation (UC1).** One PRB call raises for **one** focal entity. UC1's
+  `ServicePolicyBuilder.build` iterates many focal entities, so it **aggregates** the per-focal
+  `PolicyContradictionError`s into a single `PolicyConflictError` (`conflict_detection.py`) carrying
+  a `ConflictReport`. That aggregated error is the multi-focal treatment — permanent, 422. It is
+  raised by the UC1 builder, **not** by the graph. See the Controller / Service Policy Builder
+  sub-PRD for the aggregation contract.
 - **Bounded to the overlap signal.** The PRB is **not** hunting for every latent contradiction in the
   policy independently — only the grant/deny overlap it produced.
 - **`Contradiction.description`** names the *kind* — direct policy conflict vs coarse-scope
@@ -336,8 +379,15 @@ needs the full onboarding stack), `llm` needs only an LLM endpoint. Both are des
 |---|---|---|
 | `AIAC_POLICY_FILE` | Path to the whole-file access policy (default `/etc/aiac/policy.md`) | 1 |
 | `LLM_BASE_URL`, `LLM_MODEL`, `LLM_API_KEY` | LLM calls | 1 |
-| `UPSTREAM_MAX_RETRIES` | Transport retry budget for LLM (and, in Phase 2, ChromaDB) calls (tenacity, default `3`) | 1 |
+| `LLM_REQUEST_TIMEOUT` | Per-request LLM timeout, in seconds (default `120`) | 1 |
+| `LLM_MAX_RETRIES` | Transient-failure retry budget for the LLM seam (tenacity `stop_after_attempt`, default `3`) | 1 |
+| `LLM_RETRY_BACKOFF_MIN` | Minimum exponential backoff for the LLM seam, in seconds (default `1`) | 1 |
+| `LLM_RETRY_BACKOFF_MAX` | Maximum exponential backoff for the LLM seam, in seconds (default `30`) | 1 |
+| `UPSTREAM_MAX_RETRIES` | Transport retry budget for ChromaDB calls (tenacity, default `3`). **Superseded for the LLM seam** by the dedicated `LLM_*` knobs above | 2 |
 | `AIAC_CHROMADB_URL` | ChromaDB endpoint | 2 |
 | `CHROMA_N_RESULTS` | Number of results per ChromaDB query (default `10`) | 2 |
 
 `MAX_AUDIT_RETRIES` (default `3`) is a module constant, not an env var.
+
+The three `LLM_*` retry knobs **replace** the shared `UPSTREAM_MAX_RETRIES` for the LLM seam. They
+are named **identically** to the agent spec, so one set of values configures both.
