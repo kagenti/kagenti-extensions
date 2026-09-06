@@ -1000,6 +1000,17 @@ func TestInvocationAction_ModifyOnlyWhenStamped(t *testing.T) {
 	}
 }
 
+// The metric name is a promise to operators (and was promised in review):
+// the export-failure total is visible on /v1/pipeline as lineage.export_failures.
+func TestMetrics_ExportFailures(t *testing.T) {
+	p := NewLineageTelemetry()
+	p.exportFailures.Store(7)
+	m := p.Metrics()
+	if len(m) != 1 || m[0].Name != "lineage.export_failures" || m[0].Value != 7 {
+		t.Fatalf("Metrics() = %+v, want one lineage.export_failures = 7", m)
+	}
+}
+
 // ---- the forbidden-keys guard ----
 
 // TestForbiddenKeysNeverEmitted scans every attribute of every span emitted

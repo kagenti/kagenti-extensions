@@ -387,6 +387,19 @@ func (p *LineageTelemetry) Shutdown(ctx context.Context) error {
 // counter.
 func (p *LineageTelemetry) Ready() bool { return p.ready.Load() }
 
+// Metrics exposes the export-failure counter through pipeline.MetricsProvider,
+// so an operator can see a collector outage on /v1/pipeline rather than only in
+// the logs. The counter is a running total since Init, not a rate. Name and
+// Note carry no request or response content, as that endpoint is unauthenticated.
+func (p *LineageTelemetry) Metrics() []pipeline.Metric {
+	return []pipeline.Metric{{
+		Name:  "lineage.export_failures",
+		Value: float64(p.exportFailures.Load()),
+		Unit:  "count",
+		Note:  "OTLP batches the collector refused or never received, since start",
+	}}
+}
+
 // exportObserver wraps the OTLP exporter so a failed export is visible from
 // this plugin — a plugin-namespaced WARN and a counter — instead of only
 // through the OTel SDK's default error handler on stderr. The error is
@@ -1070,11 +1083,12 @@ func ioOutputValue(pctx *pipeline.Context, protocol string) string {
 
 // Compile-time interface assertions.
 var (
-	_ pipeline.Plugin         = (*LineageTelemetry)(nil)
-	_ pipeline.Configurable   = (*LineageTelemetry)(nil)
-	_ pipeline.Initializer    = (*LineageTelemetry)(nil)
-	_ pipeline.Shutdowner     = (*LineageTelemetry)(nil)
-	_ pipeline.Finisher       = (*LineageTelemetry)(nil)
-	_ pipeline.Readier        = (*LineageTelemetry)(nil)
-	_ pipeline.SchemaProvider = (*LineageTelemetry)(nil)
+	_ pipeline.Plugin          = (*LineageTelemetry)(nil)
+	_ pipeline.Configurable    = (*LineageTelemetry)(nil)
+	_ pipeline.Initializer     = (*LineageTelemetry)(nil)
+	_ pipeline.Shutdowner      = (*LineageTelemetry)(nil)
+	_ pipeline.Finisher        = (*LineageTelemetry)(nil)
+	_ pipeline.Readier         = (*LineageTelemetry)(nil)
+	_ pipeline.SchemaProvider  = (*LineageTelemetry)(nil)
+	_ pipeline.MetricsProvider = (*LineageTelemetry)(nil)
 )
